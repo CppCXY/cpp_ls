@@ -482,6 +482,50 @@ struct PerFileConfig {
 /// changed for any reason — a header edited, a macro moved, the closure grown — is a different key rather than a
 /// stale hit. The rendering cache can rely on `retain(dependent)` for the same job because it is keyed by the
 /// *dependent's* text; this one is keyed by what was actually parsed, which is strictly narrower.
+/// **The products a session publishes**, in the sense of `docs/locking.md`: everything a query may read and no query
+/// may write.
+///
+/// Four bounded maps of content-keyed values — a rendering, a parsed view, the macro environment in force, the summary
+/// of a rendered text. They were four `Mutex<Cache>` fields on [`Session`], which is the shape that made "a query that
+/// misses may fill the cache" possible and, with it, a request that is a writer. Here they are one value:
+///
+/// * a **reader** takes the session's `products` read lock for exactly as long as an `Arc` clone (see
+///   [`Session::products`]) and then reads the maps with [`cache::cache_lru::Cache::peek`] — no lock is held while it
+///   works, and no query can change what it is reading;
+/// * a **writer** copies the map it is about to change (`Cache` is `Clone`, and these maps are tens of entries), edits
+///   the copy, and swaps the pointer ([`Session::publish`]).
+///
+/// The cost of publication is a clone of a few dozen `Arc`s; the cost of a read is one `RwLock` acquisition and one
+/// `Arc` clone. What it buys is the property the design note is about: **a query cannot invalidate another query's
+/// world**, so no query needs the right to write.
+#[derive(Clone)]
+pub struct Products {
+    renderings: cache::cache_lru::Cache<
+        (PathBuf, u64),
+        std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    >,
+    views: cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+    macro_environments:
+        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
+    rendering_summaries:
+        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
+}
+
+impl Products {
+    /// The four maps, each with the bound its own doc comment argues for.
+    fn new() -> Products {
+        Products {
+            renderings: cache::cache_lru::Cache::renderings(),
+            views: cache::cache_lru::Cache::views(),
+            macro_environments: cache::cache_lru::Cache::macro_environments(),
+            rendering_summaries: cache::cache_lru::Cache::new(
+                RENDERING_SUMMARY_ENTRIES,
+                RENDERING_SUMMARY_BYTES,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ViewKey {
     path: PathBuf,
@@ -830,22 +874,6 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// that half when a build system hands over more translation units, and a completion may be asked for before,
     /// during or after. The search-path half never changes after this field is built.
     headers: crate::SharedHeaders,
-    /// **The macros a file's closure defines, remembered by the content they were read from.**
-    ///
-    /// [`Session::view_with_macros`] walks the file's whole closure and takes a copy of every file's text to build
-    /// one of these, and that is **measured at 106.7 ms** beside 167.8 µs for a view without it — 635×, on a
-    /// closure of 151 files. Which is affordable once and not per query, so it is kept.
-    ///
-    /// The key carries the **content hash** rather than the path: a buffer being typed in has a new text on every
-    /// keystroke and the same path, and an environment built from the old text would be a wrong answer rather than
-    /// a stale one. Two files with the same content share an entry, which is right — the environment is a reading
-    /// of that text and its closure.
-    ///
-    /// Behind a lock because the queries that want it hold a read on the session, and an environment is only ever
-    /// added (§[`Session::view_with_macros`] takes `&self`).
-    macro_environments: std::sync::Mutex<
-        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
-    >,
     /// **Files whose macros something has asked for and not yet got.**
     ///
     /// The other half of the arrangement [`Session::macro_environments`] describes: a query cannot pay 103.7 ms,
@@ -868,58 +896,18 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// and nothing reassigns it. A configuration that changes is a *new session* (the server replaces the analysis
     /// state), which is the same rule the rest of this type follows.
     config_for_file: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<PerFileConfig>>>,
-    /// **The renderings built for `view`**, remembered against the content they were read from.
-    ///
-    /// The same arrangement as [`Session::macro_environments`] and for the same reason: a rendering is a unit walk
-    /// and a preprocess, a query cannot pay it, and the file it is asked about does not change between two
-    /// keystrokes. Keyed by the **content hash** rather than the path, because a buffer being typed in has a new
-    /// text on every keystroke and a rendering of the old text would be a wrong answer rather than a stale one.
     /// **Surfaces already scanned**, shared by every effect walk — see [`crate::effect::Surfaces`].
     surfaces: std::sync::Mutex<crate::effect::Surfaces>,
     /// **Effects already computed**, shared by every walk — the other half of what makes a walk hash lookups.
     effects: std::sync::Mutex<HashMap<u64, crate::effect::Effect>>,
-    renderings: std::sync::Mutex<
-        cache::cache_lru::Cache<
-            (PathBuf, u64),
-            std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
-        >,
-    >,
-    /// **Views already built**, by what they were parsed from — the answer to "a pull is a parse per request".
+    /// **Everything a query may read and no query may write** — see [`Products`] and `docs/locking.md`.
     ///
-    /// [`Session::view`] parses a file's **rendering**, which for a header-heavy file is its whole closure; measured
-    /// on a 0.74 MB unit at the parser's 6 MB/s, that is **120 ms per call**, and a hover, a pull, an inlay hint and
-    /// a semantic-token request each call it. The tree is the expensive half and nothing was remembering it: the
-    /// rendering cache holds the rendered *text*, and the parse was made again every time.
-    ///
-    /// # Why this key cannot serve a stale view
-    ///
-    /// A view is a function of: the text parsed (the rendering's), the rendering's spans (the offsets between the
-    /// rendering and the file), the parse's own configuration (`cuda`, the language level), whether the buffer is
-    /// open, and the file's identity. All seven are in [`ViewKey`], and the text is keyed by its **content hash** —
-    /// the same rule the rendering cache uses, and stricter here, because a rendering whose text changed for any
-    /// reason (a header edited, a macro moved) is a different key rather than a stale hit. A config change moves the
-    /// language, an open/close moves `open`, a re-read of the file moves the text. Nothing else can change what a
-    /// parse of that input means.
-    ///
-    /// `FileView` is cheap to hand out because its tree and its scopes are behind `Arc`s: a hit is a handful of
-    /// reference-count bumps, which is what makes a cache worth having at all (a clone that copied the token stream
-    /// would cost twelve bytes per token — megabytes for the units this exists for).
-    ///
-    /// The value is a [`crate::file::view::ParsedView`] and not a [`FileView`]: a view holds rowan's red root, which is
-    /// neither `Send` nor `Sync`, and a session is shared across the server's threads. The root is one allocation,
-    /// made per hit — see `FileView::from_parsed`.
-    views: std::sync::Mutex<
-        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
-    >,
-    /// **The summary of a rendering**, by `(path, content hash of the rendered text)`.
-    ///
-    /// A rendering is what the preprocessor resolved, so a declaration a directive splits has one answer there —
-    /// `reference` for libstdc++'s `emplace_back` — where the file's own text has two. Reading it needs the *summary*
-    /// of the rendered text, which is a parse: measured at **20.2 ms, and 19.1 ms again** on the second ask
-    /// (`tests/rendering_real.rs`), because the rendering is cached by the cook path and its summary was not.
-    rendering_summaries: std::sync::Mutex<
-        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
-    >,
+    /// One `RwLock<Arc<..>>` for four bounded content-keyed maps, where there used to be four `Mutex<Cache>`es. A
+    /// reader clones the `Arc` and drops the lock; a writer clones the map it changes and swaps the pointer. The lock
+    /// count is one smaller, but the point is the rule: a query cannot invalidate another query's world, so no query
+    /// needs the right to write — and the server can publish the same `Arc` to the request path, which is what lets a
+    /// hover read a rendering without the session at all.
+    products: std::sync::RwLock<std::sync::Arc<Products>>,
     ///
     /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
     /// whose render declines — and the caller that wanted it (`want_the_closure_cooked`, once per drain) wants it
@@ -1765,15 +1753,9 @@ impl<F: FileProvider + Clone> Session<F> {
             macro_work: std::sync::Mutex::new(Cooking::default()),
             parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),
             config_for_file: std::sync::Mutex::new(HashMap::new()),
-            macro_environments: std::sync::Mutex::new(cache::cache_lru::Cache::macro_environments()),
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
-            renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
-            views: std::sync::Mutex::new(cache::cache_lru::Cache::views()),
-            rendering_summaries: std::sync::Mutex::new(cache::cache_lru::Cache::new(
-                RENDERING_SUMMARY_ENTRIES,
-                RENDERING_SUMMARY_BYTES,
-            )),
+            products: std::sync::RwLock::new(std::sync::Arc::new(Products::new())),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -1923,17 +1905,15 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     pub fn cache_sizes(&self) -> CacheSizes {
-        let (renderings, rendering_bytes) = self
-            .renderings
-            .lock()
-            .map(|known| {
-                let bytes = known
-                    .values()
-                    .map(|rendering| rendering.text.len())
-                    .sum::<usize>();
-                (known.len(), bytes)
-            })
-            .unwrap_or((0, 0));
+        let (renderings, rendering_bytes) = {
+            let products = self.products();
+            let bytes = products
+                .renderings
+                .values()
+                .map(|rendering| rendering.text.len())
+                .sum::<usize>();
+            (products.renderings.len(), bytes)
+        };
 
         let summaries = self.store.index().summaries().count();
         let facts = self
@@ -1950,11 +1930,10 @@ impl<F: FileProvider + Clone> Session<F> {
             .sum();
 
         let (cooked_files, cooked_declarations) = self.store.index().cooked_size();
-        let (views, view_bytes) = self
-            .views
-            .lock()
-            .map(|known| (known.len(), known.weight()))
-            .unwrap_or((0, 0));
+        let (views, view_bytes) = {
+            let products = self.products();
+            (products.views.len(), products.views.weight())
+        };
         CacheSizes {
             renderings,
             rendering_bytes,
@@ -1969,23 +1948,51 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The products published right now** — one `Arc` clone, and no lock held afterwards.
+    ///
+    /// A reader calls this once per query and reads the maps from the result. The lock is held for the clone and
+    /// nothing else, which is what "a query never waits for a writer" means in practice: a writer holds it for the same
+    /// number of instructions ([`Session::publish`]) and never for a build.
+    pub fn products(&self) -> std::sync::Arc<Products> {
+        match self.products.read() {
+            Ok(held) => std::sync::Arc::clone(&held),
+            Err(poisoned) => std::sync::Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    /// **Publish a change to the products** — the writer's half: copy what changes, swap the pointer.
+    ///
+    /// The copy is the whole `Products` and it is cheap by construction: the maps are bounded to tens of entries and
+    /// hold `Arc`s, so a copy is a few dozen reference-count bumps. That is what makes copy-on-write the right
+    /// mechanism here and a "dirty" flag the wrong one — a reader that grabbed the previous `Arc` keeps reading a
+    /// consistent world, and there is no window in which a map is half-updated.
+    fn publish(&self, change: impl FnOnce(&mut Products)) {
+        let Ok(mut held) = self.products.write() else {
+            return;
+        };
+        if std::sync::Arc::get_mut(&mut held).is_none() {
+            *held = std::sync::Arc::new(Products::clone(held.as_ref()));
+        }
+        if let Some(products) = std::sync::Arc::get_mut(&mut held) {
+            change(products);
+        }
+    }
+
     /// **A view already parsed from exactly this input**, or `None`.
     ///
     /// A hit is a handful of `Arc` bumps and one red root — see [`Session::view`] for what the key is made of and why
     /// none of it can serve a stale parse, and [`crate::file::view::ParsedView`] for why the cached half has no root.
     fn a_view_already_parsed(&self, key: &ViewKey) -> Option<FileView> {
-        let mut known = self.views.lock().ok()?;
-        let parsed = known.get(key)?;
+        let products = self.products();
+        let parsed = products.views.peek(key)?;
         Some(FileView::from_parsed((**parsed).clone()))
     }
 
     /// Remember `view` under `key`, weighed by what it actually costs — see [`a_view_weighs`].
     fn remember_a_view(&self, key: ViewKey, view: &FileView) {
         let weight = a_view_weighs(view);
-        if let Ok(mut known) = self.views.lock() {
-            let parsed = view.clone().into_parsed();
-            known.insert(key, std::sync::Arc::new(parsed), weight);
-        }
+        let parsed = std::sync::Arc::new(view.clone().into_parsed());
+        self.publish(|products| products.views.insert(key, parsed, weight));
     }
 
     /// **What every table the session owns is holding, in bytes** — see [`crate::MemoryReport`].
@@ -2091,23 +2098,20 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or((0, 0));
         // The table keeps its own byte total, so the report does not walk every unit's events on every ask.
         let (units, unit_bytes) = self.held_units().accounting();
-        let (renderings, rendering_bytes) = self
-            .renderings
-            .lock()
-            .map(|known| {
-                let bytes = known
-                    .values()
-                    .map(|rendering| rendering.text.len())
-                    .sum::<usize>();
-                (known.len(), bytes)
-            })
-            .unwrap_or((0, 0));
+        let (renderings, rendering_bytes) = {
+            let products = self.products();
+            let bytes = products
+                .renderings
+                .values()
+                .map(|rendering| rendering.text.len())
+                .sum::<usize>();
+            (products.renderings.len(), bytes)
+        };
         let (dead_macro_files, dead_macro_offsets) = self.dead_macro_decisions();
-        let (views, view_bytes) = self
-            .views
-            .lock()
-            .map(|known| (known.len(), known.weight()))
-            .unwrap_or((0, 0));
+        let (views, view_bytes) = {
+            let products = self.products();
+            (products.views.len(), products.views.weight())
+        };
         let (walk_cache_entries, walk_cache_bytes) = self.store.contributions().accounting();
         let (walks_by_content_entries, walks_by_content_bytes) = self
             .walked_by_content
@@ -2471,12 +2475,20 @@ impl<F: FileProvider + Clone> Session<F> {
             && let Some((held_path, before)) = previous
         {
             let now = crate::cache::content_hash(text);
-            if before != now
-                && let Ok(mut known) = self.macro_environments.lock()
-                && let Some(environment) = known.remove(&(held_path.clone(), before))
-            {
-                let weight = cpp_parser::MacroFacts::len(environment.as_ref());
-                known.insert((held_path, now), environment, weight);
+            if before != now {
+                self.publish(|products| {
+                    if let Some(environment) = products
+                        .macro_environments
+                        .remove(&(held_path.clone(), before))
+                    {
+                        let weight = cpp_parser::MacroFacts::len(environment.as_ref());
+                        products.macro_environments.insert(
+                            (held_path.clone(), now),
+                            environment,
+                            weight,
+                        );
+                    }
+                });
             }
         }
 
@@ -2617,9 +2629,9 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The named rendering too.** `renderings` is keyed by the *dependent's* own text, which did not
             // change — so the entry left behind is a rendering of a world whose macros have moved, and the next
             // ask would find it instead of rendering again.
-            if let Ok(mut known) = self.renderings.lock() {
-                known.retain(|(held, _)| held != &dependent);
-            }
+            self.publish(|products| {
+                products.renderings.retain(|(held, _)| held != &dependent);
+            });
         }
     }
 
@@ -3764,10 +3776,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **Apply what [`Session::prepare_the_drain`] worked out** — the index inserts, and the remembered renderings.
     pub fn commit_the_drain(&mut self, prepared: PreparedDrain) -> usize {
         for (key, rendered) in prepared.rendered {
-            if let Ok(mut known) = self.renderings.lock() {
-                let weight = rendered.weight();
-                known.insert(key, rendered, weight);
-            }
+            let weight = rendered.weight();
+            self.publish(|products| products.renderings.insert(key, rendered, weight));
         }
 
         let Some(plan) = prepared.re_read else {
@@ -4399,15 +4409,11 @@ impl<F: FileProvider + Clone> Session<F> {
                     // the writer used and the key the reader computes are two different keys — which is the one
                     // failure a count cannot show and the two hashes beside it can.
                     let cached: Vec<String> = self
+                        .products()
                         .renderings
-                        .lock()
-                        .map(|known| {
-                            known
-                                .keys()
-                                .map(|(path, hash)| format!("{}#{hash}", path.display()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                        .keys()
+                        .map(|(path, hash)| format!("{}#{hash}", path.display()))
+                        .collect();
                     eprintln!(
                         "cooking: stopping with read 0, cooked 0, backlog {} | cache {cached:?}",
                         self.pending_cooking()
@@ -4826,7 +4832,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         "view: no rendering for {} | hash {} | {} entr(ies) cached | open {}",
                         file.path.display(),
                         crate::cache::content_hash(&file.text),
-                        self.renderings.lock().map(|known| known.len()).unwrap_or(0),
+                        self.products().renderings.len(),
                         file.open
                     );
                 }
@@ -4991,7 +4997,7 @@ impl<F: FileProvider + Clone> Session<F> {
         text: &str,
     ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
         let key = (path.to_path_buf(), crate::cache::content_hash(text));
-        self.renderings.lock().ok()?.get(&key).cloned()
+        self.products().renderings.peek(&key).cloned()
     }
 
     /// **The same view, with the macros this file's own includes define, built if it has to be.**
@@ -5043,7 +5049,7 @@ impl<F: FileProvider + Clone> Session<F> {
         text: &str,
     ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
         let key = (path.to_path_buf(), crate::cache::content_hash(text));
-        self.macro_environments.lock().ok()?.get(&key).cloned()
+        self.products().macro_environments.peek(&key).cloned()
     }
 
     /// The macros `path`'s own includes define, as both readers of a body want them.
@@ -5084,13 +5090,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // **Bounded**: typing in one file changes its content hash on every keystroke, so an unbounded map here is
         // one environment per keystroke — and an environment of a header-heavy closure is thousands of names.
         let weight = cpp_parser::MacroFacts::len(made.as_ref());
-        if let Ok(mut known) = self.macro_environments.lock() {
-            known.insert(
+        self.publish(|products| {
+            products.macro_environments.insert(
                 (path.to_path_buf(), crate::cache::content_hash(text)),
                 made.clone(),
                 weight,
             );
-        }
+        });
         Some(made)
     }
 
@@ -7749,31 +7755,23 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // Keyed by the hash of the text it was **made from** — the same one the check above just compared — rather
         // than by a second read of the file, so the entry cannot describe one text under another's key.
-        if let Ok(mut known) = self.renderings.lock() {
+        {
             let key = (path.clone(), text_hash);
             if crate::probes::view() {
                 eprintln!("commit: path {:?} hash {:?}", path, text_hash);
             }
-            let before = known.len();
+            let before = self.products().renderings.len();
             let weight = indexed.rendered.weight();
-            known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
+            let rendered = std::sync::Arc::clone(&indexed.rendered);
+            self.publish(|products| products.renderings.insert(key, rendered, weight));
             if crate::probes::cooking() {
                 eprintln!(
                     "commit_a_cooked: inserted {} | cache {} -> {}",
                     path.display(),
                     before,
-                    known.len()
+                    self.products().renderings.len()
                 );
             }
-        } else if crate::probes::cooking() {
-            // **The other way this can silently not happen**: the cache lock is poisoned, which leaves it exactly as
-            // it was while the facts go into the index — "read" and "available" apart again, which is the state this
-            // whole change is about.
-            eprintln!(
-                "commit_a_cooked: NOT inserted {} | lock {}",
-                path.display(),
-                self.renderings.lock().is_ok()
-            );
         }
         {
             // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
@@ -7979,27 +7977,22 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = match self.known_rendering_of(&path, &text) {
             Some(rendered) => rendered,
             None => {
-                // Built and **kept**: the key is the one `known_rendering_of` reads, so the next ask is a lookup.
+                // Built and **published**: the key is the one `known_rendering_of` reads, so the next ask is a
+                // lookup, and a query may publish here because a rendering is a pure function of its key — the
+                // writer's copy (`publish`) is what makes that a pointer swap rather than a mutation someone else
+                // is reading.
                 let built = std::sync::Arc::new(self.rendering_of(&path)?);
-                if let Ok(mut known) = self.renderings.lock() {
-                    let weight = built.weight();
-                    known.insert(
-                        (path.clone(), crate::cache::content_hash(&text)),
-                        built.clone(),
-                        weight,
-                    );
-                }
+                let weight = built.weight();
+                let key = (path.clone(), crate::cache::content_hash(&text));
+                let kept = std::sync::Arc::clone(&built);
+                self.publish(|products| products.renderings.insert(key, kept, weight));
                 built
             }
         };
         // **The summary of the rendered text, cached** — see `rendering_summaries`. A hover on a declaration
         // a directive splits asks this, and before the cache existed every ask paid one parse of the rendering.
         let key = (path.clone(), crate::cache::content_hash(&rendered.text));
-        let remembered = self
-            .rendering_summaries
-            .lock()
-            .ok()
-            .and_then(|mut known| known.get(&key).cloned());
+        let remembered = self.products().rendering_summaries.peek(&key).cloned();
         let summary = match remembered {
             Some(summary) => summary,
             None => {
@@ -8008,10 +8001,9 @@ impl<F: FileProvider + Clone> Session<F> {
                     &rendered.text,
                     crate::SummaryKey::new(0, 0),
                 ));
-                if let Ok(mut known) = self.rendering_summaries.lock() {
-                    let weight = built.declarations.len() + built.macros.len();
-                    known.insert(key, built.clone(), weight);
-                }
+                let weight = built.declarations.len() + built.macros.len();
+                let kept = std::sync::Arc::clone(&built);
+                self.publish(|products| products.rendering_summaries.insert(key, kept, weight));
                 built
             }
         };

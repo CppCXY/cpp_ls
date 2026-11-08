@@ -5515,3 +5515,51 @@ fn a_request_does_not_publish_the_view_it_built() {
         "the pump publishes the view a request may not"
     );
 }
+
+/// **A published product is a consistent world** — the property that lets a reader work without a lock.
+///
+/// `Products` is copy-on-write behind an `Arc` (`Session::publish`): a writer clones the map it changes and swaps the
+/// pointer, so a reader that grabbed the previous `Arc` keeps reading a complete, unchanging version of it. Three
+/// halves: a query fills nothing, a publication is a *new* version, and the old version a reader still holds is
+/// untouched.
+#[test]
+fn a_published_product_is_a_consistent_world() {
+    let text = "struct Widget { int size; };\nvoid f() { Widget w; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("products-are-a-snapshot", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+
+    session.did_open(path, text);
+    // The pump publishes the written view while it indexes — that is the writer's half.
+    session.index_everything();
+    let before = session.products();
+    assert_eq!(
+        before.views.len(),
+        1,
+        "the pump published the written view of the open file"
+    );
+
+    // **A query publishes nothing**: the snapshot is the same `Arc` afterwards.
+    assert!(session.view_of_the_file(path).is_some(), "the file reads");
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &session.products()),
+        "a query may not publish"
+    );
+
+    // **An edit makes that view stale, and the pump publishes a new version** — a new `Arc`, because a reader holding
+    // the old one must not see it change.
+    let edited = format!("{text}// typed\n");
+    session.did_change(path, &edited);
+    session.advance(1);
+    let published = session.products();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &published),
+        "publication is a new version, not a mutation of the old one"
+    );
+    assert_eq!(
+        before.views.len(),
+        1,
+        "the version a reader already holds is unchanged"
+    );
+}

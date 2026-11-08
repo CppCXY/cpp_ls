@@ -73,6 +73,12 @@ pub const VIEW_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// `K` is the cache key (a path and a content hash, or an effect's own hash), `V` the value. The weight is supplied by
 /// the caller at insert time because only the caller knows what is large: a rendering's text, an environment's names.
+///
+/// **`Clone` is what makes a published snapshot possible** — see `docs/locking.md`. The maps are small by construction
+/// ([`RENDERING_ENTRIES`], [`VIEW_ENTRIES`], …), so copying one to publish a new version is a few dozen `Arc` bumps,
+/// which is cheap enough that a writer does it on every insert and a reader never has to take a lock for the map at
+/// all.
+#[derive(Clone)]
 pub struct Cache<K, V> {
     entries: HashMap<K, (V, u64, usize)>,
     clock: u64,
@@ -130,6 +136,17 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     /// Whether `key` is held, without marking it used.
     pub fn contains(&self, key: &K) -> bool {
         self.entries.contains_key(key)
+    }
+
+    /// **The value for `key`, without marking it used** — the read a *published* snapshot allows.
+    ///
+    /// [`Cache::get`] takes `&mut self` because it moves the entry to the front of the eviction order, and a published
+    /// snapshot is behind an `Arc`: a reader cannot have `&mut`, and must not. What a reader gives up is the ordering
+    /// half of the LRU: the writer's inserts still order entries, and a read that does not reorder one is a read that
+    /// may let a hot entry age. For a cache of eight entries rebuilt from a hash and a parse, that is the right side
+    /// of the trade — and it is the price of a query never waiting.
+    pub fn peek(&self, key: &K) -> Option<&V> {
+        self.entries.get(key).map(|(value, _, _)| value)
     }
 
     /// Remember `value` under `key`, whose weight is `weight` units of [`Cache::weight`].
