@@ -3609,11 +3609,14 @@ pub(crate) fn declared_parameter_defaults_with(
     shapes: &DeclarationShapes,
     binding: &Binding,
 ) -> Vec<String> {
-    if declared_template_parameters_with(shapes, binding).is_empty() {
+    // **The emptiness test is a lookup, not a build.** `declared_template_parameters_with(...).is_empty()` built the
+    // whole name row — one `String` per parameter — to ask whether there was one, and did it again below through
+    // `template_at`. The head either exists or it does not.
+    let at = binding.name_range.start_offset;
+    if shapes.template_at(at).is_none() {
         return Vec::new();
     }
 
-    let at = binding.name_range.start_offset;
     // **One parse per template head**, shared with the names and the constraints — see the note on `templates`.
     let Some(shared) = shapes.template_at(at) else {
         return Vec::new();
