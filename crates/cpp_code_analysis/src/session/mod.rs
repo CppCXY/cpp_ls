@@ -509,6 +509,16 @@ pub struct Products {
         cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<cpp_parser::MacroEnvironment>>,
     rendering_summaries:
         cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
+    /// **The three single-entry memos**, which were three `Mutex<Option<(u64, T)>>` fields: the last pull's findings
+    /// by the state of that pull, the last program's parse by the hash of its rendered text, and the last closure's
+    /// rendering by its key.
+    ///
+    /// They are products in this struct's sense — a value a query reads and a writer replaces — so they live in the
+    /// same snapshot. Each value is large and behind its own `Arc`, because a publication copies the *struct* and must
+    /// not copy a program's parse with it.
+    checks: Option<(u64, std::sync::Arc<Vec<crate::sema::check::Finding>>)>,
+    unit_index: Option<(u64, std::sync::Arc<crate::IndexedUnit>)>,
+    rendered_unit: Option<(u64, std::sync::Arc<crate::RenderedUnit>)>,
 }
 
 impl Products {
@@ -522,6 +532,9 @@ impl Products {
                 RENDERING_SUMMARY_ENTRIES,
                 RENDERING_SUMMARY_BYTES,
             ),
+            checks: None,
+            unit_index: None,
+            rendered_unit: None,
         }
     }
 }
@@ -727,7 +740,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// outlive the call) and runs every rule over it — measured **143.4 ms** on `EmmyLuaCodeStyle`, 97 % of it type
     /// inference. The findings themselves are plain data and a function of everything the pull reads, so the *answers*
     /// are what is remembered; the key names the state ([`Session::the_state_of_a_pull`]).
-    checks_memo: std::sync::Mutex<Option<(u64, Vec<crate::sema::check::Finding>)>>,
+
     /// **When this session last took an edit** — the clock the one indivisible piece of work in it is deferred by.
     ///
     /// A unit read ([`Session::prepare_a_unit_reading`]) is a walk, a render and a **parse of a whole program** in one
@@ -768,7 +781,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Because the read that fills it is the expensive half of a unit read — a render, a parse and a sweep — and that
     /// half has to be payable **outside the write lock** ([`Session::prepare_a_unit_reading`]) if a whole program is
     /// ever to be read as one. Same reason, and same shape, as [`Session::units`].
-    unit_index: std::sync::Mutex<Option<(u64, crate::IndexedUnit)>>,
+
     /// **The last unit this session rendered, and what its inputs were** — one entry, keyed by the *content* of
     /// every file the walk read.
     ///
@@ -786,7 +799,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// for twice in a row, and a map would trade a render for a memory of every stream the session ever built.
     ///
     /// Behind a lock for the same reason [`Session::unit_index`] is.
-    rendered_unit: std::sync::Mutex<Option<(u64, crate::RenderedUnit)>>,
+
     /// **How many items one completion may answer with** — `[completion] max_items` in `.cppls.toml`, clamped.
     ///
     /// A **payload** bound rather than a UI one: the client renders ten rows and receives all of them, and an
@@ -1741,9 +1754,7 @@ impl<F: FileProvider + Clone> Session<F> {
             units_read: std::collections::HashSet::new(),
             programs_wanted: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
-            checks_memo: std::sync::Mutex::new(None),
-            unit_index: std::sync::Mutex::new(None),
-            rendered_unit: std::sync::Mutex::new(None),
+
             unit_roots: std::sync::Mutex::new(HashMap::new()),
 
             last_edit: std::time::Instant::now(),
@@ -1958,6 +1969,28 @@ impl<F: FileProvider + Clone> Session<F> {
             Ok(held) => std::sync::Arc::clone(&held),
             Err(poisoned) => std::sync::Arc::clone(&poisoned.into_inner()),
         }
+    }
+
+    /// **The three memos, as a reader asks them** — one snapshot, one comparison, one clone.
+    ///
+    /// They were `Mutex<Option<(u64, T)>>` fields, taken by both sides: a pull read one under the lock, and a pull
+    /// *wrote* one under the same lock. In the published form the comparison is a read of the snapshot and the write
+    /// is a publication, so the two never meet — and a reader that misses because someone published a newer memo sees
+    /// a consistent older one, not a torn one.
+    fn checks_already(&self, state: u64) -> Option<Vec<crate::sema::check::Finding>> {
+        let products = self.products();
+        let (seen, findings) = products.checks.as_ref()?;
+        (*seen == state).then(|| (**findings).clone())
+    }
+    fn a_unit_index_already(&self, program: u64) -> Option<crate::IndexedUnit> {
+        let products = self.products();
+        let (seen, indexed) = products.unit_index.as_ref()?;
+        (*seen == program).then(|| (**indexed).clone())
+    }
+    fn a_rendered_unit_already(&self, key: u64) -> Option<crate::RenderedUnit> {
+        let products = self.products();
+        let (seen, rendered) = products.rendered_unit.as_ref()?;
+        (*seen == key).then(|| (**rendered).clone())
     }
 
     /// **Publish a change to the products** — the writer's half: copy what changes, swap the pointer.
@@ -5457,11 +5490,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // `#define` in a header it includes), the store's revision (a summary dropped anywhere), the configuration, the
         // file's language and whether the project is Unreal code.
         let state = self.the_state_of_a_pull(key, summary);
-        if let Ok(memo) = self.checks_memo.lock()
-            && let Some((remembered, findings)) = memo.as_ref()
-            && *remembered == state
-        {
-            return findings.clone();
+        if let Some(findings) = self.checks_already(state) {
+            return findings;
         }
         let model = self.semantic_model(view);
 
@@ -5528,9 +5558,8 @@ impl<F: FileProvider + Clone> Session<F> {
             &inside,
         ));
         // Stored, then answered: the next pull of this state is a lookup.
-        if let Ok(mut memo) = self.checks_memo.lock() {
-            *memo = Some((state, findings.clone()));
-        }
+        let kept = std::sync::Arc::new(findings.clone());
+        self.publish(|products| products.checks = Some((state, kept)));
         findings
     }
 
@@ -6260,11 +6289,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // that lands on a name, every drain — and a render is a walk, a cook of every file in include order and a
         // stitched stream of megabytes. The plan's M4 is this call: the second answer must not cost what the first
         // did.
-        if let Ok(known) = self.rendered_unit.lock()
-            && let Some((seen, cached)) = known.as_ref()
-            && *seen == key
-        {
-            return Some(cached.clone());
+        if let Some(cached) = self.a_rendered_unit_already(key) {
+            return Some(cached);
         }
 
         // **The database may already have this program.** The key is a hash over every `(path,
@@ -6277,9 +6303,8 @@ impl<F: FileProvider + Clone> Session<F> {
             if crate::probes::units() {
                 eprintln!("unit render: key {key:016x} served from the cache");
             }
-            if let Ok(mut known) = self.rendered_unit.lock() {
-                *known = Some((key, cached.clone()));
-            }
+            let kept = std::sync::Arc::new(cached.clone());
+            self.publish(|products| products.rendered_unit = Some((key, kept)));
             return Some(cached);
         }
         if crate::probes::units() {
@@ -6304,9 +6329,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // closure cannot repeat: the row is never hit again, it is merely wasted, and a collection drops it once no
         // file references it.
         self.store.remember_unit(key, &stream);
-        if let Ok(mut known) = self.rendered_unit.lock() {
-            *known = Some((key, stream.clone()));
-        }
+        let kept = std::sync::Arc::new(stream.clone());
+        self.publish(|products| products.rendered_unit = Some((key, kept)));
         Some(stream)
     }
 
@@ -6403,15 +6427,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // rendering and checked against those files' current texts — an edit between the two asks is a miss.
         if let Some(units_key) = self.the_units_key_of(&root, context)
             && let Some(rendered) = self
-                .rendered_unit
-                .lock()
-                .ok()
-                .and_then(|known| {
-                    known
-                        .as_ref()
-                        .filter(|(seen, _)| *seen == units_key)
-                        .map(|(_, cached)| cached.clone())
-                })
+                .a_rendered_unit_already(units_key)
                 .or_else(|| self.store.cached_unit(units_key))
             && self.the_rendering_still_describes(&rendered, units_key)
         {
@@ -6428,14 +6444,7 @@ impl<F: FileProvider + Clone> Session<F> {
             self.remember_what_the_unit_saw(&root, &rendered);
             let program = crate::cache::content_hash(&rendered.text);
             let known = self
-                .unit_index
-                .lock()
-                .ok()
-                .and_then(|memo| {
-                    memo.as_ref()
-                        .filter(|(seen, _)| *seen == program)
-                        .map(|(_, cached)| cached.clone())
-                })
+                .a_unit_index_already(program)
                 .or_else(|| self.store.cached_indexed_unit(program));
             return Some(UnitReadMaterials {
                 root,
@@ -6462,15 +6471,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The rendering, if this session or the database already has it.** Without it the program's hash is unknown
         // and neither cache can be asked — so the facts are looked up in `read_the_program`, after the cook.
         let rendered = self
-            .rendered_unit
-            .lock()
-            .ok()
-            .and_then(|known| {
-                known
-                    .as_ref()
-                    .filter(|(seen, _)| *seen == units_key)
-                    .map(|(_, cached)| cached.clone())
-            })
+            .a_rendered_unit_already(units_key)
             .or_else(|| self.store.cached_unit(units_key));
         if crate::probes::units() {
             eprintln!(
@@ -6488,14 +6489,7 @@ impl<F: FileProvider + Clone> Session<F> {
             Some(rendered) => {
                 let program = crate::cache::content_hash(&rendered.text);
                 let known = self
-                    .unit_index
-                    .lock()
-                    .ok()
-                    .and_then(|memo| {
-                        memo.as_ref()
-                            .filter(|(seen, _)| *seen == program)
-                            .map(|(_, cached)| cached.clone())
-                    })
+                    .a_unit_index_already(program)
                     .or_else(|| self.store.cached_indexed_unit(program));
                 (Some(program), known)
             }
@@ -6605,9 +6599,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// Remember what a program's parse came out as — the one-entry memo `Session::unit_index` holds.
     fn remember_the_unit_index(&self, program: u64, indexed: &crate::IndexedUnit) {
-        if let Ok(mut memo) = self.unit_index.lock() {
-            *memo = Some((program, indexed.clone()));
-        }
+        let kept = std::sync::Arc::new(indexed.clone());
+        self.publish(|products| products.unit_index = Some((program, kept)));
     }
 
     /// **How many items one completion may answer with** — `[completion] max_items` in `.cppls.toml`, clamped.

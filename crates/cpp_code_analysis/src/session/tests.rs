@@ -4934,10 +4934,7 @@ fn a_second_pull_reuses_the_inference_of_the_first() {
     let (hits_before, misses_before) = session.index().type_cache_stats();
 
     // The pull's own memo, gone: the next pull recomputes its checks and can only be fast through the type memo.
-    *session
-        .checks_memo
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    session.publish(|products| products.checks = None);
     let second = session.diagnostics("/p/a.cpp").expect("the file reads");
     let (hits_after, misses_after) = session.index().type_cache_stats();
 
@@ -5561,5 +5558,49 @@ fn a_published_product_is_a_consistent_world() {
         before.views.len(),
         1,
         "the version a reader already holds is unchanged"
+    );
+}
+
+/// **A pull's memo is a published product, so the second pull answers from it without recomputing** — step 2 of
+/// `docs/locking.md`, as a test with teeth.
+///
+/// The memo used to be a `Mutex<Option<(u64, Vec<Finding>)>>`: a pull read it under the lock and the *same* pull wrote
+/// it back under that lock, which is what made a query a writer. Now the value lives in `Products` behind its own
+/// `Arc`, and the identity of that `Arc` is the observable form of "the second pull did not recompute": a pull that
+/// read the memo answers with the published findings and publishes nothing, so the pointer is the same one.
+#[test]
+fn a_second_pull_answers_from_the_published_memo() {
+    let source = "void f() {\n    int count = \"three\";\n    (void)count;\n}\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let fixture = Memory::new("the-pull-memo-is-published", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+
+    session.did_open(path, source);
+    session.index_everything();
+
+    let first = session.diagnostics(path).expect("the file reads");
+    assert!(!first.checks.is_empty(), "the fixture has a finding");
+    let (state, findings) = session
+        .products()
+        .checks
+        .clone()
+        .expect("the first pull published its findings under the state of that pull");
+
+    let second = session.diagnostics(path).expect("the file reads");
+    let (state_again, findings_again) = session
+        .products()
+        .checks
+        .clone()
+        .expect("and so did the second");
+    assert_eq!(
+        first.checks.len(),
+        second.checks.len(),
+        "the same reading answers the same"
+    );
+    assert_eq!(state, state_again, "the same inputs");
+    assert!(
+        std::sync::Arc::ptr_eq(&findings, &findings_again),
+        "the second pull recomputed its findings: it did not answer from the published memo"
     );
 }
