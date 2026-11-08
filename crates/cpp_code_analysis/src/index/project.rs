@@ -13590,8 +13590,6 @@ impl ProjectIndex {
     ///
     /// A diagnostic, for asking "is the declaration I am looking for in the index at all, and under which scope" —
     /// the question that separates "the walk did not find it" from "it was never filed where the walk looks".
-    /// **The names a file-scope cursor can write, by prefix** — the cheap half of visibility, for completion.
-
     pub fn name_postings(&self, name: &str) -> usize {
         self.names.named(name).len()
     }
