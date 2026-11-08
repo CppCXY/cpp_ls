@@ -5604,3 +5604,51 @@ fn a_second_pull_answers_from_the_published_memo() {
         "the second pull recomputed its findings: it did not answer from the published memo"
     );
 }
+
+/// **A request may ask, but it may not clear a refusal** — the contract the pump's `cooking_refused` book exists for,
+/// and step 3's teeth.
+///
+/// The book was a `Mutex<HashSet>` read by `want_cooked_reading` (a request) and written by the pump. Clearing it on an
+/// ask is a *live loop* the session already paid for: a file whose cook can never succeed was queued, claimed, refused
+/// and cleared again, once per pull, for as long as the window stayed open — measured from a real session's log as an
+/// `index slice` line every ~250 ms, minutes after the index had drained.
+///
+/// The note now lives in `PumpNotes`, one lock the pump keeps, and the request side only reads it to *decline*. This
+/// test refuses a file directly and then asks for it: nothing may be queued, and the refusal must still be in force.
+#[test]
+fn a_request_for_a_refused_cook_does_not_clear_the_refusal() {
+    let text = "struct Widget { int size; };\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-refusal-survives-an-ask", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+    session.did_open(path, text);
+    session.index_everything();
+    // **Drained first**: `did_open` queued the file, and a queue that already holds it cannot show an ask being
+    // refused. The baseline has to be "nothing is waiting".
+    let mut slices = 0;
+    while session.pending_cooking() > 0 && slices < 64 {
+        session.advance(16);
+        slices += 1;
+    }
+    let before = session.pending_cooking();
+    assert_eq!(before, 0, "the fixture must have nothing waiting");
+
+    // The pump's half: the materials could not be gathered, so the cook is refused.
+    session.refuse_the_cooks_that_built_nothing(&[path.to_path_buf()], &[]);
+
+    // The request's half: a pull naming the file asks for its reading.
+    session.want_cooked_reading(path);
+
+    assert_eq!(
+        session.pending_cooking(),
+        before,
+        "a request re-queued a cook the pump had refused: that is the loop the refusal exists to stop"
+    );
+    session.want_cooked_reading(path);
+    assert_eq!(
+        session.pending_cooking(),
+        before,
+        "and asking twice is the same as asking once"
+    );
+}

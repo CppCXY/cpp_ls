@@ -636,6 +636,22 @@ fn a_view_weighs(view: &FileView) -> usize {
     view.source.len().saturating_mul(8) + view.tree.get_tokens().len().saturating_mul(16)
 }
 
+/// **The pump's own books** — see `docs/locking.md` step 3.
+///
+/// What a writer keeps a note of and a reader has no business consulting: the readings the second pass has already
+/// refined (`refined_readings`), the cooks whose materials could not be gathered (`cooking_refused`), and how many
+/// times each root's timeline has been walked (`walks_by_root`, a diagnostic).
+///
+/// They were three `Mutex<>` fields of [`Session`]: three locks whose only traffic was the pump talking to itself —
+/// and, for `cooking_refused`, one guard on the request side (a request may *ask*, but it may not clear a refusal).
+/// They are one value now, which is what the design note's rule comes to in practice: a note a writer keeps is not a
+/// product, so it does not get a place of its own on the reader's path.
+struct PumpNotes {
+    refined_readings: std::collections::HashSet<PathBuf>,
+    cooking_refused: std::collections::HashSet<String>,
+    walks_by_root: std::collections::HashMap<String, u64>,
+}
+
 pub struct Session<F: FileProvider = DiskFiles> {
     root: PathBuf,
     config: CompilerConfig,
@@ -692,7 +708,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     /// **The files whose reading in the index is a refined one** — what [`Session::is_refined`] answers, and what
     /// phase 1 needs to know when an answer is still the shape-only reading.
-    refined_readings: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+
     /// **The open files whose cooked reading is missing or stale** — what [`Session::cook`] is called for when the
     /// queue drains.
     ///
@@ -936,7 +952,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// A refusal is not a conclusion about the file, only about *this* moment: [`Session::want_cooked_reading`] — a
     /// query that names the file — clears it and queues again, so nothing is lost but the retry.
-    cooking_refused: std::sync::Mutex<std::collections::HashSet<String>>,
+
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read
@@ -950,7 +966,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// `UnitStats::walked` is the total, and a total cannot tell one root walked two hundred times from two hundred
     /// roots walked once. The difference is the whole of the next optimisation, and this is the measurement that
     /// decides which one it is — see [`Session::walks_by_root`].
-    walks_by_root: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// **The pump's books** — one lock, and the request path only ever asks through it. See [`PumpNotes`].
+    pump: std::sync::Mutex<PumpNotes>,
 }
 
 /// **One `import` a file writes**, as a link or a jump can use it — see [`Session::module_imports_of`].
@@ -1743,7 +1760,7 @@ impl<F: FileProvider + Clone> Session<F> {
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
             refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
-            refined_readings: std::sync::Mutex::new(std::collections::HashSet::new()),
+
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
@@ -1767,11 +1784,15 @@ impl<F: FileProvider + Clone> Session<F> {
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             products: std::sync::RwLock::new(std::sync::Arc::new(Products::new())),
-            cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
+
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
-            walks_by_root: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pump: std::sync::Mutex::new(PumpNotes {
+                refined_readings: std::collections::HashSet::new(),
+                cooking_refused: std::collections::HashSet::new(),
+                walks_by_root: std::collections::HashMap::new(),
+            }),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -2091,9 +2112,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let open: std::collections::HashSet<PathBuf> = self.documents.paths().into_iter().collect();
         let refined: std::collections::HashSet<PathBuf> = self
-            .refined_readings
+            .pump
             .lock()
-            .map(|refined| refined.iter().cloned().collect())
+            .map(|notes| notes.refined_readings.iter().cloned().collect())
             .unwrap_or_default();
 
         let mut over = bytes.saturating_sub(budget);
@@ -2562,8 +2583,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The one place a refusal is cleared**, and it is cleared because the reason for it — the text — has
         // changed. See [`Session::want_cooked_reading`], which used to clear it on every request and turned a cook
         // that cannot succeed into a loop.
-        if let Ok(mut refused) = self.cooking_refused.lock() {
-            refused.remove(&queue_key(path));
+        if let Ok(mut notes) = self.pump.lock() {
+            notes.cooking_refused.remove(&queue_key(path));
         }
         self.cooking.want(path);
 
@@ -2731,9 +2752,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // `4 to cook, 1 left` / `2 left` / `0 left` every second, forever, at 28 % of a core.
         let refused = |session: &Self, path: &Path| {
             session
-                .cooking_refused
+                .pump
                 .lock()
-                .map(|refused| refused.contains(&queue_key(path)))
+                .map(|notes| notes.cooking_refused.contains(&queue_key(path)))
                 .unwrap_or(false)
         };
 
@@ -2920,9 +2941,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // ~250 ms, minutes after the index had drained. A refusal is cleared where the *reason* could have changed —
         // an edit ([`Session::buffer_changed`]) — not by a request that changes nothing.
         let refused = self
-            .cooking_refused
+            .pump
             .lock()
-            .map(|refused| refused.contains(&queue_key(path)))
+            .map(|notes| notes.cooking_refused.contains(&queue_key(path)))
             .unwrap_or(false);
         if refused {
             return;
@@ -3831,8 +3852,8 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|(summary, _)| summary.path.clone())
             .collect();
         let re_read = self.store.commit_the_re_read(plan);
-        if let Ok(mut known) = self.refined_readings.lock() {
-            known.extend(refined);
+        if let Ok(mut notes) = self.pump.lock() {
+            notes.refined_readings.extend(refined);
         }
         if !waiting.is_empty() && self.pending_work() > 0 {
             if crate::probes::cooking() {
@@ -5946,8 +5967,8 @@ impl<F: FileProvider + Clone> Session<F> {
                     // which is the mistake this line was written with.
                     self.note_a_unit(Which::Walked);
                     // …and counted **by root**, which the total above cannot say. See [`Session::walks_by_root`].
-                    if let Ok(mut walks) = self.walks_by_root.lock() {
-                        *walks.entry(queue_key(path)).or_insert(0) += 1;
+                    if let Ok(mut notes) = self.pump.lock() {
+                        *notes.walks_by_root.entry(queue_key(path)).or_insert(0) += 1;
                     }
 
                     if crate::probes::timing() {
@@ -6149,10 +6170,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// (`examples/project_index.rs`), opening one file took `walk` from 10.6 s to 45.8 s over the same 1729 files —
     /// so the walks are not spread evenly, and this says which root is paying.
     pub fn walks_by_root(&self) -> Vec<(PathBuf, u64)> {
-        let Ok(walks) = self.walks_by_root.lock() else {
+        let Ok(notes) = self.pump.lock() else {
             return Vec::new();
         };
-        let mut walked: Vec<(PathBuf, u64)> = walks
+        let mut walked: Vec<(PathBuf, u64)> = notes
+            .walks_by_root
             .iter()
             .map(|(path, count)| (PathBuf::from(path), *count))
             .collect();
@@ -6713,8 +6735,8 @@ impl<F: FileProvider + Clone> Session<F> {
             // cost there is `index_one`'s own unit walk, not this backlog. The mark stays because it is true and
             // because the backlog it removes is real work for a drain that would otherwise walk files it has just
             // read; the batch cost is P6's next measurement, not this line's.
-            if let Ok(mut refined) = self.refined_readings.lock() {
-                refined.insert(path.clone());
+            if let Ok(mut notes) = self.pump.lock() {
+                notes.refined_readings.insert(path.clone());
             }
         }
 
@@ -7802,12 +7824,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the set that would otherwise be wanted again on every drain. See [`Session::cooking_refused`], and
     /// [`Session::want_cooked_reading`] for the one caller that clears a refusal.
     pub fn refuse_the_cooks_that_built_nothing(&mut self, asked: &[PathBuf], built: &[PathBuf]) {
-        let Ok(mut refused) = self.cooking_refused.lock() else {
+        let Ok(mut notes) = self.pump.lock() else {
             return;
         };
         for path in asked {
             if !built.iter().any(|made| made == path) {
-                refused.insert(queue_key(path));
+                notes.cooking_refused.insert(queue_key(path));
             }
         }
     }
@@ -8167,9 +8189,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // key, while one the pass built in this run is inserted under the file's own key (the store resets it, so that
         // the entry the first pass wrote stays addressable). The set is what makes the second kind visible.
         if self
-            .refined_readings
+            .pump
             .lock()
-            .is_ok_and(|refined| refined.contains(path))
+            .is_ok_and(|notes| notes.refined_readings.contains(path))
         {
             return true;
         }
