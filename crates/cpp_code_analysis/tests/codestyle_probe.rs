@@ -149,7 +149,25 @@ fn two_wrong_answers_on_the_codestyle_project() {
             )
         );
     }
+    let c_lib_text = std::fs::read_to_string(&c_lib).expect("the file reads");
     if let Some(view) = session.view_of_the_file(&c_lib) {
+        let text = c_lib_text.as_str();
+        for wanted in [
+            "result.Data",
+            "std::move(result.Data)",
+            "codeFormat.Diagnostic(uri, code)",
+            "diagnostic_results",
+        ] {
+            if let Some(at) = text.find(wanted) {
+                println!(
+                    "  type_at({wanted:?}) = {:?}",
+                    session.type_at(
+                        &view,
+                        cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+                    )
+                );
+            }
+        }
         let text = std::fs::read_to_string(&c_lib).expect("the file reads");
         let at = text
             .find("diagnostic.Message")
