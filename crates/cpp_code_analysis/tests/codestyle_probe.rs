@@ -550,6 +550,10 @@ fn what_keeps_the_pump_busy() {
         );
     }
     println!(
+        "queue sizes (pending, open, rest): {:?}",
+        session.queue_sizes()
+    );
+    println!(
         "queue before/after a question: {:?} -> {:?}",
         before,
         (session.pending_work(), session.pending_cooking())

@@ -3056,7 +3056,16 @@ impl<F: FileProvider + Clone> Session<F> {
             // prepared entry, `index_one` builds the summary itself and can hand it the environment. Every other
             // file still takes the wave's answer.
             let ready = self.prefetched.remove(&key);
+            let step_started = std::time::Instant::now();
             done.push(self.index_one(path, priority, depth, ready));
+            if crate::probes::units() {
+                eprintln!(
+                    "[advance] one step took {} ms ({} of {} step(s))",
+                    step_started.elapsed().as_millis(),
+                    taken + 1,
+                    steps
+                );
+            }
         }
 
         // Nothing left to read means nothing left to read *ahead*: what is still here was prepared for a queue that
@@ -3919,7 +3928,15 @@ impl<F: FileProvider + Clone> Session<F> {
         ready: Option<crate::index::store::Prepared>,
     ) -> Step {
         {
+            let loading = std::time::Instant::now();
             self.vfs.load(&path);
+            if crate::probes::units() {
+                eprintln!(
+                    "[step] load {} took {} us",
+                    path.display(),
+                    loading.elapsed().as_micros()
+                );
+            }
         }
         let before = self.store.stats();
 
@@ -3989,6 +4006,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 unit.is_some()
             );
         }
+        let tail = std::time::Instant::now();
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
                 summary
@@ -4000,12 +4018,29 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_default();
         let after = self.store.stats();
         let outcome = outcome_of(before, after);
+        if crate::probes::units() {
+            eprintln!(
+                "[step] {} includes+stats took {} us ({} include(s))",
+                path.display(),
+                tail.elapsed().as_micros(),
+                includes.len()
+            );
+        }
 
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
         // tenth translation unit includes is not.
+        let queueing = std::time::Instant::now();
+        let include_count = includes.len();
         for include in includes {
             self.queue.add(include, priority, depth + 1);
+        }
+        if crate::probes::units() {
+            eprintln!(
+                "[step] {} queued {include_count} include(s) in {} us",
+                path.display(),
+                queueing.elapsed().as_micros()
+            );
         }
 
         Step {
@@ -4452,6 +4487,22 @@ impl<F: FileProvider + Clone> Session<F> {
     /// are its environment), and one more thing happens at that same moment — the second parse of a file whose
     /// meaning depended on a header that arrived later. Cooking before that pass would build a reading of an
     /// environment the summaries are about to revise.
+    /// **What the queue physically holds against what it says is pending** — a diagnostic, and the measurement behind
+    /// §6 of `docs/buglist.md`.
+    ///
+    /// `pending()` is the number of paths whose standing is `Queued`; the deques also hold entries that were re-armed
+    /// into the other half, upgraded, forgotten or worked — `pop` walks them and skips them, and the two numbers
+    /// drifting apart is what makes one `advance` step take seconds while `index_one` itself takes milliseconds.
+    ///
+    /// `(pending, open deque, rest deque)`.
+    pub fn queue_sizes(&self) -> (usize, usize, usize) {
+        (
+            self.queue.pending(),
+            self.queue.open.len(),
+            self.queue.rest.len(),
+        )
+    }
+
     pub fn is_idle(&self) -> bool {
         self.queue.pending() == 0
     }
@@ -5996,6 +6047,16 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
 
+        // **This is the 3.6 s, and it is required behaviour** — see the two contract tests below, which fail if it is
+        // removed: `a_file_opened_after_the_index_was_built_is_read_through_a_walked_timeline` and
+        // `a_keystroke_in_a_body_reads_the_file_through_its_timeline`. Measured on `LSPHandle.cpp`
+        // (`tests/codestyle_probe.rs::what_keeps_the_pump_busy`): with this arm skipped, one `advance` step after an
+        // edit falls from **3.73 s to 8.75 ms** — so the cost is *acquiring* the timeline (disk decode of a
+        // whole-program rendering, or a walk), and it is paid **per keystroke** because the bounded units table has
+        // evicted this file's entry during the project read.
+        //
+        // The fix is therefore not here: it is to keep the **open file's timeline hot** (pinned against eviction), so
+        // the contract holds at milliseconds. See `docs/buglist.md` §6.
         let (unit, provisional) = self.unit_and_state_of(path)?;
         (!provisional && unit.environment_of(path).is_some()).then_some(unit)
     }

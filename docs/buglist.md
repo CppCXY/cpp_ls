@@ -36,15 +36,25 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
      disk counts as worked — so the two disagree about a file's state. Fix the disagreement, then the idle drain runs.
   3. Only then: the cooking backlog (61) drains, and the requests stop waiting for a writer.
 
-* **Where the 3.7 s is, narrowed** (`CPPLS_TRACE_UNITS=1`, `[step]` lines added to `index_one`): the edited file's own
-  step is **22 ms**, and the timeline question is **0 ms** (the unit is in hand). So the cost is *not* the per-file
-  read — it is in `advance` around the step, and the candidate list is now: the wave's `prepare_closure`, the per-call
-  `prepare_the_drain`, and `finish_a_slice`'s second pass. Timing those three is the next measurement, and the
-  instrumentation (`[step] …`) stays behind `CPPLS_TRACE_UNITS`.
+* **Where the 3.7 s is, found** (`CPPLS_TRACE_UNITS=1`, per-part timings inside `index_one`): the edited file's own
+  work is **12 ms** — load 1 µs, read 12 ms, 17 includes queued in 20 µs — and the remaining **3.6 s** is
+  `the_timeline_to_read_through` → `unit_and_state_of` → `translation_unit_of`, which finds no timeline in memory and
+  **decodes one from the disk cache (or walks it)**: a whole-program rendering, megabytes, once per keystroke.
 
-  Two candidate fixes were tried and **withdrawn**, because neither moved the number: (a) making
-  `the_timeline_to_read_through` refuse to walk (the walk is not where the time is); (b) keeping a candidate whose scope
-  differs from every local one (§5, unproven). Nothing unmeasured is in the tree.
+  ```text
+  with that arm skipped       one advance step after an edit:  8.75 ms
+  with it (as designed)       one advance step after an edit:  3.73 s
+  ```
+
+* **And it cannot simply be skipped.** Two contract tests fail when it is:
+  `a_file_opened_after_the_index_was_built_is_read_through_a_walked_timeline` and
+  `a_keystroke_in_a_body_reads_the_file_through_its_timeline`. Reading the reader's file through the program's timeline
+  is deliberate: it is what makes the second pass have nothing to repair. The defect is that the **bounded units table
+  evicts the open file's timeline during the project read**, so the contract is paid for by re-acquiring the whole
+  program on every keystroke.
+* **The fix, therefore**: keep the **open file's timeline hot** — pinned against the units table's eviction — so the
+  contract holds at milliseconds, and the acquisition happens once per open, not once per keystroke. That is the next
+  commit; the per-part instrumentation (`[step]`, `[advance]`) stays behind `CPPLS_TRACE_UNITS`.
 
 ### 5. A class can vanish from the index when its own source declares a member of the same name
 
