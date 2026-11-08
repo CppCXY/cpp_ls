@@ -3345,6 +3345,7 @@ fn visible_names(
 
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
+    let phase = std::time::Instant::now();
 
     // **The class a separated definition belongs to.** `int Source::GetLine(int) { … }` in a `.cpp` declares no scope for
     // `Source` here — the class is in a header — so the scope chain below has no class to offer members from, and a
@@ -3361,6 +3362,10 @@ fn visible_names(
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
+    if crate::probes::completion() {
+        eprintln!("[completion]   the class tier: {:?}", phase.elapsed());
+    }
+    let chain_phase = std::time::Instant::now();
 
     for (depth, scope) in chain.iter().copied().enumerate() {
         let Some(data) = scopes.scope(scope) else {
@@ -3426,6 +3431,10 @@ fn visible_names(
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
+    if crate::probes::completion() {
+        eprintln!("[completion]   the chain: {:?}", chain_phase.elapsed());
+    }
+    let global_phase = std::time::Instant::now();
     names.extend(global_offers(
         index,
         scopes,
@@ -3434,8 +3443,18 @@ fn visible_names(
         chain.len(),
         written,
     ));
+    if crate::probes::completion() {
+        eprintln!(
+            "[completion]   the global tier: {:?}",
+            global_phase.elapsed()
+        );
+    }
 
+    let sort_phase = std::time::Instant::now();
     sort_and_hide(&mut names);
+    if crate::probes::completion() {
+        eprintln!("[completion]   the sort: {:?}", sort_phase.elapsed());
+    }
     Known::Yes(names)
 }
 
