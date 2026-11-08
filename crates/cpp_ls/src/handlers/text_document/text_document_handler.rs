@@ -150,6 +150,9 @@ pub async fn process_did_close_document(
         .analysis()
         .update_session("didClose", |session| session.did_close(&path))
         .await;
+    // **And the published text goes with it**: a closed file is one the disk answers for, so a request must not
+    // believe the analysis is holding a buffer for it any more (`AnalysisState::texts`).
+    context.analysis().forget_text(&path);
     context.analysis().wake();
 
     // **Nothing is published, and nothing has to be.** Diagnostics are pulled: a client asks about the file it is
@@ -166,6 +169,9 @@ pub async fn process_did_close_document(
 /// no window in which the client holds an answer about text that is gone.
 async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: String) {
     let analysis: &AnalysisState = context.analysis();
+    // **The text is published before the write**, because this is the one moment it is in hand with no lock taken:
+    // the request path reads it to answer "is this file held" without waiting for the session (`AnalysisState::texts`).
+    analysis.publish_text(&path, &text);
     let for_session = path.clone();
     let applied = analysis
         .update_session("didOpen", move |session| {
