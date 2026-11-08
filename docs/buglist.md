@@ -5,6 +5,37 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Open
 
+### 6. One keystroke of one file costs a whole-program read, and the pump never goes idle
+
+* **Reported from use.** "CPU 风扇转的程度…后台的计算量依旧巨大…几百行的文件不应该有如此之大的计算量".
+* **Measured** (`tests/codestyle_probe.rs`, `what_keeps_the_pump_busy`, on `E:\EmmyLuaCodeStyle`, one project file
+  added — `LSPHandle.cpp`, 280 lines):
+
+  ```text
+  one keystroke: advance(1)         3.70 s        ← ONE step, one file
+  a completion                      1.19 s, 1 item(s)
+  until idle after the edit         400 slices, still pending 61 | cooking 61
+  store stats                       reused 1544, rebuilt 48        ← of the project's 1590 files
+  ```
+
+* **Three separate facts, and they compound:**
+  1. **The whole program is read per keystroke.** One `advance` step after an edit costs 3.70 s, which is the
+     whole-program read (walk + cook every file of the closure + insert) — the same "one indivisible piece" the code
+     documents at 5.09 s. A 280-line file should cost its own parse.
+  2. **The queue never empties.** After draining 400 slices, `pending_work` sits at 61–62 and `pending_cooking` stays
+     **61 for ever**: the idle drain (where cooking is marked and `want_the_closure_cooked` runs) is never reached, so
+     61 files keep asking to be cooked and the pump spins — that is the fan.
+  3. **The requests pay it.** `advance` needs `&mut Session`, so the server runs it under the write lock: a completion
+     arriving in that window waits, which is why it took 1.19 s and answered one item.
+* **What to change, in order** — none of it is a lock:
+  1. **The program read must not be triggered by a `#include` file's edit.** It exists for module interface units
+     (`import std;`); for an `#include` project the per-file summaries already answer. Gate it on "this file imports a
+     module" (or on a request explicitly asking for the program), not on "a pause in typing".
+  2. **The queue must reach idle.** 61 pending after 1 600 steps means the frontier never closes: every file indexed
+     re-adds its includes, and `Work::add` refuses only files already *worked*, while a file whose summary came from the
+     disk counts as worked — so the two disagree about a file's state. Fix the disagreement, then the idle drain runs.
+  3. Only then: the cooking backlog (61) drains, and the requests stop waiting for a writer.
+
 ### 5. A class can vanish from the index when its own source declares a member of the same name
 
 * **Reported from use, twice.** "你把 `LSPHandle` 识别为了构造函数本身而不是类本身" — completion after `LSPHandle::`

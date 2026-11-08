@@ -426,3 +426,125 @@ fn what_the_analysis_says_about_lsp_handle() {
         println!("  member_completions: {members:?}");
     }
 }
+/// **What keeps the pump busy** — the reader's `CPU fan` report, measured instead of guessed.
+///
+/// A 280-line file should cost one parse. If the background is hot, something is being *re-queued*, so this asks the
+/// pump directly: how many slices until it is idle, what each one did, and whether asking a question (a completion, a
+/// diagnostics pull) makes more work appear. `CPPLS_CODESTYLE_PROJECT` names the project.
+#[test]
+#[ignore = "a probe, not a test: it measures what the pump does after the project is read"]
+fn what_keeps_the_pump_busy() {
+    let root = project();
+    let file = root
+        .join("CodeFormatServer")
+        .join("src")
+        .join("LSP")
+        .join("LSPHandle.cpp");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+
+    let started = Instant::now();
+    let first = session.advance(64);
+    println!("first slice: {} step(s) in {:?}", first.len(), started.elapsed());
+    println!(
+        "  pending_work {} | pending_cooking {} | units {:?}",
+        session.pending_work(),
+        session.pending_cooking(),
+        session.unit_stats()
+    );
+
+    session.did_open(&file, &text);
+    for round in 0..12 {
+        let started = Instant::now();
+        let steps = session.advance(64);
+        let named: Vec<String> = steps
+            .iter()
+            .take(6)
+            .map(|step| {
+                format!(
+                    "{} ({})",
+                    step.path.file_name().unwrap_or_default().to_string_lossy(),
+                    if step.with_the_environment { "env" } else { "text" }
+                )
+            })
+            .collect();
+        println!(
+            "round {round:>2}: {:>3} step(s) in {:>8.1?} | pending_work {:>5} | cooking {:>4} | {}",
+            steps.len(),
+            started.elapsed(),
+            session.pending_work(),
+            session.pending_cooking(),
+            named.join(" ")
+        );
+        if steps.is_empty() && session.pending_work() == 0 {
+            println!("idle at round {round}");
+            break;
+        }
+    }
+
+    // **And what one keystroke costs the pump** — the reader's "fan spins after every edit" report, as a number.
+    let mut drained = 0usize;
+    let started = Instant::now();
+    while session.pending_work() > 0 && drained < 400 {
+        session.advance(64);
+        drained += 1;
+    }
+    println!(
+        "\ndrained: {drained} more slice(s) in {:?} | pending_work {} | cooking {}",
+        started.elapsed(),
+        session.pending_work(),
+        session.pending_cooking()
+    );
+    let edited = format!("{text}// typed\n");
+    session.did_change(&file, &edited);
+    let before_edit = (session.pending_work(), session.pending_cooking());
+    let started = Instant::now();
+    let steps = session.advance(1);
+    println!(
+        "one keystroke: advance(1) {:?}, {} step(s) | queue {:?} -> {:?} | cooking {}",
+        started.elapsed(),
+        steps.len(),
+        before_edit,
+        (session.pending_work(), session.pending_cooking()),
+        session.pending_cooking()
+    );
+    let started = Instant::now();
+    let mut after_edit = 0usize;
+    while session.pending_work() > 0 && after_edit < 400 {
+        session.advance(64);
+        after_edit += 1;
+    }
+    println!(
+        "until idle after the edit: {after_edit} slice(s) in {:?} | cooking {}",
+        started.elapsed(),
+        session.pending_cooking()
+    );
+
+    // **And what a question costs the pump**: does asking for a completion put work back on the queue?
+    let before = (session.pending_work(), session.pending_cooking());
+    if let Some(view) = session.view_of_the_file(&file) {
+        let at = text.find("RefreshDiagnostic").map(|n| n + 4).unwrap_or(0);
+        let started = Instant::now();
+        let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+        println!(
+            "a completion: {} item(s) in {:?}",
+            set.items.len(),
+            started.elapsed()
+        );
+    }
+    println!(
+        "queue before/after a question: {:?} -> {:?}",
+        before,
+        (session.pending_work(), session.pending_cooking())
+    );
+
+    let stats = session.stats();
+    println!("store stats: {stats:?}");
+    println!("words: {}", session.cache_sizes().summaries);
+}
