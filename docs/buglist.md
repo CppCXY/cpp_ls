@@ -36,6 +36,16 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
      disk counts as worked — so the two disagree about a file's state. Fix the disagreement, then the idle drain runs.
   3. Only then: the cooking backlog (61) drains, and the requests stop waiting for a writer.
 
+* **Where the 3.7 s is, narrowed** (`CPPLS_TRACE_UNITS=1`, `[step]` lines added to `index_one`): the edited file's own
+  step is **22 ms**, and the timeline question is **0 ms** (the unit is in hand). So the cost is *not* the per-file
+  read — it is in `advance` around the step, and the candidate list is now: the wave's `prepare_closure`, the per-call
+  `prepare_the_drain`, and `finish_a_slice`'s second pass. Timing those three is the next measurement, and the
+  instrumentation (`[step] …`) stays behind `CPPLS_TRACE_UNITS`.
+
+  Two candidate fixes were tried and **withdrawn**, because neither moved the number: (a) making
+  `the_timeline_to_read_through` refuse to walk (the walk is not where the time is); (b) keeping a candidate whose scope
+  differs from every local one (§5, unproven). Nothing unmeasured is in the tree.
+
 ### 5. A class can vanish from the index when its own source declares a member of the same name
 
 * **Reported from use, twice.** "你把 `LSPHandle` 识别为了构造函数本身而不是类本身" — completion after `LSPHandle::`

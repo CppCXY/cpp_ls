@@ -3949,6 +3949,16 @@ impl<F: FileProvider + Clone> Session<F> {
         // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
         // and is not worth asserting anything about. See [`HeldUnit`].
         let unit = self.the_timeline_to_read_through(&spelled);
+        let timed = std::time::Instant::now();
+        let timeline_ask = std::time::Instant::now();
+        if crate::probes::units() {
+            eprintln!(
+                "[step] timeline question for {} took {} ms (timeline {})",
+                path.display(),
+                timeline_ask.elapsed().as_millis(),
+                unit.is_some()
+            );
+        }
         let has_a_timeline = unit
             .as_ref()
             .is_some_and(|unit| unit.environment_of(&spelled).is_some());
@@ -3970,6 +3980,15 @@ impl<F: FileProvider + Clone> Session<F> {
                 None => self.store.get(&path),
             },
         };
+        if crate::probes::units() {
+            eprintln!(
+                "[step] {} read in {} ms after a {} ms timeline question (timeline {})",
+                path.display(),
+                timed.elapsed().as_millis(),
+                timeline_ask.elapsed().as_millis(),
+                unit.is_some()
+            );
+        }
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
                 summary

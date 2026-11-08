@@ -451,7 +451,11 @@ fn what_keeps_the_pump_busy() {
 
     let started = Instant::now();
     let first = session.advance(64);
-    println!("first slice: {} step(s) in {:?}", first.len(), started.elapsed());
+    println!(
+        "first slice: {} step(s) in {:?}",
+        first.len(),
+        started.elapsed()
+    );
     println!(
         "  pending_work {} | pending_cooking {} | units {:?}",
         session.pending_work(),
@@ -470,7 +474,11 @@ fn what_keeps_the_pump_busy() {
                 format!(
                     "{} ({})",
                     step.path.file_name().unwrap_or_default().to_string_lossy(),
-                    if step.with_the_environment { "env" } else { "text" }
+                    if step.with_the_environment {
+                        "env"
+                    } else {
+                        "text"
+                    }
                 )
             })
             .collect();
@@ -531,7 +539,10 @@ fn what_keeps_the_pump_busy() {
     if let Some(view) = session.view_of_the_file(&file) {
         let at = text.find("RefreshDiagnostic").map(|n| n + 4).unwrap_or(0);
         let started = Instant::now();
-        let set = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
+        let set = session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        );
         println!(
             "a completion: {} item(s) in {:?}",
             set.items.len(),
