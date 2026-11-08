@@ -89,6 +89,42 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   contract holds at milliseconds, and the acquisition happens once per open, not once per keystroke. That is the next
   commit; the per-part instrumentation (`[step]`, `[advance]`) stays behind `CPPLS_TRACE_UNITS`.
 
+* **The 1.15 s completion, localized** (`CPPLS_TRACE_COMPLETION=1` now prints `visible_names`' four segments):
+
+  ```text
+  the position: scope "", written "Refr"
+    the class tier: 1.1678 s      ← the whole cost
+    the chain:          1.6 ms
+    the global tier:    3.6 ms
+    the sort:            16 us
+    the listing:        1.17 s for 24 name(s)
+  (the same request, warm: class 70 us → 4.3 ms in total)
+  ```
+
+  It is `the_class_a_definition_belongs_to` + `names_of_a_class` → `ProjectIndex::members_of` → `members_of_inner` →
+  **`resolve_aliases_or_unresolved`**, whose resolution of the class name is the index's declaration query — and its
+  first call is the guard-evaluating visibility walk (1.2 s on this closure). Warm it is 70 µs.
+
+  **Three earlier rounds cleared the wrong suspect because of a probe artefact**: they timed
+  `Session::members_of("LSPHandle")` *before* asking for the completion, which warmed the answer to 16–25 µs. The
+  number that matters is the cold one, and it is the first request after each edit — `definition_answers` is cleared on
+  every index change and the member list is dropped when any file it was made of changes (and `LSPHandle`'s list
+  includes the out-of-line constructor's fact, which lives in the `.cpp` being edited).
+
+* **The next change, named**: give the *class* resolution in `resolve_aliases_or_unresolved` the cheap visibility
+  (`include_closure` + the `names` postings) instead of the walk, falling back to the walk when it finds nothing. It is
+  a different question from the completion's *name list*, which is why the cheap version is allowed here and was not
+  there: a class's members are its own facts, and a class behind conditionally-included code still has the members a
+  reader would type. It must be checked against
+  `a_name_only_the_cooked_reading_declares_is_offered_over_the_wire` and
+  `a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines`, which are the two contracts the *name-list*
+  version broke.
+
+* **What this goal fixed, and what it did not**: `LSPHandle` resolving to its constructor (§5, `38e58cf`) is fixed and
+  measured; "the pump never idles" is disproved; "a keystroke triggers a whole-program read" is corrected to "the
+  *first* read of a file builds its timeline once" (3.6 s, under the write lock); the completion's 1.15 s is localized
+  to one function and **not yet fixed**.
+
 ### 5. A class can vanish from the index when its own source declares a member of the same name
 
 * **Reported from use, twice.** "你把 `LSPHandle` 识别为了构造函数本身而不是类本身" — completion after `LSPHandle::`
