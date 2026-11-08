@@ -157,17 +157,27 @@ request path and the step's wording says "thoroughly removed". The honest next i
 `std::sync::mpsc` sender the request pushes into and the pump drains, which makes "a request pushes, only the pump
 reads back" true without an asterisk.
 
+**Second half** (`5d9df1a`): that increment, done. The two asks are one channel — `Ask::Refine` and `Ask::Cook`, a
+`Sender` a request sends on and a `Receiver` the pump drains in its own slice — so a request's interaction with the pump
+is a `send` and no lock at all, and the books are read back only by their owner. The receiver's `Mutex` is not on the
+request path: the pump holds it for a `try_iter` into its own notes.
+
+Reconnecting it also **found a dead loop**: the environment slice in `finish_a_slice` read the same queue the loop above
+it had already drained, so `drain.environments` was always empty and the macro environment a query asked for was never
+built. It reads the pump's own backlog now (`PumpNotes.environments`), which the `Cook` ask fills.
+
 Lock count, measured (`^\s+\w+: std::sync::Mutex<` in `session/mod.rs`):
 
 ```text
 the goal's start   20 Mutex
 after step 1       16 Mutex + 1 RwLock<Arc<Products>>   (four caches -> one published snapshot)
 after step 2       13 Mutex
-after step 3       11 Mutex                             (three books -> one PumpNotes)
+after step 3       10 Mutex                             (three books -> one PumpNotes; two asks -> one channel)
 ```
 
-Steps 1–3 remove 9 of the 20, and — more to the point — every one of them removes a *write from a query*: a query no
-longer fills the view cache, no longer replaces the three memos, and no longer edits the pump's books.
+Steps 1–3 remove **10 of the 20**, and every one of them removes a *write or a lock from a query*: a query no longer
+fills the view cache, no longer replaces the three memos, no longer edits the pump's books, and no longer takes a lock to
+ask for work.
 
 ## The rule this leaves behind
 
