@@ -3008,6 +3008,19 @@ impl<F: FileProvider + Clone> Session<F> {
     /// not reach in this call (a file it discovers outranks it) is simply dropped and read again when its turn comes.
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
+
+        // **The writer fills the view cache; a query may not** — see `docs/locking.md`.
+        //
+        // A written view is ~2 ms of parse and a hit is a handful of `Arc` bumps, so the cache is worth having — but
+        // it used to be filled by the *query* that missed (`view_of_the_file`), which made every request a writer and
+        // was one of the reasons the session needed a lock that a request could be asked to take. The reader's half
+        // is now: look up, and on a miss build one for this answer and publish nothing. This loop is the other half,
+        // and it runs where writing is already the job: the files a reader has open, once each, until one is
+        // published. `advance(1)` is what `apply_buffer` calls after a keystroke, so the window is one slice.
+        for open in self.documents.paths() {
+            self.publish_the_written_view(&open);
+        }
+
         // **What one batch costs**, under the unit trace. The modules fixture's module read is nine of these and
         // 48–59 s, and no number outside could say which of the nine — or which half of a batch, the wave's closure
         // preparation or the per-file steps — was the seconds.
@@ -4857,10 +4870,21 @@ impl<F: FileProvider + Clone> Session<F> {
     /// read it as "no such file" — [`Session::is_indexed`] and [`Session::pending_cooking`] are how those are told
     /// apart.
     pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
+        self.written_view(path.as_ref()).map(|(view, _)| view)
+    }
+
+    /// **The view of a file's own text, and the key it is filed under** — the query's half of
+    /// [`Session::view_of_the_file`]. It **publishes nothing**: the cache is filled by
+    /// [`Session::publish_the_written_view`].
+    ///
+    /// The split is the rule from `docs/locking.md` rather than a preference: a query may not write. The written view
+    /// is 2 ms of parse and a hit is a handful of `Arc` bumps, so the cache is worth having — but filling it from the
+    /// query that missed made every request a writer, which is one of the reasons a request could be asked to take
+    /// the session's write lock. A request now builds one view for its own answer and forgets it; the pump remembers.
+    fn written_view(&self, requested: &Path) -> Option<(FileView, ViewKey)> {
         // **Held the way the VFS holds it, and asked for it the same way.** The VFS normalizes a path on the way in
         // and on the way out, so a lookup by a caller's spelling finds the file; the *queue* is keyed the same, so
         // the request below names the file the session will actually cook.
-        let requested = path.as_ref();
         let file = self.vfs.held(requested)?;
         // Queue it **only if there is nothing to read yet** — the rule `view` states, and the reason this one used to
         // make every request work: it asked unconditionally, so the file was cooked again on every query even though
@@ -4904,12 +4928,21 @@ impl<F: FileProvider + Clone> Session<F> {
             environment: known.clone().map(EnvironmentId),
         };
         if let Some(held) = self.a_view_already_parsed(&key) {
-            return Some(held);
+            return Some((held, key));
         }
         let macros = known.unwrap_or_default();
         let view = FileView::parse_with_cuda(file, macros.as_ref(), self.config.cuda());
-        self.remember_a_view(key, &view);
-        Some(view)
+        Some((view, key))
+    }
+
+    /// **Fill the view cache for one file** — the job a query is not allowed to do.
+    ///
+    /// Called by the writer ([`Session::advance`]) for the documents a reader has open, which is the set a keystroke's
+    /// requests are about. A file that is already published is a lookup and a return.
+    fn publish_the_written_view(&self, requested: &Path) {
+        if let Some((view, key)) = self.written_view(requested) {
+            self.remember_a_view(key, &view);
+        }
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.

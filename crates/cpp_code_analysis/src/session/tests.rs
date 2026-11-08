@@ -5475,3 +5475,43 @@ fn a_completion_right_after_an_edit_lists_the_files_own_members() {
         "the class is declared in the file itself, so the answer must not depend on the pump having read it again"
     );
 }
+
+/// **A query does not fill the view cache; the pump does** — the rule from `docs/locking.md`, as a test.
+///
+/// A written view is a 2 ms parse and a hit is a handful of `Arc` bumps, so the cache is worth having. But it used to
+/// be filled by the query that missed, which made every request a writer and is one of the reasons a request could be
+/// asked to take the session's write lock. The pump now publishes it (`advance`, for the open documents), and the
+/// assertions below are the two halves: a miss publishes nothing, and one slice later the entry is there.
+#[test]
+fn a_request_does_not_publish_the_view_it_built() {
+    let text = "struct Widget { int size; };\nvoid f() { Widget w; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("a-query-does-not-publish-a-view", &files);
+    let mut session = fixture.session();
+    let path = Path::new("/p/a.cpp");
+
+    session.did_open(path, text);
+    session.index_everything();
+    assert!(session.view_of_the_file(path).is_some(), "the file reads");
+
+    // **A miss after an edit**: the text changed, so the published key is the old one.
+    let edited = format!("{text}// typed\n");
+    session.did_change(path, &edited);
+    let before = session.cache_sizes().views;
+    assert!(
+        session.view_of_the_file(path).is_some(),
+        "a miss is built for the answer"
+    );
+    assert_eq!(
+        session.cache_sizes().views,
+        before,
+        "a query may not publish the view it built"
+    );
+
+    // **…and the writer does**, in one slice, for the file the reader has open.
+    session.advance(1);
+    assert!(
+        session.cache_sizes().views > before,
+        "the pump publishes the view a request may not"
+    );
+}
