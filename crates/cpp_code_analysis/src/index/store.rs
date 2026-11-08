@@ -1926,11 +1926,11 @@ impl<F: FileProvider> SummaryStore<F> {
         // **Built once per timeline, not once per slice.** definitions() walks every event and allocates an
         // Arc per definition; the pass used to pay that again for every slice that reused the same unit —
         // measured at ~2.6 ms per unit, ~8 units per slice, 81 slices, **1.7 s of a 5.8 s pass**.
-        let unit_definitions: Vec<std::sync::Arc<crate::UnitDefinitions>> =
-            units.iter().map(|unit| unit.definitions_cached()).collect();
+        let unit_definitions: Vec<crate::UnitDefinitions<'_>> =
+            units.iter().map(|unit| unit.definitions()).collect();
         let environments: Vec<(
             &std::sync::Arc<crate::TranslationUnit>,
-            std::sync::Arc<crate::UnitDefinitions>,
+            crate::UnitDefinitions<'_>,
         )> = units.iter().zip(unit_definitions).collect();
 
         // **The names the files being re-read could possibly need** — the filter's own filter, and the one that
@@ -3117,8 +3117,8 @@ impl<F: FileProvider> SummaryStore<F> {
 /// outside every unit is one nobody compiled, and there is no environment to read its bodies in.
 fn bodies_of<'pass>(
     environments: &'pass [(
-        &std::sync::Arc<crate::TranslationUnit>,
-        std::sync::Arc<crate::UnitDefinitions>,
+        &'pass std::sync::Arc<crate::TranslationUnit>,
+        crate::UnitDefinitions<'pass>,
     )],
     seed: &'pass crate::macros::MacroTable,
     path: &Path,

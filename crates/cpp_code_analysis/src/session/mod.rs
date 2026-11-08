@@ -5750,6 +5750,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 // **Held rather than taken**, for the reason the units table carries: this cache is what made the
                 // unit walk need `&mut self`, and `&mut self` is what put the walk inside the writer. A lock of its
                 // own is enough — the walk is the only thing that ever holds it for long.
+                #[cfg(feature = "perf-probe")]
+                crate::perf::mark("closure");
                 let mut definitions = self.held_definitions();
                 #[cfg(feature = "perf-probe")]
                 crate::perf::mark("definitions");
@@ -6316,6 +6318,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// and not an error.
     pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
         let started = std::time::Instant::now();
+        #[cfg(feature = "perf-probe")]
+        crate::perf::mark("read start");
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
         // keyed by the normalized path.
         let root = self.store.index().summary(root)?.path.clone();

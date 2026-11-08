@@ -1808,7 +1808,7 @@ pub struct TranslationUnit {
     /// A pure function of the unit, which is why it can live here: nothing in the unit changes after the walk.
     /// Measured: the pass asked for ~8 units' definitions per slice, 81 slices, ~2.6 ms each — 1.7 s of a 5.8 s
     /// second pass.
-    definitions_cache: std::sync::OnceLock<std::sync::Arc<UnitDefinitions>>,
+    definitions_cache: std::sync::OnceLock<()>,
     /// **The frame paths**: for each frame, the frames it is nested in, each with the offset in that ancestor at
     /// which this frame's text becomes live — `(outermost include's ancestor, offset)`, nearest ancestor first.
     ///
@@ -1975,9 +1975,6 @@ impl TranslationUnit {
         for key in self.entered.keys() {
             bytes += key.len() + std::mem::size_of::<u32>();
         }
-        if let Some(definitions) = self.definitions_cache.get() {
-            bytes += definitions.heap_bytes();
-        }
         bytes
     }
 
@@ -2130,28 +2127,34 @@ impl TranslationUnit {
     /// ([`crate::macros::MacroFile::Frame`]), and a consumer can act on the answer instead of on an offset in a
     /// line this crate wrote. Definitions that arrive without a position ([`crate::macros::MacroFile`]'s third
     /// case) still exist — the closure path's `MacroEnvironment` carries text only — and they say so.
-    /// **[TranslationUnit::definitions], built once and shared.** The second pass asks every slice that reuses
-    /// this timeline, and the answer cannot change.
-    pub fn definitions_cached(&self) -> std::sync::Arc<UnitDefinitions> {
-        self.definitions_cache
-            .get_or_init(|| std::sync::Arc::new(self.definitions()))
-            .clone()
+    /// **[TranslationUnit::definitions].** No longer cached: building the table is a slot per event and no lexing, so
+    /// a cache in front of it bought nothing — and the one this replaced could not be expressed any more, because the
+    /// table borrows the unit's events.
+    pub fn definitions_cached(&self) -> UnitDefinitions<'_> {
+        self.definitions()
     }
 
-    pub fn definitions(&self) -> UnitDefinitions {
-        let mut by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>> =
-            vec![None; self.events.len()];
-        let mut counted = UnitDefinitions::default();
+    pub fn definitions(&self) -> UnitDefinitions<'_> {
+        // **A slot per event, nothing lexed.** A body is read the first time the cook asks for it, which is what makes
+        // this table cheap to build and is why the cache that used to sit in front of it is gone — see
+        // [`UnitDefinitions::of`] for the measurement.
+        let mut by_event: Vec<
+            Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>,
+        > = (0..self.events.len()).map(|_| None).collect();
+        let mut function_like_without_parameters = 0usize;
+        let mut without_a_body = 0usize;
+        let mut in_force_without_a_parameter_list = 0usize;
 
         for (index, event) in self.events.iter().enumerate() {
             let Some(body) = event.body_text.as_ref() else {
                 // A fact with no replacement list is not a definition this reader can paste — but only the
                 // **definition** channel counts it: the in-force channel is defined by having a body.
                 if event.unconditional && event.function_like.is_some() {
-                    counted.without_a_body += 1;
+                    without_a_body += 1;
                 }
                 continue;
             };
+            let _ = body;
 
             if !event.unconditional {
                 // The in-force channel: a body a condition settled, usable only when the caller classified the
@@ -2160,7 +2163,7 @@ impl TranslationUnit {
                     Some(false) => {}
                     Some(true) if event.parameters.is_some() => {}
                     _ => {
-                        counted.in_force_without_a_parameter_list += 1;
+                        in_force_without_a_parameter_list += 1;
                         continue;
                     }
                 }
@@ -2169,7 +2172,7 @@ impl TranslationUnit {
                 // one whose shape the walk could not read is not a definition at all.
                 match (event.function_like, event.body) {
                     (Some(true), _) if event.parameters.is_none() => {
-                        counted.function_like_without_parameters += 1;
+                        function_like_without_parameters += 1;
                         continue;
                     }
                     (Some(_), Some(_)) => {}
@@ -2177,15 +2180,18 @@ impl TranslationUnit {
                 }
             }
 
-            match definition_written_at(event, body) {
-                Some(definition) => by_event[index] = Some(std::sync::Arc::new(definition)),
-                None => counted.unreadable += 1,
-            }
+            // **Classification only** — the body is lexed when the slot is first asked for. The event index is all a
+            // slot needs to carry, because this table borrows the events.
+            by_event[index] = Some(std::sync::OnceLock::new());
         }
 
         UnitDefinitions {
+            unit: self,
             by_event,
-            ..counted
+            function_like_without_parameters,
+            without_a_body,
+            in_force_without_a_parameter_list,
+            unreadable: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -2404,7 +2410,7 @@ impl TranslationUnit {
 struct UnitCook<'unit> {
     unit: &'unit TranslationUnit,
     sources: &'unit dyn crate::preprocess::macros::UnitSources,
-    definitions: &'unit UnitDefinitions,
+    definitions: &'unit UnitDefinitions<'unit>,
     seed: Option<&'unit crate::macros::MacroTable>,
     use_in_force_bodies: bool,
     /// **What `__has_include` is answered from** — the include search, or `None` when the caller has none and the
@@ -2566,36 +2572,42 @@ impl UnitCook<'_> {
 }
 
 /// **A unit's definitions, read once** — what [`TranslationUnit::definitions`] produces, and what every file's
-/// cook then asks about by name.
-///
-/// It is a `Vec` parallel to the unit's events rather than a map: the question is never "what is this name", it is
-/// "what does the fact at this index spell", and the index comes from the view — which already resolved *which*
-/// fact is in force. A map here would be a second name lookup on the hot path and a second place for the two to
-/// disagree.
-#[derive(Default)]
-pub struct UnitDefinitions {
-    /// Parallel to `TranslationUnit::events`: the definition a fact becomes as a `#define` line, or `None` when
-    /// that fact is not one this reader can put back together.
-    by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>>,
+pub struct UnitDefinitions<'unit> {
+    /// **Where the bodies are**, borrowed rather than copied: a definition is built from its event's own name,
+    /// parameter list and replacement list, and all three already live in the unit.
+    ///
+    /// Lazy on purpose. The table used to lex **every** `#define` of the closure while the unit was prepared —
+    /// measured on `import std;` at **78.8 M allocations**, more than the whole analysis — while the cook only ever asks
+    /// for the bodies of macros it actually meets. A slot is filled on the first ask and remembered, so a name asked for
+    /// twice is lexed once.
+    unit: &'unit TranslationUnit,
+    /// Parallel to `TranslationUnit::events`: the definition a fact becomes as a `#define` line, or `None` when that
+    /// fact is not one this reader can put back together.
+    by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>>,
     /// Definitions whose parameter list the evidence does not carry — a function-like macro that cannot be
     /// substituted into, so it is not in the table. Counted for the unit; see [`TranslationUnit::definitions`].
     pub function_like_without_parameters: usize,
     /// Definitions with no replacement list stored at all: nothing to expand.
     pub without_a_body: usize,
-    /// Definitions whose replacement list did not read as a macro definition.
-    pub unreadable: usize,
+    /// Definitions whose replacement list did not read as a macro definition. Counted when the slot is first asked
+    /// for, because that is when the definition is finally read — see [`UnitDefinitions::of`].
+    unreadable: std::sync::atomic::AtomicUsize,
     /// Bodies that arrived through the in-force channel and could not be used — nobody said whether the macro
     /// takes parameters. See `Configuration::in_force_without_a_parameter_list`.
     pub in_force_without_a_parameter_list: usize,
 }
-
-impl UnitDefinitions {
-    /// The bytes this table holds: one slot per event, and the definitions the slots point at.
+impl UnitDefinitions<'_> {
+    /// The bytes this table holds: one slot per event, and the definitions the slots have built.
     pub fn heap_bytes(&self) -> usize {
-        let mut bytes = std::mem::size_of::<UnitDefinitions>()
+        let mut bytes = std::mem::size_of::<UnitDefinitions<'_>>()
             + self.by_event.capacity()
-                * std::mem::size_of::<Option<std::sync::Arc<crate::macros::MacroDef>>>();
-        for definition in self.by_event.iter().flatten() {
+                * std::mem::size_of::<
+                    Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>,
+                >();
+        for definition in self.by_event.iter().flatten().filter_map(|cell| cell.get()) {
+            let Some(definition) = definition else {
+                continue;
+            };
             bytes += std::mem::size_of::<crate::macros::MacroDef>() + definition.name.len();
             if let Some(params) = &definition.params {
                 bytes += params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
@@ -2604,9 +2616,24 @@ impl UnitDefinitions {
         bytes
     }
 
-    /// The definition the fact at `index` spells, when it spells one.
+    /// **The definition the fact at `index` spells, built the first time it is asked for.**
+    ///
+    /// The body is lexed here rather than when the unit was prepared: on `import std;` the table holds tens of thousands
+    /// of definitions and the cook meets a fraction of them, so the eager version lexed replacement lists nothing would
+    /// ever expand. A slot remembers its answer — including "this one does not read" — so a second ask costs nothing.
     pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
-        self.by_event.get(index as usize)?.as_ref()
+        let cell = self.by_event.get(index as usize)?.as_ref()?;
+        cell.get_or_init(|| {
+            let event = self.unit.events.get(index as usize)?;
+            let body = event.body_text.as_deref()?;
+            let built = definition_written_at(event, body).map(std::sync::Arc::new);
+            if built.is_none() {
+                self.unreadable
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            built
+        })
+        .as_ref()
     }
 
     /// How many facts of the unit spell a definition this reader could use.
@@ -2616,6 +2643,12 @@ impl UnitDefinitions {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// **How many replacement lists did not read as a macro definition**, among the slots asked for so far — see
+    /// [`Self::of`], which is where the count is made.
+    pub fn unreadable(&self) -> usize {
+        self.unreadable.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

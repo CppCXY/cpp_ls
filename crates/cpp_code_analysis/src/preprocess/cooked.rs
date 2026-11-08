@@ -174,13 +174,17 @@ impl CookedStream {
                 Origin::Source => match previous_source_end {
                     Some(end) => end == cooked.token.range.start_offset,
                     None => match previous_cooked.as_deref() {
-                        Some(previous) => !joining_would_merge(&mut join, previous, cooked.token.text()),
+                        Some(previous) => {
+                            !joining_would_merge(&mut join, previous, cooked.token.text())
+                        }
                         None => false,
                     },
                 },
                 // Everything the cook produced — an expansion, a `##` paste, a `#` stringisation.
                 _ => match previous_cooked.as_deref() {
-                    Some(previous) => !joining_would_merge(&mut join, previous, cooked.token.text()),
+                    Some(previous) => {
+                        !joining_would_merge(&mut join, previous, cooked.token.text())
+                    }
                     None => false,
                 },
             };
@@ -752,7 +756,7 @@ pub fn configuration_from_environment_and(
 /// **offsets** are a property of the file, computed by the view when a query names one.
 pub struct FileMacros<'unit> {
     view: crate::MacroView<'unit>,
-    definitions: &'unit crate::UnitDefinitions,
+    definitions: &'unit crate::UnitDefinitions<'unit>,
     /// What the compiler predefines and the configuration decides — the oldest layer.
     seed: Option<&'unit MacroTable>,
     /// May the in-force channel be used? A decision the measurement left open, and the caller's to make: see
@@ -764,7 +768,7 @@ impl<'unit> FileMacros<'unit> {
     /// What `view`'s file starts with, over the unit's definitions and the compilation's seed.
     pub fn new(
         view: crate::MacroView<'unit>,
-        definitions: &'unit crate::UnitDefinitions,
+        definitions: &'unit crate::UnitDefinitions<'unit>,
         seed: Option<&'unit MacroTable>,
         use_in_force_bodies: bool,
     ) -> Self {
