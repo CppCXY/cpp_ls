@@ -16,8 +16,8 @@ layer and the LSP server are all in this repository. **No clangd, no libclang, n
 | | clangd | cpp_ls |
 | --- | --- | --- |
 | Project model | a compilation database, or heuristics | nothing, or `.cppls.toml`, or a compilation database |
-| Unit of work | a file with flags | **the program**: includes inlined, `#if` resolved, macros expanded, modules cooked |
-| Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → GCC's `bits/std.cc`, MSVC's headers); partitions resolved by naming convention |
+| Unit of work | a file with flags | **the program**: includes inlined, `#if` resolved, macros expanded, modules resolved from their interface units |
+| Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`); a unit is identified by the `export module` it declares |
 | Answers in | a file that compiles | a file being edited — half-typed lines included |
 | Diagnostics | Clang's | its own 26 checks, measured at **zero false positives** on libstdc++'s own sources |
 
@@ -25,28 +25,26 @@ layer and the LSP server are all in this repository. **No clangd, no libclang, n
 
 **1. The program is the unit of work, not the file.** A C++ file does not mean what its characters say until a
 preprocessor has run, so one runs: `#include`s are inlined, the `#if` branch actually in force is taken, macros are
-expanded, and the parser reads the text a compiler would see. The closure of `import std;` on this machine is **384
-files** and a **4.85 MB** rendering; every answer after that comes from **one** parse of it, shared by every file that
-imports the module.
+expanded, and the parser reads the text a compiler would see. A typical `import std;` program is a **384-file,
+4.85 MB** rendering parsed **once**, and every file that imports the module answers from that parse.
 
-**2. Modules are cooked from source, partitions included.** `import std;` is answered by resolving the module's
-interface unit (GCC's `<include>/bits/std.cc`, MSVC's header tree), not by asking for a BMI the build never produced.
-`export module geometry:shapes;` is resolved through the naming conventions projects actually use
-(`<module>_<partition>.cppm`, `-`, `/`, `.`), an `export import :part;` re-exports that partition's names to importers,
-and an implementation unit (`module geometry;`) sees them all.
+**2. Modules follow the standard, and the units are identified by what they *declare*.** The language defines the
+semantics — a partition is internal to its module, `export import :part;` re-exports it, an implementation unit
+(`module geometry;`) sees its module's names, and `std` is an implementation-provided module — and those are the rules
+this server implements; what the language does **not** define is which *file* holds a unit (that mapping belongs to the
+build) or the compiled module format. So `import std;` reads the implementation's own module source — libstdc++'s
+`bits/std.cc`, MSVC's `modules/std.ixx`, each of which declares `export module std;` — and a project's units are
+found by reading each candidate file: a file that does not declare `export module geometry:shapes;` is **rejected**, so
+the naming conventions are a search order, not an assumption.
 
 **3. No build system required.** Includes that no compiler ever looked at are found by a bounded fuzzy search under the
 project root, so a Visual Studio solution and an unconfigured checkout both work. A compilation database, when present,
 is used for exact per-file flags.
 
-**4. Every claim in this repository is measured.** **2,545 tests across 167 suites**, plus probes that run against real
+**4. Every claim in this repository is measured.** **2,000+ tests**, plus probes that run against real
 headers rather than fixtures. [`docs/buglist.md`](docs/buglist.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
 (**GCC 40, Clang 29, MSVC 62**) all run in CI.
-
-**5. Hover is reconstructed, never a text slice.** A hover card is built from the indexed fact — signature, deduced type
-(`auto`, `decltype`, structured bindings), doc comment — and a type is answered by its **definition**, not by whichever
-forward declaration happens to sit in `<format>`.
 
 ## Crates
 
@@ -107,7 +105,7 @@ exists. Both are described in [`docs/configuration.md`](docs/configuration.md).
 ## Working on it
 
 ```bash
-cargo test --workspace --release          # 2,545 tests; the latency ones only measure in --release
+cargo test --workspace --release          # 2,000+ tests; the latency ones only measure in --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 ```
