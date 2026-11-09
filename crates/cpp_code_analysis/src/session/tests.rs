@@ -2137,6 +2137,40 @@ fn a_files_rendering_is_its_reading_and_not_one_answer_beside_another() {
     );
 }
 
+/// **A program is read even when its root's summary has not been built yet** — the CI failure, made deterministic.
+///
+/// `the_next_unit_to_read` accepts an open file whose summary is absent (its module question is `is_none_or`), so the
+/// drain can ask for a program the index has not caught up with — and the read used to refuse it with a `?`, after
+/// which the `while let Some(reading)` loop of the drain ended and a whole translation unit went unread. Measured on
+/// CI: `both translation units are read: ["/p/a.cpp"]`, where `index_everything`'s rounds had built one root's summary
+/// and not the other's; a faster machine built both, which is why the same test passed locally with the same code.
+///
+/// This test builds that state deliberately: two open files and **no** indexing, so neither has a summary.
+#[test]
+fn a_program_is_read_before_its_root_has_a_summary() {
+    let cfg = "#ifdef A\nstruct X { int from_a; };\n#else\nstruct X { long from_b; };\n#endif\n";
+    let a = "#define A 1\n#include \"cfg.h\"\n";
+    let b = "#include \"cfg.h\"\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/cfg.h", cfg)
+        .with_file("/p/a.cpp", a)
+        .with_file("/p/b.cpp", b);
+    let fixture = Memory::new("a-program-without-its-summary", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", a);
+    session.did_open("/p/b.cpp", b);
+
+    let mut read = Vec::new();
+    while let Some(reading) = session.read_a_looked_at_unit() {
+        read.push(reading.root.clone());
+    }
+    assert_eq!(
+        read.len(),
+        2,
+        "both open files are read, summary or not: {read:?}"
+    );
+}
+
 /// **The same header, read in two translation units, answers each of them its own way** — §5 step two's acceptance.
 ///
 /// `cfg.h` declares `X` one way when `A` is defined and another when it is not, so `a.cpp` (which defines it before

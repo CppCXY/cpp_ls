@@ -287,6 +287,35 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 
 
+### 14. A program read ended the drain when its root's summary had not been built yet
+
+* **The report**: CI failed `session::tests::a_header_read_in_two_programs_answers_each_its_own_way` with
+  `both translation units are read: ["/p/a.cpp"]` — one program read, the other silently not. It passed locally on the
+  same commit, so the first question was whether it is a platform difference. **It is not.** It is a race between the
+  index and the unit schedule, and a slower machine loses it.
+* **The mechanism, in two adjacent lines.** `the_next_unit_to_read` deliberately accepts an open file whose summary is
+  absent — its module question is `is_none_or` — so the drain may ask for the program of a file the index has not
+  caught up with. `gather_a_unit_read` then began with `self.store.index().summary(root)?`, and
+  `translation_unit_of` refuses a root with no summary even for an open file (it can fall back to a *directive* summary,
+  but only when the whole directive closure is describable). The `?` returned `None`, `read_a_looked_at_unit` returned
+  `None`, and the caller's `while let Some(reading) = …` loop **ended** — one file read, one lost, and no diagnostic
+  anywhere. `index_everything` builds both summaries on a fast machine and one of them on a slower one.
+* **The fix**: the caller that asks for a program does the one parse the program needs. `read_a_looked_at_unit` now
+  checks `summary(&root)` and, when it is missing, runs the pump's own `index_one` for that root before
+  `read_the_unit`. Nothing new is introduced — it is the step `advance` already performs — and the cost is one parse the
+  index owed anyway.
+* **Measured, both directions.** `session::tests::a_program_is_read_before_its_root_has_a_summary` builds the state
+  deliberately — two open files and **no** `index_everything`, so neither has a summary:
+
+  ```text
+  without the fix: assertion failed: both open files are read, summary or not: []
+  with the fix:    both are read, and the CI test passes
+  ```
+
+  The assertion is on the **number of programs read**, not on a timeout, so it asks the same question the CI failure
+  asked and it is deterministic on every platform.
+* **Not disabled**, and no retry loop: the test stays, and the schedule is what changed.
+
 ### 13. A sweep of GCC's, Clang's and MSVC's own headers — three gaps fixed, one open
 
 * **Why this exists.** Section 12's `__real__` was found by chasing one name. The question after it was the right one:

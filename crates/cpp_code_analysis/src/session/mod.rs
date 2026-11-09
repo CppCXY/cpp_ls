@@ -7071,6 +7071,16 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn read_a_looked_at_unit(&mut self) -> Option<UnitReading> {
         let root = self.the_next_unit_to_read()?;
 
+        // **A program's root has to have a summary, so build it here when the index has not caught up.** The schedule
+        // accepts an open file whose summary is absent — and the read then used to fail, which ended the drain with a
+        // translation unit unread. Measured on CI: `both translation units are read: ["/p/a.cpp"]`, one root summarised
+        // by `index_everything` and the other not. The one parse is the pump's own `index_one`, so nothing new is
+        // introduced: the caller that asks for a program is allowed to do the work the program needs.
+        if self.store.index().summary(&root).is_none() {
+            let ready = self.prefetched.remove(&queue_key(&root));
+            self.index_one(root.clone(), Priority::Open, 0, ready);
+        }
+
         let reading = self.read_the_unit(&root);
         // **A reading that could not be built is retried, not marked done.** This used to mark the root read whatever
         // happened, and for a module unit that was fatal: the unit's summary is queued rather than read when the pump
