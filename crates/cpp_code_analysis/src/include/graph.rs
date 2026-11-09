@@ -1169,6 +1169,15 @@ impl Marked {
         self.mentioned.contains(name)
     }
 
+    /// **Is this name one the compilation itself says something about** — a `-D`, a `-U`, or a compiler predefine?
+    ///
+    /// The compiler's own table is the only place a macro exists that no file writes, so this is what a caller needs
+    /// to decide that a name *no file defines* cannot be a macro at all: the two questions together are two index
+    /// lookups, where asking the include closure is a walk of every file the cursor's file can reach.
+    pub fn names_the_compilation(&self, name: &str) -> bool {
+        self.mentions(name)
+    }
+
     /// Is the name one this state passed without being able to decide?
     pub fn is_uncertain(&self, name: &str) -> bool {
         self.uncertain.iter().any(|held| &**held == name)

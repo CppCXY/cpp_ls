@@ -263,13 +263,31 @@ pub fn hover_text(
     })
 }
 
+/// **One call, timed, and said out loud when it is slow.** The stage names are the only way to tell "the query" from
+/// what the query asked: a hover's own second has been attributed to the pump, the cook and the locks in earlier
+/// rounds, and each time it was one of these calls — so the next attribution comes from a name, not a theory.
+macro_rules! timed {
+    ($name:expr, $call:expr) => {{
+        let started = std::time::Instant::now();
+        let value = $call;
+        let ms = started.elapsed().as_millis();
+        if ms >= 15 {
+            log::warn!("hover: stage {} took {ms} ms", $name);
+        }
+        value
+    }};
+}
+
 pub fn hover(
     session: &Session<DiskFiles>,
     view: &FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
-    if let Some(found) = hover_of_the_program(session, view, offset, in_the_file) {
+    if let Some(found) = timed!(
+        "program",
+        hover_of_the_program(session, view, offset, in_the_file)
+    ) {
         return Some(found);
     }
 
@@ -361,7 +379,7 @@ fn hover_of_the_program(
     // popup is the resolved path, which is the one thing a reader cannot see from the line they wrote — the header
     // is found by a search, and *which* of the four thousand files on this machine's search path it found is the
     // answer to the question the line asks.
-    if let Known::Yes(header) = session.header_at(view, in_the_file) {
+    if let Known::Yes(header) = timed!("header_at", session.header_at(view, in_the_file)) {
         return Some(markdown(header_markdown(&header)));
     }
 
@@ -369,7 +387,10 @@ fn hover_of_the_program(
     // `size_t` in decimal and `{:#x}` is hex with a prefix, and both are inside a literal that no declaration
     // describes. Asked here — after the header, before every name question — because a string literal is not a name
     // and the queries below would spend their time finding that out.
-    if let Some(found) = crate::handlers::format::format_string_hover(session, view, in_the_file) {
+    if let Some(found) = timed!(
+        "format_string",
+        crate::handlers::format::format_string_hover(session, view, in_the_file)
+    ) {
         return Some(found);
     }
 
@@ -386,7 +407,10 @@ fn hover_of_the_program(
     // **The macro question, asked in the file's coordinates.** A macro use has no footprint in the rendering — the cook
     // expanded it — so the query takes the file offset the client gave us. Measured: a hover on a file's own
     // `#define MAX(a, b)` answered nothing, because the reading offset named a position the file does not have.
-    if let Known::Yes(found) = session.macro_at_a_file_offset(view, in_the_file) {
+    if let Known::Yes(found) = timed!(
+        "macro_at_a_file_offset",
+        session.macro_at_a_file_offset(view, in_the_file)
+    ) {
         return Some(markdown(macro_markdown(
             session,
             view,
@@ -400,7 +424,7 @@ fn hover_of_the_program(
     // `<gtest/gtest.h>` writes `#define TEST(a, b) …` behind `#if !GTEST_DONT_DEFINE_TEST`, and the file that uses
     // `TEST(Format, LocalStatement)` plainly has it. The popup says what the name is and that its existence depends on
     // the compilation, rather than saying nothing at all (which is what an editor reported: no hover on `TEST`).
-    match session.macro_definition(view, offset) {
+    match timed!("macro_definition", session.macro_definition(view, offset)) {
         Known::Yes(found) => {
             return Some(markdown(macro_markdown(
                 session,

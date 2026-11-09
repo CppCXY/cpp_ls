@@ -15667,6 +15667,23 @@ impl ProjectIndex {
     /// The cost is one traversal of the reachable files per caller, so a caller that asks about one position should
     /// use [`ProjectIndex::macro_definition`] and one that asks about many should hold this.
     pub fn macro_environment(&self, name: &str, visible_from: &Path) -> MacroEnvironment {
+        // **A name nothing defines cannot be a macro, and that is the answer most hovers want.** This walk is a
+        // traversal of every file the cursor can reach — **1.0 s** on `EmmyLuaCodeStyle` for `LSPHandle.cpp`'s
+        // standard-library closure — and a hover asks it about *every* name: a local, a member, a class, a `std::`
+        // type. The index already holds each file's `#define`/`#undef` by name, and the compilation's own table
+        // (the `-D`s and the compiler's predefines) holds the rest, so a name neither of them mentions is not a macro
+        // in any file and the walk can only return nothing. Two lookups instead of a closure walk.
+        //
+        // **A file the index has not read yet is the one case this can be wrong about**, and it degrades rather than
+        // lies: the answer is "no macro here", which is the same answer the walk would give for an unread file, and the
+        // name questions below it still answer. The macro the unread file defines comes back when the index reaches it
+        // — the memo is dropped for the file it arrives from.
+        if self.names.definers_of(name).is_empty() && !self.macros.names_the_compilation(name) {
+            return MacroEnvironment {
+                name: name.to_string(),
+                candidates: Vec::new(),
+            };
+        }
         // **The walk is remembered, because it is the whole cost and it is asked again.** Measured on neovim:
         // 1.19 s per walk, three identical walks in a row, and every repeated question paid it again — see
         // [`ProjectIndex::macro_environments`] for the numbers and for the invalidation rule.
