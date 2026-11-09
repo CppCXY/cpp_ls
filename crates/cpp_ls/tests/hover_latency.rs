@@ -213,7 +213,13 @@ impl Server {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // **The server's stderr is where the `CPPLS_TRACE_*` probes print**, and the diagnostics stage table is one
+            // of them. Off by default so an ordinary run stays quiet; on with `CPPLS_PROBE_STDERR=1`.
+            .stderr(if std::env::var_os("CPPLS_PROBE_STDERR").is_some() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .expect("the server starts");
         let stdin = child.stdin.take().expect("stdin");
@@ -236,6 +242,24 @@ impl Server {
 
     fn notify(&mut self, method: &str, params: Value) {
         self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+    }
+
+    /// Send a request and **do not wait for its answer** — so that the next request is measured while this one is
+    /// still running, which is the state a client is in when it pulls diagnostics and asks for a hover.
+    fn send_only(&mut self, id: i64, method: &str, params: Value) {
+        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+    }
+
+    fn receive(&mut self, method: &str, id: i64) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.messages.recv_timeout(left) {
+                Ok(message) if message.get("id") == Some(&json!(id)) => return message,
+                Ok(_) => {}
+                Err(error) => panic!("the server did not answer {method}: {error}"),
+            }
+        }
     }
 
     fn request(&mut self, id: i64, method: &str, params: Value) -> Value {
@@ -470,4 +494,213 @@ fn walk(root: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// **The three requests a client makes about one open file, side by side** — the reader's report is "hover takes a
+/// huge time after opening a file, inlay hints are instant", and the question is *which* of hover's extra steps pays.
+///
+/// The order inside a round is inlay → hover → diagnostics, and the rounds repeat: if the pull is the CPU, the next
+/// round's hover inherits the load and the per-round numbers say so. The last round happens after a `didChange`, which
+/// is the state the reader is actually in.
+///
+/// ```text
+/// $env:CPPLS_HOVER_ROOT = "E:\EmmyLuaCodeStyle"
+/// $env:CPPLS_HOVER_FILE = "CodeFormatServer\src\LSP\LSPHandle.cpp"
+/// cargo test --release -p cpp_ls --test hover_latency the_three_requests -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "drives the real server on a real project; run with --ignored"]
+fn the_three_requests_about_one_open_file() {
+    let Some((root, file)) = fixture() else {
+        eprintln!("skipped: no fixture (set CPPLS_HOVER_ROOT and CPPLS_HOVER_FILE)");
+        return;
+    };
+    let text = std::fs::read_to_string(&file).expect("the fixture reads");
+    let last_line = text.lines().count().saturating_sub(1) as u32;
+    let (line, character, what) = a_use_site(&text);
+    eprintln!(
+        "  the file is {}, the use site is {line}:{character} {what}",
+        file.display()
+    );
+
+    let log = std::env::temp_dir().join(format!("cppls-three-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&log);
+    let mut server = Server::start(&root, &log);
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": {
+                "window": { "workDoneProgress": true },
+                "textDocument": {
+                    "hover": { "contentFormat": ["markdown", "plaintext"] },
+                    "inlayHint": { "dynamicRegistration": false },
+                    "diagnostic": { "dynamicRegistration": true, "refreshSupport": true },
+                },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri_of(&file), "languageId": "cpp", "version": 1, "text": text }
+        }),
+    );
+
+    let uri = uri_of(&file);
+    let mut id = 100i64;
+    let round_of = |server: &mut Server, id: &mut i64, label: &str, version: i64| {
+        let started = Instant::now();
+        let inlays = server.request(
+            *id,
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": last_line, "character": 0 } },
+            }),
+        );
+        *id += 1;
+        let inlay = started.elapsed();
+
+        let started = Instant::now();
+        let hover = server.request(
+            *id,
+            "textDocument/hover",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+        );
+        *id += 1;
+        let hover_took = started.elapsed();
+
+        let started = Instant::now();
+        let report = server.request(
+            *id,
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri } }),
+        );
+        *id += 1;
+        let diagnostic = started.elapsed();
+
+        let inlay_count = inlays["result"].as_array().map_or(0, |items| items.len());
+        let hover_shown = hover["result"]["contents"]["value"]
+            .as_str()
+            .map(|value| value.lines().next().unwrap_or_default().to_string())
+            .unwrap_or_else(|| "(null)".to_string());
+        let findings = report["result"]["items"]
+            .as_array()
+            .map_or(usize::MAX, |items| items.len());
+        eprintln!(
+            "  {label:<22} inlay {:>8.1} ms ({inlay_count}) | hover {:>8.1} ms ({hover_shown}) | diagnostics {:>8.1} ms ({})",
+            inlay.as_secs_f64() * 1000.0,
+            hover_took.as_secs_f64() * 1000.0,
+            diagnostic.as_secs_f64() * 1000.0,
+            if findings == usize::MAX {
+                "not a full report".to_string()
+            } else {
+                format!("{findings} item(s)")
+            },
+        );
+        let _ = version;
+    };
+
+    for round in 1..=3 {
+        round_of(&mut server, &mut id, &format!("round {round}"), 1);
+    }
+
+    // **The reader's state**: one keystroke, then the same three questions.
+    let edited = format!("{text}// typed\n");
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [ { "text": edited } ],
+        }),
+    );
+    round_of(&mut server, &mut id, "after one keystroke", 2);
+
+    // **The reader's real situation, which the rounds above cannot show.** A client that pulls diagnostics pulls them
+    // *on open and on every keystroke*, and the hover arrives while that pull is running. Here the pull is sent
+    // without waiting, so the hover that follows races it for the analysis pool and the cores — which is the
+    // difference between "a hover is 20 ms of work" and "a hover takes a second".
+    for attempt in 1..=2 {
+        server.send_only(
+            7000 + attempt,
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri } }),
+        );
+        let started = Instant::now();
+        let hover = server.request(
+            8000 + attempt,
+            "textDocument/hover",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+        );
+        let contended = started.elapsed();
+        let started = Instant::now();
+        let _ = server.receive("textDocument/diagnostic", 7000 + attempt);
+        let pull_after = started.elapsed();
+        eprintln!(
+            "  while a pull is in flight  ({attempt})  hover {:>8.1} ms ({}) | the pull answered {:>8.1} ms after we waited",
+            contended.as_secs_f64() * 1000.0,
+            hover["result"]["contents"]["value"]
+                .as_str()
+                .map(|value| value.lines().next().unwrap_or_default().to_string())
+                .unwrap_or_else(|| "(null)".to_string()),
+            pull_after.as_secs_f64() * 1000.0,
+        );
+    }
+
+    server.request(9999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    drop(server);
+
+    eprintln!("\n  the server's slow lines:");
+    let mut shown = 0;
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let Ok(body) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in body.lines() {
+                if line.contains("a query took")
+                    || line.contains("held the analysis")
+                    || line.contains("diagnostic")
+                    || line.contains("cook")
+                {
+                    if shown < 40 {
+                        eprintln!("    {line}");
+                    }
+                    shown += 1;
+                }
+            }
+        }
+    } else {
+        eprintln!("    (no log at {})", log.display());
+    }
+    eprintln!("  {} line(s) matched", shown);
+    let _ = std::fs::remove_dir_all(&log);
+}
+
+/// **A use site**: the name in front of the file's first `->` or `.` in the body — the shape a reader hovers while
+/// reading code, as opposed to a declaration's own name.
+fn a_use_site(text: &str) -> (u32, u32, String) {
+    for (number, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("//") || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some(at) = line.find("->") else { continue };
+        if at < 4 {
+            continue;
+        }
+        let start = line[..at]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |index| index + 1);
+        let name = line[start..at].to_string();
+        if !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) {
+            return (number as u32, start as u32, name);
+        }
+    }
+    (0, 0, "(nothing)".to_string())
 }

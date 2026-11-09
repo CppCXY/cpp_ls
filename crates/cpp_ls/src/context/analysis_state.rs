@@ -730,15 +730,23 @@ impl AnalysisState {
         }
         self.wake();
 
+        // **Where a pull's time goes, stage by stage.** The reader's report is "diagnostics sits on a core", and the
+        // answer cannot be read off this function: four of its six stages are `run_blocking` calls whose work happens
+        // elsewhere. Each one is timed here, at `debug`, because the log line `a query took … ran …` that already
+        // exists only says a call was slow, not which call.
+        let stage = std::time::Instant::now();
+        let mut sliced = 0usize;
         for _ in 0..PREPARE_INDEX_SLICE {
             let Some(next) = self.next_file_for_catch_up(&to_prepare).await else {
                 break;
             };
             self.read_queued_file(&next).await;
+            sliced += 1;
         }
+        let sliced_for = stage.elapsed();
 
         let target = to_prepare.clone();
-        if self
+        let ready = self
             .run_blocking(move |session| {
                 Some(
                     session.index().summary(&target).is_some()
@@ -747,10 +755,15 @@ impl AnalysisState {
                 )
             })
             .await
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if ready {
+            log::debug!(
+                "pull prepare: {sliced} file(s) in {sliced_for:?}, ready after them in {:?} — no cook",
+                stage.elapsed() - sliced_for
+            );
             return true;
         }
+        let checked_for = stage.elapsed() - sliced_for;
 
         let target = to_prepare.clone();
         let Some(materials) = self
@@ -759,14 +772,23 @@ impl AnalysisState {
         else {
             return false;
         };
+        let gathered_for = stage.elapsed() - sliced_for - checked_for;
         let Some(rendered) = self.render_cooks(vec![materials]).await.pop() else {
             return false;
         };
-        self.update_session("commit a diagnostic rendering", move |session| {
-            session.commit_a_cooked(rendered).is_some()
-        })
-        .await
-        .unwrap_or(false)
+        let rendered_for = stage.elapsed() - sliced_for - checked_for - gathered_for;
+        let committed = self
+            .update_session("commit a diagnostic rendering", move |session| {
+                session.commit_a_cooked(rendered).is_some()
+            })
+            .await
+            .unwrap_or(false);
+        log::debug!(
+            "pull prepare: {sliced} file(s) in {sliced_for:?}, check {checked_for:?}, gather {gathered_for:?}, \
+             render {rendered_for:?}, commit {:?} ({committed})",
+            stage.elapsed() - sliced_for - checked_for - gathered_for - rendered_for
+        );
+        committed
     }
 
     /// Tell the analysis what a path's text is now, or answer `None` when no workspace has been opened.
