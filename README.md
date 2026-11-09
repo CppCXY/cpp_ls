@@ -42,7 +42,7 @@ is used for exact per-file flags.
 **4. Every claim in this repository is measured.** **2,545 tests across 167 suites**, plus probes that run against real
 headers rather than fixtures. [`docs/buglist.md`](docs/buglist.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
-(**GCC 40, Clang 29, MSVC 61**) all run in CI.
+(**GCC 40, Clang 29, MSVC 62**) all run in CI.
 
 **5. Hover is reconstructed, never a text slice.** A hover card is built from the indexed fact — signature, deduced type
 (`auto`, `decltype`, structured bindings), doc comment — and a type is answered by its **definition**, not by whichever
