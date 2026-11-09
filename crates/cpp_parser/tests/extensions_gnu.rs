@@ -18,6 +18,14 @@ const CONSTRUCTS: &[(&str, &str)] = &[
     ("__extension__", "__extension__ typedef int T;"),
     ("an asm block", "void f() { __asm__ volatile (\"nop\"); }"),
     ("__int128", "__int128 big = 0;"),
+    (
+        "__real__ in an expression",
+        "void f() { double d = __real__ 1.0; }",
+    ),
+    (
+        "__imag__ in an expression",
+        "void f() { double d = __imag__ 1.0; }",
+    ),
     ("__restrict__", "void f(int* __restrict__ a);"),
     (
         "a case range",
@@ -237,4 +245,46 @@ fn dump_a_function_pointer_declaration() {
         }
     }
     walk(&tree.get_red_root(), 0);
+}
+
+/// **A body using `__real__`/`__imag__` must not swallow the rest of the class.**
+///
+/// They are GCC's unary operators for `_Complex`, and libstdc++ writes them in `<complex>`'s members:
+///
+/// ```cpp
+/// constexpr float real() const { return __real__ _M_value; }
+/// ```
+///
+/// To this parser they were ordinary identifiers, so `return __real__ _M_value;` was a return of `__real__` followed
+/// by a second expression, and the recovery from that error **swallowed the rest of the class body**. On the unit read
+/// of `bits/std.cc` the class was `<complex>` and every file rendered after it lost its declarations — `iostream`'s
+/// `std::cout` among them, which is what `docs/buglist.md` section 12 is about:
+///
+/// ```text
+/// before:  [names] insert_a_reading .../iostream: declarations 0
+/// after:   [names] insert_a_reading .../iostream: declarations 9
+/// ```
+///
+/// The check is on the **later members**, not on the error count: a parser that recovers by swallowing still reports
+/// one error, and the members are what a reader loses.
+#[test]
+fn the_complex_operators_do_not_swallow_the_rest_of_the_class() {
+    use cpp_parser::CppAstNode;
+
+    let text = "struct C {\n    float real() const { return __real__ 1; }\n    float imag() const { return __imag__ 1; }\n    void next();\n};\n";
+    let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+    let names: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter_map(cpp_parser::CppDeclaration::cast)
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "imag"),
+        "the member after the first `__real__` survives: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "next"),
+        "and so does the one after that: {names:?}"
+    );
 }

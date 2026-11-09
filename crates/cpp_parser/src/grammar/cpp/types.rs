@@ -6147,6 +6147,14 @@ fn ordinary_implementation_keyword(p: &CppParser) -> Option<ImplementationKeywor
         | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => {
             ImplementationKeyword::Bare
         }
+        // **GCC's unary operators** — `__real__ x`, `__imag__ x`, the spellings `_Complex` support is written in.
+        // They are operators rather than specifiers, and the arm that matters is the **expression** one
+        // (`parse_unary_expr`'s implementation-keyword case, which steps the keyword and parses the operand); this
+        // list is what makes that arm see them, and it is also what keeps them out of a declaration's specifier
+        // sequence. Measured on libstdc++'s `<complex>`: without them `constexpr float real() const { return
+        // __real__ _M_value; }` did not parse, the recovery swallowed the class body, and every file rendered after
+        // it lost its declarations — `std::cout` among them (`docs/buglist.md` section 12).
+        "__real__" | "__imag__" => ImplementationKeyword::Bare,
         _ => return None,
     })
 }

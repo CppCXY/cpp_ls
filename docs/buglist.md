@@ -286,6 +286,55 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   macro that expands to a brace is the first thing to look for there.
 
 
+
+### 12. `std::cout` and `std::map` were missing because the **parser** lost `<complex>`
+
+* **The report, and the challenge it earned**: after section 10 the two names answered, but the fix there was a
+  fallback — "a cook that produces less than half the file's declarations no longer shadows the file's summary". The
+  question asked of it was the right one: *is this not a preprocessor bug?* It was a **parser** bug, and the fallback
+  is now **removed**.
+* **The chain, measured.** `CPPLS_TRACE_ATTRIBUTION=1` on the unit read of `bits/std.cc` printed **no `cout`
+  declaration at all** among 33,744, and the dump (`CPPLS_DUMP_RENDERING_DIR`) showed `extern ostream cout;` present in
+  the 5 MB stream. `tests/unit_stream_probe.rs` then answered the next question from the dump: the **tree** has the
+  declaration (`cout` at 3270335) and its ancestors are
+  `CompoundStat → NamespaceDecl → DeclSpecifierSeq → Declaration → …` — a `namespace` parsed *inside a declaration's
+  specifier sequence*, which is what a parse that lost a brace looks like. The stream's own errors were at 3 132 739
+  and 3 139 253, inside libstdc++'s `<complex>`:
+* **The construct that lost it**:
+
+  ```cpp
+  constexpr float real() const { return __real__ _M_value; }
+  __attribute ((__abi_tag__ ("cxx11"))) constexpr float imag() const { return __imag__ _M_value; }
+  ```
+
+  `__real__`/`__imag__` were ordinary identifiers, so `return __real__ _M_value;` was a return of `__real__` followed
+  by a second expression; the recovery from that error swallowed the rest of the class body, and every file rendered
+  after it lost its declarations. Reduced to a fixture: a class with one `__real__` member and one after it kept
+  **2** facts where it should have 4 (`inspect facts`), and `__attribute` was **not** the culprit (tested apart).
+* **The fix**: `__real__` and `__imag__` are **GNU unary operators**, so they are implementation keywords
+  (`ordinary_implementation_keyword`), which is what routes them through `parse_unary_expr`'s
+  "step the keyword, parse the operand" arm — and keeps them out of a declaration's specifier sequence. Pinned by
+  `extensions_gnu::the_complex_operators_do_not_swallow_the_rest_of_the_class` and two entries in that file's
+  construct table (`__real__ in an expression`, `__imag__ in an expression`), which fail to parse without it.
+* **Measured after**, cold (cache deleted):
+
+  ```text
+  [names] insert_a_reading .../iostream: declarations 9        (was 0)
+  [names] insert_a_reading .../bits/stl_map.h: declarations 125 (was 2)
+  define std::map  → stl_map.h:105    define std::cout → iostream:65
+  hover  std::map  → template <typename _Key, typename _Tp, typename _Compare = …, typename _Alloc = …> class map
+  hover  std::cout → `std::cout` — a variable of type `ostream`, in `std`
+  ```
+
+* **And the fallback is gone.** `a_broken_cook` is deleted from `visible_declarations_upto`; the policy that the asking
+  program's own reading answers alone stands, because a name such a reading does not hold is a name that program
+  decided against. What stayed is a genuine fix found on the way: the summary's postings carry reading id **0**, not
+  `Readings::ON_ITS_OWN`, so the existing fallback had been matching no posting at all (measured, not guessed).
+
+> **A trap worth recording**: the negative check for the parser fix restored `types.rs` with `Copy-Item`, which keeps
+> the **source** mtime — so cargo did not rebuild and the "without the fix" run was really the "with" run. The test
+> looked unpinnable until the file was touched. Any restore that is meant to be observed must update the timestamp.
+
 ## Closed
 
 ### 11. A module's partitions are found and their names are visible — `test_module` has an example now
@@ -369,7 +418,9 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   does the file have a `sequence`, what is `posting.reading`, and what does `the_reading_for` answer — with `asking`
   `Some(program)` and `None`.
 
-* **`map` and `cout` — fixed.** With the facts now reachable, two more layers had to fall:
+* **`map` and `cout` — fixed, and the first attempt at it was a workaround that section 12 removed.** Its real cause
+  was the parser losing `<complex>`; what stayed from this investigation is the `definition_across_files` collapse and
+  the posting-id fix. With the facts reachable, two more layers had to fall:
   1. **The lookup refused a broken cook's shadow.** The asker's own program reading answers alone by policy (a name
      it does not hold is a name the program decided against), but the unit read of `bits/std.cc` on this machine filed
      `iostream` with **0** declarations and `bits/stl_map.h` with **2**, against summaries of 10 and 288 — a cook whose

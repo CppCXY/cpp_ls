@@ -63,6 +63,54 @@ fn where_the_parser_puts_the_intrinsics() {
         println!("  error {index} at {}: {around:?}", range.start_offset);
     }
 
+    // **The two the index lost**: `std::cout` (iostream) and `std::map` (stl_map.h). Are they in the *tree* at all?
+    // A declaration the parser did not produce is a parser answer; one it produced and the facts did not is the facts
+    // builder's. `docs/buglist.md` section 12.
+    for name in ["cout", "map"] {
+        use cpp_parser::CppAstNode;
+        let found: Vec<cpp_parser::SourceRange> = root
+            .descendants()
+            .filter_map(cpp_parser::CppDeclaration::cast)
+            .filter(|declaration| declaration.get_name_text().as_deref() == Some(name))
+            .map(|declaration| cpp_parser::source_range(declaration.syntax().text_range()))
+            .collect();
+        println!(
+            "`{name}`: {} declaration node(s) in the tree, at {:?}",
+            found.len(),
+            found
+                .iter()
+                .take(4)
+                .map(|range| range.start_offset)
+                .collect::<Vec<_>>()
+        );
+        // **The ancestors of the first one**, which is what says whether the *tree* put it inside a function body (a
+        // swallowed brace, the parser's defect) or only the scope layer did (the facts builder's).
+        if let Some(range) = found.first() {
+            let node = root
+                .descendants()
+                .find(|node| usize::from(node.text_range().start()) == range.start_offset);
+            if let Some(node) = node {
+                let mut kinds = Vec::new();
+                let mut current = node.parent();
+                while let Some(parent) = current {
+                    kinds.push(format!("{:?}", parent.kind()));
+                    current = parent.parent();
+                }
+                println!("    ancestors: {kinds:?}");
+            }
+        }
+    }
+    // **The errors around `cout`**, which is where a derail that swallows the namespace block would show.
+    let cout_at = text.find("extern ostream cout").unwrap_or(0);
+    let mut around: Vec<usize> = tree
+        .get_errors()
+        .iter()
+        .map(|error| cpp_parser::source_range(error.range).start_offset)
+        .filter(|at| *at < cout_at + 20_000 && *at > cout_at.saturating_sub(400_000))
+        .collect();
+    around.sort_unstable();
+    println!("errors near `cout` ({cout_at}): {around:?}");
+
     for name in ["_mm_abs_epi16", "vector<bool, _Alloc>", "format"] {
         let Some(at) = text.find(name) else {
             println!("`{name}`: not in the stream");

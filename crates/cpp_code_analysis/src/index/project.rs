@@ -12765,10 +12765,16 @@ impl ProjectIndex {
             && (path.ends_with("stl_map.h") || path.ends_with("iostream"));
         if tracing {
             eprintln!(
-                "[names] insert_a_reading {}: sequence {:?} id {id} declarations {}",
+                "[names] insert_a_reading {}: sequence {:?} id {id} declarations {} diagnostics {:?}",
                 path,
                 self.sequence.get(&path),
-                reading.declarations.len()
+                reading.declarations.len(),
+                reading
+                    .diagnostics
+                    .iter()
+                    .take(3)
+                    .map(|diagnostic| &diagnostic.message)
+                    .collect::<Vec<_>>()
             );
         }
         if let Some(&sequence) = self.sequence.get(&path) {
@@ -13945,19 +13951,6 @@ impl ProjectIndex {
                     .and_then(|readings| readings.id_for(program))
                     .is_some()
             });
-            // **A reading with a fraction of the file's declarations is a cook that went wrong**, and it must not
-            // speak for the file — the same rule the arm below states for a program that did not read the file, and
-            // the measurement that makes it necessary is the unit read of `bits/std.cc` on this machine: `iostream`
-            // came out with **0** declarations and `bits/stl_map.h` with **2**, against summaries of 10 and 288. The
-            // policy that the asking program's reading answers alone is right for a name the program *decided*
-            // against (`#if 0 struct Dead`), and a reading holding a fraction of the file is not a decision, it is a
-            // cook whose attribution failed. Measured after this: `std::map` and `std::cout` answer from an
-            // `import std;` file (`docs/buglist.md` section 10).
-            let a_broken_cook = cooked.is_some_and(|cooked| {
-                // Zero is the ordinary broken case — `iostream` came out with **no** declarations at all — so an
-                // empty reading is the first thing this has to include, not exclude.
-                cooked.declarations.len() * 2 < summary.declarations.len()
-            });
             let (facts, reading): (&[DeclFact], u32) = match cooked {
                 Some(cooked) if cooked.declarations.iter().any(&accepts) => {
                     (cooked.declarations.as_slice(), reading)
@@ -13965,11 +13958,9 @@ impl ProjectIndex {
                 // **The summary's postings carry reading `0`** — measured, not guessed: `[names]` printed
                 // `file 172 id 0 index 2` for `iostream`'s `cout`, while `Readings::ON_ITS_OWN` is `1`, so a fallback
                 // that claimed `1` matched no posting and answered nothing. `0` is what `insert_at` files a summary's
-                // declarations under.
-                Some(_)
-                    if (a_broken_cook || !the_askers_own)
-                        && summary.declarations.iter().any(&accepts) =>
-                {
+                // declarations under. The policy itself is unchanged: the asking program's own reading answers alone,
+                // because a name it does not hold is a name that program did not compile.
+                Some(_) if !the_askers_own && summary.declarations.iter().any(&accepts) => {
                     (summary.declarations.as_slice(), 0)
                 }
                 Some(cooked) => (cooked.declarations.as_slice(), reading),

@@ -1642,8 +1642,25 @@ fn file_what_was_found(
     files: &mut [(std::path::PathBuf, crate::CookedFile)],
     unplaced: &mut usize,
 ) {
+    let tracing = std::env::var("CPPLS_TRACE_ATTRIBUTION").is_ok();
+    let interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
+    if tracing {
+        eprintln!("[attr] {} declaration(s) to place", declarations.len());
+    }
     for mut fact in declarations {
+        if tracing && interested(&fact.name) {
+            eprintln!(
+                "[attr] {} kind {:?} range {}..{}",
+                fact.name,
+                fact.kind,
+                fact.range.start_offset,
+                fact.range.end_offset()
+            );
+        }
         let Some((file, range)) = stream.written_span(fact.range) else {
+            if tracing && interested(&fact.name) {
+                eprintln!("[attr] {} -> no written span", fact.name);
+            }
             *unplaced += 1;
             continue;
         };
@@ -1652,12 +1669,25 @@ fn file_what_was_found(
             continue;
         };
         if name_file != file {
+            if tracing && interested(&fact.name) {
+                eprintln!(
+                    "[attr] {} -> the name is in file {name_file}, the declaration in {file}",
+                    fact.name
+                );
+            }
             *unplaced += 1;
             continue;
         }
         if !stream.span_lands_in(file, range) || !stream.span_lands_in(name_file, name_range) {
             *unplaced += 1;
             continue;
+        }
+        if tracing && interested(&fact.name) {
+            eprintln!(
+                "[attr] {} -> file {file} {:?}",
+                fact.name,
+                files.get(file as usize).map(|(path, _)| path.file_name())
+            );
         }
         fact.range = range;
         fact.name_range = name_range;
