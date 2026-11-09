@@ -94,8 +94,19 @@ macro_rules! dispatch_request {
                             $context.task(id.clone(), upto, move |cancel_token| {
                                 let snapshot = snapshot.clone();
                                 async move {
+                                    let started = std::time::Instant::now();
                                     crate::context::catch_up_upto(&snapshot, upto).await;
-                                    $handler(snapshot, params, cancel_token).await
+                                    let waited = started.elapsed();
+                                    let started = std::time::Instant::now();
+                                    let answer = $handler(snapshot, params, cancel_token).await;
+                                    let took = started.elapsed();
+                                    if (waited + took).as_millis() >= 50 {
+                                        log::warn!(
+                                            "request {} waited {waited:?} for events and took {took:?}",
+                                            <$req_type>::METHOD
+                                        );
+                                    }
+                                    answer
                                 }
                             }).await;
                             return Ok(());
