@@ -33,17 +33,14 @@
 //! translated against a 24-edits-old text. The client did nothing wrong: a request may assume the server has
 //! processed everything it sent before it.
 //!
-//! So the queue is **applied before a request's handler runs**, and only up to the sequence number that was current
-//! when the request was dispatched ([`UpdateInbox::queued`], read on the message loop's own task, where the order
-//! is the client's). A change that arrives *after* the request is not applied for it — that is what the client's
-//! `$/cancelRequest` is about, and applying it would answer a question about text the cursor was never placed in.
+//! A request waits until the single worker has applied the sequence current at dispatch. Requests also form
+//! coalescing barriers; if a later change starts while a request is running, that request is cancelled with
+//! `ContentModified` rather than being answered against a newer live session.
 //!
 //! # Who applies, and what "one writer" means here
 //!
-//! Two callers: the worker task (when the server is otherwise idle) and any request that finds the queue ahead of
-//! it. They do not interleave, because the queue's lock is held **for as long as the events take to apply** — so
-//! whoever holds it is the one writer, and the order the client sent things in is the order they happen in, no
-//! matter who is doing the applying.
+//! Only the worker applies notifications. Requests observe its completed sequence and never take ownership of an
+//! in-progress update, so cancelling a waiter cannot drop the update.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -54,7 +51,7 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 
 use crate::handlers;
 
@@ -82,31 +79,62 @@ pub enum UpdateEvent {
 }
 
 impl UpdateEvent {
-    /// Is `other` a **newer statement about the same thing**, so that this event has nothing left to say?
-    ///
-    /// One shape qualifies, and it is the one a client produces while typing, pasting or formatting: two
-    /// `didChange` for one document, one after the other. FULL sync is what makes it safe — every change carries
-    /// the **whole** text, so the later one replaces the earlier rather than transforming it, and what is dropped
-    /// is a text the client itself never showed (it went from the first to the second without stopping).
-    ///
-    /// Everything else is left alone, and each exclusion has its own reason:
-    ///
-    /// * `didOpen`, `didClose` and `didSave` are not only text — they move the file between "the buffer" and "the
-    ///   disk", and a save is a statement that the two now agree;
-    /// * two changes to **different** documents are two documents: last-wins across them would drop a file's whole
-    ///   edit;
-    /// * a change that is not **adjacent** to one for the same document is separated by something that changed the
-    ///   world in between — `A` edited, `B` opened, `A` edited again: merging those two would apply the second
-    ///   change to `A` before `B` was opened, which is an order the client did not send.
-    ///
-    /// (Incremental sync would break this rule outright, and that is one more reason this server advertises FULL:
-    /// a range-based change cannot be dropped without losing the edits it makes.)
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Opened(_) => "opened",
+            Self::Changed(_) => "changed",
+            Self::Saved(_) => "saved",
+            Self::Closed(_) => "closed",
+            Self::WatchedFilesChanged(_) => "watched files changed",
+        }
+    }
+
+    fn document_uri(&self) -> Option<&lsp_types::Uri> {
+        match self {
+            Self::Opened(params) => Some(&params.text_document.uri),
+            Self::Changed(params) => Some(&params.text_document.uri),
+            Self::Saved(params) => Some(&params.text_document.uri),
+            Self::Closed(params) => Some(&params.text_document.uri),
+            Self::WatchedFilesChanged(_) => None,
+        }
+    }
+
+    fn changes_analysis(&self) -> bool {
+        match self {
+            Self::Saved(params) => params.text.is_some(),
+            Self::WatchedFilesChanged(params) => !params.changes.is_empty(),
+            _ => true,
+        }
+    }
+
+    /// Adjacent changes to one document can be combined in order, unless a request separates them.
     fn absorbs(&self, other: &UpdateEvent) -> bool {
         match (self, other) {
             (UpdateEvent::Changed(earlier), UpdateEvent::Changed(later)) => {
                 earlier.text_document.uri == later.text_document.uri
+                    && earlier.text_document.version < later.text_document.version
             }
             _ => false,
+        }
+    }
+
+    fn absorb(&mut self, other: UpdateEvent) {
+        match (self, other) {
+            (UpdateEvent::Changed(earlier), UpdateEvent::Changed(later)) => {
+                if let Some(full) = later
+                    .content_changes
+                    .iter()
+                    .rposition(|change| change.range.is_none())
+                {
+                    earlier.text_document.version = later.text_document.version;
+                    earlier.content_changes =
+                        later.content_changes.into_iter().skip(full).collect();
+                } else {
+                    earlier.text_document.version = later.text_document.version;
+                    earlier.content_changes.extend(later.content_changes);
+                }
+            }
+            _ => unreachable!("only compatible document changes are merged"),
         }
     }
 }
@@ -115,6 +143,7 @@ impl UpdateEvent {
 struct QueuedUpdate {
     /// The number this event was given when it was queued, starting at `1`. See [`UpdateInbox::queued`].
     seq: u64,
+    last_seq: u64,
     event: UpdateEvent,
 }
 
@@ -133,6 +162,12 @@ pub struct UpdateInbox {
     applying: Mutex<()>,
     /// How many events have ever been queued — see [`UpdateInbox::queued`].
     queued: AtomicU64,
+    /// The latest request boundary; changes may not be combined across it.
+    request_boundary: AtomicU64,
+    /// The last event whose application has completed.
+    applied: watch::Sender<u64>,
+    /// The last analysis-changing event whose application has begun.
+    started_change: watch::Sender<u64>,
     /// "There is something to apply."
     work: Notify,
 }
@@ -145,10 +180,15 @@ impl Default for UpdateInbox {
 
 impl UpdateInbox {
     pub fn new() -> Self {
+        let (applied, _) = watch::channel(0);
+        let (started_change, _) = watch::channel(0);
         UpdateInbox {
             pending: Mutex::new(VecDeque::new()),
             applying: Mutex::new(()),
             queued: AtomicU64::new(0),
+            request_boundary: AtomicU64::new(0),
+            applied,
+            started_change,
             work: Notify::new(),
         }
     }
@@ -157,19 +197,22 @@ impl UpdateInbox {
     ///
     /// **A run of changes to one document collapses into one piece of work** — see [`UpdateEvent::absorbs`] for the
     /// exact rule and why nothing else may collapse. The count still goes up for every message, because the count
-    /// is what a request measures its own past with, and the merged event keeps the **earliest** number of the run:
-    /// a request that was dispatched after the first change of the run is entitled to see the run, and it now sees
-    /// the run's last text — which is the only text of it that still exists.
+    /// is what a request measures its own past with. A request boundary prevents merging a later change into the
+    /// text that request is entitled to see.
     pub async fn push(&self, event: UpdateEvent) {
-        // The number is taken **before** the lock, so that a caller reading `queued` on another task never sees a
-        // count whose event is not in the queue yet: the count is only ever read by the task that sends (see the
-        // module documentation), and this ordering is what makes that safe rather than lucky.
-        let seq = self.queued.fetch_add(1, Ordering::SeqCst) + 1;
-
         let mut pending = self.pending.lock().await;
+        let seq = self.queued.fetch_add(1, Ordering::SeqCst) + 1;
+        let boundary = self.request_boundary.load(Ordering::SeqCst);
         match pending.back_mut() {
-            Some(last) if last.event.absorbs(&event) => last.event = event,
-            _ => pending.push_back(QueuedUpdate { seq, event }),
+            Some(last) if last.seq > boundary && last.event.absorbs(&event) => {
+                last.event.absorb(event);
+                last.last_seq = seq;
+            }
+            _ => pending.push_back(QueuedUpdate {
+                seq,
+                last_seq: seq,
+                event,
+            }),
         }
         drop(pending);
 
@@ -178,10 +221,46 @@ impl UpdateInbox {
 
     /// **How many events the client has sent so far** — the number a request records when it is dispatched.
     ///
-    /// A request applies the queue **up to this number and no further**, which is the ordering guarantee stated as
-    /// arithmetic: everything the client sent before the request, and nothing it sent after.
+    /// A request waits until the worker has applied at least this sequence; later changes cancel an in-flight request.
     pub fn queued(&self) -> u64 {
         self.queued.load(Ordering::SeqCst)
+    }
+
+    pub fn applied(&self) -> u64 {
+        *self.applied.borrow()
+    }
+
+    /// Run a short synchronous action without letting a new event cross the applied-sequence check.
+    pub(crate) async fn when_caught_up<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let _pending = self.pending.lock().await;
+        if self.queued() == self.applied() {
+            Some(action())
+        } else {
+            None
+        }
+    }
+
+    pub fn record_request(&self) -> u64 {
+        let upto = self.queued();
+        self.request_boundary.fetch_max(upto, Ordering::SeqCst);
+        upto
+    }
+
+    pub async fn wait_until_applied(&self, upto: u64) {
+        let mut applied = self.applied.subscribe();
+        loop {
+            if *applied.borrow_and_update() >= upto {
+                return;
+            }
+            applied
+                .changed()
+                .await
+                .expect("the update inbox remains alive while a request waits");
+        }
+    }
+
+    pub fn started_changes(&self) -> watch::Receiver<u64> {
+        self.started_change.subscribe()
     }
 
     /// Wait until there is something to apply, or `timeout` passes.
@@ -226,13 +305,18 @@ impl UpdateInbox {
                 break;
             };
 
+            if queued.event.changes_analysis() {
+                self.started_change.send_replace(queued.last_seq);
+            }
             log::debug!(
-                "apply_upto: applying event {} ({:?})",
+                "apply_upto: applying event {} ({}, document {:?})",
                 queued.seq,
-                queued.event
+                queued.event.kind(),
+                queued.event.document_uri()
             );
             let started = std::time::Instant::now();
             apply(queued.event).await;
+            self.applied.send_replace(queued.last_seq);
             let took = started.elapsed().as_millis();
             if took > 50 {
                 log::debug!("apply_upto: event {} took {took} ms", queued.seq);
@@ -249,17 +333,13 @@ impl UpdateInbox {
 /// The timing is the diagnostic that was missing when a request looked stuck: a client waits here before its handler's
 /// first line, so "the request never answered" and "the events took a second" were indistinguishable in the log. Only a
 /// slow run is logged.
-pub async fn catch_up_upto(snapshot: &ServerContextSnapshot, upto: u64) -> usize {
+pub async fn catch_up_upto(snapshot: &ServerContextSnapshot, upto: u64) {
     let started = std::time::Instant::now();
-    let applied = snapshot
-        .inbox()
-        .apply_upto(upto, |event| async move { process(snapshot, event).await })
-        .await;
+    snapshot.inbox().wait_until_applied(upto).await;
     let took = started.elapsed().as_millis();
     if took > 50 {
-        log::debug!("catch_up_upto: {applied} event(s) applied in {took} ms (upto {upto})");
+        log::debug!("catch_up_upto: waited {took} ms for events through {upto}");
     }
-    applied
 }
 
 /// Apply one event: the whole of what a notification does to the analysis.
@@ -292,7 +372,14 @@ pub fn spawn_update_queue(inner: Arc<ServerContextInner>) {
         let snapshot = ServerContextSnapshot::new(inner);
 
         loop {
-            if catch_up_upto(&snapshot, u64::MAX).await == 0 {
+            let worker_snapshot = &snapshot;
+            let applied = snapshot
+                .inbox()
+                .apply_upto(u64::MAX, |event| async move {
+                    process(worker_snapshot, event).await
+                })
+                .await;
+            if applied == 0 {
                 snapshot.inbox().wait_for_work(IDLE_WAIT).await;
             }
         }
@@ -347,6 +434,44 @@ mod tests {
             UpdateEvent::Changed(params) => Some(&params.content_changes.last()?.text),
             _ => None,
         }
+    }
+
+    #[test]
+    fn a_save_without_text_does_not_invalidate_running_requests() {
+        let event = UpdateEvent::Saved(lsp_types::DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: "file:///a.cpp".parse().unwrap(),
+            },
+            text: None,
+        });
+        assert!(!event.changes_analysis());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publishing_a_caught_up_result_cannot_race_a_new_enqueue() {
+        let inbox = std::sync::Arc::new(UpdateInbox::new());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let publishing_inbox = inbox.clone();
+        let publishing = tokio::spawn(async move {
+            publishing_inbox
+                .when_caught_up(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        let enqueueing_inbox = inbox.clone();
+        let mut enqueueing =
+            tokio::spawn(async move { enqueueing_inbox.push(opened("file:///a.cpp")).await });
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(50), &mut enqueueing)
+            .await
+            .is_err();
+        release_tx.send(()).unwrap();
+        publishing.await.unwrap().unwrap();
+        enqueueing.await.unwrap();
+        assert!(blocked);
     }
 
     /// **A run of changes to one document is one piece of work, and it is the last text of the run.**
@@ -454,6 +579,130 @@ mod tests {
             .await;
         assert_eq!(count, 1);
         assert_eq!(applied, [true, false], "in the order the client sent them");
+    }
+
+    #[tokio::test]
+    async fn a_request_boundary_prevents_merging_a_later_change() {
+        let inbox = UpdateInbox::new();
+        inbox.push(changed("file:///a.cpp", 1, "before")).await;
+        let bound = inbox.record_request();
+        inbox.push(changed("file:///a.cpp", 2, "after")).await;
+
+        let mut applied = Vec::new();
+        inbox
+            .apply_upto(bound, |event| {
+                applied.push(text_of(&event).unwrap().to_string());
+                async {}
+            })
+            .await;
+        assert_eq!(applied, ["before"]);
+
+        inbox
+            .apply_upto(u64::MAX, |event| {
+                applied.push(text_of(&event).unwrap().to_string());
+                async {}
+            })
+            .await;
+        assert_eq!(applied, ["before", "after"]);
+    }
+
+    #[tokio::test]
+    async fn incremental_changes_are_combined_without_losing_their_order() {
+        let inbox = UpdateInbox::new();
+        let ranged = |version, text: &str| {
+            let mut event = changed("file:///a.cpp", version, text);
+            if let UpdateEvent::Changed(params) = &mut event {
+                params.content_changes[0].range = Some(lsp_types::Range::new(
+                    lsp_types::Position::new(0, 0),
+                    lsp_types::Position::new(0, 0),
+                ));
+            }
+            event
+        };
+        inbox.push(ranged(2, "first")).await;
+        inbox.push(ranged(3, "second")).await;
+
+        let mut changes = Vec::new();
+        inbox
+            .apply_upto(u64::MAX, |event| {
+                if let UpdateEvent::Changed(params) = event {
+                    assert_eq!(params.text_document.version, 3);
+                    changes.extend(params.content_changes.into_iter().map(|change| change.text));
+                }
+                async {}
+            })
+            .await;
+        assert_eq!(changes, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn a_full_replacement_discards_preceding_incremental_edits() {
+        let inbox = UpdateInbox::new();
+        inbox.push(changed("file:///a.cpp", 1, "old")).await;
+        let mut later = match changed("file:///a.cpp", 2, "replacement") {
+            UpdateEvent::Changed(params) => params,
+            _ => unreachable!(),
+        };
+        later.content_changes.insert(
+            0,
+            lsp_types::TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range::new(
+                    lsp_types::Position::new(10, 0),
+                    lsp_types::Position::new(10, 0),
+                )),
+                range_length: None,
+                text: "obsolete".to_string(),
+            },
+        );
+        inbox.push(UpdateEvent::Changed(later)).await;
+        let mut changes = Vec::new();
+        inbox
+            .apply_upto(u64::MAX, |event| {
+                if let UpdateEvent::Changed(params) = event {
+                    changes.extend(params.content_changes.into_iter().map(|change| change.text));
+                }
+                async {}
+            })
+            .await;
+        assert_eq!(changes, ["replacement"]);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiter_does_not_discard_an_update_in_progress() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let inbox = Arc::new(UpdateInbox::new());
+        inbox.push(changed("file:///a.cpp", 1, "text")).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let worker_inbox = inbox.clone();
+        let worker = tokio::spawn(async move {
+            let mut entered = Some(entered_tx);
+            let mut release = Some(release_rx);
+            worker_inbox
+                .apply_upto(u64::MAX, |_| {
+                    let entered = entered.take().unwrap();
+                    let release = release.take().unwrap();
+                    async move {
+                        entered.send(()).unwrap();
+                        release.await.unwrap();
+                    }
+                })
+                .await
+        });
+
+        entered_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), inbox.wait_until_applied(1))
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), inbox.wait_until_applied(1))
+            .await
+            .expect("the update completes after its waiter is dropped");
+        assert_eq!(worker.await.unwrap(), 1);
     }
 
     /// Two processors do not interleave: while one is applying an event, another waits for the queue — so

@@ -98,6 +98,7 @@ pub async fn on_switch_source_header(
         // The file has to be read for its includes to be known; a header nothing has opened is exactly the case where the
         // answer comes from another file's `#include`.
         context.analysis().prepare(&path).await;
+        context.analysis().catch_up(&path).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

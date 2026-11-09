@@ -1,3 +1,4 @@
+use lsp_server::Message;
 use lsp_types::InitializeParams;
 use std::error::Error;
 use tokio::sync::oneshot;
@@ -82,19 +83,24 @@ impl LspServer {
     /// Wait for initialization to complete while handling initialization-allowed messages
     async fn wait_for_initialization(&mut self) -> Result<(), Box<dyn Error + Sync + Send>> {
         loop {
-            // Check if initialization is complete
-            if self.processor.check_initialization_complete()? {
-                break; // Initialization completed
-            }
-
-            // Use a short timeout to check for messages during initialization
-            match tokio::time::timeout(
-                tokio::time::Duration::from_millis(50),
-                self.connection.recv(),
-            )
-            .await
-            {
-                Ok(Some(msg)) => {
+            tokio::select! {
+                result = &mut self.processor.init_rx => {
+                    if let Err(error) = result {
+                        log::error!("server initialization failed: {error}");
+                        return Err(Box::new(error));
+                    }
+                    break;
+                }
+                message = self.connection.recv() => {
+                    let Some(msg) = message else {
+                        return Ok(());
+                    };
+                    if let Message::Notification(notification) = &msg
+                        && let Some(response) = self.processor.cancel_pending_request(notification)
+                    {
+                        self.server_context.send(response);
+                        continue;
+                    }
                     // Process message if allowed during initialization, otherwise queue it
                     if self.processor.can_process_during_init(&msg) {
                         self.processor
@@ -103,14 +109,6 @@ impl LspServer {
                     } else {
                         self.processor.pending_messages.push(msg);
                     }
-                }
-                Ok(None) => {
-                    // Connection closed during initialization
-                    return Ok(());
-                }
-                Err(_) => {
-                    // Timeout - continue checking for initialization completion
-                    continue;
                 }
             }
         }

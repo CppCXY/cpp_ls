@@ -46,6 +46,7 @@ pub async fn on_goto_implementation(
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+        context.analysis().catch_up(&path).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

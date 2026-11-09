@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! · while idle, the server sends no `workspace/*/refresh` and no `publishDiagnostics` at all
-//! · one edit does not send a **diagnostic** refresh either — that message is gone from the server altogether
+//! · one edit sends a bounded diagnostic refresh without creating a pull/refresh loop
 //! ```
 //!
 //! # Why the client advertises refresh support
@@ -34,9 +34,7 @@ const IDLE_WINDOW: Duration = Duration::from_secs(5);
 
 /// How many server-initiated messages one edit may cause.
 ///
-/// The honest set after an edit is: at most one *answer* refresh for the hints and one for the tokens — and **no
-/// diagnostic refresh at all**, which is asserted separately below. Three leaves room for a progress notification
-/// and nothing else; the loop this guards produced one every few slices.
+/// The honest set after an edit is a bounded refresh for hints, tokens and diagnostics.
 const EDIT_BUDGET: usize = 3;
 
 const MAIN_CPP: &str = r#"#include "a.h"
@@ -70,6 +68,7 @@ fn an_idle_session_sends_the_client_nothing() {
             // the code path with the hint refresh.
             "capabilities": {
                 "window": { "workDoneProgress": true },
+                "workspace": { "diagnostics": { "refreshSupport": true } },
                 "textDocument": {
                     "diagnostic": { "dynamicRegistration": true, "refreshSupport": true },
                     "inlayHint": { "dynamicRegistration": true, "refreshSupport": true },
@@ -103,6 +102,9 @@ fn an_idle_session_sends_the_client_nothing() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+
+    // Let initial index and program-read refreshes finish before observing idle.
+    server.listen(Duration::from_secs(3));
 
     // **The observation.** Everything the server says while nothing happens.
     let idle = server.listen(IDLE_WINDOW);
@@ -146,11 +148,25 @@ fn an_idle_session_sends_the_client_nothing() {
         "one edit caused {refreshes} refresh request(s) (budget {EDIT_BUDGET}): {methods:?}"
     );
 
-    // **And never this one.** `workspace/diagnostic/refresh` is not sent by this server at all: a pull client asks on
-    // its own rhythm, and the request made it ask in a loop — the reason this test exists.
     assert!(
-        !methods.contains(&"workspace/diagnostic/refresh"),
-        "the server asked for a diagnostic refresh, which it must never do: {methods:?}"
+        methods.contains(&"workspace/diagnostic/refresh"),
+        "a pull client must be told when the index changes: {methods:?}"
+    );
+    let response = server.request(
+        20,
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": main_uri } }),
+    );
+    assert!(
+        response.get("result").is_some(),
+        "the refresh can be pulled: {response}"
+    );
+    let repeated = server.listen(Duration::from_secs(3));
+    assert!(
+        !repeated
+            .iter()
+            .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+        "pulling the refreshed report must not create another refresh: {repeated:?}"
     );
 }
 

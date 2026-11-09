@@ -1,4 +1,5 @@
-use lsp_server::Message;
+use lsp_server::{ErrorCode, Message, Notification, RequestId, Response};
+use lsp_types::{CancelParams, NumberOrString};
 use std::error::Error;
 use tokio::sync::oneshot;
 
@@ -9,7 +10,6 @@ use super::connection::AsyncConnection;
 
 /// Server initialization and message processing state
 pub(super) struct ServerMessageProcessor {
-    initialization_complete: bool,
     pub(super) pending_messages: Vec<Message>,
     pub(super) init_rx: oneshot::Receiver<()>,
 }
@@ -17,7 +17,6 @@ pub(super) struct ServerMessageProcessor {
 impl ServerMessageProcessor {
     pub(super) fn new(init_rx: oneshot::Receiver<()>) -> Self {
         Self {
-            initialization_complete: false,
             pending_messages: Vec::new(),
             init_rx,
         }
@@ -48,27 +47,34 @@ impl ServerMessageProcessor {
         self.handle_message(msg, connection, server_context).await
     }
 
-    /// Check if initialization is complete and process pending messages
-    pub(super) fn check_initialization_complete(
+    pub(super) fn cancel_pending_request(
         &mut self,
-    ) -> Result<bool, Box<dyn Error + Sync + Send>> {
-        if !self.initialization_complete {
-            match self.init_rx.try_recv() {
-                Ok(_) => {
-                    self.initialization_complete = true;
-                    return Ok(true); // Signal to process pending messages
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {
-                    // Still initializing
-                }
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    // Initialization task closed unexpectedly
-                    self.initialization_complete = true;
-                    return Ok(true); // Signal to process pending messages
-                }
-            }
+        notification: &Notification,
+    ) -> Option<Response> {
+        if notification.method != "$/cancelRequest" {
+            return None;
         }
-        Ok(false)
+        let params: CancelParams = match serde_json::from_value(notification.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                log::warn!("invalid cancellation parameters during initialization: {error}");
+                return None;
+            }
+        };
+        let id: RequestId = match params.id {
+            NumberOrString::Number(id) => id.into(),
+            NumberOrString::String(id) => id.into(),
+        };
+        let at = self
+            .pending_messages
+            .iter()
+            .position(|message| matches!(message, Message::Request(request) if request.id == id))?;
+        self.pending_messages.remove(at);
+        Some(Response::new_err(
+            id,
+            ErrorCode::RequestCanceled as i32,
+            "cancel".to_string(),
+        ))
     }
 
     /// Process all pending messages after initialization
@@ -111,3 +117,7 @@ impl ServerMessageProcessor {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+#[path = "message_processor_tests.rs"]
+mod tests;

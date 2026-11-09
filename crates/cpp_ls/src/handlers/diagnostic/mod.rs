@@ -19,17 +19,8 @@
 //! cooked reading, that is the text the compiler parses, and its errors are placed back in the file by the same map
 //! every declaration's range goes through.
 //!
-//! # One channel, and it is the client's
-//!
-//! Diagnostics are **pulled**: a client asks with `textDocument/diagnostic` and [`diagnose_file`] answers. There was
-//! a push half beside it — a service that published `textDocument/publishDiagnostics` after an edit settled — and it
-//! is deleted. Two channels for one answer is how a screen ends up holding a diagnostic about text that is gone: a
-//! published answer cannot be recalled, while a pulled one is computed when it is asked for, from the index as it
-//! stands at that moment.
-//!
-//! So the timing questions this layer used to have — how long to wait after a keystroke, what to do with an answer
-//! that has been overtaken, whether a finishing pass may remove another's bookkeeping — do not have answers here any
-//! more. They have no place to be asked.
+//! Pull-capable clients request reports. Other clients receive debounced push diagnostics for open documents; the
+//! diagnostic service cancels superseded work, checks the document version and clears the result on close.
 mod document_diagnostic;
 
 use std::path::Path;

@@ -36,6 +36,8 @@ rust-i18n.workspace = true
 
 # A `file:` URI is percent-encoded, and a Windows path is not.
 percent-encoding.workspace = true
+# Native watching is used when the client cannot register watched-file notifications.
+notify.workspace = true
 
 # Logging: `log` for the calls, `fern` for the sink, `chrono` for the timestamp in the file name.
 log.workspace = true

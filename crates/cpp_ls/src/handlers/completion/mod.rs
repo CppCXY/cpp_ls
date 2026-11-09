@@ -247,6 +247,7 @@ pub async fn on_completion(
             RequestOutcome::Ready(_) => "ready",
             RequestOutcome::Cancelled(_) => "cancelled",
             RequestOutcome::Missing => "missing",
+            RequestOutcome::Failed { .. } => "failed",
         }
     );
 

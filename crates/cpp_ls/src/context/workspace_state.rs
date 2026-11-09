@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::{PathPattern, WatchFilter};
-use lsp_types::Uri;
+use cpp_parser::LineIndex;
+use lsp_types::{Position, TextDocumentContentChangeEvent, Uri};
 
 use crate::handlers::ClientConfig;
 use crate::util::uri_to_file_path;
@@ -26,7 +27,7 @@ pub struct WorkspaceState {
     /// The directories the client opened, in the order it named them. The first is the session's root.
     pub roots: Vec<PathBuf>,
     /// The editor's open buffers, by URI, as the client sent them.
-    pub open_files: HashMap<Uri, String>,
+    open_files: HashMap<Uri, OpenDocument>,
     pub client_config: ClientConfig,
     /// A configuration file a caller named (`--config`), for a workspace whose `.cppls.toml` is elsewhere.
     ///
@@ -35,6 +36,51 @@ pub struct WorkspaceState {
     config_file: Option<PathBuf>,
     /// The client's `exclude` list, parsed once — see [`WorkspaceState::set_client_config`].
     excludes: Vec<PathPattern>,
+}
+
+#[derive(Debug)]
+struct OpenDocument {
+    text: String,
+    version: i32,
+}
+
+#[derive(Debug)]
+pub enum DocumentChangeError {
+    NotOpen,
+    OutOfOrder { current: i32, received: i32 },
+    InvalidRange,
+}
+
+impl std::fmt::Display for DocumentChangeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotOpen => write!(formatter, "the document is not open"),
+            Self::OutOfOrder { current, received } => {
+                write!(
+                    formatter,
+                    "document version {received} is not newer than {current}"
+                )
+            }
+            Self::InvalidRange => write!(formatter, "the change has an invalid UTF-16 range"),
+        }
+    }
+}
+
+fn edit_offset(text: &str, index: &LineIndex, position: Position) -> Option<usize> {
+    let line = position.line as usize;
+    let start = usize::from(index.get_line_offset(line)?);
+    let body = crate::util::line_body(text, index, line)?;
+    let mut units = 0u32;
+    for (offset, character) in body.char_indices() {
+        if units == position.character {
+            return Some(start + offset);
+        }
+        units += character.len_utf16() as u32;
+        if units > position.character {
+            return None;
+        }
+    }
+    (units <= position.character).then_some(start + body.len())
 }
 
 impl WorkspaceState {
@@ -91,12 +137,69 @@ impl WorkspaceState {
         self.client_config = client_config;
     }
 
-    /// The client says a buffer is now open with this text, or that its text is now this.
-    ///
-    /// One method for `didOpen`, `didChange` and a `didSave` that carried text, because the state has one question
-    /// about a buffer: which text is this path's. The protocol distinguishes the events; nothing here does.
-    pub fn sync_open_file(&mut self, uri: Uri, text: String) {
-        self.open_files.insert(uri, text);
+    pub fn open_file(&mut self, uri: Uri, text: String, version: i32) {
+        self.open_files.insert(uri, OpenDocument { text, version });
+    }
+
+    pub fn change_file(
+        &mut self,
+        uri: &Uri,
+        version: i32,
+        changes: &[TextDocumentContentChangeEvent],
+    ) -> Result<String, DocumentChangeError> {
+        let document = self
+            .open_files
+            .get_mut(uri)
+            .ok_or(DocumentChangeError::NotOpen)?;
+        if version <= document.version {
+            return Err(DocumentChangeError::OutOfOrder {
+                current: document.version,
+                received: version,
+            });
+        }
+        let mut updated = document.text.clone();
+        for change in changes {
+            if let Some(range) = change.range {
+                let index = LineIndex::parse(&updated);
+                let start = edit_offset(&updated, &index, range.start)
+                    .ok_or(DocumentChangeError::InvalidRange)?;
+                let end = edit_offset(&updated, &index, range.end)
+                    .ok_or(DocumentChangeError::InvalidRange)?;
+                if start > end {
+                    return Err(DocumentChangeError::InvalidRange);
+                }
+                updated.replace_range(start..end, &change.text);
+            } else {
+                updated = change.text.clone();
+            }
+        }
+        document.version = version;
+        document.text = updated.clone();
+        Ok(updated)
+    }
+
+    pub fn replace_open_text(
+        &mut self,
+        uri: &Uri,
+        text: String,
+    ) -> Result<i32, DocumentChangeError> {
+        let document = self
+            .open_files
+            .get_mut(uri)
+            .ok_or(DocumentChangeError::NotOpen)?;
+        document.text = text;
+        Ok(document.version)
+    }
+
+    pub fn open_version(&self, uri: &Uri) -> Option<i32> {
+        self.open_files.get(uri).map(|document| document.version)
+    }
+
+    pub fn open_document_versions(&self) -> Vec<(Uri, i32)> {
+        self.open_files
+            .iter()
+            .map(|(uri, document)| (uri.clone(), document.version))
+            .collect()
     }
 
     /// The client closed a document: the path is the filesystem's again.
@@ -116,7 +219,7 @@ impl WorkspaceState {
         self.open_files
             .iter()
             .filter(|(uri, _)| self.is_workspace_file(uri))
-            .map(|(uri, text)| (uri.clone(), text.clone()))
+            .map(|(uri, document)| (uri.clone(), document.text.clone()))
             .collect()
     }
 
@@ -239,12 +342,75 @@ mod tests {
         let path = uri("p/src/main.cpp");
 
         assert!(!state.is_open_file(&path));
-        state.sync_open_file(path.clone(), "int x;\n".to_string());
+        state.open_file(path.clone(), "int x;\n".to_string(), 1);
         assert!(state.is_open_file(&path));
         assert_eq!(state.workspace_open_files().len(), 1);
 
         state.close_open_file(&path);
         assert!(!state.is_open_file(&path));
         assert!(state.workspace_open_files().is_empty());
+    }
+
+    fn ranged(start: (u32, u32), end: (u32, u32), text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range::new(
+                Position::new(start.0, start.1),
+                Position::new(end.0, end.1),
+            )),
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn incremental_changes_use_utf16_and_apply_in_order() {
+        let mut state = state(&["p"], &[]);
+        let path = uri("p/src/main.cpp");
+        state.open_file(path.clone(), "a😀b\r\nsecond\n".to_string(), 1);
+        let text = state
+            .change_file(
+                &path,
+                2,
+                &[
+                    ranged((0, 1), (0, 3), "XY"),
+                    ranged((0, 4), (0, 4), "!"),
+                    ranged((1, 0), (1, 6), "two"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(text, "aXYb!\r\ntwo\n");
+        assert_eq!(state.open_version(&path), Some(2));
+    }
+
+    #[test]
+    fn invalid_ranges_and_out_of_order_versions_leave_the_document_unchanged() {
+        let mut state = state(&["p"], &[]);
+        let path = uri("p/src/main.cpp");
+        state.open_file(path.clone(), "a😀b\n".to_string(), 1);
+        assert!(matches!(
+            state.change_file(
+                &path,
+                2,
+                &[ranged((0, 0), (0, 0), "X"), ranged((0, 3), (0, 4), "")],
+            ),
+            Err(DocumentChangeError::InvalidRange)
+        ));
+        assert_eq!(state.open_files[&path].text, "a😀b\n");
+        assert_eq!(state.open_version(&path), Some(1));
+        assert!(matches!(
+            state.change_file(&path, 1, &[ranged((0, 0), (0, 0), "X")]),
+            Err(DocumentChangeError::OutOfOrder { .. })
+        ));
+    }
+
+    #[test]
+    fn an_overlong_character_position_clamps_to_the_line_end() {
+        let mut state = state(&["p"], &[]);
+        let path = uri("p/src/main.cpp");
+        state.open_file(path.clone(), "abc\n".to_string(), 1);
+        let text = state
+            .change_file(&path, 2, &[ranged((0, 100), (0, 100), "!")])
+            .unwrap();
+        assert_eq!(text, "abc!\n");
     }
 }

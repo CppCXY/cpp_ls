@@ -43,17 +43,38 @@ pub async fn process_did_open_text_document(
     params: DidOpenTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
+    let version = params.text_document.version;
     let text = params.text_document.text;
     let path = uri_to_file_path(&uri)?;
 
     // What the client has open is recorded whether or not a workspace is open yet: the buffer is the editor's, and
     // a workspace that arrives later re-applies it (`handlers::initialized`).
-    {
+    let open_single_file_workspace = {
         let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.sync_open_file(uri.clone(), text.clone());
+        workspace_manager.open_file(uri.clone(), text.clone(), version);
+        if workspace_manager.root().is_none() {
+            if let Some(parent) = path.parent() {
+                workspace_manager.set_roots(vec![parent.to_path_buf()]);
+                true
+            } else {
+                log::warn!("cannot choose a workspace for {}", path.display());
+                false
+            }
+        } else {
+            false
+        }
+    };
+
+    if open_single_file_workspace {
+        crate::handlers::start_analysis(context.clone()).await;
+        crate::handlers::register_files_watch(context.clone()).await;
     }
 
     apply_buffer(&context, path, text).await;
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
 
     Some(())
 }
@@ -72,18 +93,25 @@ pub async fn process_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> Option<()> {
     let uri = params.text_document.uri;
-    // Full sync (`TextDocumentSyncKind::FULL` is what this server advertises), so the last change is the text. A
-    // client that sent incremental changes anyway would need their ranges applied here, which is the one thing
-    // advertising FULL is for: it does not have to.
-    let text = params.content_changes.last()?.text.clone();
+    let version = params.text_document.version;
     let path = uri_to_file_path(&uri)?;
 
-    {
+    let text = {
         let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.sync_open_file(uri.clone(), text.clone());
-    }
+        match workspace_manager.change_file(&uri, version, &params.content_changes) {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("cannot apply document change for {}: {error}", uri.as_str());
+                return None;
+            }
+        }
+    };
 
     apply_buffer(&context, path, text).await;
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
 
     Some(())
 }
@@ -113,10 +141,17 @@ pub async fn process_did_save_text_document(
 
     {
         let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.sync_open_file(uri, text.clone());
+        if let Err(error) = workspace_manager.replace_open_text(&uri, text.clone()) {
+            log::warn!("cannot apply saved text for {}: {error}", uri.as_str());
+            return None;
+        }
     }
 
     apply_buffer(&context, path, text).await;
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
 
     Some(())
 }
@@ -139,6 +174,10 @@ pub async fn process_did_close_document(
         let mut workspace_manager = context.workspace_manager().lock().await;
         workspace_manager.close_open_file(&uri);
     }
+    context
+        .diagnostics()
+        .close_document(&context, uri.clone())
+        .await;
 
     let Some(path) = uri_to_file_path(&uri) else {
         return Some(());
@@ -151,44 +190,22 @@ pub async fn process_did_close_document(
         .update_session("didClose", |session| session.did_close(&path))
         .await;
     context.analysis().wake();
-
-    // **Nothing is published, and nothing has to be.** Diagnostics are pulled: a client asks about the file it is
-    // showing, and a closed file is one it is not showing — so there is no list of ours to clear, which is what the
-    // `clear_push_file_diagnostics` branch here used to do by hand. The disk answers for this path again
-    // (`Session::did_close`), and the next pull is answered from it.
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
     Some(())
 }
 
 /// Tell the session what a path's text is now.
 ///
-/// **The diagnostics follow from the client's own next request**, which is the whole of the pull design: an edit is
-/// recorded here, and the answer is computed when it is asked for. There is no schedule and no delay, and therefore
-/// no window in which the client holds an answer about text that is gone.
+/// The caller schedules push diagnostics or a pull refresh after the update has been recorded.
 async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: String) {
     let analysis: &AnalysisState = context.analysis();
     let for_session = path.clone();
     let applied = analysis
         .update_session("didOpen", move |session| {
             session.did_open(&for_session, &text);
-            // **The edit is read before this handler returns.** `did_open` drops the file's summary and queues it,
-            // so until something reads it again the index describes the text the user just replaced — and the very
-            // next request is a completion or a hover **about that text**. Leaving it to the pump is a race the
-            // client cannot see: measured with `tests/handshake.rs`'s
-            // `a_completion_sees_a_change_to_an_included_header`, a completion asked in the same breath as the
-            // keystroke was answered from the old summary often enough that the test — which asserts the exact
-            // opposite — failed in one full run in three while passing alone.
-            //
-            // `advance(1)` and not more: it takes the file at the head of the queue, which the `did_open` above put
-            // there at `Priority::Open`, and reads **it** — a wave needs `left > 1`, so this is one parse and one
-            // insert, the same work the pump's next slice would do. Its includes stay queued for the pump, so the
-            // write lock is held for one file (measured 2-6 ms on `EmmyLuaCodeStyle`), well inside the budget.
-            session.advance(1);
-            // **And the module units this file imports are queued now, not on the first hover.** `import std;` reads a
-            // whole program — 223 files and a 1.99 MB rendering, measured at **11 s** cold and **0.3 s** from the
-            // cache — and a request that queues it spends that on the request that asked, so the reader's first hover
-            // answers nothing. Queueing it at open starts the same work while the reader is still moving the cursor;
-            // the pump does the reading. This only names the units.
-            session.queue_the_modules_a_file_imports(&for_session);
         })
         .await;
 
@@ -199,6 +216,6 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
         return;
     }
 
-    // Anything the read above discovered — the includes it queued — is the pump's, and this is how it is told.
+    // The queued file is the pump's; parsing it is not part of this write-locked update.
     analysis.wake();
 }

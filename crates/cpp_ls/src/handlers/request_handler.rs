@@ -5,11 +5,9 @@
 //!
 //! ```text
 //! 1. match the method string against <Req>::METHOD      (the client's spelling, not a string literal here)
-//! 2. extract::<Req::Params>()                           (a params type that does not fit is not an error the
-//!                                                        client sees: the row is skipped and the request falls
-//!                                                        through to "handler not found")
+//! 2. extract::<Req::Params>()                           (invalid parameters receive `InvalidParams`)
 //! 3. context.snapshot()                                 (a handle to the services, cloned per request)
-//! 4. remember how many notifications the client has sent (the bound step 5 applies up to)
+//! 4. record a notification-sequence barrier
 //! 5. context.task(id, |cancel_token| handler(…))         (spawned, so the message loop keeps reading; the
 //!                                                        token is what `$/cancelRequest` cancels)
 //! ```
@@ -18,7 +16,7 @@
 //! that into the response — `Ready` → result, `Missing` → `null`, `Cancelled` → the cancel error, a panic →
 //! an internal error. That is why every row below looks the same and why adding one is a one-line edit.
 //!
-//! # Why a request applies the notification queue before its handler runs
+//! # Why a request waits for the notification queue before its handler runs
 //!
 //! Because the queue is invisible to the *client*, and it must be invisible to the request too. The handlers only
 //! enqueue (so the loop reading from the client never waits for a parse), which left one hole: a `didChange`
@@ -27,10 +25,9 @@
 //! a completion of the wrong kind. Measured on this server: a burst of 24 changes followed by one completion
 //! answered with the file's global names instead of the object's members.
 //!
-//! So step 4 reads [`crate::context::UpdateInbox::queued`] on the message loop's own task — where the order is the
-//! client's — and the spawned task applies the queue up to that number before handing the snapshot to the handler.
-//! Everything the client sent before the request is applied; a change that arrives after it is not, which is what
-//! the client's own `$/cancelRequest` is about. See [`crate::context::update_queue`] for the whole argument.
+//! The dispatcher records the current sequence on the message loop, and the spawned task waits for the worker to
+//! apply it. Later changes are not part of an immutable snapshot: if one starts before the request finishes, the
+//! request receives `ContentModified`. See [`crate::context::update_queue`].
 
 use std::error::Error;
 
@@ -93,8 +90,8 @@ macro_rules! dispatch_request {
                             let snapshot = $context.snapshot();
                             // **How much of the client's stream this request is entitled to see.** Read here, on the
                             // task that has just read the messages in order, and applied inside the request's own task.
-                            let upto = snapshot.inbox().queued();
-                            $context.task(id.clone(), move |cancel_token| {
+                            let upto = snapshot.inbox().record_request();
+                            $context.task(id.clone(), upto, move |cancel_token| {
                                 let snapshot = snapshot.clone();
                                 async move {
                                     crate::context::catch_up_upto(&snapshot, upto).await;

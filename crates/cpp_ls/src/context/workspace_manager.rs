@@ -39,25 +39,29 @@ use crate::handlers::ClientConfig;
 /// Two seconds because the events do not stop when a build system is done with the file: a `cmake` run writes it,
 /// then the editor's watcher reports it, then the build writes it again for the next target. A reload costs a
 /// compiler run and a re-read of the database, so waiting is cheap and reloading twice is not.
-const CONFIG_RELOAD_DELAY: Duration = Duration::from_secs(2);
+const RELOAD_DEBOUNCE: Duration = Duration::from_secs(2);
 
 pub struct WorkspaceManager {
-    config_reload_token: Arc<PendingTask>,
+    reload_token: Arc<PendingTask>,
     reload_lock: Arc<AsyncMutex<()>>,
     reload_generation: Arc<AtomicU64>,
     /// Bumped whenever the workspace changes underneath the analysis, so a background pass can see that it has been
     /// superseded and stop instead of writing into a workspace that no longer exists.
     workspace_version: Arc<AtomicI64>,
+    log_file: Option<PathBuf>,
+    closing: bool,
     pub state: WorkspaceState,
 }
 
 impl WorkspaceManager {
     pub fn new() -> Self {
         Self {
-            config_reload_token: Arc::new(PendingTask::default()),
+            reload_token: Arc::new(PendingTask::default()),
             reload_lock: Arc::new(AsyncMutex::new(())),
             reload_generation: Arc::new(AtomicU64::new(0)),
             workspace_version: Arc::new(AtomicI64::new(0)),
+            log_file: None,
+            closing: false,
             state: WorkspaceState::new(ClientConfig::default()),
         }
     }
@@ -79,6 +83,14 @@ impl WorkspaceManager {
         self.state.root()
     }
 
+    pub fn set_log_file(&mut self, path: Option<PathBuf>) {
+        self.log_file = path;
+    }
+
+    pub fn log_file(&self) -> Option<&std::path::Path> {
+        self.log_file.as_deref()
+    }
+
     pub fn set_client_config(&mut self, client_config: ClientConfig) {
         self.state.set_client_config(client_config);
     }
@@ -86,6 +98,14 @@ impl WorkspaceManager {
     /// A number that changes whenever the workspace does.
     pub fn workspace_version(&self) -> i64 {
         self.workspace_version.load(Ordering::Acquire)
+    }
+
+    pub fn reload_generation(&self) -> u64 {
+        self.reload_generation.load(Ordering::Acquire)
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.closing
     }
 
     /// Is this path the project's build description?
@@ -107,26 +127,37 @@ impl WorkspaceManager {
         if !self.is_configuration_file(&config_path) {
             return;
         }
+        self.add_debounced_reload(context, format!("{} changed", config_path.display()))
+            .await;
+    }
 
-        let (cancel_token, cancelled_existing) =
-            self.config_reload_token.replace(CONFIG_RELOAD_DELAY).await;
+    pub async fn add_rescan_task(&self, context: ServerContextSnapshot) {
+        self.add_debounced_reload(context, "native watcher requested a rescan".into())
+            .await;
+    }
+
+    async fn add_debounced_reload(&self, context: ServerContextSnapshot, reason: String) {
+        let (cancel_token, cancelled_existing) = self.reload_token.replace(RELOAD_DEBOUNCE).await;
         if cancelled_existing {
             log::debug!("a reload was already pending; waiting for the events to stop");
         }
 
-        let config_reload_token = self.config_reload_token.clone();
-        let handles = self.reload_task_handles();
+        let reload_token = self.reload_token.clone();
         tokio::spawn(async move {
             cancel_token.wait().await;
             if cancel_token.is_cancelled() {
                 // A newer event owns the wait now: it will see the newer database, so this one does nothing.
-                config_reload_token.clear(&cancel_token).await;
+                reload_token.clear(&cancel_token).await;
                 return;
             }
 
-            log::info!("reloading the workspace: {} changed", config_path.display());
-            spawn_workspace_reload_task(handles, context);
-            config_reload_token.clear(&cancel_token).await;
+            let manager = context.workspace_manager().lock().await;
+            if !manager.is_closing() && !cancel_token.is_cancelled() {
+                log::info!("reloading the workspace: {reason}");
+                manager.add_reload_workspace_task(context.clone());
+            }
+            drop(manager);
+            reload_token.clear(&cancel_token).await;
         });
     }
 
@@ -135,21 +166,22 @@ impl WorkspaceManager {
         spawn_workspace_reload_task(self.reload_task_handles(), context);
     }
 
-    /// Drop what belongs to the workspace being left behind, and mark the workspace as changed.
-    ///
-    /// **Nothing has to be cleared on the client's side.** Diagnostics are pulled, so a client asks about a file
-    /// under the new workspace and is answered from it — there is no published list to go stale, which is the defect
-    /// this used to have to undo (`DiagnosticService::cancel_all` and the clear it led to are gone with the push
-    /// path). The buffers stay: they are the editor's, not the workspace's.
+    /// Mark the old workspace epoch as obsolete. Open buffers remain owned by the editor.
     pub async fn clear_workspace(&self) {
         self.workspace_version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.closing = true;
+        self.reload_generation.fetch_add(1, Ordering::AcqRel);
+        self.reload_token.cancel().await;
+        self.clear_workspace().await;
     }
 
     fn reload_task_handles(&self) -> ReloadTaskHandles {
         ReloadTaskHandles {
             reload_lock: self.reload_lock.clone(),
             reload_generation: self.reload_generation.clone(),
-            workspace_version: self.workspace_version.clone(),
         }
     }
 }
@@ -173,7 +205,6 @@ impl DerefMut for WorkspaceManager {
 struct ReloadTaskHandles {
     reload_lock: Arc<AsyncMutex<()>>,
     reload_generation: Arc<AtomicU64>,
-    workspace_version: Arc<AtomicI64>,
 }
 
 /// Reload the workspace, unless a newer reload has started while this one waited for the lock.
@@ -191,14 +222,17 @@ fn spawn_workspace_reload_task(handles: ReloadTaskHandles, context: ServerContex
 
         {
             let workspace_manager = context.workspace_manager().lock().await;
+            if workspace_manager.is_closing()
+                || generation != handles.reload_generation.load(Ordering::Acquire)
+            {
+                return;
+            }
             workspace_manager.clear_workspace().await;
         }
 
         // The same path as the first open: the compiler runs again, the new flags are read, the buffers are
         // re-marked, the project is indexed, and the diagnostics are published again.
         crate::handlers::start_analysis(context.clone()).await;
-
-        handles.workspace_version.fetch_add(1, Ordering::AcqRel);
     });
 }
 
@@ -236,6 +270,12 @@ impl DebounceToken {
 struct PendingTask(AsyncMutex<Option<Arc<DebounceToken>>>);
 
 impl PendingTask {
+    async fn cancel(&self) {
+        if let Some(token) = self.0.lock().await.take() {
+            token.cancel();
+        }
+    }
+
     async fn replace(&self, delay: Duration) -> (Arc<DebounceToken>, bool) {
         let mut current = self.0.lock().await;
         let had_existing = current.is_some();
@@ -263,7 +303,7 @@ impl PendingTask {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{DebounceToken, PendingTask};
+    use super::{DebounceToken, PendingTask, WorkspaceManager};
 
     #[tokio::test]
     async fn a_superseded_wait_ends_immediately_and_says_so() {
@@ -283,6 +323,19 @@ mod tests {
         );
         assert!(!second.is_cancelled());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_reload_and_invalidates_the_epoch() {
+        let mut manager = WorkspaceManager::new();
+        let (token, _) = manager.reload_token.replace(Duration::from_secs(60)).await;
+        let version = manager.workspace_version();
+        let generation = manager.reload_generation();
+        manager.shutdown().await;
+        assert!(manager.is_closing());
+        assert!(token.is_cancelled());
+        assert!(manager.workspace_version() > version);
+        assert!(manager.reload_generation() > generation);
     }
 
     #[tokio::test]

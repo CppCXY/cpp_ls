@@ -332,6 +332,180 @@ fn no_update_holds_the_analysis_for_longer_than_its_budget() {
     }
 }
 
+#[test]
+fn an_unrelated_completion_stays_responsive_after_a_large_incremental_edit() {
+    if not_the_product() {
+        return;
+    }
+    let project = Project::new("edit-latency");
+    let declarations: String = (0..10_000)
+        .map(|index| format!("int global_{index};\n"))
+        .collect();
+    let large = format!(
+        "// revision 0000\nstruct Widget {{ int member; }};\n{declarations}\
+         void g() {{\n    Widget w;\n    w.\n}}\n"
+    );
+    let small = "struct Small { int member; };\nvoid f() {\n    Small w;\n    w.\n}\n";
+    project.write("large.cpp", &large);
+    project.write("small.cpp", small);
+
+    let mut server = Server::start(project.root());
+    let large_uri = uri_of(&project.root().join("large.cpp"));
+    let small_uri = uri_of(&project.root().join("small.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    for (uri, text) in [(&large_uri, large.as_str()), (&small_uri, small)] {
+        server.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text } }),
+        );
+    }
+    let (line, character) = position_of(small, "w.");
+    let character = character + 2;
+    let params = json!({ "textDocument": { "uri": small_uri }, "position": { "line": line, "character": character } });
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let answer = server.request(2, "textDocument/completion", params.clone());
+        let found = answer["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == "member"));
+        if found && server.worst_write_hold().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fixture did not settle: {answer}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut times = Vec::new();
+    for version in 2..=21 {
+        let started = Instant::now();
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": large_uri, "version": version },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 12 }, "end": { "line": 0, "character": 16 } },
+                    "text": format!("{version:04}")
+                }]
+            }),
+        );
+        let answer = server.request(
+            100 + i64::from(version),
+            "textDocument/completion",
+            params.clone(),
+        );
+        assert!(
+            answer["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "member")),
+            "the unrelated completion must remain correct: {answer}"
+        );
+        times.push(started.elapsed());
+    }
+    times.sort();
+    let p95 = times[(times.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "large edit -> unrelated completion: p50={} ms, p95={} ms, max={} ms",
+        times[times.len() / 2].as_millis(),
+        p95.as_millis(),
+        times.last().unwrap().as_millis()
+    );
+    assert!(
+        p95 < Duration::from_millis(500),
+        "large edits delayed an unrelated completion: {times:?}"
+    );
+
+    let (line, character) = position_of(&large, "w.");
+    let params = json!({
+        "textDocument": { "uri": large_uri },
+        "position": { "line": line, "character": character + 2 }
+    });
+    let mut same_file = Vec::new();
+    for version in 22..=41 {
+        let started = Instant::now();
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": large_uri, "version": version },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 12 }, "end": { "line": 0, "character": 16 } },
+                    "text": format!("{version:04}")
+                }]
+            }),
+        );
+        let answer = server.request(
+            100 + i64::from(version),
+            "textDocument/completion",
+            params.clone(),
+        );
+        assert!(
+            answer["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "member")),
+            "the edited document must still complete correctly: {answer}"
+        );
+        same_file.push(started.elapsed());
+    }
+    same_file.sort();
+    let same_p95 = same_file[(same_file.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "large edit -> same-file completion: p50={} ms, p95={} ms, max={} ms",
+        same_file[same_file.len() / 2].as_millis(),
+        same_p95.as_millis(),
+        same_file.last().unwrap().as_millis()
+    );
+    assert!(
+        same_p95 < Duration::from_millis(1000),
+        "same-file completions suffered a multi-second stall: {same_file:?}"
+    );
+
+    let mut diagnostic = Vec::new();
+    for version in 42..=51 {
+        let started = Instant::now();
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": large_uri, "version": version },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 12 }, "end": { "line": 0, "character": 16 } },
+                    "text": format!("{version:04}")
+                }]
+            }),
+        );
+        let answer = server.request(
+            100 + i64::from(version),
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": large_uri } }),
+        );
+        assert_eq!(answer["result"]["kind"], "full", "{answer}");
+        assert!(answer["result"]["items"].is_array(), "{answer}");
+        diagnostic.push(started.elapsed());
+    }
+    diagnostic.sort();
+    let diagnostic_p95 = diagnostic[(diagnostic.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "large edit -> diagnostic: p50={} ms, p95={} ms, max={} ms",
+        diagnostic[diagnostic.len() / 2].as_millis(),
+        diagnostic_p95.as_millis(),
+        diagnostic.last().unwrap().as_millis()
+    );
+    assert!(
+        diagnostic_p95 < Duration::from_secs(3),
+        "diagnostics suffered a multi-second stall: {diagnostic:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The harness. Duplicated from `handshake.rs` rather than shared, because an integration test is a separate binary
 // and a `tests/common` module would have to be a crate of its own to be usable from both — and what is here is
@@ -373,6 +547,14 @@ impl Project {
 
     fn write(&self, name: &str, text: &str) {
         std::fs::write(self.root.join(name), text).expect("the fixture file");
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            eprintln!("could not remove {}: {error}", self.root.display());
+        }
     }
 }
 

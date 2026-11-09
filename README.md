@@ -77,7 +77,8 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 - **Semantic tokens** — names, types, keywords, documentation commands, and format strings (`formatSpecifier`,
   `formatArgument`, `formatConversion`, `formatEscape`).
 - **Code actions** — quick fixes from the same diagnostics.
-- **Diagnostics** — pull-based (`textDocument/diagnostic`), 26 codes: `syntax-error`, `include-not-found`,
+- **Diagnostics** — `textDocument/diagnostic` for pull-capable clients, otherwise versioned
+  `textDocument/publishDiagnostics`, 26 codes: `syntax-error`, `include-not-found`,
   `undefined-name`, `undefined-field`, `redefinition`, `missing-return`, `argument-count`, `param-type-check`,
   `assign-type-check`, `return-type-mismatch`, `access-invisible`, `concept-not-satisfied`,
   `assignment-in-condition`, `unnecessary-branch`, `macro-redefined`, nine clang-tidy-shaped style rules
@@ -101,6 +102,9 @@ Point an editor at `target/release/cpp_ls`. The VS Code client is
 A project needs no configuration. When it wants some, a `.cppls.toml` in the workspace root names the language standard,
 include paths, defines, per-path rules and diagnostic switches; a `compile_commands.json` is used for exact flags when it
 exists. Both are described in [`docs/configuration.md`](docs/configuration.md).
+
+The server currently analyzes only the first workspace folder. If the client cannot dynamically register file
+watches, a native watcher monitors that folder; watcher failures are reported to the client.
 
 ## Working on it
 
@@ -133,11 +137,9 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
 
 ## Documentation
 
-[`docs/cpp-support.md`](docs/cpp-support.md) · [`docs/c-support.md`](docs/c-support.md) ·
-[`docs/configuration.md`](docs/configuration.md) · [`docs/locking.md`](docs/locking.md) ·
-[`docs/buglist.md`](docs/buglist.md) — what works, how to configure it, how the cache is locked, and what is still open
-with its measurement.
-
+[`docs/cpp-support.md`](docs/cpp-support.md)
+[`docs/c-support.md`](docs/c-support.md) ·
+[`docs/configuration.md`](docs/configuration.md)
 ## License
 
 MIT. See [`LICENSE`](LICENSE).

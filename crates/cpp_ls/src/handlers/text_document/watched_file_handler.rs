@@ -93,13 +93,10 @@ pub async fn process_did_change_watched_files(
         // The events queued work — re-reading the files that include what changed, or the whole project after a
         // configuration change — and the pump is what reads it.
         context.analysis().wake();
-
-        // **The answer changed and the document did not** — a watched file is not one the client is editing, so
-        // nothing about the text it is showing has moved. It used to be told (`workspace/diagnostic/refresh`).
-        //
-        // **It is not told any more, and that is the decision rather than an omission.** A pull client asks on its own
-        // rhythm, and the request made it ask inside a loop — see the note in `handlers/initialized` — so what a
-        // watched-file event does is queue the work and wake the pump, nothing else.
+        context
+            .diagnostics()
+            .schedule_open_files(context.clone())
+            .await;
         if response.everything {
             log::info!("the whole project has to be read again");
         }

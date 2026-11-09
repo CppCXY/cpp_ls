@@ -1868,6 +1868,194 @@ int main() {
 }
 ";
 
+#[test]
+fn a_client_without_dynamic_watches_observes_an_external_header_edit() {
+    let project = Project::new("native-watch-header");
+    project.write("widget.h", FRESH_TYPE_H);
+    project.write("main.cpp", FRESH_TYPE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": FRESH_TYPE_CPP }
+        }),
+    );
+
+    let (line, character) = position_of(FRESH_TYPE_CPP, "w.");
+    let completion = |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    };
+    server.ask_until_it(100, completion, |response| {
+        response["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == "size"))
+    });
+
+    project.write("widget.h", "struct Widget { int from_disk; };\n");
+    let deadline = Instant::now() + TIMEOUT;
+    let mut id = 200;
+    loop {
+        let request = completion(id);
+        let response = server.request(id, "textDocument/completion", request["params"].clone());
+        if response["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == "from_disk"))
+        {
+            break;
+        }
+        if let Some(error) = response.get("error") {
+            assert_eq!(
+                error["code"],
+                json!(lsp_server::ErrorCode::ContentModified as i32)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the external edit was not observed: {response}"
+        );
+        id += 1;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+#[test]
+fn a_native_watcher_rescans_new_directories_after_a_burst() {
+    let project = Project::new("native-watch-directory");
+    project.write("initial.cpp", "int initial_symbol;\n");
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.ask_until_it(
+        10,
+        |id| json!({ "id": id, "method": "workspace/symbol", "params": { "query": "initial_symbol" } }),
+        |response| response["result"].as_array().is_some_and(|items| !items.is_empty()),
+    );
+
+    let directory = project.root().join("new_directory");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("new.cpp"), "int created_in_new_directory;\n").unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    let mut id = 100;
+    loop {
+        let response = server.request(
+            id,
+            "workspace/symbol",
+            json!({ "query": "created_in_new_directory" }),
+        );
+        if response["result"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["name"] == "created_in_new_directory")
+        }) {
+            break;
+        }
+        if let Some(error) = response.get("error") {
+            assert_eq!(
+                error["code"],
+                json!(lsp_server::ErrorCode::ContentModified as i32)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the new directory was not indexed: {response}"
+        );
+        id += 1;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn links_and_type_definitions_are_ready_on_the_first_request_after_open() {
+    let project = Project::new("first-links-and-types");
+    project.write("widget.h", FRESH_TYPE_H);
+    project.write("main.cpp", FRESH_TYPE_CPP);
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let header_uri = uri_of(&project.root().join("widget.h"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": FRESH_TYPE_CPP }
+        }),
+    );
+    let links = server.request(
+        2,
+        "textDocument/documentLink",
+        json!({ "textDocument": { "uri": main_uri } }),
+    );
+    assert!(
+        links["result"].as_array().is_some_and(|links| {
+            links.iter().any(|link| {
+                link["target"]
+                    .as_str()
+                    .is_some_and(|target| target.eq_ignore_ascii_case(&header_uri))
+            })
+        }),
+        "the first request must include the resolved header: {links}"
+    );
+
+    let (line, character) = position_of(FRESH_TYPE_CPP, "Widget w");
+    let types = server.request(
+        3,
+        "textDocument/typeDefinition",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": line, "character": character - 1 },
+        }),
+    );
+    assert!(
+        types["result"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["uri"]
+                    .as_str()
+                    .is_some_and(|uri| uri.eq_ignore_ascii_case(&header_uri))
+            })
+        }),
+        "the first type definition must resolve the included type: {types}"
+    );
+}
+
 /// **An edit to an included header is visible to the completion that follows it.**
 ///
 /// This is the shape a user reported and diagnosed as "文件的 didchange 尚未处理完毕": an edit reaches the analysis in
@@ -2223,6 +2411,319 @@ fn a_completion_right_after_a_change_sees_the_change() {
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
+}
+
+#[test]
+fn an_incremental_edit_is_visible_to_the_next_completion() {
+    let project = Project::new("incremental-completion");
+    let source = "struct Widget { int size; };\nvoid f() {\n    Widget w;\n    w.\n}\n";
+    project.write("main.cpp", source);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+    let initialized = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["textDocumentSync"]["change"],
+        json!(2)
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+    let (line, character) = position_of(source, "w.");
+    server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("size")))
+        },
+    );
+
+    let (edit_line, edit_character) = position_of(source, "int size;");
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": edit_line, "character": edit_character },
+                    "end": { "line": edit_line, "character": edit_character }
+                },
+                "text": " int added;"
+            }]
+        }),
+    );
+    let answer = server.request(
+        200,
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+    );
+    assert!(
+        answer["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == json!("added"))),
+        "the incremental edit must be visible immediately: {answer}"
+    );
+}
+
+#[test]
+fn a_client_without_pull_support_receives_versioned_diagnostics() {
+    let project = Project::new("legacy-diagnostics");
+    let broken = "struct Unclosed { int value;\n";
+    let clean = "int main() { return 0; }\n";
+    project.write("main.cpp", broken);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "textDocument": { "publishDiagnostics": { "versionSupport": true } }
+            }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": broken }
+        }),
+    );
+    let first = server.wait_for(|message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == uri
+            && message["params"]["version"] == 1
+    });
+    assert!(
+        first["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "the invalid file must be diagnosed: {first}"
+    );
+
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{ "text": clean }]
+        }),
+    );
+    let corrected = server.wait_for(|message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == uri
+            && message["params"]["version"] == 2
+    });
+    assert_eq!(corrected["params"]["diagnostics"], json!([]));
+
+    for (version, text) in [(3, broken), (4, clean)] {
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }),
+        );
+    }
+    let latest = server.wait_for(|message| {
+        if message["method"] == "textDocument/publishDiagnostics" && message["params"]["uri"] == uri
+        {
+            assert_ne!(
+                message["params"]["version"], 3,
+                "a superseded result was published"
+            );
+            return message["params"]["version"] == 4;
+        }
+        false
+    });
+    assert_eq!(latest["params"]["diagnostics"], json!([]));
+
+    server.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let closed = server.wait_for(|message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == uri
+            && message["params"]["version"].is_null()
+    });
+    assert_eq!(closed["params"]["diagnostics"], json!([]));
+}
+
+#[test]
+fn an_unreadable_diagnostic_target_is_an_error_not_an_empty_report() {
+    let project = Project::new("missing-diagnostic");
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    let missing = uri_of(&project.root().join("missing.cpp"));
+    let response = server.request(
+        2,
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": missing } }),
+    );
+    assert_eq!(
+        response["error"]["code"],
+        json!(lsp_server::ErrorCode::RequestFailed as i32),
+        "an unreadable file is not a clean file: {response}"
+    );
+}
+
+#[test]
+fn a_file_opened_without_a_workspace_gets_an_analysis_session() {
+    let project = Project::new("single-file");
+    let source = "struct Widget { int member; };\nvoid f() { Widget w; w.\n}\n";
+    project.write("main.cpp", source);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": null,
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+    let (line, character) = position_of(source, "w.");
+    let answer = server.request(
+        2,
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+    );
+    assert!(
+        answer["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == "member")),
+        "the single file must be analysed: {answer}"
+    );
+}
+
+#[test]
+fn a_module_is_read_in_the_background_for_completion() {
+    let project = Project::new("background-module");
+    let source = "import report;\nvoid f() { Report r; r.\n}\n";
+    project.write("main.cpp", source);
+    project.write(
+        "report.cppm",
+        "export module report;\nexport struct Report { int module_member; };\n",
+    );
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+    let (line, character) = position_of(source, "r.");
+    server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "module_member"))
+        },
+    );
+}
+
+#[test]
+fn a_configuration_reload_indexes_the_new_project_files() {
+    let project = Project::new("reload-generation");
+    project.write(".cppls.toml", "[workspace]\nsource_extensions = []\n");
+    project.write("main.cpp", "int main() { return 0; }\n");
+    project.write("extra.custom", "int ReloadedSymbol;\n");
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "diagnostic": {} } }
+        }),
+    );
+    server.notify("initialized", json!({}));
+    let before = server.request(2, "workspace/symbol", json!({ "query": "ReloadedSymbol" }));
+    assert!(
+        before["result"]
+            .as_array()
+            .is_none_or(|items| items.is_empty()),
+        "the custom extension is not initially indexed: {before}"
+    );
+
+    project.write(
+        ".cppls.toml",
+        "[workspace]\nsource_extensions = [\"custom\"]\n",
+    );
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({
+            "changes": [{ "uri": uri_of(&project.root().join(".cppls.toml")), "type": 2 }]
+        }),
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    server.ask_until_it(
+        100,
+        |id| json!({ "id": id, "method": "workspace/symbol", "params": { "query": "ReloadedSymbol" } }),
+        |response| {
+            response["result"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["name"] == "ReloadedSymbol"))
+        },
+    );
 }
 
 /// A macro defined in one header and used in two files — the shape a rename has to get right, and the shape a

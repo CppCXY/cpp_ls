@@ -16,8 +16,8 @@
 //! 4. the session      opened over the first root: the compiler is run, `compile_commands.json` is read
 //! 5. the buffers      a client restarting sends its open documents *after* this, but a reload has them already
 //! 6. indexing         in the background, so the first request is answered while the project is still being read
-//! 7. file watches     the globs the client should tell us about, registered dynamically
-//! 8. diagnostics      the first full pass, once the index holds something
+//! 7. file watches     client registration or a native fallback
+//! 8. diagnostics      push scheduling or pull refresh, once the index holds something
 //! ```
 //!
 //! Steps 6 to 8 are what make this a *language server* rather than a query engine: the session is usable the moment
@@ -45,42 +45,13 @@ pub use client_config::{ClientConfig, get_client_config};
 /// otherwise stay stale for the rest of the session if that ever happened.
 const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 
-/// How many files one background slice reads before it lets the runtime run something else.
-///
-/// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
-/// arriving mid-index waits for a slice and not for a project. A slice's files are parsed on all the cores at once
-/// (`Session::advance`), so thirty-two files hold the lock for about what sixteen did when they were parsed one at a
-/// time — short enough that a keystroke does not feel it, long enough that the indexing does not spend its time
-/// taking locks.
-///
-/// # What was tried here, and why it is still a count
-///
-/// A **time budget** instead of a count: advance until twenty-five milliseconds have gone, on the theory that a
-/// count cannot be right for both small files and four-megabyte headers. Measured, it was **worse** — the answers
-/// stayed empty for the first nine completions rather than the first seven, and completions that were fast were
-/// fast because they had *nothing to say*. A slice that ends early drains the queue later, and a list with no
-/// summary behind it is not a fast answer but no answer. Throughput and latency pull against each other here, and
-/// this count already sat at a workable point between them.
+/// Maximum number of files prepared in one adaptive background wave.
 const INDEX_SLICE: usize = 24;
 
-/// **How many files one slice cooks** — the same shape as [`INDEX_SLICE`], and the same reason.
-///
-/// Cooking a file is a render and a parse of it, which is the largest single thing this pump does: measured
-/// `own 9–269 ms` per file against the `unit 15–42 ms` a lookup costs. The count is small because the work is
-/// large, and because the expensive half now runs under a **read** lock ([`Session::render_them`]) while only the
-/// insert needs the write one.
+/// Maximum number of cooks gathered per slice; rendering runs without the session lock.
 const COOK_A_SLICE: usize = 4;
 
-/// **How long one slice may hold the analysis write lock** — the number the count above is a proxy for.
-///
-/// Measured, thirty-two files held the lock for anywhere between **84 and 2430 ms**, and a slice of *zero* files —
-/// the cooking half of `Session::advance` — for up to **1527 ms**. This is what a completion arriving inside that
-/// window waits for.
-///
-/// Bounding the slice *by* this number was tried and is worse: slices of 76–356 ms, and the completion list came
-/// back **empty for the first eight requests** instead of the first five. The two knobs trade a wait for an empty
-/// list, and no setting of either wins, because reading files and answering questions take the same write lock.
-/// The constant is kept as the record of what the wait actually is.
+/// Feedback target for adjusting wave size, not a hard end-to-end latency deadline.
 const INDEX_SLICE_MS: u64 = 30;
 
 pub async fn initialized_handler(
@@ -89,7 +60,7 @@ pub async fn initialized_handler(
     cmd_args: CmdArgs,
 ) -> Option<()> {
     let roots = workspace_roots(&params);
-    init_logger(roots.first().and_then(|root| root.to_str()), &cmd_args);
+    let log_file = init_logger(roots.first().and_then(|root| root.to_str()), &cmd_args);
 
     let client_id = match &cmd_args.editor {
         Some(editor) => editor.clone().into(),
@@ -110,6 +81,7 @@ pub async fn initialized_handler(
     {
         let mut workspace_manager = context.workspace_manager().lock().await;
         workspace_manager.set_roots(roots.clone());
+        workspace_manager.set_log_file(log_file);
         workspace_manager.set_client_config(client_config);
         // The `--config` a caller named is kept, because a reload re-opens the session and has no `CmdArgs` of its
         // own: the file the user pointed at is part of what the workspace *is*.
@@ -127,9 +99,59 @@ pub async fn initialized_handler(
 /// Called once at `initialized` and again on every workspace reload (`WorkspaceManager`), which is why it takes the
 /// context and asks the state where the workspace is rather than being handed a root.
 pub async fn start_analysis(context: ServerContextSnapshot) {
-    let Some(root) = open_session(&context).await else {
+    let Some((root, version)) = open_session(&context).await else {
         return;
     };
+
+    if context.workspace_manager().lock().await.is_closing() {
+        return;
+    }
+
+    if !context
+        .lsp_features()
+        .supports_dynamic_watched_files_registration()
+    {
+        let log_file = context
+            .workspace_manager()
+            .lock()
+            .await
+            .log_file()
+            .map(PathBuf::from);
+        if let Some(mut filter) = context
+            .analysis()
+            .with_snapshot(|session| session.watch_filter())
+        {
+            if let Some(log_file) = log_file {
+                match std::fs::canonicalize(&log_file) {
+                    Ok(path) => filter = filter.ignore(path),
+                    Err(error) => log::warn!(
+                        "cannot exclude the server log {} from the watcher: {error}",
+                        log_file.display()
+                    ),
+                }
+            }
+            if let Err(error) = context
+                .native_watcher()
+                .start(context.clone(), root.clone(), filter)
+                .await
+            {
+                context.native_watcher().stop().await;
+                let message = format!(
+                    "Cannot watch workspace files: {error}. External changes may not be detected."
+                );
+                log::error!("{message}");
+                context.client().show_message(lsp_types::ShowMessageParams {
+                    typ: lsp_types::MessageType::WARNING,
+                    message,
+                });
+            }
+        }
+    }
+
+    if context.workspace_manager().lock().await.is_closing() {
+        context.native_watcher().stop().await;
+        return;
+    }
 
     context.status_bar().update_progress_task(
         ProgressTask::LoadWorkspace,
@@ -137,20 +159,29 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         Some(format!("Indexing {}", root.display())),
     );
 
-    index_in_background(context).await;
+    index_in_background(context.clone(), version).await;
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
 }
 
 /// Open a session over the workspace root, with the client's buffers already in front of it.
 ///
 /// `None` when the client has named no folder: there is nothing to open over, and every query answers "no analysis"
 /// until it does — which is the honest state rather than an empty project.
-async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
-    let (root, filter, config_file) = {
+async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64)> {
+    let (root, filter, config_file, version, generation) = {
         let workspace_manager = context.workspace_manager().lock().await;
+        if workspace_manager.is_closing() {
+            return None;
+        }
         (
             workspace_manager.root()?.to_path_buf(),
             workspace_manager.watch_filter()?,
             workspace_manager.config_file().map(PathBuf::from),
+            workspace_manager.workspace_version(),
+            workspace_manager.reload_generation(),
         )
     };
 
@@ -159,54 +190,54 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
         .create_progress_task(ProgressTask::LoadWorkspace)
         .await;
 
-    // The compiler is run here (`Session::open` asks it for its search paths), so this is the one slow call in the
-    // handshake, and it happens on the blocking pool rather than on the runtime's own thread.
-    context
+    let session = context
         .analysis()
-        .open(root.clone(), filter, config_file)
-        .await;
-
-    report_project_configuration(context);
-
-    // The open buffers are read **after** the session exists, and the order is the point: a client that restarted
-    // with unsaved files would otherwise have the analysis answer about the disk, and a change that arrived while
-    // the session was being built (the update queue is a separate task) is in this list because it is read now.
-    let open_files = {
-        let workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.workspace_open_files()
-    };
-
-    // **The sharing cache, warm** — §8 step 4, and before the first file is read, so the units this run builds can
-    // splice last run's contributions instead of re-walking them. A missing file is a cold start, not an error.
-    context
-        .analysis()
-        .update_session("initialized: the sharing cache", |session| {
-            let restored = session.load_the_sharing();
-            if restored > 0 {
-                log::info!("restored {restored} shared contribution(s) from the last run");
-            }
-        })
-        .await;
-    if !open_files.is_empty() {
-        let count = open_files.len();
-        context
-            .analysis()
-            .update_session(
-                "initialized: the files the client had open",
-                move |session| {
-                    for (uri, text) in &open_files {
-                        if let Some(path) = uri_to_file_path(uri) {
-                            session.did_open(path, text);
-                        }
-                    }
-                },
-            )
-            .await;
-        log::info!("re-marked {count} open buffers as the text the analysis reads");
+        .build_session(root.clone(), filter, config_file)
+        .await?;
+    if !install_prepared_session(context, session, version, generation).await {
+        log::debug!("discarding a workspace session superseded while it was being built");
+        return None;
     }
 
+    let diagnostic_delay = context
+        .analysis()
+        .with_snapshot(|session| session.project_config().config.diagnostics.on_change_ms)
+        .flatten();
+    context.diagnostics().set_change_delay(diagnostic_delay);
+    report_project_configuration(context);
+
     log::info!("analysing {}", root.display());
-    Some(root)
+    Some((root, version))
+}
+
+async fn install_prepared_session(
+    context: &ServerContextSnapshot,
+    mut session: cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
+    version: i64,
+    generation: u64,
+) -> bool {
+    let workspace_manager = context.workspace_manager().lock().await;
+    if workspace_manager.is_closing()
+        || workspace_manager.workspace_version() != version
+        || workspace_manager.reload_generation() != generation
+    {
+        return false;
+    }
+
+    let open_files = workspace_manager.workspace_open_files();
+    for (uri, text) in &open_files {
+        if let Some(path) = uri_to_file_path(uri) {
+            session.did_open(path, text);
+        }
+    }
+    context.analysis().install_session(session).await;
+    if !open_files.is_empty() {
+        log::info!(
+            "re-marked {} open buffers as the text the analysis reads",
+            open_files.len()
+        );
+    }
+    true
 }
 
 /// Tell the user what working the project out produced, when there is something to tell.
@@ -301,10 +332,10 @@ fn report_project_configuration(context: &ServerContextSnapshot) {
 /// A server that pumped the queue only at startup would answer about an empty index for the rest of the session —
 /// every query in a file the user has typed in would be "not read yet" — so the pump is what makes an edit visible
 /// again, and it is one task rather than a rule every handler would have to remember.
-async fn index_in_background(context: ServerContextSnapshot) {
+async fn index_in_background(context: ServerContextSnapshot, version: i64) {
     tokio::spawn(async move {
-        let version = context.workspace_manager().lock().await.workspace_version();
         let mut first_pass = true;
+        let mut last_diagnostic_revision = None;
         // What the last slice left to do — see the drain below, which is the moment a file's **cooked** reading
         // changes hands.
         let mut was_pending = false;
@@ -339,6 +370,21 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 return;
             }
 
+            let open_file = context
+                .analysis()
+                .with_snapshot(|session| session.next_open_file_to_read())
+                .flatten();
+            if let Some(path) = open_file
+                && context.analysis().read_queued_file(&path).await
+            {
+                was_pending = true;
+                continue;
+            }
+
+            let before = context
+                .analysis()
+                .with_snapshot(|session| (session.pending_work(), session.revision()));
+
             // **The parse, under a read lock — and the insert, under the write lock.**
             //
             // This is the split that ends the wait, rather than moving it. Reading a file into the index is a parse,
@@ -364,13 +410,13 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // lock was free and the thread was busy. That is the difference `spawn_blocking` makes.
             let prepared = context
                 .analysis()
-                .run_blocking(move |session| Some(session.prepare_a_wave(wave)))
+                .run_blocking(move |session| Some(session.prepare_background_wave(wave)))
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
             log::trace!("pump: wave prepared ({prepared_count})");
 
-            let Some((pending, drain, claimed, held)) = context
+            let Some((pending, drain, claimed, held, committed)) = context
                 .analysis()
                 .update_session("index slice", |session| {
                     // **Timed, and split, because the count is only a proxy for the one number a caller can feel:**
@@ -391,16 +437,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // a cook needs is gathered, rendered and parsed under the read lock below, beside whatever a
                     // person is typing ([`Session::materials_for`], [`Session::render_them`]).
                     let claimed = session.claim_cooking(COOK_A_SLICE);
-
-                    // **The module units a request queued**, read here rather than inside the request: a module unit is
-                    // read as a program (a whole closure rendered), so a hover that did it was indexing under the write
-                    // lock — measured, 1 468 ms of a 1 862 ms first hover. Four per slice is enough to keep the queue
-                    // moving without holding this write lock for a rendering.
-                    for _ in 0..4 {
-                        if !session.read_a_module_unit() {
-                            break;
-                        }
-                    }
 
                     let pending_now = session.pending_work();
                     // **Where the memory is, at the one moment somebody looks**: when the queue drains, the
@@ -459,7 +495,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                             cooking = claimed.len()
                         );
                     }
-                    (pending_now, drain, claimed, held)
+                    (pending_now, drain, claimed, held, taken)
                 })
                 .await
             else {
@@ -481,16 +517,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 _ => wave,
             };
 
-            // **The drain's and the cooking slice's expensive halves, under one read lock.** Measured, the second
-            // pass is `150 ms` per file, a rendering is `9–269 ms` and gathering a cook's materials is `15–42 ms` —
-            // and together they were the largest thing left inside the write lock, holding it for up to **572 ms** on
-            // a slice that committed *no* files at all. None of them changes anything, so none of them belongs under
-            // the lock a query waits for.
-            // …and the same for the drain and the cooking slice: a rendering is 9–269 ms per file and a unit walk is
-            // 150 ms, so this phase is the longest remaining uninterrupted span of CPU in the loop.
-            //
-            // **Taken before the closures consume them**, for the breaker below and for the refusals: what a slice
-            // *asked for* is half of "did it achieve anything", and the other half comes back from the commit.
+            // Gather cook inputs and prepare the drain under a read lock; render the owned cooks after releasing it.
             let drain_was_empty = drain.is_empty();
             let asked: Vec<std::path::PathBuf> = claimed.clone();
             let claimed_count = asked.len();
@@ -499,24 +526,23 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 drain_was_empty,
                 asked.len()
             );
-            let (prepared_drain, rendered_cooks, built) = context
+            let (prepared_drain, cooks, cooking_revision) = context
                 .analysis()
                 .run_blocking(move |session| {
-                    let materials = session.materials_for(claimed);
-                    let rendered = session.render_them(materials);
-                    // **What actually came back, not what was asked for.** `materials_for` answering with a file is
-                    // only half the question — the render is the other half, and it declines on its own grounds
-                    // (`Session::render_them`). Measured from a reader's log: `4 to cook` every second with
-                    // `committed 0`, because the four files gathered materials and then rendered nothing, so nothing
-                    // was ever refused and the closure walk wanted them again on the next drain.
-                    let built: Vec<std::path::PathBuf> = rendered
+                    let revision = session.revision();
+                    let cooks = claimed
                         .iter()
-                        .map(|rendered| rendered.indexed.summary.path.clone())
+                        .filter_map(|path| session.gather_a_cook(path))
                         .collect();
-                    Some((session.prepare_the_drain(drain), rendered, built))
+                    Some((session.prepare_the_drain(drain), cooks, Some(revision)))
                 })
                 .await
                 .unwrap_or_default();
+            let rendered_cooks = context.analysis().render_cooks(cooks).await;
+            let built: Vec<std::path::PathBuf> = rendered_cooks
+                .iter()
+                .map(|rendered| rendered.indexed.summary.path.clone())
+                .collect();
 
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
@@ -530,7 +556,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // repeated `4 to cook, 1 left` / `2 left` / `0 left` every second for as long as the window
                     // stayed open, at 28 % of a core. A query that names one of them clears its refusal
                     // (`Session::want_cooked_reading`), so nothing is lost but the retry.
-                    session.refuse_the_cooks_that_built_nothing(&asked, &built);
+                    if let Some(revision) = &cooking_revision {
+                        if session.is_current(revision) {
+                            session.refuse_the_cooks_that_built_nothing(&asked, &built);
+                        } else if session.owns_revision(revision) {
+                            for path in &asked {
+                                session.want_cooked_reading(path);
+                            }
+                        }
+                    }
                     let cook_logged = !asked.is_empty();
                     if !asked.is_empty() {
                         log::info!(
@@ -593,12 +627,25 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // **Only a slice that had work to do counts.** A wake with nothing pending is what a `prepare` for a file
             // that is already prepared produces, and counting those as "no progress" is how a single stuck file's
             // signal got diluted into a warning every eight seconds on an idle server.
-            let had_work = pending > 0 || claimed_count > 0 || !drain_was_empty;
-            let progressed = prepared_count > 0
-                || !drain_was_empty
+            let after = context.analysis().with_snapshot(|session| {
+                (
+                    session.pending_work(),
+                    before
+                        .as_ref()
+                        .is_some_and(|(_, revision)| !session.is_current(revision)),
+                )
+            });
+            let pending = after.as_ref().map_or(pending, |(pending, _)| *pending);
+            let had_work = before.as_ref().is_some_and(|(pending, _)| *pending > 0)
                 || claimed_count > 0
+                || !drain_was_empty;
+            let progressed = committed > 0
                 || re_read > 0
-                || cooked > 0;
+                || cooked > 0
+                || after.as_ref().is_some_and(|(_, changed)| *changed)
+                || before
+                    .as_ref()
+                    .is_some_and(|(previous, _)| pending < *previous);
             no_progress = if progressed || !had_work {
                 0
             } else {
@@ -617,6 +664,9 @@ async fn index_in_background(context: ServerContextSnapshot) {
                      {dropped} queued file(s) were dropped (they are asked for again by the query that names one)"
                 );
                 no_progress = 0;
+                if dropped == 0 {
+                    context.analysis().wait_for_work(IDLE_WAIT).await;
+                }
             }
 
             if pending > 0 {
@@ -754,23 +804,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     })
                     .await;
             } else if was_pending {
-                // **The queue drained — and the server says nothing about it.**
-                //
-                // A file's cooked reading is built from the environment of a complete translation unit, so the
-                // answers for an open file *do* change here: between the edit and this moment its diagnostics are read
-                // off its own text, which is the coarser reading. The server used to announce it with
-                // `workspace/diagnostic/refresh`.
-                //
-                // **That is gone on purpose, and it is not coming back.** A pull client already asks on its own
-                // rhythm, and the server's request made it ask in a *loop*: a reader's log showed
-                // `republishing open file diagnostics` alternating with an `index slice` cycle that asked for the same
-                // nine cooks every second and committed nothing, at a full core, for as long as the window stayed
-                // open. There is no workspace diagnostic *report* in this server either
-                // (`workspace_diagnostics: false`), so the refresh named nothing to redo — it was a request to repeat
-                // work that had just been done.
-                //
-                // What replaces it is the client's own next ask, answered from the index as it stands.
-
                 // **…and the hints, for the same reason and with a measurement of their own.**
                 //
                 // A hint's parameter names come from the callee's declaration, so a request that arrives while the
@@ -798,6 +831,27 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     context.client().refresh_semantic_tokens();
                 }
             }
+            let revision = context
+                .analysis()
+                .with_snapshot(|session| {
+                    if last_diagnostic_revision
+                        .as_ref()
+                        .is_some_and(|previous| session.is_current(previous))
+                    {
+                        None
+                    } else {
+                        Some(session.revision())
+                    }
+                })
+                .flatten();
+            if let Some(revision) = revision {
+                context.diagnostics().refresh_pull(context.clone());
+                context
+                    .diagnostics()
+                    .schedule_open_files(context.clone())
+                    .await;
+                last_diagnostic_revision = Some(revision);
+            }
             was_pending = false;
 
             // **A whole program the session owes, and the only thing that can wake it up for it.**
@@ -824,10 +878,21 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // back to back would peg a core for minutes after every pause; one idle tick between them is
                     // the same pace the loop uses when it has nothing to do.
                     if context.analysis().read_a_program().await {
-                        tokio::time::sleep(IDLE_WAIT).await;
+                        context.diagnostics().refresh_pull(context.clone());
+                        context
+                            .diagnostics()
+                            .schedule_open_files(context.clone())
+                            .await;
+                        if context.lsp_features().supports_refresh_inlay_hint() {
+                            context.client().refresh_inlay_hints();
+                        }
+                        if context.lsp_features().supports_refresh_semantic_tokens() {
+                            context.client().refresh_semantic_tokens();
+                        }
+                        context.analysis().wait_for_work(IDLE_WAIT).await;
                     }
                 } else {
-                    tokio::time::sleep(wait + IDLE_WAIT).await;
+                    context.analysis().wait_for_work(wait).await;
                 }
                 continue;
             }
@@ -868,4 +933,91 @@ pub fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
     }
 
     roots
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cpp_code_analysis::{CompilerConfig, Session, WatchFilter};
+    use lsp_server::Connection;
+    use lsp_types::{ClientCapabilities, TextDocumentContentChangeEvent};
+
+    use super::*;
+    use crate::context::{ClientId, ServerContext};
+    use crate::util::path_to_uri;
+
+    fn prepared(
+        context: &ServerContextSnapshot,
+        root: &std::path::Path,
+    ) -> Session<cpp_code_analysis::DiskFiles> {
+        Session::with_config(
+            root,
+            context.analysis().files().clone(),
+            WatchFilter::new(root),
+            CompilerConfig::default(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_built_session_receives_the_latest_buffer_at_installation() {
+        let (connection, _client) = Connection::memory();
+        let server = ServerContext::new(
+            Arc::new(connection),
+            ClientCapabilities::default(),
+            ClientId::Other,
+        );
+        let context = server.snapshot();
+        let root = std::env::temp_dir().join("cpp-ls-install-session");
+        let path = root.join("main.cpp");
+        let uri = path_to_uri(&path).unwrap();
+        let session = prepared(&context, &root);
+        let (version, generation) = {
+            let mut manager = context.workspace_manager().lock().await;
+            manager.set_roots(vec![root]);
+            manager.open_file(uri.clone(), "int old_name;".into(), 1);
+            manager
+                .change_file(
+                    &uri,
+                    2,
+                    &[TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: "int current_name;".into(),
+                    }],
+                )
+                .unwrap();
+            (manager.workspace_version(), manager.reload_generation())
+        };
+        assert!(install_prepared_session(&context, session, version, generation).await);
+        let text = context
+            .analysis()
+            .with_snapshot(|session| session.files().held(&path).unwrap().text.clone())
+            .unwrap();
+        assert_eq!(text.as_ref(), "int current_name;");
+        server.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_built_for_an_old_workspace_is_not_installed() {
+        let (connection, _client) = Connection::memory();
+        let server = ServerContext::new(
+            Arc::new(connection),
+            ClientCapabilities::default(),
+            ClientId::Other,
+        );
+        let context = server.snapshot();
+        let root = std::env::temp_dir().join("cpp-ls-stale-session");
+        let session = prepared(&context, &root);
+        let (version, generation) = {
+            let mut manager = context.workspace_manager().lock().await;
+            manager.set_roots(vec![root]);
+            let captured = (manager.workspace_version(), manager.reload_generation());
+            manager.clear_workspace().await;
+            captured
+        };
+        assert!(!install_prepared_session(&context, session, version, generation).await);
+        assert!(context.analysis().with_snapshot(|_| ()).is_none());
+        server.close().await;
+    }
 }

@@ -109,7 +109,9 @@ fn where_the_module_read_spends_its_time() {
         };
         let prepare = started.elapsed();
         let started = Instant::now();
-        let reading = session.commit_a_unit_reading(prepared);
+        let reading = session
+            .commit_a_unit_reading(prepared)
+            .expect("the session did not change");
         let commit = started.elapsed();
         println!(
             "{round:>6}: prepare {:>8.2} s, commit {:>8.2} s — {} file(s), {} declaration(s), {} token(s), {} error(s)",
@@ -143,7 +145,9 @@ fn where_the_module_read_spends_its_time() {
     };
     let prepare = started.elapsed();
     let started = Instant::now();
-    let reading = restarted.commit_a_unit_reading(prepared);
+    let reading = restarted
+        .commit_a_unit_reading(prepared)
+        .expect("the session did not change");
     let commit = started.elapsed();
     println!(
         "restart: prepare {:>8.2} s, commit {:>8.2} s — {} file(s), {} declaration(s), {} token(s)",

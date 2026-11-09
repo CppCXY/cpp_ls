@@ -47,6 +47,10 @@ use crate::sema::types::{Type, TypeBindings, parse_type_spelling};
 use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::symbol::{Known, UnknownReason};
 
+#[cfg(test)]
+#[path = "project_cache_tests.rs"]
+mod cache_tests;
+
 /// How many files a visibility walk will cross before giving up.
 ///
 /// A backstop rather than a policy: real include graphs are shallow (the walker's own limit is
@@ -1036,8 +1040,8 @@ pub struct ProjectIndex {
     /// builds the closure once (18 ms over 145 files of the MSVC standard library, measured by
     /// `examples/completion_latency.rs`), and a completion asks the same question on every keystroke — a steady-state
     /// query measured **4–5 ms** with the per-condition memo in place and **84–90 ms** without one. The two memos
-    /// share a lifetime and therefore a rule: whatever clears `visibility_answers` clears this, because both are
-    /// answers that can only change when what the index holds changes.
+    /// share invalidation triggers: the walk memo is cleared on index changes, while condition answers for a known
+    /// file are evicted only for that file and its dependents.
     ///
     /// Keyed by the root so that a server with several files open keeps at most one answer per file, and storing the
     /// walk's own `Seen` rather than a copy of the pair because that is what the walk produces.
@@ -1063,11 +1067,8 @@ pub struct ProjectIndex {
     ///
     /// # What clearing it whole costs a request, measured
     ///
-    /// **This is the largest remaining term in a completion's latency, and it is the reason a keystroke is slow
-    /// exactly while the index is filling.** Every `insert` drops the whole memo, so the next query re-evaluates
-    /// every guarded include in its closure from scratch — and during indexing there is an insert every few
-    /// milliseconds, so *every* query pays it. Measured on the fixture `crates/cpp_ls/tests/latency.rs` uses, twelve
-    /// completions fired from `didOpen`:
+    /// Before selective invalidation, every `insert` dropped the whole memo, so the next query re-evaluated every
+    /// guarded include in its closure. Measured on the latency fixture, twelve completions fired from `didOpen`:
     ///
     /// ```text
     ///   the query's own work   #0 350 ms   #1 598 ms   #2 1270 ms   #3+ 2–5 ms
@@ -1078,18 +1079,8 @@ pub struct ProjectIndex {
     /// **0–2 ms** and the materialisation of its 548 candidates **1–2 ms** on the same queries, while
     /// `visible_files_with_modules` — which asks this memo for every guarded edge — measures 359–588 ms.
     ///
-    /// # What the fix is, so the next round does not have to find it again
-    ///
-    /// The clear is *correct* and it is too wide. An answer for `(file, region)` can change only if the inserted
-    /// summary is one the file's closure contains — reachability is decided by the *includers'* edges, which do not
-    /// move when a summary arrives, so `ProjectIndex::dependents_of(inserted)` names exactly the files to invalidate.
-    /// Two pieces are needed and neither is written yet:
-    ///
-    /// * the memo needs to be removable **by file** rather than whole (a second map, `file → keys`, or a `retain`);
-    /// * the precise edge case: inserting `X` also makes `X`'s own includes reachable from everything that can see
-    ///   `X`, and those are inside `dependents_of(X)` already — but an edge `X → S` first becomes visible to the
-    ///   walk when **`X`** is inserted, so `X`'s insert has to invalidate the files that can see `X`, which is the
-    ///   same rule with `X` in the inserted role.
+    /// An answer for `(file, region)` depends on the file's closure. Replacing a known summary therefore evicts that
+    /// file and its dependents; a newly discovered path clears the whole memo because previous edges may reach it.
     ///
     /// The alternative — the one the `FactGuard::Region` arm's own comment names — is the incremental
     /// `macros_at`/`macro_environment` state, one walk per file with conditions answered as they are reached,
@@ -12332,6 +12323,27 @@ impl ProjectIndex {
         &self.macros
     }
 
+    fn invalidate_visibility_answers(&self, path: &Path, known: bool) {
+        let affected = known.then(|| {
+            std::iter::once(normalize(path))
+                .chain(
+                    self.dependents_of(path)
+                        .iter()
+                        .map(|dependent| normalize(dependent)),
+                )
+                .collect::<HashSet<_>>()
+        });
+        let mut answers = self
+            .visibility_answers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(affected) = affected {
+            answers.retain(|(file, _), _| !affected.contains(file));
+        } else {
+            answers.clear();
+        }
+    }
+
     /// Add or replace one file's summary.
     ///
     /// The reverse edges are updated rather than rebuilt: an edit to one file changes only its own out-edges,
@@ -12354,12 +12366,10 @@ impl ProjectIndex {
     /// whose keys match have the same declarations, at the same offsets, with the same ranges, *and* the same
     /// resolved includes.
     pub fn insert_at(&mut self, path: &Path, summary: FileSummary) {
-        // A new summary can change any condition's answer, so the per-condition memo goes: an answer about
-        // visibility can only change when what the index holds changes, and losing one costs a condition, not a
-        // walk. See [`ProjectIndex::visibility_answers`].
-        if let Ok(mut answers) = self.visibility_answers.lock() {
-            answers.clear();
-        }
+        let rewritten = normalize(path);
+        let known_to_the_index =
+            self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
+        self.invalidate_visibility_answers(path, known_to_the_index);
         // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
         // class, and nothing computed before it may answer after it.
         if let Ok(mut answers) = self.type_answers.lock() {
@@ -12378,9 +12388,6 @@ impl ProjectIndex {
         // testing the summaries map made every keystroke look like a brand-new file and cleared the whole walk memo
         // (measured: one keystroke left two walks where the targeted rule should leave one, and the survival this
         // change is for never happened). `known_paths` outlives a forget for exactly this reason.
-        let rewritten = normalize(path);
-        let known_to_the_index =
-            self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
         self.known_paths.insert(rewritten.clone());
         if let Ok(mut walks) = self.visibility.lock() {
             if known_to_the_index {
@@ -12519,9 +12526,7 @@ impl ProjectIndex {
         // `LuaSyntaxTree.cpp`, 33.5 ms of a 200 ms pull. The contributor rule is also a correctness fix rather than
         // only bookkeeping — the test `name_index_agrees_with_the_scan::after_every_kind_of_edit` caught a query
         // between a forget and the next insert answering from a walk that still had the forgotten file in it.
-        if let Ok(mut answers) = self.visibility_answers.lock() {
-            answers.clear();
-        }
+        self.invalidate_visibility_answers(Path::new(&path), true);
         // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
         // class, and nothing computed before it may answer after it.
         if let Ok(mut answers) = self.type_answers.lock() {
@@ -14524,7 +14529,7 @@ impl ProjectIndex {
                     // **The condition is asked, and the answer is remembered**. Asking costs the file's
                     // whole closure state; the same question is asked by every query and every walk over hundreds of
                     // edges, and the answer cannot change until a summary is inserted — so it is memoised on the
-                    // index (`visibility_answers`), which `insert_at` clears.
+                    // index (`visibility_answers`), which `insert_at` invalidates for affected files.
                     //
                     // Only `Active` is *used*: a condition that holds makes the include unconditional, and one
                     // nobody can decide leaves the answer exactly where it was (`Conditional`). What `Inactive`

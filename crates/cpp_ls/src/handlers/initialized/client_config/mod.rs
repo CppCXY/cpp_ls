@@ -55,11 +55,11 @@ pub async fn get_client_config(
 ) -> ClientConfig {
     let mut config = ClientConfig::for_client(client_id);
 
-    match client_id {
-        ClientId::VSCode => {
+    match (client_id, supports_config_request) {
+        (ClientId::VSCode, true) => {
             get_client_config_vscode(context, &mut config).await;
         }
-        _ if supports_config_request => {
+        (_, true) => {
             get_client_config_default(context, &mut config, Some(&["cppls"])).await;
         }
         _ => {}

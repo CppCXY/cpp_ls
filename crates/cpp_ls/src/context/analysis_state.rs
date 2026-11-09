@@ -101,7 +101,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::context::RequestOutcome;
 
@@ -112,6 +112,7 @@ pub struct AnalysisState {
     files: SessionFiles<DiskFiles>,
     /// How many queries may read at once.
     blocking_permits: Arc<Semaphore>,
+    file_read_gate: Arc<Mutex<()>>,
     /// Held for reading by a query and for writing by an update, so that an update waits for the queries already
     /// running rather than interleaving with them. That is the whole reason it is separate from `inner`'s own lock:
     /// the write lock is taken *before* the blocking hop, which is what keeps a notification from being overtaken.
@@ -154,6 +155,7 @@ impl AnalysisState {
             files,
             gate: Arc::new(tokio::sync::RwLock::new(())),
             blocking_permits: Arc::new(Semaphore::new(Self::analysis_parallelism())),
+            file_read_gate: Arc::new(Mutex::new(())),
             worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
         }
@@ -203,11 +205,12 @@ impl AnalysisState {
         // `EmmyLuaCodeStyle` with `CPPLS_TRACE_CODE_ACTION=1`: `codeAction` took **56 ms, of which `prepare` was
         // 54 ms** — and the fix provider itself was **14 µs**. The handler was not slow; it was queueing.
         //
-        // The condition is the one the doc comments argue for: **a rendering already exists**, so `load` has nothing to
-        // read and `want_cooked_reading` has nothing to request. `view` is a read, and a read does not wait for the
-        // pump's parse.
+        // Check the rendering without constructing a parsed view on this path.
         if self
-            .with_snapshot(|session| session.view(path).is_some())
+            .with_snapshot(|session| {
+                session.files().held(path).is_some_and(|file| file.open)
+                    || session.has_rendering(path)
+            })
             .unwrap_or(false)
         {
             return true;
@@ -301,18 +304,110 @@ impl AnalysisState {
     /// The check is a **read**, and a read does not wait for the pump's parse — only a write does. See
     /// [`Session::needs_catching_up`] for why the answer is exact rather than a guess.
     pub async fn catch_up(&self, path: &std::path::Path) {
-        if !self
-            .with_snapshot(|session| session.needs_catching_up(path))
-            .unwrap_or(true)
-        {
-            return;
+        const MAX_FILES: usize = 9;
+        for _ in 0..MAX_FILES {
+            let Some(next) = self.next_file_for_catch_up(path).await else {
+                return;
+            };
+            self.read_queued_file(&next).await;
         }
+        self.wake();
+    }
 
+    async fn next_file_for_catch_up(&self, path: &std::path::Path) -> Option<PathBuf> {
+        let immediate = match self.inner.try_read() {
+            Ok(session) => Some(session.as_ref().map(|session| {
+                (
+                    session.needs_catching_up(path),
+                    session.next_file_to_catch_up(path),
+                )
+            })),
+            Err(_) => None,
+        };
+        let (needs_work, next) = match immediate {
+            Some(state) => state,
+            None => {
+                let path = path.to_path_buf();
+                self.run_blocking(move |session| {
+                    Some((
+                        session.needs_catching_up(&path),
+                        session.next_file_to_catch_up(&path),
+                    ))
+                })
+                .await
+            }
+        }?;
+        if !needs_work {
+            return None;
+        }
+        if next.is_some() {
+            return next;
+        }
         let path = path.to_path_buf();
-        self.update_session("a request caught up with its file", move |session| {
-            session.catch_up(&path)
+        self.update_session("queue an unread include", move |session| {
+            session.ensure_file_to_catch_up(&path)
         })
-        .await;
+        .await
+        .flatten()
+    }
+
+    pub async fn read_queued_file(&self, path: &std::path::Path) -> bool {
+        let guard = self.file_read_gate.clone().lock_owned().await;
+        let path = path.to_path_buf();
+        let gathered = self
+            .run_blocking(move |session| Some((session.gather_a_file_read(&path), guard)))
+            .await;
+        let Some((Some(materials), guard)) = gathered else {
+            return false;
+        };
+        let prepared = tokio::task::spawn_blocking(move || (materials.read(), guard)).await;
+        let (prepared, _guard) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => {
+                log::error!("the background file read failed: {error}");
+                return false;
+            }
+        };
+        let committed = self
+            .update_session("commit a file read", move |session| {
+                session.commit_a_file_read(prepared)
+            })
+            .await
+            .unwrap_or(false);
+        if committed {
+            self.wake();
+        }
+        committed
+    }
+
+    pub async fn render_cooks(
+        &self,
+        cooks: Vec<cpp_code_analysis::session::DetachedCook<DiskFiles>>,
+    ) -> Vec<cpp_code_analysis::session::RenderedCook> {
+        if cooks.is_empty() {
+            return Vec::new();
+        }
+        let permit = match self.blocking_permits.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                log::error!("cannot schedule rendering: {error}");
+                return Vec::new();
+            }
+        };
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            cooks.into_iter().filter_map(|cook| cook.render()).collect()
+        })
+        .await
+        {
+            Ok(rendered) => rendered,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => {
+                log::error!("rendering failed: {error}");
+                Vec::new()
+            }
+        }
     }
 
     /// Tell the indexing pump that the queue has work in it.
@@ -348,7 +443,11 @@ impl AnalysisState {
     /// Returns whether a program was attempted. `false` when none was owed, or when the clock
     /// ([`cpp_code_analysis::Session::the_program_to_read`]) or the size budget said no.
     pub async fn read_a_program(&self) -> bool {
-        let Some(Some(root)) = self.with_snapshot(|session| session.the_program_to_read()) else {
+        let Some(Some((root, revision))) = self.with_snapshot(|session| {
+            session
+                .the_program_to_read()
+                .map(|root| (root, session.revision()))
+        }) else {
             return false;
         };
 
@@ -361,9 +460,16 @@ impl AnalysisState {
         // **The expensive half with no lock at all.** `spawn_blocking` rather than the analysis pool: this work is
         // the background's, and it must not be one of the permits a request waits for.
         let prepared = match materials {
-            Some(materials) => tokio::task::spawn_blocking(move || materials.read_the_program())
-                .await
-                .unwrap_or(None),
+            Some(materials) => {
+                match tokio::task::spawn_blocking(move || materials.read_the_program()).await {
+                    Ok(prepared) => prepared,
+                    Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                    Err(error) => {
+                        log::error!("the background program read failed: {error}");
+                        return false;
+                    }
+                }
+            }
             None => None,
         };
 
@@ -371,6 +477,10 @@ impl AnalysisState {
         // that cannot be built is not chosen again on the next wake.
         let read = self
             .update_session("read a program", move |session| {
+                if !session.is_current(&revision) {
+                    log::debug!("discarding a program read from an older session revision");
+                    return None;
+                }
                 session.commit_a_program(&root, prepared)
             })
             .await
@@ -427,37 +537,44 @@ impl AnalysisState {
     ///
     /// A test's way in: it builds a session with [`Session::with_config`] over *this* chain (no compiler is run) to
     /// assert that a buffer written through one handle is what a session reads through the other. Production code
-    /// does not need it, because [`AnalysisState::open`] builds the session over the same chain itself.
+    /// does not need it, because [`AnalysisState::build_session`] uses the same chain.
     #[cfg(test)]
     pub fn files(&self) -> &SessionFiles<DiskFiles> {
         &self.files
     }
 
-    /// Make the analysis be about `root`, replacing whatever session was open.
-    ///
-    /// Replacing rather than refusing, because this is the same call for the two moments a workspace appears: the
-    /// first `initialized`, and a reload (the workspace folder changed, `.cppls.toml` or `compile_commands.json` was
-    /// rewritten). In both cases the honest answer is "analyse *this* root now" — and a reload is cheap, because
-    /// the summaries the previous session wrote are on disk under the root and the new session re-reads them
-    /// instead of parsing (`Session::open`, `SummaryStore`).
-    ///
-    /// `config_file` is a configuration file a caller named (`--config`); `None` means the conventional
-    /// `.cppls.toml` in the root, and a project without one is the ordinary case rather than a problem.
-    ///
-    /// The buffers survive either way: they live in the provider chain, which this state owns and every session
-    /// reads through. What does *not* survive is the index, so the caller re-marks the open documents
-    /// (`Session::did_open`) — see `handlers::initialized`.
-    pub async fn open(&self, root: PathBuf, filter: WatchFilter, config_file: Option<PathBuf>) {
+    /// Build a session and restore its sharing cache on the blocking pool, without locking the live session.
+    /// The caller validates the workspace epoch, replays open buffers and installs it separately.
+    pub async fn build_session(
+        &self,
+        root: PathBuf,
+        filter: WatchFilter,
+        config_file: Option<PathBuf>,
+    ) -> Option<Session<DiskFiles>> {
         let files = self.files.clone();
-        self.update("open the session", move |slot| {
-            *slot = Some(Session::open_with_config_file(
-                root,
-                files,
-                filter,
-                config_file.as_deref(),
-            ));
+        match tokio::task::spawn_blocking(move || {
+            let session =
+                Session::open_with_config_file(root, files, filter, config_file.as_deref());
+            let restored = session.load_the_sharing();
+            if restored > 0 {
+                log::info!("restored {restored} shared contribution(s) from the last run");
+            }
+            session
         })
-        .await;
+        .await
+        {
+            Ok(session) => Some(session),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => {
+                log::error!("failed to construct a workspace session: {error}");
+                None
+            }
+        }
+    }
+
+    pub async fn install_session(&self, session: Session<DiskFiles>) {
+        self.update("install the session", move |slot| *slot = Some(session))
+            .await;
     }
 
     /// **Run a read-only query, and report where a slow one spent its time.**
@@ -487,7 +604,7 @@ impl AnalysisState {
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
     {
         let started = std::time::Instant::now();
-        let _permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
+        let permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
         let waited_for_a_permit = started.elapsed().as_millis() as u64;
 
         let inner = self.inner.clone();
@@ -495,6 +612,7 @@ impl AnalysisState {
         let waited_for_the_gate = started.elapsed().as_millis() as u64;
 
         let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let locked = std::time::Instant::now();
             let session = inner
                 .read()
@@ -549,64 +667,11 @@ impl AnalysisState {
         }
     }
 
-    /// **Is there a reading for this file, and read and cook it if not.**
+    /// Prepare a current summary and cooked rendering before a diagnostic query.
     ///
-    /// The write half of a pull request, and it must happen **before** the query: [`AnalysisState::query_blocking`]
-    /// runs its closure under the read lock — that is what lets queries run beside the index pump — while reading a
-    /// file and cooking it are `&mut Session`. So the two are split where the two locks are, and this is the first.
-    ///
-    /// # Why `textDocument/diagnostic` needed it
-    ///
-    /// The pull handler used [`AnalysisState::prepare`], which **queues** a file for cooking and returns — and then
-    /// asked the query, which found no reading and answered `Missing`. A `Missing` outcome becomes a JSON `null`
-    /// response (`context::ServerContext::task`), and a client expecting a `DocumentDiagnosticReport` drops it: the
-    /// diagnostics it already had stay on screen, which is what "输入代码之后诊断不改变" is.
-    ///
-    /// The `bool` is whether the file can be cooked at all: `false` means it is not there, which is the honest
-    /// `Missing` rather than an empty report.
-    ///
-    /// # The fast path, and the 195 seconds that made it necessary
-    ///
-    /// Every one of those three steps is **discovery work that has already been done**, and there was no check for
-    /// that. `add_project_files` re-queues **every file of the project** — see its own note, where the queue is the
-    /// one thing it always touches — and `index_everything` then drains that queue, so a pull request re-indexed the
-    /// whole project. A write hold is what every other request waits for, so this is not "diagnostics are slow": it
-    /// is **hover, completion and every keystroke** waiting behind it.
-    ///
-    /// Measured on a real project (`EmmyLuaCodeStyle`, 5 000+ files) from the server's own budget warning, which
-    /// names the label this function passes:
-    ///
-    /// ```text
-    /// 17:52:25 `prepare a file a pull request named` held the analysis for 195264 ms
-    /// 17:53:58   … 3524 ms
-    /// 17:54:20   … 2068 ms
-    /// 17:54:49   … 7018 ms
-    /// ```
-    ///
-    /// **195 seconds, and then seconds on every request after it.**
-    ///
-    /// # Why the guard is these two questions, and why one was not enough
-    ///
-    /// **`session.view(path)` is `Some` only when the file is indexed *and* its rendering is cached.** It builds
-    /// nothing; on a miss it only notes that the file wants cooking. So it is exactly "the rendering this function
-    /// exists to produce is already there".
-    ///
-    /// **And it is not enough on its own**, which a test caught: a *rendering* is cached by content hash and an
-    /// **edit does not evict it** — the file's summary is what an edit drops (see [`crate::FileSummary`] and
-    /// `Session::did_open`). A guard of `view` alone therefore answered "already prepared" for a buffer the client
-    /// had just changed, skipped the re-index, and the query that followed found no summary and answered nothing —
-    /// which is the very defect (`诊断不改变`) this function was written to fix. Measured by
-    /// `diagnostics_are_answered_before_the_index_has_read_the_file`, which indexes a file, edits it, and requires
-    /// the pull path to bring the answer back.
-    ///
-    /// So the summary is required as well: **a summary exists exactly when the index has read the file's current
-    /// text**, and that is the freshness this has to be sure of. Both together mean "the work is done and it is the
-    /// work for the text now in the buffer".
-    ///
-    /// It is also conservative in the direction that matters: a file that is **not** ready still takes the path
-    /// below unchanged, so a cold file, an edited file and a file whose rendering is one pump away all behave
-    /// exactly as they did. Nothing here can make a diagnostic disappear that used to appear; the only change is
-    /// that work already finished is not done again.
+    /// File reads and rendering run without the session lock; short commits validate their captured revision. The
+    /// bounded catch-up does not drain unrelated project work. `false` means the file is unreadable, not yet ready,
+    /// or its prepared work became stale; callers must not treat it as a clean diagnostic report.
     pub async fn prepare_for_a_diagnostic(&self, path: &std::path::Path) -> bool {
         let to_prepare = path.to_path_buf();
 
@@ -632,86 +697,73 @@ impl AnalysisState {
             // applies the edit, so for one pull the summary and the cooked reading are still the old ones and there is
             // no view: `checks_about` then has no tree, every finding disappears, and the client is told the file became
             // clean — the flash this function exists to prevent. Measured: `prepare fast path` followed by
-            // `view=false checks=0` on the pull right after `didChange`. `Session::view` is a lookup of the rendering
-            // (not a parse), so asking costs a hash read.
-            && session.view(&to_prepare).is_some()
+            // `view=false checks=0` on the pull right after `didChange`. `has_rendering` checks the same rendering
+            // without parsing it on the async runtime.
+            && session.has_rendering(&to_prepare)
         {
             return true;
         }
 
-        self.update_session("prepare a file a pull request named", move |session| {
-            // **Already cooked: nothing to do, even though the read lock was unavailable a moment ago.**
-            //
-            // The fast path above needs the *read* lock, and the pump holds the write lock in slices whenever there
-            // is work — so on a busy session a pull that would need no work at all fell through to this closure,
-            // loaded the file, drained the queue and cooked it **again**. Cooking a system header is a macro
-            // expansion of a hundred kilobytes: the header of a real standard-library file costs tens of
-            // milliseconds, which is why opening `<ostream>` turned into a core at 100 %, with the diagnostics
-            // flashing because every pull re-queued work that the next pull then waited on.
-            //
-            // Asking the question *inside* the write lock costs nothing and settles it: a view that is already
-            // there means this request has all it needs.
-            if session.index().summary(&to_prepare).is_some() && session.view(&to_prepare).is_some()
-            {
-                return true;
-            }
+        let target = to_prepare.clone();
+        let queued = self
+            .update_session("prepare a file a pull request named", move |session| {
+                if session.index().summary(&target).is_some()
+                    && session.index().cooked_declarations(&target).is_some()
+                    && session.has_rendering(&target)
+                {
+                    return true;
+                }
+                if session.load(&target).is_none() {
+                    return false;
+                }
+                if !session.contains_project_file(&target) {
+                    session.add_project_files([target.clone()]);
+                }
+                session.want_refinement(&target);
+                session.want_cooked_reading(&target);
+                true
+            })
+            .await
+            .unwrap_or(false);
+        if !queued {
+            return false;
+        }
+        self.wake();
 
-            session.load(&to_prepare);
+        for _ in 0..PREPARE_INDEX_SLICE {
+            let Some(next) = self.next_file_for_catch_up(&to_prepare).await else {
+                break;
+            };
+            self.read_queued_file(&next).await;
+        }
 
-            // **`index_everything`, but `add_project_files` only for a file the index has never heard of.**
-            //
-            // The pair is the whole of the cost, and only one half of it is needed for the ordinary case.
-            // `add_project_files` re-queues **every file of the project** — it is a discovery step, and its own note
-            // says the queue is the one thing it always touches — so a pull re-indexed a 5 000-file project to
-            // answer a question about one buffer. `index_everything` is the *drain*, and what it drains can be just
-            // this file.
-            //
-            // And for an edited file it already is: `Session::did_change`/`did_open` queue it at `Priority::Open`
-            // and mark it for cooking (see `Session::buffer_changed`). So the file being prepared is already the
-            // head of the queue and the drain below reads **it** — which is exactly the "answer before the pump
-            // reaches it" that the pull path exists for. Dropping the re-queue removes the project-wide work and
-            // changes nothing about which file gets read.
-            //
-            // Measured from the budget warning before this, on every keystroke rather than once:
-            //
-            // ```text
-            // 17:53:58 `prepare a file a pull request named` held the analysis for 3524 ms
-            // 17:54:20   … 2068 ms
-            // 17:54:49   … 7018 ms
-            // ```
-            // **Discovery is for a file the session has not been told about yet**, and the test for that is the
-            // project list rather than the file's location: a buffer the client opened from outside the folder (a
-            // header `Go to definition` reached, an untitled buffer) still has to be queued once before it can be
-            // cooked, and a system header a reader opens is *one* such file, not one per pull — the in-lock check
-            // above is what keeps the second pull out of here entirely.
-            if !session
-                .project_files()
-                .iter()
-                .any(|known| known == &to_prepare)
-            {
-                session.add_project_files([to_prepare.clone()]);
-            }
+        let target = to_prepare.clone();
+        if self
+            .run_blocking(move |session| {
+                Some(
+                    session.index().summary(&target).is_some()
+                        && session.index().cooked_declarations(&target).is_some()
+                        && session.has_rendering(&target),
+                )
+            })
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
 
-            // **Bounded, and by a slice.** That call loops until the queue is empty, so a pull was asking for the
-            // whole project — see [`PREPARE_INDEX_SLICE`] for the 102 seconds that cost. A pull is a nudge for one
-            // file; the pump is the loop that owns this work, and anything still queued is left for it.
-            //
-            // **A count and not a deadline, which was tried here and is worse.** The file cannot be cooked until
-            // its include chain has been read, and how many files that is cannot be known without reading them — so
-            // a slice that is too small answers `false` and the client shows nothing, which is the defect this
-            // function exists to fix. A count large enough for an ordinary include chain and far short of a project
-            // is the honest setting; the pump finishes the rest within the second.
-            //
-            // **And the second pass is asked for, because a pull is a request about this file.** Phase 0 of
-            // `docs/indexing-design.md` stopped a start from refining the project: a file is refined when somebody
-            // asks, and the pull is somebody. Without the ask the file keeps the shape-only reading the index gives
-            // — a class opened by another file's macro body has no scope there — and every finding computed from it
-            // is computed from the weaker reading. `catch_up` asks on the hover path and this is the diagnostics
-            // path's half; the drain is `advance`'s tail, which serves an ask only when the queue is idle, so it
-            // costs nothing when there is already work.
-            session.want_refinement(&to_prepare);
-            session.advance(PREPARE_INDEX_SLICE);
-            session.cook(&to_prepare).is_some()
+        let target = to_prepare.clone();
+        let Some(materials) = self
+            .run_blocking(move |session| session.gather_a_cook(&target))
+            .await
+        else {
+            return false;
+        };
+        let Some(rendered) = self.render_cooks(vec![materials]).await.pop() else {
+            return false;
+        };
+        self.update_session("commit a diagnostic rendering", move |session| {
+            session.commit_a_cooked(rendered).is_some()
         })
         .await
         .unwrap_or(false)
@@ -1172,5 +1224,80 @@ mod tests {
 
         assert_eq!(read.await.unwrap(), Some(1));
         assert_eq!(write.await.unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_returns_before_a_running_blocking_query_finishes() {
+        use super::super::{CancelSource, snapshot_query};
+        use tokio_util::sync::CancellationToken;
+
+        let state = Arc::new(AnalysisState::new());
+        let root = std::env::temp_dir().join("cppls-analysis-state-tests");
+        opened(&state, &root).await;
+
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let query_state = state.clone();
+        let query_token = token.clone();
+        let query = tokio::spawn(async move {
+            snapshot_query(&query_state, query_token, move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Some(42)
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        token.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RequestOutcome::Cancelled(CancelSource::Client)
+        ));
+
+        let write_state = state.clone();
+        let mut write = tokio::spawn(async move { write_state.update("test", |_| 1).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut write)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(write.await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catching_up_can_be_cancelled_while_waiting_for_the_session_lock() {
+        let state = AnalysisState::new();
+        let root = std::env::temp_dir().join("cppls-analysis-state-tests");
+        opened(&state, &root).await;
+
+        let inner = state.inner.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = tokio::task::spawn_blocking(move || {
+            let _guard = inner.write().unwrap();
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+        });
+        entered_rx.await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.catch_up(&root.join("main.cpp")),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        writer.await.unwrap();
+        assert!(
+            result.is_err(),
+            "waiting for the lock must remain cancellable"
+        );
     }
 }

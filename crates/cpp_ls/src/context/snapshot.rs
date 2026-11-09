@@ -4,7 +4,8 @@ use tokio::sync::Mutex;
 use crate::context::{UpdateEvent, UpdateInbox, lsp_features::LspFeatures};
 
 use super::{
-    AnalysisState, client::ClientProxy, status_bar::StatusBar, workspace_manager::WorkspaceManager,
+    AnalysisState, DiagnosticService, NativeFileWatcher, client::ClientProxy,
+    status_bar::StatusBar, workspace_manager::WorkspaceManager,
 };
 
 #[derive(Clone)]
@@ -37,7 +38,15 @@ impl ServerContextSnapshot {
         &self.inner.lsp_features
     }
 
-    /// **The client's pending notifications** — the queue a request applies before it reads the analysis.
+    pub fn diagnostics(&self) -> &DiagnosticService {
+        &self.inner.diagnostics
+    }
+
+    pub fn native_watcher(&self) -> &NativeFileWatcher {
+        &self.inner.native_watcher
+    }
+
+    /// The client's pending notifications, applied by one worker before request barriers complete.
     pub fn inbox(&self) -> &UpdateInbox {
         &self.inner.inbox
     }
@@ -59,4 +68,6 @@ pub struct ServerContextInner {
     pub lsp_features: Arc<LspFeatures>,
     /// The client's pending notifications. See [`ServerContextSnapshot::enqueue`].
     pub inbox: UpdateInbox,
+    pub diagnostics: DiagnosticService,
+    pub native_watcher: NativeFileWatcher,
 }

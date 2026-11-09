@@ -9,19 +9,9 @@
 //! **/*.cppm, **/*.ixx                               module interfaces (a C++20 project's own kind of source)
 //! ```
 //!
-//! # Why the client watches and this server does not
-//!
-//! A server-side watcher (`notify`, inotify, a poll loop) is a second opinion about a filesystem the client is
-//! already watching, and a worse one: it costs a thread and a recursive watch per root, it has to debounce a
-//! temporary-file rename that the client performed and understands, and on a large checkout it is the difference
-//! between an idle server and a busy one. The decision is 's ("no OS watcher"), and this
-//! module is the other half of it: what the client cannot be asked to do, this server does not do either.
-//!
-//! A client that does not support dynamic registration gets no registration and no events; it still gets
-//! diagnostics for every file it *opens*, which is the part that does not need a watcher. That is a real limitation
-//! and it is logged rather than hidden.
+//! Clients with dynamic registration provide the events; otherwise the server uses a native watcher.
 
-use log::{info, warn};
+use log::info;
 use lsp_types::{
     DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, Registration,
     RegistrationParams, Unregistration, UnregistrationParams, WatchKind,
@@ -55,9 +45,6 @@ pub async fn register_files_watch(context: ServerContextSnapshot) {
         .lsp_features()
         .supports_dynamic_watched_files_registration()
     {
-        warn!(
-            "the client cannot be asked to watch files; changes made outside the editor will not be noticed"
-        );
         return;
     }
 

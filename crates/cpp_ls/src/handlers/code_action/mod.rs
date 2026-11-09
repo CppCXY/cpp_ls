@@ -49,8 +49,10 @@ pub async fn on_code_action(
     let trace = cpp_code_analysis::probes::code_action();
     let started = std::time::Instant::now();
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
+    if let Some(path) = uri_to_file_path(&uri)
+        && !context.analysis().prepare_for_a_diagnostic(&path).await
+    {
+        return RequestOutcome::Missing;
     }
     let prepared = started.elapsed();
 

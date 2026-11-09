@@ -157,17 +157,6 @@ impl ClientProxy {
         }
     }
 
-    /// **`textDocument/publishDiagnostics` is deliberately not here.**
-    ///
-    /// It was, and it is gone with the push path: diagnostics are **pulled** (`textDocument/diagnostic`), so the
-    /// server never sends them unasked. A client that asks is answered from the index as it stands, which is what
-    /// removes the whole class of defect the push path kept having — an answer about text the user has since
-    /// replaced, arriving after the edit that replaced it.
-    ///
-    /// **`workspace/diagnostic/refresh` is deliberately not here either**, and for a reason that took a reader's log
-    /// to see: asking a client to ask again made it ask in a *loop*, because the ask produced work and the work
-    /// drained into another refresh. A pull client has its own rhythm; the server's job is to answer it. See the note
-    /// in `handlers/initialized` where this used to be called.
     pub async fn apply_edit(
         &self,
         params: ApplyWorkspaceEditParams,
@@ -189,6 +178,10 @@ impl ClientProxy {
     pub fn send_request_no_response(&self, method: &str, params: impl serde::Serialize) {
         let request_id = self.next_id();
         self.send_request_no_wait(request_id, method, params);
+    }
+
+    pub fn refresh_diagnostics(&self) {
+        self.send_request_no_response("workspace/diagnostic/refresh", ());
     }
 
     /// Ask the client to ask again for the inlay hints it is showing.

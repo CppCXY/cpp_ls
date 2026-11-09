@@ -60,6 +60,7 @@ pub async fn on_prepare_call_hierarchy(
     log::debug!("call hierarchy: prepare asked at {position:?}");
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+        context.analysis().catch_up(&path).await;
     }
     log::debug!("call hierarchy: prepare returned, asking the session");
 
@@ -84,6 +85,7 @@ pub async fn on_incoming_calls(
         return RequestOutcome::Missing;
     };
     context.analysis().prepare(&path).await;
+    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;
@@ -108,6 +110,7 @@ pub async fn on_outgoing_calls(
         return RequestOutcome::Missing;
     };
     context.analysis().prepare(&path).await;
+    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;

@@ -76,8 +76,8 @@ use std::sync::{Arc, RwLock};
 use crate::cache::SummaryKey;
 use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
-use crate::file::vfs::Vfs;
-use crate::file::view::{FileView, TokensOf};
+use crate::file::vfs::{Vfs, VfsFile};
+use crate::file::view::{FileView, ParsedView, TokensOf};
 use crate::include::config::{CompileCommands, CompilerConfig, project_config_from_flags};
 use crate::include::toolchain::{self, Environment, Toolchain};
 use crate::index::project::{
@@ -334,6 +334,7 @@ pub type SessionFiles<F = DiskFiles> = OverlayFiles<OpenDocuments, F>;
 #[derive(Debug, Clone, Default)]
 pub struct OpenDocuments {
     buffers: Arc<RwLock<HashMap<String, String>>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl OpenDocuments {
@@ -349,10 +350,17 @@ impl OpenDocuments {
     /// `&self` rather than `&mut self`, because the buffer map is behind a lock: a caller holding the handle can
     /// write a buffer while a session reads through it, which is the whole reason the handle exists.
     pub fn open(&self, path: impl AsRef<Path>, text: impl Into<String>) {
-        self.buffers
+        let mut buffers = self
+            .buffers
             .write()
-            .expect("the buffer map is not poisoned")
-            .insert(normalize_path(path.as_ref(), cfg!(windows)), text.into());
+            .expect("the buffer map is not poisoned");
+        let key = normalize_path(path.as_ref(), cfg!(windows));
+        let text = text.into();
+        if buffers.get(&key) != Some(&text) {
+            buffers.insert(key, text);
+            self.revision
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// The document is closed: the path is the filesystem's again.
@@ -360,11 +368,22 @@ impl OpenDocuments {
     /// Returns whether there was a buffer to drop. The text is **not** kept: after a close, the disk is the answer,
     /// and holding the last buffer would answer with an edit that may never have been saved.
     pub fn close(&self, path: impl AsRef<Path>) -> bool {
-        self.buffers
+        let mut buffers = self
+            .buffers
             .write()
-            .expect("the buffer map is not poisoned")
+            .expect("the buffer map is not poisoned");
+        let removed = buffers
             .remove(&normalize_path(path.as_ref(), cfg!(windows)))
-            .is_some()
+            .is_some();
+        if removed {
+            self.revision
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        removed
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The buffer for a path, if it is open.
@@ -506,6 +525,23 @@ struct ViewKey {
     environment: Option<EnvironmentId>,
 }
 
+fn buffer_view_key(
+    file: &VfsFile,
+    cuda: bool,
+    environment: Option<Arc<cpp_parser::MacroEnvironment>>,
+) -> ViewKey {
+    ViewKey {
+        path: file.path.clone(),
+        rendering: None,
+        text: crate::cache::content_hash(&file.text),
+        id: file.id,
+        cuda,
+        language: None,
+        open: file.open,
+        environment: environment.map(EnvironmentId),
+    }
+}
+
 /// The identity of a rendering — **by object, held**, see [`ViewKey::rendering`].
 #[derive(Debug, Clone)]
 struct RenderingId(std::sync::Arc<crate::preprocess::cooked::RenderedCooked>);
@@ -579,8 +615,17 @@ fn a_view_weighs(view: &FileView) -> usize {
     view.source.len().saturating_mul(8) + view.tree.get_tokens().len().saturating_mul(16)
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionRevision {
+    session: Arc<()>,
+    changes: u64,
+    documents: u64,
+}
+
 pub struct Session<F: FileProvider = DiskFiles> {
     root: PathBuf,
+    identity: Arc<()>,
+    changes: u64,
     config: CompilerConfig,
     /// What `discover` found, or `None` when no compiler answered. Kept for a human reading a log line, and for
     /// 's measurements.
@@ -614,6 +659,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
 
     /// What the project scan found, so that a configuration change can re-seed from it.
     project: Vec<PathBuf>,
+    project_paths: HashMap<String, PathBuf>,
     queue: Work,
     /// The files this session has **parsed** since the last body pass — the candidates for
     /// [`SummaryStore::re_read_where_a_body_decides`], which may only run once the closure is in hand.
@@ -635,7 +681,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     /// **The files whose reading in the index is a refined one** — what [`Session::is_refined`] answers, and what
     /// phase 1 needs to know when an answer is still the shape-only reading.
-    refined_readings: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    refined_readings: std::sync::Mutex<std::collections::HashSet<String>>,
     /// **The open files whose cooked reading is missing or stale** — what [`Session::cook`] is called for when the
     /// queue drains.
     ///
@@ -1310,6 +1356,7 @@ pub struct RenderedCook {
     pub text_hash: u64,
     pub indexed: crate::IndexedRendering,
     pub reading: CookedReading,
+    revision: SessionRevision,
 }
 
 pub struct CookingMaterials {
@@ -1335,6 +1382,19 @@ pub struct CookingMaterials {
     pub seed: MacroTable,
     /// The names the file's raw reading already declares, so the render's addition can be counted.
     pub already_declared: std::collections::HashSet<String>,
+    revision: SessionRevision,
+}
+
+pub struct DetachedCook<F: FileProvider> {
+    files: SessionFiles<F>,
+    config: CompilerConfig,
+    materials: CookingMaterials,
+}
+
+impl<F: FileProvider + Clone> DetachedCook<F> {
+    pub fn render(self) -> Option<RenderedCook> {
+        Session::<F>::render_cook(&self.files, &self.config, &self.materials)
+    }
 }
 
 /// **What a wave prepared, and the units the pass that follows it will need.**
@@ -1357,6 +1417,88 @@ pub struct PreparedWave {
     /// stored one is served instead of being rebuilt, and the files it covers need no timeline at all. This is what
     /// makes a second start cheap: the pass costs a lookup rather than a parse per file.
     pub refinements: Vec<crate::FileSummary>,
+    revision: Option<SessionRevision>,
+}
+
+pub struct FileReadMaterials<F: FileProvider> {
+    path: PathBuf,
+    revision: SessionRevision,
+    input: crate::index::store::DetachedRead<F>,
+    view: Option<BufferViewMaterials>,
+}
+
+pub struct PreparedFile {
+    path: PathBuf,
+    revision: SessionRevision,
+    prepared: crate::index::store::Prepared,
+    view: Option<PreparedBufferView>,
+}
+
+#[derive(Clone)]
+struct BufferViewMaterials {
+    file: VfsFile,
+    cuda: bool,
+    environment: Option<Arc<cpp_parser::MacroEnvironment>>,
+}
+
+struct PreparedBufferView {
+    key: ViewKey,
+    parsed: ParsedView,
+    weight: usize,
+}
+
+impl BufferViewMaterials {
+    fn parse(self) -> PreparedBufferView {
+        let key = buffer_view_key(&self.file, self.cuda, self.environment.clone());
+        let macros = self.environment.unwrap_or_default();
+        let view = FileView::parse_with_cuda(&self.file, macros.as_ref(), self.cuda);
+        let weight = a_view_weighs(&view);
+        PreparedBufferView {
+            key,
+            parsed: view.into_parsed(),
+            weight,
+        }
+    }
+}
+
+impl<F: FileProvider> FileReadMaterials<F> {
+    pub fn read(self) -> PreparedFile {
+        let (prepared, view) = match self.view {
+            Some(view)
+                if view.file.text.len() >= 16 * 1024
+                    && std::thread::available_parallelism().is_ok_and(|count| count.get() > 1) =>
+            {
+                std::thread::scope(|scope| {
+                    let worker_view = view.clone();
+                    let worker = std::thread::Builder::new()
+                        .name("cpp-ls-buffer-view".to_string())
+                        .stack_size(16 * 1024 * 1024)
+                        .spawn_scoped(scope, move || worker_view.parse());
+                    match worker {
+                        Ok(worker) => {
+                            let prepared = self.input.read();
+                            let view = worker
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                            (prepared, Some(view))
+                        }
+                        Err(error) => {
+                            log::warn!("could not start a buffer-view worker: {error}");
+                            (self.input.read(), Some(view.parse()))
+                        }
+                    }
+                })
+            }
+            Some(view) => (self.input.read(), Some(view.parse())),
+            None => (self.input.read(), None),
+        };
+        PreparedFile {
+            path: self.path,
+            revision: self.revision,
+            prepared,
+            view,
+        }
+    }
 }
 
 /// **What a drained slice still has to do, decided but not paid for.**
@@ -1379,6 +1521,7 @@ pub struct Drain {
     units: Vec<std::sync::Arc<crate::TranslationUnit>>,
     /// The macro environments a query asked for and has not got — up to `MACRO_SLICE` of them.
     environments: Vec<PathBuf>,
+    revision: Option<SessionRevision>,
 }
 
 impl Drain {
@@ -1402,11 +1545,15 @@ pub struct PreparedDrain {
         (PathBuf, u64),
         std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     )>,
+    revision: Option<SessionRevision>,
+    retry_files: Vec<PathBuf>,
+    retry_environments: Vec<PathBuf>,
 }
 
 /// **A unit read whose expensive half is done** — see [`Session::prepare_a_unit_reading`].
 pub struct PreparedUnitReading {
     root: PathBuf,
+    revision: SessionRevision,
     /// The hash of the rendering these facts were read from — what the memo and the database file them under.
     program: u64,
     indexed: crate::IndexedUnit,
@@ -1438,6 +1585,7 @@ pub struct PreparedUnitReading {
 /// budget is about a pathological closure now, not about a person's typing speed.
 pub struct UnitReadMaterials<F: FileProvider> {
     root: PathBuf,
+    revision: SessionRevision,
     /// The compilation context, which is part of the key a summary is filed under.
     key: SummaryKey,
     /// The key the rendering is filed under: the content hash of every file the walk entered, folded.
@@ -1485,6 +1633,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
         if let Some(indexed) = self.known {
             return Some(PreparedUnitReading {
                 root: self.root,
+                revision: self.revision,
                 program: self.program?,
                 indexed,
                 walked: self
@@ -1555,6 +1704,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
         {
             return Some(PreparedUnitReading {
                 root: self.root,
+                revision: self.revision,
                 program,
                 indexed: known,
                 walked: stream.walked.clone(),
@@ -1569,6 +1719,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
 
         Some(PreparedUnitReading {
             root: self.root,
+            revision: self.revision,
             program,
             indexed,
             walked: stream.walked.clone(),
@@ -1729,6 +1880,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let mut session = Session {
             root: root.clone(),
+            identity: Arc::new(()),
+            changes: 0,
             config,
             toolchain,
             discovery,
@@ -1738,6 +1891,10 @@ impl<F: FileProvider + Clone> Session<F> {
             store,
             filter,
             share_contributions: crate::probes::share(),
+            project_paths: project
+                .iter()
+                .map(|path| (queue_key(path), path.clone()))
+                .collect(),
             project: project.clone(),
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
@@ -1793,6 +1950,38 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn revision(&self) -> SessionRevision {
+        SessionRevision {
+            session: self.identity.clone(),
+            changes: self.changes,
+            documents: self.documents.revision(),
+        }
+    }
+
+    pub fn is_current(&self, revision: &SessionRevision) -> bool {
+        self.owns_revision(revision)
+            && self.changes == revision.changes
+            && self.documents.revision() == revision.documents
+    }
+
+    pub fn owns_revision(&self, revision: &SessionRevision) -> bool {
+        Arc::ptr_eq(&self.identity, &revision.session)
+    }
+
+    fn changed_input(&mut self) {
+        self.changes = self
+            .changes
+            .checked_add(1)
+            .expect("session revision overflow");
+    }
+
+    fn forget_refinement(&self, path: &Path) {
+        self.refined_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&queue_key(path));
     }
 
     // The configuration every summary in this session is keyed against.
@@ -2049,8 +2238,13 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
         candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.1));
 
-        let open: std::collections::HashSet<PathBuf> = self.documents.paths().into_iter().collect();
-        let refined: std::collections::HashSet<PathBuf> = self
+        let open: std::collections::HashSet<String> = self
+            .documents
+            .paths()
+            .iter()
+            .map(|path| queue_key(path))
+            .collect();
+        let refined: std::collections::HashSet<String> = self
             .refined_readings
             .lock()
             .map(|refined| refined.iter().cloned().collect())
@@ -2062,8 +2256,8 @@ impl<F: FileProvider + Clone> Session<F> {
             if over == 0 {
                 break;
             }
-            if open.contains(&path)
-                || refined.contains(&path)
+            if open.contains(&queue_key(&path))
+                || refined.contains(&queue_key(&path))
                 || self.queue.is_queued(&path)
                 || self
                     .parsed_since_the_last_pass
@@ -2236,6 +2430,10 @@ impl<F: FileProvider + Clone> Session<F> {
         &self.project
     }
 
+    pub fn contains_project_file(&self, path: &Path) -> bool {
+        self.project_paths.contains_key(&queue_key(path))
+    }
+
     /// Add files the caller knows about to the project list — a build system's translation units, a test's
     /// fixtures, a directory listing somebody else did better.
     ///
@@ -2246,14 +2444,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// This is also how a session over an in-memory project gets a project list at all: the scan reads a
     /// directory, and a set of buffers has none. See [`Session::with_config`].
     pub fn add_project_files(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> usize {
-        // A set rather than a scan of `self.project` per path: a build system hands over its whole translation-unit
-        // list at once, and "is this path already here" asked once per path is a quadratic walk of ten thousand
-        // paths — which is the one size of project this layer exists to survive.
-        let mut held: HashSet<String> = self.project.iter().map(|path| queue_key(path)).collect();
         let mut added = 0;
 
         for path in paths {
-            if held.insert(queue_key(&path)) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.project_paths.entry(queue_key(&path))
+            {
+                entry.insert(path.clone());
                 self.project.push(path.clone());
                 added += 1;
             }
@@ -2323,7 +2520,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// not exist anywhere. The file goes to the **rest** half of the queue: the user has stopped looking at it, and
     /// everything else they are looking at now comes first.
     pub fn did_close(&mut self, path: impl AsRef<Path>) {
+        self.changed_input();
         let path = path.as_ref();
+        self.forget_refinement(path);
         self.documents.close(path);
         // The text the analysis was holding was the *buffer's*, and the disk may never have seen it. Dropping the
         // entry is what makes the next question read the file again — a closed buffer is not a text this session
@@ -2340,10 +2539,7 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
 
-    /// The client reported filesystem changes — its own watcher's events, not ours.
-    ///
-    /// The entry point for the "no OS watcher" decision: a client that watches (or an
-    /// editor that simply knows, because it is what wrote the file) sends events, and this turns them into work.
+    /// Turn client or native filesystem notifications into index work.
     /// The batch is built here from the same [`WatchFilter`] the session was opened with, so the cache directory,
     /// `.git` and any ignored build tree are filtered once, in one place.
     ///
@@ -2357,8 +2553,16 @@ impl<F: FileProvider + Clone> Session<F> {
         self.respond(&batch)
     }
 
+    /// The effective watch filter, including project configuration and cache exclusions.
+    pub fn watch_filter(&self) -> WatchFilter {
+        self.filter.clone()
+    }
+
     /// [`Session::changed`] for a caller that did its own coalescing.
     pub fn respond(&mut self, batch: &ChangeBatch) -> Response {
+        if !batch.is_empty() {
+            self.changed_input();
+        }
         // Anything read ahead was read before this batch said the world moved.
         self.prefetched.clear();
 
@@ -2391,6 +2595,12 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         let response = self.store.respond(batch);
+        for path in &response.forgotten {
+            self.forget_refinement(path);
+            if !self.documents.is_open(path) {
+                self.vfs.close(path);
+            }
+        }
 
         if response.everything {
             // The configuration is part of every summary's key, so every stored summary is now a miss: the work is
@@ -2407,6 +2617,11 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         } else {
             for path in &response.reindex {
+                self.forget_refinement(path);
+                self.store.forget(path);
+                if !self.documents.is_open(path) {
+                    self.vfs.close(path);
+                }
                 // A file the user has open is the file they are waiting for; `respond` does not know about
                 // buffers, and this is the one thing the session adds to its answer.
                 let priority = if self.documents.is_open(path) {
@@ -2428,6 +2643,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// anything can ask a question about the file — and the summary is dropped with it, because the old one
     /// describes text that no longer exists.
     fn buffer_changed(&mut self, path: &Path, text: &str) {
+        self.changed_input();
         // **The clock the one indivisible piece of work is deferred by.** Recorded first, so that nothing this edit
         // starts can be mistaken for the idle period that follows it — see [`Session::a_unit_may_be_read_now`] and
         // [`UNTIL_A_UNIT_MAY_BE_READ`].
@@ -2457,6 +2673,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // Drops the summary **and the cooked reading**: what this file was read *as* is no longer what it is, and a
         // declaration whose range points into the text the user just replaced is a wrong answer rather than a
         // missing one. The reading is rebuilt when the queue drains — see [`Session::cooking`].
+        self.forget_refinement(path);
         self.store.forget(path);
         self.held_definitions().forget(path);
         // **The translation unit of *this* file, and only this file's.** A unit is a timeline over a closure, so an
@@ -2575,6 +2792,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // Measured: without this, `std::Widget` kept answering after `_STD_BEGIN` became `namespace studio {`,
             // with every other step of the invalidation working — and the assertion that used to stand for this
             // (`macro_readings` non-empty) was a note nothing read, so the capability had never been wired at all.
+            self.forget_refinement(&dependent);
             let was_indexed = self.store.forget(&dependent);
             if was_indexed {
                 self.queue.again(dependent.clone(), Priority::Rest, 0);
@@ -3173,23 +3391,49 @@ impl<F: FileProvider + Clone> Session<F> {
     /// of thirty-two files held it for **84, 503, 882, 1190 and 2430 ms**, so every completion arriving inside that
     /// window waited for all of it. With the parse moved out, the same slice holds it for **9–12 ms**.
     pub fn prepare_a_wave(&self, steps: usize) -> PreparedWave {
+        self.prepare_wave(steps, false)
+    }
+
+    pub fn prepare_background_wave(&self, steps: usize) -> PreparedWave {
+        self.prepare_wave(steps, true)
+    }
+
+    fn prepare_wave(&self, steps: usize, defer_open_files: bool) -> PreparedWave {
+        let revision = Some(self.revision());
         // **The files [`Session::commit_a_wave`] is about to pop**, which is what `peek` answers — the queue as it
         // stands now, without taking anything. A file a step discovers later can outrank these and is prepared on a
         // later wave, which is why the committing half still has a slow path.
-        let wave: Vec<PathBuf> = self
+        let candidates: Vec<PathBuf> = self
             .queue
             .peek(steps)
             .into_iter()
             .filter(|path| {
                 let key = queue_key(path);
-                !self.prefetched.contains_key(&key) && !self.queue.is_worked(path)
+                !self.prefetched.contains_key(&key)
+                    && !self.queue.is_worked(path)
+                    && (!defer_open_files || !self.documents.is_open(path))
             })
-            // **And the file that is going to be read through its timeline is not part of it.** A wave parses text;
-            // this file is read by [`Session::commit_a_wave`]'s `index_one`, which has the session and can walk the
-            // timeline. See [`Session::will_read_it_as_the_program`] for the question and
-            // [`Session::the_timeline_to_read_through`] for what it costs.
-            .filter(|path| !self.will_read_it_as_the_program(path))
             .collect();
+        let mut prepared = Vec::new();
+        let mut wave = Vec::new();
+        for path in candidates {
+            if self.documents.is_open(&path) {
+                let spelled = self
+                    .store
+                    .index()
+                    .summary(&path)
+                    .map(|summary| summary.path.as_path())
+                    .unwrap_or(&path);
+                if let Some(unit) = self.the_timeline_to_read_through(spelled) {
+                    if prepared.is_empty() {
+                        let reading = self.store.prepare_with_the_timeline(&path, &unit);
+                        prepared.push((path, reading));
+                    }
+                    continue;
+                }
+            }
+            wave.push(path);
+        }
 
         // **The units, rooted at the files the pass after this one will actually re-read** — which is the slice
         // [`Session::finish_a_slice`] is about to drain, **not** the wave about to be parsed.
@@ -3239,9 +3483,10 @@ impl<F: FileProvider + Clone> Session<F> {
 
         if wave.is_empty() {
             return PreparedWave {
-                prepared: Vec::new(),
+                prepared,
                 units,
                 refinements,
+                revision,
             };
         }
 
@@ -3250,14 +3495,21 @@ impl<F: FileProvider + Clone> Session<F> {
             .max(wave.len());
         let queue = &self.queue;
         let prefetched = &self.prefetched;
+        prepared.extend(self.store.prepare_closure(
+            &wave,
+            |target| {
+                !queue.is_worked(target)
+                    && !prefetched.contains_key(&queue_key(target))
+                    && (!self.documents.is_open(target)
+                        || wave.iter().any(|root| queue_key(root) == queue_key(target)))
+            },
+            room,
+        ));
         PreparedWave {
-            prepared: self.store.prepare_closure(
-                &wave,
-                |target| !queue.is_worked(target) && !prefetched.contains_key(&queue_key(target)),
-                room,
-            ),
+            prepared,
             units,
             refinements,
+            revision,
         }
     }
 
@@ -3277,10 +3529,19 @@ impl<F: FileProvider + Clone> Session<F> {
     /// caller takes the drain to [`Session::prepare_the_drain`] under a read lock and brings it back to
     /// [`Session::commit_the_drain`] — so the write lock is held for the inserts and for nothing else.
     pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> (Vec<Step>, Drain) {
+        if !wave
+            .revision
+            .as_ref()
+            .is_some_and(|revision| self.is_current(revision))
+        {
+            log::debug!("discarding an index wave prepared for an older session revision");
+            return (Vec::new(), Drain::default());
+        }
         let PreparedWave {
             prepared,
             units,
             refinements,
+            revision: _,
         } = wave;
         for (path, made) in prepared {
             self.prefetched.insert(queue_key(&path), made);
@@ -3308,6 +3569,11 @@ impl<F: FileProvider + Clone> Session<F> {
             if !done.is_empty() && committing.elapsed().as_millis() >= COMMIT_MS {
                 break;
             }
+            if self.queue.peek(1).first().is_some_and(|path| {
+                self.documents.is_open(path) && !self.prefetched.contains_key(&queue_key(path))
+            }) {
+                break;
+            }
             let Some((path, priority, depth)) = self.queue.pop() else {
                 break;
             };
@@ -3322,6 +3588,128 @@ impl<F: FileProvider + Clone> Session<F> {
         let drain = self.finish_a_slice(&done, units);
 
         (done, drain)
+    }
+
+    pub fn next_open_file_to_read(&self) -> Option<PathBuf> {
+        self.queue
+            .peek(1)
+            .into_iter()
+            .find(|path| self.documents.is_open(path))
+    }
+
+    pub fn next_file_to_catch_up(&self, path: &Path) -> Option<PathBuf> {
+        if self.queue.is_queued(path) {
+            return Some(path.to_path_buf());
+        }
+        self.unread_includes_of(path)
+            .into_iter()
+            .find(|include| self.queue.is_queued(include))
+    }
+
+    /// Requeue an unread include so its preparation can happen outside the session lock.
+    pub fn ensure_file_to_catch_up(&mut self, path: &Path) -> Option<PathBuf> {
+        self.want_refinement(path);
+        if let Some(next) = self.next_file_to_catch_up(path) {
+            return Some(next);
+        }
+        let include = self.unread_includes_of(path).into_iter().next()?;
+        self.queue.again(include.clone(), Priority::Open, 1);
+        Some(include)
+    }
+
+    pub fn gather_a_file_read(&self, path: &Path) -> Option<FileReadMaterials<SessionFiles<F>>> {
+        if !self.queue.is_queued(path) {
+            return None;
+        }
+        let revision = self.revision();
+        let spelled = self
+            .vfs
+            .held(path)
+            .filter(|file| file.open)
+            .map(|file| file.path.as_path())
+            .or_else(|| {
+                self.project_paths
+                    .get(&queue_key(path))
+                    .map(PathBuf::as_path)
+            })
+            .or_else(|| self.vfs.held(path).map(|file| file.path.as_path()))
+            .or_else(|| {
+                self.store
+                    .index()
+                    .summary(path)
+                    .map(|summary| summary.path.as_path())
+            })
+            .unwrap_or(path);
+        let timeline = if self.documents.is_open(path) {
+            self.the_timeline_to_read_through(spelled)
+        } else {
+            None
+        };
+        let input = self.store.detached_read(spelled, timeline)?;
+        let view =
+            self.vfs
+                .held(spelled)
+                .filter(|file| file.open)
+                .map(|file| BufferViewMaterials {
+                    file: file.clone(),
+                    cuda: self.config.cuda(),
+                    environment: self.known_macros_of(&file.path, &file.text),
+                });
+        Some(FileReadMaterials {
+            path: spelled.to_path_buf(),
+            revision,
+            input,
+            view,
+        })
+    }
+
+    pub fn commit_a_file_read(&mut self, file: PreparedFile) -> bool {
+        if !self.is_current(&file.revision) || !self.queue.forget(&file.path) {
+            log::debug!(
+                "discarding an obsolete file read for {}",
+                file.path.display()
+            );
+            return false;
+        }
+        let path = file.path;
+        self.prefetched.remove(&queue_key(&path));
+        let rendering = file.prepared.rendering();
+        let step = self.index_one(path.clone(), Priority::Open, 0, Some(file.prepared));
+        if step.with_the_environment {
+            self.parsed_since_the_last_pass
+                .retain(|queued| queued != &path);
+        } else if matches!(
+            step.outcome,
+            StepOutcome::Built | StepOutcome::Unstored | StepOutcome::Reused
+        ) {
+            self.parsed_since_the_last_pass.push(path.clone());
+        }
+        if let Some((hash, rendered)) = rendering {
+            let weight = rendered.weight();
+            self.renderings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert((path.clone(), hash), rendered, weight);
+            self.cooking.forget(&path);
+        }
+        if let Some(view) = file.view
+            && let Some(current) = self.vfs.held(&path)
+            && view.key
+                == buffer_view_key(
+                    current,
+                    self.config.cuda(),
+                    self.known_macros_of(&current.path, &current.text),
+                )
+        {
+            self.views
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(view.key, Arc::new(view.parsed), view.weight);
+        }
+        if !step.with_the_environment {
+            self.want_refinement(&path);
+        }
+        true
     }
 
     /// **What has to happen once a slice's files are in the index** — the second pass, the cooks, the environments.
@@ -3485,6 +3873,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 all
             },
             environments: Vec::new(),
+            revision: Some(self.revision()),
         };
 
         if self.is_idle() {
@@ -3643,8 +4032,12 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             return None;
         };
+        if queue_key(root) != queue_key(&prepared.root) || !self.is_current(&prepared.revision) {
+            log::debug!("discarding a program prepared for an older session revision");
+            return None;
+        }
+        let committed = self.commit_a_unit_reading(prepared)?;
         self.units_read.insert(queue_key(root));
-        let committed = self.commit_a_unit_reading(prepared);
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("commit");
         Some(committed)
@@ -3666,7 +4059,21 @@ impl<F: FileProvider + Clone> Session<F> {
             files,
             units,
             environments,
+            revision,
         } = drain;
+        let retry_files = files.clone();
+        let retry_environments = environments.clone();
+        if !revision
+            .as_ref()
+            .is_some_and(|revision| self.is_current(revision))
+        {
+            return PreparedDrain {
+                revision,
+                retry_files,
+                retry_environments,
+                ..PreparedDrain::default()
+            };
+        }
         let tracing = crate::probes::cooking();
 
         // **The two halves are timed apart**, because a start-up regression of **90 %** was found inside this
@@ -3720,11 +4127,50 @@ impl<F: FileProvider + Clone> Session<F> {
             ));
         }
 
-        PreparedDrain { re_read, rendered }
+        PreparedDrain {
+            re_read,
+            rendered,
+            revision,
+            retry_files,
+            retry_environments,
+        }
     }
 
     /// **Apply what [`Session::prepare_the_drain`] worked out** — the index inserts, and the remembered renderings.
     pub fn commit_the_drain(&mut self, prepared: PreparedDrain) -> usize {
+        if !prepared
+            .revision
+            .as_ref()
+            .is_some_and(|revision| self.is_current(revision))
+        {
+            if prepared
+                .revision
+                .as_ref()
+                .is_some_and(|revision| Arc::ptr_eq(&self.identity, &revision.session))
+            {
+                let mut wanted = self
+                    .refined_on_request
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for path in prepared.retry_files {
+                    if self.files.exists(&path) {
+                        wanted.insert(path);
+                    }
+                }
+                drop(wanted);
+                let mut work = self
+                    .macro_work
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for path in prepared.retry_environments {
+                    if self.files.exists(&path) {
+                        work.want(&path);
+                    }
+                }
+            }
+            log::debug!("discarding a drain prepared for an older session revision");
+            return 0;
+        }
         for (key, rendered) in prepared.rendered {
             if let Ok(mut known) = self.renderings.lock() {
                 let weight = rendered.weight();
@@ -3751,7 +4197,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
         let re_read = self.store.commit_the_re_read(plan);
         if let Ok(mut known) = self.refined_readings.lock() {
-            known.extend(refined);
+            known.extend(refined.iter().map(|path| queue_key(path)));
         }
         if !waiting.is_empty() && self.pending_work() > 0 {
             if crate::probes::cooking() {
@@ -3965,7 +4411,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // defines — so reading a file with it and marking the result would suppress the repair for a reading that
         // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
         // and is not worth asserting anything about. See [`HeldUnit`].
-        let unit = self.the_timeline_to_read_through(&spelled);
+        let prepared_with_environment = ready
+            .as_ref()
+            .is_some_and(crate::index::store::Prepared::with_environment);
+        let unit = if ready.is_none() {
+            self.the_timeline_to_read_through(&spelled)
+        } else {
+            None
+        };
         let timed = std::time::Instant::now();
         let timeline_ask = std::time::Instant::now();
         if crate::probes::units() {
@@ -4052,9 +4505,10 @@ impl<F: FileProvider + Clone> Session<F> {
             // built by whoever wrote that entry — with an environment or without one, the store cannot say — and a
             // file read without an environment is exactly what the second pass is for. Claiming either would be
             // claiming the second pass has nothing to repair, which is the whole of what this flag asserts.
-            with_the_environment: read_here
-                && has_a_timeline
-                && matches!(outcome, StepOutcome::Built | StepOutcome::Unstored),
+            with_the_environment: prepared_with_environment
+                || (read_here
+                    && has_a_timeline
+                    && matches!(outcome, StepOutcome::Built | StepOutcome::Unstored)),
         }
     }
 
@@ -4118,20 +4572,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // them on its own slice. Nothing is lost: `needs_catching_up` stays true while any include is unread, so the
         // next request about this file reads eight more and the pump drains the rest in between.
         const INCLUDES_A_REQUEST_READS: usize = 8;
-        // **Only the ones nothing has queued yet**, so the inline pass and the pump never read the same header: a
-        // queued file is one the pump will reach, and reading it here as well would be the double parse this bound
-        // exists to avoid.
-        let mut includes: Vec<PathBuf> = self
-            .unread_includes_of(path)
-            .into_iter()
-            .filter(|include| !self.queue.is_queued(include))
-            .collect();
+        let mut includes = self.unread_includes_of(path);
         if includes.len() > INCLUDES_A_REQUEST_READS {
             for include in includes.split_off(INCLUDES_A_REQUEST_READS) {
                 self.queue.add(include, Priority::Open, 1);
             }
         }
         for include in includes {
+            self.queue.forget(&include);
             self.index_one(include, Priority::Open, 1, None);
         }
     }
@@ -4717,6 +5165,20 @@ impl<F: FileProvider + Clone> Session<F> {
         })
     }
 
+    /// Check whether the current text has a rendering without parsing a view or scheduling work.
+    pub fn has_rendering(&self, path: impl AsRef<Path>) -> bool {
+        let requested = path.as_ref();
+        let key = self
+            .store
+            .index()
+            .summary(requested)
+            .map(|summary| summary.path.as_path())
+            .unwrap_or(requested);
+        self.vfs
+            .held(key)
+            .is_some_and(|file| self.known_rendering_of(&file.path, &file.text).is_some())
+    }
+
     /// The file as the cursor is in it: the buffer when it is open, the disk otherwise.
     ///
     /// `None` when there is neither — a path that is not open and cannot be read. Everything below takes a view,
@@ -4926,19 +5388,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // of this file's own text with an environment that has not moved. The identity is the environment *object* —
         // held in the key, so its address cannot be reused under it — and `None` for the empty one, which is one value
         // however often it is made.
-        let key = ViewKey {
-            path: file.path.clone(),
-            // A buffer view parses the file's own text, which has no rendering behind it.
-            rendering: None,
-            text: crate::cache::content_hash(&file.text),
-            id: file.id,
-            cuda: self.config.cuda(),
-            // A buffer view's parser is built from `ParserConfig::default()` and the environment alone — see
-            // `FileView::parse_with_cuda` — so there is no language level in its identity.
-            language: None,
-            open: file.open,
-            environment: known.clone().map(EnvironmentId),
-        };
+        let key = buffer_view_key(file, self.config.cuda(), known.clone());
         if let Some(held) = self.a_view_already_parsed(&key) {
             return Some(held);
         }
@@ -6398,6 +6848,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// and not an error.
     pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
         let started = std::time::Instant::now();
+        let revision = self.revision();
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("read start");
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
@@ -6430,9 +6881,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     rendered.files.len(),
                 );
             }
-            // **What an importer of this module sees** — recorded here as well as on the walk path, because this is
-            // the path a warm session takes and the answer must not depend on which one read the unit.
-            self.remember_what_the_unit_saw(&root, &rendered);
             let program = crate::cache::content_hash(&rendered.text);
             let known = self
                 .unit_index
@@ -6446,6 +6894,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .or_else(|| self.store.cached_indexed_unit(program));
             return Some(UnitReadMaterials {
                 root,
+                revision,
                 key: SummaryKey::new(0, context),
                 units_key,
                 unit: None,
@@ -6508,14 +6957,9 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             None => (None, None),
         };
-        // **What an importer of this module sees** — the rendering's own file list, recorded where the visibility walk
-        // can reach it. See `ProjectIndex::unit_closures`.
-        if let Some(rendered) = &rendered {
-            self.remember_what_the_unit_saw(&root, rendered);
-        }
-
         Some(UnitReadMaterials {
             root,
+            revision,
             key,
             units_key,
             unit: Some(unit),
@@ -6530,21 +6974,7 @@ impl<F: FileProvider + Clone> Session<F> {
         })
     }
 
-    /// **Record what an importer of this module sees** — the unit's whole rendering, by module name.
-    ///
-    /// A module is not a header, and the visibility walk cannot get this from `#include` edges: it evaluates each guard
-    /// against a state that is not the unit's, so a header the unit included behind `_HAS_CXX20` — MSVC's `xstring`
-    /// behind `<string>` — is dropped. Measured: `report.cppm` importing `std` saw **151 files and no
-    /// `std::string`**, while `main.cpp` saw 173 only because its own `#include` pulled the same tree in textually.
-    ///
-    /// The rendering has already decided every one of those guards, once, for the module, so its `walked` list is the
-    /// answer — recorded on the index (`ProjectIndex::unit_closures`) where the visibility walk finds it.
-    fn remember_what_the_unit_saw(&self, root: &Path, rendered: &crate::RenderedUnit) {
-        self.remember_the_walked_closure(root, &rendered.walked);
-    }
-
-    /// [`Session::remember_what_the_unit_saw`] from the list alone — the form a **cold** read has, because the
-    /// rendering is cooked inside [`UnitReadMaterials::read_the_program`] and only the walked list comes back out.
+    /// Record the closure only when the program reading is committed.
     fn remember_the_walked_closure(&self, root: &Path, walked: &[PathBuf]) {
         if walked.is_empty() {
             return;
@@ -6633,7 +7063,13 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Put what [`Session::prepare_a_unit_reading`] worked out into the index** — one `insert_cooked` per file, and
     /// the only part of a unit read that needs `&mut self`.
-    pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> UnitReading {
+    ///
+    /// Returns `None` when the session or its inputs changed after preparation.
+    pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> Option<UnitReading> {
+        if !self.is_current(&prepared.revision) {
+            log::debug!("discarding a unit reading prepared for an older session revision");
+            return None;
+        }
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("before the commit");
         let PreparedUnitReading {
@@ -6641,6 +7077,7 @@ impl<F: FileProvider + Clone> Session<F> {
             program,
             indexed,
             walked,
+            revision: _,
         } = prepared;
         // **What an importer of this module sees** — the closure the cold path only had here, and the warm path also
         // records at gather time. See [`ProjectIndex::unit_closures`](crate::ProjectIndex).
@@ -6728,11 +7165,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // because the backlog it removes is real work for a drain that would otherwise walk files it has just
             // read; the batch cost is P6's next measurement, not this line's.
             if let Ok(mut refined) = self.refined_readings.lock() {
-                refined.insert(path.clone());
+                refined.insert(queue_key(&path));
             }
         }
 
-        UnitReading {
+        Some(UnitReading {
             root,
             files: placed,
             declared: 0,
@@ -6743,7 +7180,7 @@ impl<F: FileProvider + Clone> Session<F> {
             unbalanced: indexed.unbalanced,
             braces: indexed.braces,
             errors: indexed.errors,
-        }
+        })
     }
 
     /// **Read one translation unit as a program, and file its facts under every file it read.**
@@ -6779,7 +7216,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let prepared = self.prepare_a_unit_reading(root)?;
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
-        let reading = self.commit_a_unit_reading(prepared);
+        let reading = self.commit_a_unit_reading(prepared)?;
         if crate::probes::units() {
             eprintln!(
                 "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
@@ -7654,6 +8091,16 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             seed,
             already_declared,
+            revision: self.revision(),
+        })
+    }
+
+    /// Gather a cook that can be rendered without holding the session lock.
+    pub fn gather_a_cook(&self, path: &Path) -> Option<DetachedCook<F>> {
+        Some(DetachedCook {
+            files: self.files.clone(),
+            config: self.config.clone(),
+            materials: self.cooking_materials(path)?,
         })
     }
 
@@ -7665,6 +8112,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The starting macro state and the seed are moved in rather than borrowed because the caller has to let go of the
     /// session between the two halves — that is the whole point of the split — and a borrow of `&self` cannot survive it.
     pub fn render_a_cooked(&self, materials: &CookingMaterials) -> Option<RenderedCook> {
+        if !self.is_current(&materials.revision) {
+            return None;
+        }
+        Self::render_cook(&self.files, &self.config, materials)
+    }
+
+    fn render_cook(
+        files: &SessionFiles<F>,
+        config: &CompilerConfig,
+        materials: &CookingMaterials,
+    ) -> Option<RenderedCook> {
         let CookingMaterials {
             path,
             key,
@@ -7674,6 +8132,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             seed,
             already_declared,
+            revision,
         } = materials;
 
         let (tokens, _) = { cpp_parser::lex(text, &cpp_parser::LexerConfig::default()) };
@@ -7708,7 +8167,7 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             (None, None) => return None,
         };
-        let indexer = FileIndexer::new(&self.files, &self.config);
+        let indexer = FileIndexer::new(files, config);
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
             declarations: indexed.summary.declarations.len(),
@@ -7726,6 +8185,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash: *text_hash,
             indexed,
             reading,
+            revision: revision.clone(),
         })
     }
 
@@ -7745,6 +8205,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             indexed,
             reading,
+            revision,
         } = rendered;
         let path = indexed.summary.path.clone();
 
@@ -7753,14 +8214,16 @@ impl<F: FileProvider + Clone> Session<F> {
         let current = self
             .text(&path)
             .map(|text| crate::cache::content_hash(&text));
-        if current != Some(text_hash) {
+        if !self.is_current(&revision) || current != Some(text_hash) {
             if crate::probes::cooking() {
                 eprintln!(
                     "commit_a_cooked: dropped {} | the text changed while it was being rendered",
                     path.display()
                 );
             }
-            self.want_cooked_reading(&path);
+            if Arc::ptr_eq(&self.identity, &revision.session) && self.files.exists(&path) {
+                self.want_cooked_reading(&path);
+            }
             return None;
         }
 
@@ -8207,7 +8670,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if self
             .refined_readings
             .lock()
-            .is_ok_and(|refined| refined.contains(path))
+            .is_ok_and(|refined| refined.contains(&queue_key(path)))
         {
             return true;
         }
@@ -8261,14 +8724,22 @@ impl<F: FileProvider + Clone> Session<F> {
     /// entry. This is the query behind `textDocument/definition`: measured on one real file, **46** identifiers
     /// answered `Ambiguous` through the single-answer form, and every one of them had a usable list behind it.
     pub fn definitions(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectDefinitions> {
-        definitions_across_files(
+        let mut answer = definitions_across_files(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
             offset.get(),
-        )
+        );
+        if let Known::Yes(definitions) = &mut answer {
+            for definition in &mut definitions.found {
+                if let Some(path) = self.project_paths.get(&queue_key(&definition.file)) {
+                    definition.file.clone_from(path);
+                }
+            }
+        }
+        answer
     }
 
     /// **Every place the symbol at `offset` is written** — what `textDocument/references` asks.
@@ -10628,6 +11099,13 @@ impl Cooking {
     /// taking anything — see [`Session::is_ready_for_a_request_about`].
     fn wants(&self, path: &Path) -> bool {
         self.held.contains(&queue_key(path))
+    }
+
+    fn forget(&mut self, path: &Path) {
+        let key = queue_key(path);
+        if self.held.remove(&key) {
+            self.wanted.retain(|queued| queue_key(queued) != key);
+        }
     }
 
     /// Take up to `how_many` files to cook, in order.

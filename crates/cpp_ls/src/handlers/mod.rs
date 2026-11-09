@@ -92,6 +92,9 @@ pub async fn read_the_modules(
     path: &std::path::Path,
     caught_up: bool,
 ) {
+    if !caught_up {
+        context.analysis().catch_up(path).await;
+    }
     // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
     // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
     // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for
@@ -103,7 +106,7 @@ pub async fn read_the_modules(
     let nothing_to_read = context
         .analysis()
         .with_snapshot(|session| {
-            (caught_up || !session.needs_catching_up(path))
+            !session.needs_catching_up(path)
                 && !session.imports_a_module_that_is_not_read(path)
                 && !session.a_module_unit_is_waiting_for_its_program()
         })
@@ -128,9 +131,6 @@ pub async fn read_the_modules(
     context
         .analysis()
         .update_session("a request queued the modules", move |session| {
-            if !caught_up {
-                session.catch_up(&read);
-            }
             session.queue_the_modules_a_file_imports(&read)
         })
         .await;

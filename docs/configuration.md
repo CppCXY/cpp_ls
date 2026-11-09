@@ -195,7 +195,7 @@ path for all of them.
 
 ```toml
 [diagnostics]
-on_change_ms = 300       # how long a file's diagnostics wait for typing to stop
+on_change_ms = 300       # debounce for push diagnostics; pull requests remain client-driven
 enable = []              # start from this list only (an empty list means "everything")
 disable = []             # never report these — wins over `enable`, and over the defaults
                          # e.g. disable = ["missing-include", "unused"] — the rule names are the codes below
@@ -218,6 +218,10 @@ scanf = true             # `%…` with scansets — scanf, sscanf
 "mylib::log" = "std"
 "mylib::trace" = { syntax = "printf", argument = 1 }     # `trace(level, fmt, …)`
 ```
+
+For clients without pull-diagnostics support, `on_change_ms` sets the debounce in milliseconds before publishing
+diagnostics for open files; the default is 300 ms. Pull-capable clients request diagnostics themselves, so this setting
+does not delay or schedule their pull requests. Where supported, inter-file changes also trigger a coalesced pull refresh.
 
 A wrapper has a *position*: `mylib::trace(level, fmt, …)` puts the format string second, which
 `{ syntax = "printf", argument = 1 }` says and a list of names cannot. A bare string means the common case — that syntax,
