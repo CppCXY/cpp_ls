@@ -15129,9 +15129,13 @@ impl ProjectIndex {
         const ALIAS_DEPTH: usize = 4;
 
         let mut rewritten = name.to_string();
+        let tracing = std::env::var("CPPLS_TRACE_ALIAS").is_ok();
 
         for _ in 0..ALIAS_DEPTH {
             let segments: Vec<&str> = rewritten.split("::").collect();
+            if tracing {
+                eprintln!("[alias] trying {rewritten}");
+            }
 
             // The last segment is excluded: it is the name being looked for, and substituting it would be
             // answering a different question from the one the caller asked.
@@ -15142,6 +15146,21 @@ impl ProjectIndex {
                 // synonym is the one that says nothing about where `E` really lives.
                 let mut candidates = self.files_declaring(&prefix, visible_from);
                 candidates.sort_by_key(|found| found.fact.kind == DeclKind::Other);
+                if tracing {
+                    eprintln!(
+                        "[alias] prefix {prefix}: {:?}",
+                        candidates
+                            .iter()
+                            .map(|found| format!(
+                                "{} {:?} scope {:?} type {:?}",
+                                found.fact.name,
+                                found.fact.kind,
+                                found.fact.scope,
+                                found.fact.type_of
+                            ))
+                            .collect::<Vec<_>>()
+                    );
+                }
                 let alias = candidates.into_iter().next()?;
 
                 // A prefix that names the entity **itself** — an `enum class` reached through a `using`, a class
@@ -15150,7 +15169,16 @@ impl ProjectIndex {
                 // missing: only *aliases* were followed (`type_of` is an alias's target), while a `using`-declared
                 // enum has no target at all and its `qualified_name` is the only spelling its members are stored
                 // under.
-                if let Some(qualified) = self.qualified_name_of_the_entity(alias.fact, &prefix) {
+                if let Some(qualified) = self.qualified_name_of_the_entity(alias.fact, &prefix)
+                    // **A rewrite that changes nothing is not a rewrite.** The entity's own qualified name *is*
+                    // the prefix for an ordinary **type alias** — `using json = basic_json<>;` in `namespace
+                    // nlohmann` gives `nlohmann::json` back unchanged — and returning it here skipped the alias arm
+                    // below, so `nlohmann::json::object` was retried as `nlohmann::json::object` and answered
+                    // `NotDeclaredHere` while `members_of(nlohmann::json)` listed the member. Measured on
+                    // `EmmyLuaCodeStyle`'s `LSP.cpp:12`, `auto object = nlohmann::json::object();`: the call's type
+                    // was `UnknownType`, and both the hover and go-to-definition stopped at the alias.
+                    && qualified != prefix
+                {
                     return Some(format!("{qualified}::{}", segments[take..].join("::")));
                 }
 

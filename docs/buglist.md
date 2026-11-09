@@ -338,6 +338,41 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   The same probe on the file the report is about (`LSPHandle.cpp`): rendering 2 181 tokens, first view 1.9 ms, and a
   body keystroke costs the pump 15.6–18.8 ms — nothing at the library level accounts for a freeze.
 
+### 9. `nlohmann::json::object()` has no type — the alias was a no-op, and the member's fact has no scope
+
+* **Reported from use** (picture 3, the half that is not the hover): hovering the variable `object` no longer shows a
+  function, but its type is unknown — "the type of `nlohmann::json::object` is not known here" — and go-to-definition
+  on `object` finds nothing in `json.hpp`.
+* **Measured.** `definition("nlohmann::json::object")` is `NotDeclaredHere` while `members_of("nlohmann::json")`
+  answers **53 members**; the alias itself resolves (`define` on `json` → `json_fwd.hpp:62 type in nlohmann type
+  basic_json<>`), and the fact exists: `facts --file json.hpp --name object` lists
+  `1960:23 object function returns basic_json parameters (initializer_list_t init = {})`.
+* **Fixed, half of it: the alias rewrite was a no-op.** `through_an_alias`'s first arm answers the entity's own
+  qualified name, and for an ordinary **type alias** that name *is* the prefix — `using json = basic_json<>;` in
+  `namespace nlohmann` gives `nlohmann::json` back — so the rewrite returned the spelling it was given, the search
+  found nothing again, and the type-alias arm below (which reads `type_of`, `basic_json<>`, and names
+  `nlohmann::basic_json`) was never reached. Guarded with `qualified != prefix`; traced with `CPPLS_TRACE_ALIAS=1`:
+
+  ```text
+  [alias] trying nlohmann::json::object
+  [alias] prefix nlohmann::json: ["json Type scope Some("nlohmann") type Some("basic_json<>")"]
+  [alias] trying nlohmann::basic_json::object      ← the rewrite now happens
+  ```
+* **Open, and it is the bigger bug: the member's fact has no scope.** The retry asks
+  `nlohmann::basic_json::object` and still finds nothing, because the fact at `json.hpp:1960` is stored with
+  `scope: None` (`facts --name object` prints it with no "in …"). The **last** member fact that has the class's scope
+  is `assert_invariant` at `1253`; everything after it — `set_parents` at `1274`, the static `object` at `1960`, the
+  hundreds of members in between — is filed as file-scope declarations. `members_of("nlohmann::json")` therefore
+  answers **53** members for a class that declares hundreds.
+* **What is established about where it is *not*.** The tree is right: `inspect tree` at `set_parents` shows
+  `Syntax(ClassBody)` → `Syntax(ClassDef)` → `Syntax(NamespaceDecl)` — so the **parser keeps the class body** and the
+  **symbol/scope layer** is what loses it. Three fixtures built from the exact source around 1253 (the `#if` inside a
+  body, the lambda, the macro `try`/`catch`, the `switch` of blocks) all keep the scope, so the trigger is earlier in
+  the twenty-three-thousand-line header.
+* **Next**: bisect `json.hpp` — cut ranges above 1253 and re-ask the scope of `object` — or diff the **rendering**
+  (`CPPLS_DUMP_RENDERING_DIR`) against the source at 1253..1274, since the scope tree is built from the rendering and a
+  macro that expands to a brace is the first thing to look for there.
+
 ## Closed
 
 ### A body edit rebuilt the macro environment — 103.7 ms of closure walk per keystroke
