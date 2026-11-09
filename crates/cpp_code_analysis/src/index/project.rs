@@ -14173,6 +14173,8 @@ impl ProjectIndex {
     fn the_walks_fingerprint(&self, contributors: &[String]) -> u64 {
         const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        /// A file in the closure the index does not hold: a fixed value, so "absent" is a state the fingerprint can
+        /// name rather than a hole in it.
         const NOT_IN_THE_INDEX: u64 = 0x1d57_9b40_c3e8_2a6f;
         let mut fingerprint = FNV_OFFSET;
         let mut eat = |value: u64| {

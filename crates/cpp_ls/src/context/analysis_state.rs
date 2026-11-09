@@ -177,6 +177,15 @@ impl AnalysisState {
     /// other request. (A query that loaded what it needed would take `&mut Session` and serialize all of them, which
     /// is the trade this exists to avoid.)
     pub async fn prepare(&self, path: &std::path::Path) -> bool {
+        let whole = std::time::Instant::now();
+        let answer = self.prepare_inner(path).await;
+        if whole.elapsed().as_millis() >= 50 {
+            log::warn!("prepare {} took {:?}", path.display(), whole.elapsed());
+        }
+        answer
+    }
+
+    async fn prepare_inner(&self, path: &std::path::Path) -> bool {
         // **The shortcut that matters, and it is the ordinary case.** The file a request is about is normally one the
         // editor has open, so the VFS already holds its text and its cooked reading is either built or already asked
         // for — which is exactly the state in which the two steps below would each do nothing. Asking is a read, and

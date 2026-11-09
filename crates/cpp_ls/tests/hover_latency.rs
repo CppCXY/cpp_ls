@@ -193,6 +193,7 @@ fn a_hover_does_not_spin() {
             };
             for line in body.lines() {
                 if line.contains("a query took")
+                    || line.contains("prepare")
                     || line.contains("held the analysis")
                     || line.contains("render")
                 {
@@ -212,6 +213,9 @@ struct Server {
     child: Child,
     stdin: ChildStdin,
     messages: Receiver<Value>,
+    /// Responses that arrived while waiting for a different id. A pipelined request (the pull sent without waiting)
+    /// is answered in the middle of another request's loop, and dropping that message made the later `receive` time out.
+    pending: std::collections::HashMap<i64, Value>,
 }
 
 impl Server {
@@ -241,6 +245,7 @@ impl Server {
             child,
             stdin,
             messages,
+            pending: std::collections::HashMap::new(),
         }
     }
 
@@ -262,12 +267,20 @@ impl Server {
     }
 
     fn receive(&mut self, method: &str, id: i64) -> Value {
+        if let Some(held) = self.pending.remove(&id) {
+            return held;
+        }
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.messages.recv_timeout(left) {
-                Ok(message) if message.get("id") == Some(&json!(id)) => return message,
-                Ok(_) => {}
+                Ok(message) => match message.get("id").and_then(Value::as_i64) {
+                    Some(other) if other != id => {
+                        self.pending.insert(other, message);
+                    }
+                    Some(_) => return message,
+                    None => {}
+                },
                 Err(error) => panic!("the server did not answer {method}: {error}"),
             }
         }
@@ -275,15 +288,7 @@ impl Server {
 
     fn request(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.messages.recv_timeout(left) {
-                Ok(message) if message.get("id") == Some(&json!(id)) => return message,
-                Ok(_) => {}
-                Err(error) => panic!("the server did not answer {method}: {error}"),
-            }
-        }
+        self.receive(method, id)
     }
 }
 
@@ -468,7 +473,10 @@ fn where_a_hover_is_slow() {
                 continue;
             };
             for line in body.lines() {
-                if line.contains("a query took") || line.contains("held the analysis") {
+                if line.contains("a query took")
+                    || line.contains("prepare")
+                    || line.contains("held the analysis")
+                {
                     eprintln!("    {line}");
                     shown += 1;
                     if shown > 40 {
@@ -576,6 +584,7 @@ fn the_three_requests_about_one_open_file() {
         );
         *id += 1;
         let inlay = started.elapsed();
+        eprintln!("  [probe] inlay done");
 
         let started = Instant::now();
         let hover = server.request(
@@ -585,6 +594,7 @@ fn the_three_requests_about_one_open_file() {
         );
         *id += 1;
         let hover_took = started.elapsed();
+        eprintln!("  [probe] hover done");
 
         let started = Instant::now();
         let report = server.request(
@@ -683,7 +693,9 @@ fn the_three_requests_about_one_open_file() {
             };
             for line in body.lines() {
                 if line.contains("a query took")
+                    || line.contains("prepare")
                     || line.contains("held the analysis")
+                    || line.contains("hover:")
                     || line.contains("diagnostic")
                     || line.contains("cook")
                 {
