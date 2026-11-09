@@ -128,6 +128,17 @@ fn a_hover_does_not_spin() {
     );
 
     let mut numbers: Vec<(String, Duration)> = Vec::new();
+    // **The two states a reader is in**: while the index is still filling (the default), and after it has settled
+    // (`CPPLS_HOVER_SETTLE_MS`). The difference between the two runs is the whole question of whether a slow request
+    // is *work* or *recomputation*: a settled index has nothing left to invalidate, so a settled request that is still
+    // slow is doing its own work from scratch.
+    if let Some(settle) = std::env::var("CPPLS_HOVER_SETTLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        eprintln!("  settling for {settle} ms before the first hover");
+        std::thread::sleep(Duration::from_millis(settle));
+    }
     for round in 1..=2u32 {
         for (line, character, what) in &picked {
             let id = i64::from(round) * 1000 + i64::from(*line);
