@@ -20,15 +20,21 @@ use mimalloc::MiMalloc;
 
 struct Counting;
 
-/// **This thread's allocations for the current measurement.** The generation pair is what makes the count honest for a
-/// worker thread the index spawned before `perf::reset()`: a stale generation means "count from here", so a thread's
-/// first mark after a reset carries only its own work.
+// **This thread's allocations for the current measurement.** The generation pair is what makes the count honest for a
+// worker thread the index spawned before `perf::reset()`: a stale generation means "count from here", so a thread's
+// first mark after a reset carries only its own work.
+//
+// A comment and not a doc comment: a `thread_local!` is a macro invocation, and rustdoc generates no documentation for
+// one (`unused_doc_comments`, which `-D warnings` turns into an error).
 #[cfg(feature = "perf-probe")]
 thread_local! {
     static HERE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+// Read by hand while a measurement is being read off, which is why nothing calls it: the probe prints the totals and a
+// caller who wants this thread's share asks for it in the run being investigated.
 #[cfg(feature = "perf-probe")]
+#[allow(dead_code)]
 fn allocations_here() -> usize {
     HERE.with(|cell| cell.get().1)
 }

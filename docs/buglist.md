@@ -39,12 +39,26 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   The two commands differ only in the **function they call first**: `hover` goes through
   `hover_text` -> `hover_of_the_program`, `define` calls `session.definition` directly; and `hover` also asks
   `session.header_at` before that.
-* **The next step, in order**: (1) one temporary print in `hover_of_the_program` and in
-  `definitions_across_files` showing the candidate list and its order for this exact cursor with a full index;
-  (2) the same in `Session::definition`'s collapse (`definition_across_files`, "one candidate -> answer, several ->
-  Ambiguous"), because a plural of two — the local and the library type — would explain both pictures and would also
-  explain why the **hover** (which sees the singular) picks the wrong one; (3) fix the preference so a declaration the
-  cursor's own file writes wins over one it merely includes, with `DeclFact::definition` breaking ties among classes.
+* **Found, and fixed — it was the card, not the lookup.** The probe (`CPPLS_TRACE_HOVER=1`) printed what the two
+  queries answer and then what the card heard:
+
+  ```text
+  [hover] at 5546: picked Yes(ProjectDefinition { file: LSPHandle.cpp, fact: { name: "result", local: true } })
+  [card]  heard result local true type_of None => indexed .../xlocale:result      ← the card re-asked the index
+  ```
+
+  `declaration_markdown` re-asks the index for a declaration whose fact has no type, no return type and no parameter
+  list — which is **every fact built from a binding**, and a hover on a declaration's own name gets one. A binding
+  carries no type (deliberately: the type is a fact about the file's text), so the condition was always true for a
+  local, and the lookup was a **bare name**, because a local's `qualified_name()` is just its spelling — a function
+  body contributes no scope segment. `index.definition("result", LSPHandle.cpp)` answered the standard library's
+  `codecvt_base::result`; `LSP.cpp`'s `object` was answered by `basic_json::json_value::object`.
+* **The fix**: a local is never looked up by name in the index (`if !found.fact.local && …`). The card then keeps the
+  local's own fact, and the deduced-type note it already had fills the type in:
+  `` `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`, declared in `LSPHandle.cpp:139:10` ``.
+* **Pinned by** `reported_hover::a_local_is_not_answered_by_a_same_named_declaration_from_the_index`, a fixture whose
+  header declares `using result = int;` in another namespace and whose `.cpp` declares a local `auto result = 1;`.
+  Verified to fail without the guard (`let indexed = if true` in its place) and pass with it.
 
 ### 8. `LSPHandle.cpp` cannot see `LanguageServer.h` — a bare quoted include and no compile database
 

@@ -151,6 +151,19 @@ pub fn the_type(opened: &Opened, place: &Place) -> Result<Answer, String> {
 pub fn the_hover(opened: &Opened, place: &Place) -> Result<Answer, String> {
     let at = place.offset(&opened.text)?;
     let where_at = at_a_place(&opened.text, at);
+    // **What the analysis answers before the card is rendered** — the probe this question needed: `hover` and
+    // `define` disagreed about the same cursor, and the difference had to be seen before `hover_text` composed
+    // anything. See `docs/buglist.md` section 7.
+    if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
+        let picked = opened
+            .session
+            .definition(&opened.view, ReadingOffset::new(at));
+        let all = opened
+            .session
+            .definitions(&opened.view, ReadingOffset::new(at));
+        eprintln!("[hover] at {at}: picked {picked:?}");
+        eprintln!("[hover] at {at}: all {all:?}");
+    }
     let shown = cpp_ls::handlers::hover::hover_text(
         &opened.session,
         &opened.view,

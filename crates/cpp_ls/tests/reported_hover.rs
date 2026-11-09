@@ -260,3 +260,65 @@ fn a_member_through_a_smart_pointers_arrow_is_named() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A local variable is never answered by a same-named declaration from the index.**
+///
+/// Reported from `EmmyLuaCodeStyle`: hovering the variable in
+/// `auto result = std::make_shared<lsp::DocumentFormattingResult>();` showed
+/// `` `codecvt_base::result` — a type of type `int`, in `codecvt_base`, declared in `xlocale:581:11` `` — a real
+/// `using result = int;` from the standard library — and hovering the variable `object` in `LSP.cpp:12` showed a
+/// static member function `object`.
+///
+/// The cause was in the **card**, not in the lookup: `declaration_markdown` re-asks the index for a declaration whose
+/// fact has no type, no return type and no parameter list — which is every fact built from a **binding** — and a
+/// local's `qualified_name()` is its bare spelling, because a function body contributes no scope segment. So the bare
+/// name found another entity entirely. `definitions`, `definition` and `type_at` had the local right all along.
+/// See `docs/buglist.md` section 7.
+#[test]
+fn a_local_is_not_answered_by_a_same_named_declaration_from_the_index() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-local");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let header = root.join("standard.h");
+    std::fs::write(
+        &header,
+        "namespace std {\nstruct codecvt_base {\n    using result = int;\n};\n}\n",
+    )
+    .expect("the header writes");
+    let file = root.join("a.cpp");
+    let source = "#include \"standard.h\"\nvoid f() {\n    auto result = 1;\n}\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone(), header.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("result").expect("the local") + 1;
+    let text = cpp_ls::handlers::hover::hover_text(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("the local has a card");
+
+    assert!(
+        !text.contains("codecvt_base"),
+        "the card is about the local, not about the standard library's `result`: {text}"
+    );
+    assert!(
+        text.contains("a variable"),
+        "and it says what the local is: {text}"
+    );
+    assert!(text.contains("int"), "and what it deduced to: {text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

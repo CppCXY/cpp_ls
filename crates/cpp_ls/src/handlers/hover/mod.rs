@@ -1173,13 +1173,24 @@ fn declaration_markdown(
     // The index is asked only when the binding's fact has **nothing to render from** — no type, no return type, no
     // parameter list — so a declaration the file spells keeps its own answer, and one the index does not hold falls back
     // to the binding rather than to an empty card.
-    let indexed = if (found.fact.type_of.is_none()
-        && found.fact.returns.is_none()
-        && found.fact.parameter_list.is_none())
-        // **A binding carries no annotation either.** `UCLASS(Blueprintable)` is read into the fact from the file's text
-        // (`fill_the_reflection`), and a fact built from a *binding* — which is what a hover on the declaration's own name
-        // gets — has none of it. The index's fact is the one with it, so it is asked for whenever the field is missing.
-        || found.fact.reflection.is_none()
+    // **A local is never looked up by name in the index.** A binding carries no type, so the condition below was
+    // always true for one — and the index lookup it triggered was a *bare name*, because a local's
+    // `qualified_name()` is just its spelling (`scope` is `None`: a function body contributes no segment). Measured
+    // on `EmmyLuaCodeStyle`'s `LSPHandle.cpp:139`, `auto result = std::make_shared<lsp::DocumentFormattingResult>();`:
+    // the card for the variable `result` was `` `codecvt_base::result` — a type of type `int`, in `codecvt_base`,
+    // declared in `xlocale:581:11` `` — a real declaration of the same spelling from the standard library, inside a
+    // conditional block. `definitions` and `type_at` had the local right; only the card re-asked. `LSP.cpp:12`'s
+    // `auto object = nlohmann::json::object();` was the same shape: a variable shown as the static function
+    // `basic_json::object(initializer_list_t init = ...)`. See `docs/buglist.md` section 7.
+    let indexed = if !found.fact.local
+        && ((found.fact.type_of.is_none()
+            && found.fact.returns.is_none()
+            && found.fact.parameter_list.is_none())
+            // **A binding carries no annotation either.** `UCLASS(Blueprintable)` is read into the fact from the file's
+            // text (`fill_the_reflection`), and a fact built from a *binding* — which is what a hover on the
+            // declaration's own name gets — has none of it. The index's fact is the one with it, so it is asked for
+            // whenever the field is missing.
+            || found.fact.reflection.is_none())
     {
         session
             .index()
@@ -1188,6 +1199,18 @@ fn declaration_markdown(
     } else {
         None
     };
+    if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
+        eprintln!(
+            "[card] heard {} local {} type_of {:?} => indexed {}",
+            found.fact.name,
+            found.fact.local,
+            found.fact.type_of,
+            indexed
+                .as_ref()
+                .map(|seen| format!("{}:{}", seen.file.display(), seen.fact.name))
+                .unwrap_or_else(|| "no".to_string())
+        );
+    }
     let found = match &indexed {
         Some(indexed) => indexed,
         None => found,
