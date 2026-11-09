@@ -977,6 +977,14 @@ pub struct ProjectIndex {
     /// never come to point at a different file than it was made for.
     sequence: HashMap<String, u32>,
     next_sequence: u32,
+    /// **How many times the summaries have changed** — one bump per [`ProjectIndex::insert_at`] and
+    /// [`ProjectIndex::forget`].
+    ///
+    /// Not a version of the answers: it is what makes the *check* cheap. A cached walk is valid if the readings it was
+    /// made of are unchanged, and that is a fingerprint over its whole closure (measured: ~0.1 ms for 1063 files). A
+    /// request asks the same closure question thousands of times, so the fingerprint is taken once per request: a walk
+    /// built or validated at this number answers from the stamp alone until the index changes again.
+    changed: u64,
 
     /// The inverted index — see [`crate::index::names`]. Derived from `summaries` and `cooked`, and updated in the
     /// same call that changes either; nothing else writes it.
@@ -1056,7 +1064,7 @@ pub struct ProjectIndex {
     /// while the four walks from the headers it includes survive. A file the index has **never** seen still clears
     /// the whole map, because a new file can change how an `#include "x.h"` resolves for a closure that does not
     /// contain it. See [`ProjectIndex::insert_at`] and [`ProjectIndex::forget`].
-    visibility: std::sync::Mutex<HashMap<String, CachedWalk>>,
+    visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<CachedWalk>>>,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -2191,12 +2199,12 @@ impl ProjectIndex {
                 contributors.push(member.file.clone());
             }
         }
-        if contributors
-            .iter()
-            .any(|file| self.cooked_reading(file).is_none())
-        {
-            return;
-        }
+        // **A list made of not-yet-cooked facts is cached like any other**, and the invalidation rule is what makes
+        // that safe: cooking a file calls [`ProjectIndex::forget_member_lists`] for it when its declarations *changed*,
+        // so the entry a raw reading produced is dropped the moment a cooked one disagrees with it. Refusing to cache
+        // it instead was measured as the whole cost of a cold request: `members_of("std")` — 6 080 members, 37 ms —
+        // was recomputed by **every** question that resolved a member of a `std::` type (one cold inlay: ~170 times,
+        // 6.3 s), because one of its contributors happened not to be cooked yet.
 
         let read_at = self.summaries.len();
 
@@ -12438,6 +12446,7 @@ impl ProjectIndex {
     /// whose keys match have the same declarations, at the same offsets, with the same ranges, *and* the same
     /// resolved includes.
     pub fn insert_at(&mut self, path: &Path, summary: FileSummary) {
+        self.changed = self.changed.wrapping_add(1);
         let rewritten = normalize(path);
         let known_to_the_index =
             self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
@@ -12507,8 +12516,20 @@ impl ProjectIndex {
 
             sequence
         } else {
-            let sequence = self.next_sequence;
-            self.next_sequence += 1;
+            // **A file keeps the number it was first given.** An edit is `forget` followed by a re-read, and a fresh
+            // number for the re-read would put the file in a different place in every closure it is part of — which
+            // matters because a closure's ordered file list is now cached with the closure rather than rebuilt per
+            // question (see `CachedWalk::files`): the cached list is a `(sequence, visibility)` pair per file, and a
+            // renumbered file would either be dropped from it (its old number gone from `order`) or read out of the
+            // wrong slot. Numbering a path once makes the answer stable for the whole session.
+            let sequence = match self.sequence.get(&path) {
+                Some(&known) => known,
+                None => {
+                    let sequence = self.next_sequence;
+                    self.next_sequence += 1;
+                    sequence
+                }
+            };
             self.order.insert(sequence, path.clone());
             // **The key is normalized when it is written**, not when it is asked for. Two readers
             // arrive at this map with two spellings of the same file: the visibility walk hands
@@ -12584,6 +12605,7 @@ impl ProjectIndex {
     /// Returns whether there was anything to forget, which is what lets a watcher report "this event changed
     /// nothing" rather than counting every ignored path as work.
     pub fn forget(&mut self, path: &Path) -> bool {
+        self.changed = self.changed.wrapping_add(1);
         let path = normalize(path);
         let Some(summary) = self.summaries.remove(&path) else {
             return false;
@@ -12630,13 +12652,20 @@ impl ProjectIndex {
         // declaration queries out of a rendering nobody has any more: the same rule as the summary, for the same
         // reason, because an answer about a file that is gone is worse than no answer.
         self.forget_the_readings_of(&path);
-        let sequence = self.sequence.remove(&path).or_else(|| {
-            // **Both spellings go**, for the reason the insert keeps both: a file forgotten under one spelling that
-            // stayed findable under the other would answer with declarations the index no longer has.
-            self.sequence.remove(&normalize(Path::new(&path)))
-        });
+        // **The number is kept**, and the reason is the cached closure order (`CachedWalk::files`): a walk holds a
+        // `(sequence, visibility)` pair per file, and a re-read that renumbered the file would either be dropped from
+        // that list or read out of the wrong slot until the whole closure was rebuilt. `forget` still removes
+        // everything the number *finds* — the summary, the readings, the postings — so a query that reaches the path
+        // through `order` finds nothing to answer with. The pair `(sequence, path)` is stable for the session.
+        let sequence = self
+            .sequence
+            .get(&path)
+            .copied()
+            .or_else(|| self.sequence.get(&normalize(Path::new(&path))).copied());
         if let Some(sequence) = sequence {
-            self.order.remove(&sequence);
+            // `order` and `sequence` are **not** removed — see the comment above: a file keeps its number for the
+            // session, so a cached closure order survives an edit. What it finds is gone: the summary, the readings
+            // and the postings below.
             self.names
                 .remove_declarations(sequence, 0, &summary.declarations);
             self.names.remove_macros(sequence, &summary.macros);
@@ -13861,8 +13890,9 @@ impl ProjectIndex {
         let walk_started = std::time::Instant::now();
         let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
         let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
-        let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
-        let files = self.visible_in_order_of(visible_files);
+        let (walk, walk_files) = self.the_visible_walk(visible_from);
+        let files = walk_files.as_ref();
+        let through_an_import = &walk.through_an_import;
         if crate::probes::visibility() {
             eprintln!(
                 "[visibility] {} file(s) after the order step, from {}",
@@ -14366,18 +14396,110 @@ impl ProjectIndex {
         contributors.sort_unstable();
         contributors.dedup();
         let fingerprint = self.the_walks_fingerprint(&contributors);
+        // **The files in sequence order, computed with the walk rather than per question** — the one shape every
+        // cross-file question iterates by. See [`CachedWalk::files`].
+        let files = self.visible_in_order_of(
+            seen.visibility
+                .iter()
+                .map(|(path, visibility)| (path.clone(), *visibility))
+                .collect(),
+        );
         if let Ok(mut walks) = self.visibility.lock() {
             walks.insert(
                 from,
-                CachedWalk {
+                std::sync::Arc::new(CachedWalk {
                     seen: std::sync::Arc::new(seen),
                     contributors: std::sync::Arc::new(contributors),
                     fingerprint,
-                },
+                    files: std::sync::Arc::new(files),
+                    stamp: self.changed,
+                }),
             );
         }
 
         (order, through_an_import)
+    }
+
+    /// **The walk and its ordered files, memoised** — what a query that iterates the closure needs.
+    ///
+    /// [`ProjectIndex::visible_files_with_modules`] answers with owned vectors, which is the right shape for its own
+    /// callers (a `Vec` of paths for "which files does this file see") and the wrong one for the declaration queries:
+    /// they ask the same closure question thousands of times per request (measured: **15 489** for one cold inlay), so
+    /// a clone of every path per question was seconds of the request. This hands out the shared walk instead.
+    fn the_visible_walk(
+        &self,
+        from: &Path,
+    ) -> (
+        std::sync::Arc<Seen>,
+        std::sync::Arc<Vec<(u32, IncludeVisibility)>>,
+    ) {
+        let from = normalize(from);
+        let remembered = self
+            .visibility
+            .lock()
+            .ok()
+            .and_then(|walks| walks.get(&from).cloned());
+        if let Some(known) = remembered {
+            // **The stamp first.** A request asks the same closure question thousands of times, and between its
+            // questions the index does not change at all: the walk built (or validated) at this stamp answers without
+            // touching the closure. Measured on a cold inlay this is the difference between ~0.1 ms and ~1 µs per
+            // question, and there are 15 489 of them.
+            if known.stamp == self.changed {
+                return (
+                    std::sync::Arc::clone(&known.seen),
+                    std::sync::Arc::clone(&known.files),
+                );
+            }
+            if self.the_walks_fingerprint(&known.contributors) == known.fingerprint {
+                let files = if known.files.len() == known.seen.visibility.len() {
+                    std::sync::Arc::clone(&known.files)
+                } else {
+                    // **The order is complete only if every visible file had a sequence when the walk was made.** A
+                    // walk can be built while a file it can see is not yet in the index, so the stored order is one
+                    // short. The lengths are the check and this is the repair — cheap and rare.
+                    std::sync::Arc::new(
+                        self.visible_in_order_of(
+                            known
+                                .seen
+                                .visibility
+                                .iter()
+                                .map(|(path, visibility)| (path.clone(), *visibility))
+                                .collect(),
+                        ),
+                    )
+                };
+                if let Ok(mut walks) = self.visibility.lock() {
+                    walks.insert(
+                        from.clone(),
+                        std::sync::Arc::new(CachedWalk {
+                            seen: std::sync::Arc::clone(&known.seen),
+                            contributors: std::sync::Arc::clone(&known.contributors),
+                            fingerprint: known.fingerprint,
+                            files: std::sync::Arc::clone(&files),
+                            stamp: self.changed,
+                        }),
+                    );
+                }
+                return (std::sync::Arc::clone(&known.seen), files);
+            }
+        }
+        // A miss builds through the one implementation of the walk, and the freshly memoised entry is the answer.
+        let _ = self.visible_files_with_modules(Path::new(&from));
+        if let Some(known) = self
+            .visibility
+            .lock()
+            .ok()
+            .and_then(|walks| walks.get(&from).cloned())
+        {
+            return (
+                std::sync::Arc::clone(&known.seen),
+                std::sync::Arc::clone(&known.files),
+            );
+        }
+        (
+            std::sync::Arc::new(Seen::default()),
+            std::sync::Arc::new(Vec::new()),
+        )
     }
 
     /// **Everything behind one module edge**: the target's includes, its own module edges, and theirs.
@@ -16151,6 +16273,13 @@ struct CachedWalk {
     /// The inputs this walk was made of, as one number. An entry answers only while every contributor's
     /// [`ProjectIndex::walk_inputs`] still hashes to what it did here.
     fingerprint: u64,
+    /// **The files the walk found, in sequence order** — the order every cross-file question iterates by. Computed
+    /// once with the walk: rebuilding it per question (clone every path, look up every sequence, sort) was seconds of
+    /// a cold request, because a cold inlay asks thousands of those questions.
+    files: std::sync::Arc<Vec<(u32, IncludeVisibility)>>,
+    /// The value of [`ProjectIndex::changed`] when this entry was last built or validated: while the index has not
+    /// changed since, there is nothing to validate and the fingerprint is not recomputed.
+    stamp: u64,
 }
 
 /// Two outputs from one walk because the second is a property of *how* a file was reached, and a walk that has
