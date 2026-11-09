@@ -113,7 +113,11 @@ fn what_the_module_closure_holds() {
     );
     match session.index().summary(&iostream) {
         Some(summary) => {
-            for fact in summary.declarations.iter().filter(|fact| fact.name == "cout") {
+            for fact in summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.name == "cout")
+            {
                 eprintln!(
                     "cout fact: scope {:?} exported {} guard {:?} type {:?}",
                     fact.scope, fact.exported, fact.guard, fact.type_of

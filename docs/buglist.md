@@ -285,6 +285,9 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   (`CPPLS_DUMP_RENDERING_DIR`) against the source at 1253..1274, since the scope tree is built from the rendering and a
   macro that expands to a brace is the first thing to look for there.
 
+
+## Closed
+
 ### 10. `import std;`: `vector` pointed at a forward declaration, and `map`/`cout` are not found at all
 
 * **Reported from use** on `C:\Users\zc\Desktop\test_module`, `src/std_module_demo.cpp` (an `import std;` file with no
@@ -338,7 +341,27 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   `posting.reading != the_reading_for(posting.file, None)`). The next print is those three values for these two files:
   does the file have a `sequence`, what is `posting.reading`, and what does `the_reading_for` answer — with `asking`
   `Some(program)` and `None`.
-## Closed
+
+* **`map` and `cout` — fixed.** With the facts now reachable, two more layers had to fall:
+  1. **The lookup refused a broken cook's shadow.** The asker's own program reading answers alone by policy (a name
+     it does not hold is a name the program decided against), but the unit read of `bits/std.cc` on this machine filed
+     `iostream` with **0** declarations and `bits/stl_map.h` with **2**, against summaries of 10 and 288 — a cook whose
+     attribution failed, not a decision. A reading holding less than half the file's declarations no longer shadows
+     the summary, and the fallback now claims the reading id the summary's postings actually carry (`0`, measured with
+     `CPPLS_TRACE_NAMES=1`: `file 172 id 0 index 2`; `Readings::ON_ITS_OWN` is `1`, which matched nothing).
+  2. **`definition_across_files` did not apply the two rules `ProjectIndex::definition` has**: a `using`-declaration is
+     a synonym rather than a second entity, and a definition beats a forward declaration. `std::cout` was
+     `[std.cc using std::cout;, iostream's variable]` → Ambiguous; `std::map` was the same plus the definition in
+     `stl_map.h` and a forward declaration in `stl_multimap.h`.
+* **Measured after**, on `test_module`'s `import std;` file:
+
+  ```text
+  define std::map  → stl_map.h:105  template <typename _Key, typename _Tp, typename _Compare = …, typename _Alloc = …> class map
+  define std::cout → iostream:65    `std::cout` — a variable of type `ostream`, in `std`
+  ```
+
+  and the completion after `std::` is what it was, so nothing was traded away for this.
+
 
 ### 7. `hover` answers with an index fact while `define` answers with the file's own declaration
 

@@ -196,15 +196,44 @@ pub fn definition_across_files(
     offset: usize,
 ) -> Known<ProjectDefinition> {
     match definitions_across_files(index, declaring, scopes, root, path, offset) {
-        Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
-        Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(
-            // The spelling the cursor wrote, read back from the tree rather than taken from the list: a reader
-            // asking "which `find` is this" wants the name they pointed at, not the qualified name of whichever
-            // overload happens to sort first.
-            crate::sema::resolve::qualified_name_at(root, offset)
-                .map(|(written, _)| written)
-                .unwrap_or_default(),
-        ))),
+        Known::Yes(mut found) => {
+            // **A synonym is not a second entity, and a definition beats a forward declaration.** Both rules were in
+            // `ProjectIndex::definition` and neither was here, so every query on this path answered `Ambiguous` for a
+            // name a module re-exports: measured on `test_module`'s `import std;` file, `std::cout` had two candidates
+            // — `std.cc:1588 using std::cout;` (kind `Other`) and `iostream:65 extern ostream cout;` — and `std::map`
+            // had three: the same kind of synonym, the **definition** in `stl_map.h`, and a forward declaration in
+            // `stl_multimap.h`. See `docs/buglist.md` section 10.
+            if found
+                .found
+                .iter()
+                .any(|declaration| declaration.fact.kind != DeclKind::Other)
+            {
+                found
+                    .found
+                    .retain(|declaration| declaration.fact.kind != DeclKind::Other);
+            }
+            if found.found.len() > 1 {
+                let definitions: Vec<&ProjectDefinition> = found
+                    .found
+                    .iter()
+                    .filter(|declaration| declaration.fact.definition)
+                    .collect();
+                if let [only] = definitions.as_slice() {
+                    return Known::Yes((*only).clone());
+                }
+            }
+            match found.found.len() {
+                1 => Known::Yes(found.found.remove(0)),
+                _ => Known::Unknown(UnknownReason::Ambiguous(Box::from(
+                    // The spelling the cursor wrote, read back from the tree rather than taken from the list: a reader
+                    // asking "which `find` is this" wants the name they pointed at, not the qualified name of whichever
+                    // overload happens to sort first.
+                    crate::sema::resolve::qualified_name_at(root, offset)
+                        .map(|(written, _)| written)
+                        .unwrap_or_default(),
+                ))),
+            }
+        }
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::No,
     }
@@ -12732,6 +12761,16 @@ impl ProjectIndex {
             .clear();
 
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
+        let tracing = std::env::var("CPPLS_TRACE_NAMES").is_ok()
+            && (path.ends_with("stl_map.h") || path.ends_with("iostream"));
+        if tracing {
+            eprintln!(
+                "[names] insert_a_reading {}: sequence {:?} id {id} declarations {}",
+                path,
+                self.sequence.get(&path),
+                reading.declarations.len()
+            );
+        }
         if let Some(&sequence) = self.sequence.get(&path) {
             let previous = self
                 .cooked
@@ -13780,6 +13819,31 @@ impl ProjectIndex {
             }
         };
 
+        if std::env::var("CPPLS_TRACE_NAMES").is_ok()
+            && let Narrow::Named(names) = narrow
+            && names.iter().any(|name| *name == "cout" || *name == "map")
+        {
+            let postings = match &postings {
+                Some(postings) => postings
+                    .iter()
+                    .map(|posting| {
+                        format!(
+                            "file {} id {} index {}",
+                            posting.file,
+                            posting.reading,
+                            posting.index()
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                None => vec!["no narrow".to_string()],
+            };
+            eprintln!(
+                "[names] visible_declarations {:?}: {} posting(s) — {postings:?}",
+                names,
+                postings.len()
+            );
+        }
+
         // One `(file, its candidates)` group at a time, in file order. Without postings a file's candidates are all of
         // its facts, which is what the empty group range stands for.
         let mut next = 0;
@@ -13881,11 +13945,31 @@ impl ProjectIndex {
                     .and_then(|readings| readings.id_for(program))
                     .is_some()
             });
+            // **A reading with a fraction of the file's declarations is a cook that went wrong**, and it must not
+            // speak for the file — the same rule the arm below states for a program that did not read the file, and
+            // the measurement that makes it necessary is the unit read of `bits/std.cc` on this machine: `iostream`
+            // came out with **0** declarations and `bits/stl_map.h` with **2**, against summaries of 10 and 288. The
+            // policy that the asking program's reading answers alone is right for a name the program *decided*
+            // against (`#if 0 struct Dead`), and a reading holding a fraction of the file is not a decision, it is a
+            // cook whose attribution failed. Measured after this: `std::map` and `std::cout` answer from an
+            // `import std;` file (`docs/buglist.md` section 10).
+            let a_broken_cook = cooked.is_some_and(|cooked| {
+                // Zero is the ordinary broken case — `iostream` came out with **no** declarations at all — so an
+                // empty reading is the first thing this has to include, not exclude.
+                cooked.declarations.len() * 2 < summary.declarations.len()
+            });
             let (facts, reading): (&[DeclFact], u32) = match cooked {
                 Some(cooked) if cooked.declarations.iter().any(&accepts) => {
                     (cooked.declarations.as_slice(), reading)
                 }
-                Some(_) if !the_askers_own && summary.declarations.iter().any(&accepts) => {
+                // **The summary's postings carry reading `0`** — measured, not guessed: `[names]` printed
+                // `file 172 id 0 index 2` for `iostream`'s `cout`, while `Readings::ON_ITS_OWN` is `1`, so a fallback
+                // that claimed `1` matched no posting and answered nothing. `0` is what `insert_at` files a summary's
+                // declarations under.
+                Some(_)
+                    if (a_broken_cook || !the_askers_own)
+                        && summary.declarations.iter().any(&accepts) =>
+                {
                     (summary.declarations.as_slice(), 0)
                 }
                 Some(cooked) => (cooked.declarations.as_slice(), reading),
