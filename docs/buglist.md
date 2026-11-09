@@ -5,6 +5,70 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Open
 
+### 7. `hover` answers with an index fact while `define` answers with the file's own declaration
+
+* **Reported from use** on `C:\Users\zc\Desktop\github\EmmyLuaCodeStyle`, two pictures that look unrelated and are
+  the same defect:
+  * `LSPHandle.cpp:139`, `auto result = std::make_shared<lsp::DocumentFormattingResult>();` — hovering `result` shows
+    `` `codecvt_base::result` — a type of type `int`, in `codecvt_base`, declared in `xlocale:581:11` ``, with the
+    "inside a conditional block" caveat.
+  * `LSP.cpp:12`, `auto object = nlohmann::json::object();` — hovering the **variable** `object` shows the **static
+    function** `basic_json::object(initializer_list_t init = ...)`.
+* **Measured, and the two answers disagree about the same cursor** (`tools/inspect`, same project, same file):
+
+  ```text
+  inspect hover --project <p> --file CodeFormatServer/src/LSP/LSPHandle.cpp \
+      --needle 'auto result = std::make_shared<lsp::DocumentFormattingResult>' --shift 6 --index
+      hover at 139:11: `codecvt_base::result` — a type of type `int`, in `codecvt_base`
+  inspect define ... same offset --index
+      picked   LSPHandle.cpp:139:10   result   variable
+      found    LSPHandle.cpp:139:10   result   variable
+  inspect hover ... --cook          (no --index)
+      hover at 139:11: `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`
+  ```
+
+  So the **full index is what flips the answer**: with it, `hover` resolves the name to a fact of the same spelling
+  from the standard library; without it, to the local. `define` is right in both runs.
+* **The card's content is not wrong** — MSVC's `<xlocale>:581` really is `using result = int;` inside
+  `class codecvt_base`, and that line really is inside a conditional region. The defect is *which* `result` the hover
+  was asked about: a declared variable was answered with an unrelated type of the same name that happens to be in the
+  closure. `LSP.cpp:12`'s `object` is the same shape (a variable answered by a function).
+* **What is established about where it is not:** the fact for the local is right (`facts --name result` lists
+  `139:10 result variable type auto`), `define` picks it, `type` answers it
+  (`` `result` is `shared_ptr<lsp::DocumentFormattingResult>` ``), and the offset is the same in all three commands.
+  The two commands differ only in the **function they call first**: `hover` goes through
+  `hover_text` -> `hover_of_the_program`, `define` calls `session.definition` directly; and `hover` also asks
+  `session.header_at` before that.
+* **The next step, in order**: (1) one temporary print in `hover_of_the_program` and in
+  `definitions_across_files` showing the candidate list and its order for this exact cursor with a full index;
+  (2) the same in `Session::definition`'s collapse (`definition_across_files`, "one candidate -> answer, several ->
+  Ambiguous"), because a plural of two — the local and the library type — would explain both pictures and would also
+  explain why the **hover** (which sees the singular) picks the wrong one; (3) fix the preference so a declaration the
+  cursor's own file writes wins over one it merely includes, with `DeclFact::definition` breaking ties among classes.
+
+### 8. `LSPHandle.cpp` cannot see `LanguageServer.h` — a bare quoted include and no compile database
+
+* **Reported from use** (picture 1): `_server->GetService<ConfigService>()` is underlined, and the hover says
+  "`LanguageServer*` has no member `GetService`".
+* **Measured**: the class is fine and its facts are fine (`facts --file CodeFormatServer/src/LanguageServer.h` lists all
+  30, including `44:14 GetService function in LanguageServer returns Service *`), but
+  `members --class LanguageServer --file <LSPHandle.cpp> --index` answers **0 members** while asking from the header
+  itself answers **21**. The cause is one line of the summary:
+
+  ```text
+  include "LanguageServer.h" -> unresolved        ← the other 16 resolve
+  ```
+
+  The project has **no `compile_commands.json` and no `.cppls.toml`**, so the search paths are the toolchain's only,
+  and a **quoted include with no directory** is exactly the case the fuzzy fallback refuses by contract
+  (`include::fuzzy::tests::a_bare_file_name_is_never_matched`). With the include directories stated,
+  `include "LanguageServer.h" -> .../CodeFormatServer/src/languageserver.h` and `members` answers **21**, including
+  `GetService`. A `.cppls.toml` naming the project's own `-I` directories is in that project now.
+* **What to build from it**: the analysis can infer include roots for a CMake project without a database — the two
+  conventions that would have found this one are "a directory whose name is `include`" and "a CMake target's `src`",
+  and the safe form is the one already documented for fuzzy includes: match only when the tail is **unique** under the
+  root, and prefer it for **quoted** includes (which the compiler resolves against the file's own directory first).
+
 ### 6. One keystroke of one file costs a whole-program read, and the pump never goes idle
 
 * **Reported from use.** "CPU 风扇转的程度…后台的计算量依旧巨大…几百行的文件不应该有如此之大的计算量".
