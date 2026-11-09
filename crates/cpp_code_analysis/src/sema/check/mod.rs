@@ -189,7 +189,21 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
         return;
     }
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
+        // **Which rule costs what**, at `CPPLS_TRACE_DIAGNOSTICS=1`. A pull on the reader'"'"'s project takes seconds to
+        // answer zero findings, and the table is the only way to say which rule spends them rather than guess.
+        let started = std::time::Instant::now();
         T::check(context);
+        let took = started.elapsed();
+        if crate::probes::diagnostics() && took.as_millis() >= 2 {
+            eprintln!(
+                "[diagnostics]   check {:<45} {:>6} ms",
+                std::any::type_name::<T>()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("?"),
+                took.as_millis()
+            );
+        }
     }
 }
 
