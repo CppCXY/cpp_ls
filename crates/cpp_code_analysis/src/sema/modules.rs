@@ -576,11 +576,18 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         // `:` and `.` are both separators between a module and its partition, so both are expanded; the
         // difference between them is only which spelling of the *name* they came from.
         let dotted = name.replace(':', ".");
+        // **The underscore is the shape a project actually writes**: CMake's module documentation and `test_module`
+        // both name a partition file `<module>_<partition>.cppm`, while this list had only `-`, `/` and `.`. A
+        // candidate is verified by reading it — it has to declare `export module m:part;` — so one more spelling costs
+        // a failed read at worst, and a partition nothing could find made `import geometry;` see nothing of
+        // `:shapes` (`tests/partition_probe.rs`, `docs/buglist.md` section 11).
         let stems = [
             name.replace(':', "-").replace('.', "/"),
             name.replace(':', "-"),
             dotted.replace('.', "/"),
             dotted.clone(),
+            name.replace(':', "_").replace('.', "/"),
+            name.replace(':', "_"),
         ];
 
         for directory in self.search_directories(including) {

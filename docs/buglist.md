@@ -286,6 +286,32 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   macro that expands to a brace is the first thing to look for there.
 
 
+### 11. A module's partitions are found and their names are visible — `test_module` has an example now
+
+* **Reported from use**: the module project had no partition example, and asking for one turned up a defect first. A
+  project that names its partition files `<module>_<partition>.cppm` — which CMake's documentation and `test_module`
+  both do — had `export import :shapes;` resolve to **nothing**: `ModuleScanner::candidate_paths` knew
+  `geometry-shapes`, `geometry/shapes` and `geometry.shapes` and not the `_` spelling.
+* **Measured** (`tests/partition_probe.rs`, on the project): before the fix, `partition_demo.cpp` (a module
+  implementation unit, `module geometry;`) saw **2** files — itself and the primary interface — and neither
+  `geometry_shapes.cppm` nor `geometry_area.cppm`; `definition("Rect")` and `definition("rect_area")` were
+  `NotDeclaredHere`. After the `_` stems were added: **4** visible files, `Rect` → `geometry_shapes.cppm:672`,
+  `rect_area` → `geometry_area.cppm:530`, and the same answers from `main.cpp` (`import geometry;`) through the
+  primary interface's `export import`.
+* **The example**, written into `C:\Users\zc\Desktop\test_module` and built there:
+  `src/geometry.cppm` (primary interface, `export import :shapes; export import :area;`),
+  `src/geometry_shapes.cppm` (`export module geometry:shapes; export struct Rect`),
+  `src/geometry_area.cppm` (`export module geometry:area; import :shapes; export double rect_area(...)`),
+  `src/partition_demo.cpp` (an implementation unit, `module geometry;`), and `main.cpp` importing the module.
+  `cmake --build build` succeeds and the program prints `3 x 4 的面积 = 12`; `README.md` has the section that explains
+  the three rules (`export import` re-exports, `:part` is module-internal, the file-name convention).
+* **What is not pinned hermetically.** The test `modules::a_partition_named_with_an_underscore_is_found_and_its_names_are_visible`
+  passes **with and without** the fix: its partition files are project files, so the scanner's unit index already holds
+  them and the naming convention is never consulted. A fixture where the partition is *not* a project file, and a
+  fixture provider for the scanner's own reads, both failed for reasons about the fixture's paths rather than about
+  the convention (recorded here rather than worked around); the real project is the measurement, and a scanner-level
+  test is the next attempt.
+
 ## Closed
 
 ### 10. `import std;`: `vector` pointed at a forward declaration, and `map`/`cout` are not found at all

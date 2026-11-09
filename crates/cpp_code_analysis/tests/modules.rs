@@ -2041,3 +2041,79 @@ fn a_module_unit_is_read_as_a_translation_unit() {
         "a file that imports a module is compiled with the module's build"
     );
 }
+
+/// **A module's partition is found by the name a project actually writes**, and an importer sees its names.
+///
+/// `test_module` names its partition files `<module>_<partition>.cppm` — `geometry_shapes.cppm` beside
+/// `geometry.cppm` — which the candidate list did not know: it tried `geometry-shapes`, `geometry/shapes` and
+/// `geometry.shapes`, so `export import :shapes;` in the primary interface resolved to nothing, and a file that
+/// imports the module saw neither `Rect` nor `rect_area`. Measured with `tests/partition_probe.rs` and the real
+/// project (`docs/buglist.md` section 11).
+///
+/// The fixture spells the same shape in memory: a primary interface that re-exports two partitions, and a `.cpp` that
+/// imports the module and uses what the partitions export.
+#[test]
+fn a_partition_named_with_an_underscore_is_found_and_its_names_are_visible() {
+    use cpp_code_analysis::{Known, OpenDocuments, Session, SessionFiles, WatchFilter};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "src/geometry.cppm",
+            "export module geometry;\nexport import :shapes;\nexport import :area;\n",
+        )
+        .with_file(
+            "src/geometry_shapes.cppm",
+            "export module geometry:shapes;\nexport struct Rect {\n    double width;\n};\n",
+        )
+        .with_file(
+            "src/geometry_area.cppm",
+            "export module geometry:area;\nimport :shapes;\nexport double rect_area(const Rect &rect);\n",
+        )
+        .with_file(
+            "src/use.cpp",
+            "import geometry;\ndouble f(Rect rect) {\n    return rect_area(rect);\n}\n",
+        );
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session =
+        Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
+    // **All four are project files, and the test therefore documents rather than pins the naming convention** — the
+    // scanner's unit index already holds a partition the project has read, so it would find it whatever the candidate
+    // names are. The convention itself is measured on the real project by `tests/partition_probe.rs` (partition files
+    // invisible before the `_` spelling was added, visible after), and a fixture that reproduces it needs the scanner
+    // to read a file the project has not — which this fixture's provider could not be made to do (the attempt is in
+    // `docs/buglist.md` section 11).
+    session.add_project_files([
+        std::path::PathBuf::from("src/geometry.cppm"),
+        std::path::PathBuf::from("src/geometry_shapes.cppm"),
+        std::path::PathBuf::from("src/geometry_area.cppm"),
+        std::path::PathBuf::from("src/use.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("src/use.cpp"));
+    session.index_everything();
+
+    let use_file = std::path::Path::new("src/use.cpp");
+    let rect = session.index().definition("Rect", use_file);
+    assert!(
+        matches!(rect, Known::Yes(ref found) if found.file.ends_with("geometry_shapes.cppm")),
+        "`Rect` comes from the `:shapes` partition: {rect:?}"
+    );
+    let area = session.index().definition("rect_area", use_file);
+    assert!(
+        matches!(area, Known::Yes(ref found) if found.file.ends_with("geometry_area.cppm")),
+        "`rect_area` comes from the `:area` partition: {area:?}"
+    );
+
+    // And the partitions are part of the module's visibility, not merely readable by name.
+    let visible: Vec<String> = session
+        .index()
+        .visible_files(use_file)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        visible
+            .iter()
+            .any(|path| path.ends_with("geometry_shapes.cppm")),
+        "the partition file is in the importer's view: {visible:?}"
+    );
+}
