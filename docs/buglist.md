@@ -5,94 +5,6 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 ## Open
 
-### 7. `hover` answers with an index fact while `define` answers with the file's own declaration
-
-* **Reported from use** on `C:\Users\zc\Desktop\github\EmmyLuaCodeStyle`, two pictures that look unrelated and are
-  the same defect:
-  * `LSPHandle.cpp:139`, `auto result = std::make_shared<lsp::DocumentFormattingResult>();` — hovering `result` shows
-    `` `codecvt_base::result` — a type of type `int`, in `codecvt_base`, declared in `xlocale:581:11` ``, with the
-    "inside a conditional block" caveat.
-  * `LSP.cpp:12`, `auto object = nlohmann::json::object();` — hovering the **variable** `object` shows the **static
-    function** `basic_json::object(initializer_list_t init = ...)`.
-* **Measured, and the two answers disagree about the same cursor** (`tools/inspect`, same project, same file):
-
-  ```text
-  inspect hover --project <p> --file CodeFormatServer/src/LSP/LSPHandle.cpp \
-      --needle 'auto result = std::make_shared<lsp::DocumentFormattingResult>' --shift 6 --index
-      hover at 139:11: `codecvt_base::result` — a type of type `int`, in `codecvt_base`
-  inspect define ... same offset --index
-      picked   LSPHandle.cpp:139:10   result   variable
-      found    LSPHandle.cpp:139:10   result   variable
-  inspect hover ... --cook          (no --index)
-      hover at 139:11: `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`
-  ```
-
-  So the **full index is what flips the answer**: with it, `hover` resolves the name to a fact of the same spelling
-  from the standard library; without it, to the local. `define` is right in both runs.
-* **The card's content is not wrong** — MSVC's `<xlocale>:581` really is `using result = int;` inside
-  `class codecvt_base`, and that line really is inside a conditional region. The defect is *which* `result` the hover
-  was asked about: a declared variable was answered with an unrelated type of the same name that happens to be in the
-  closure. `LSP.cpp:12`'s `object` is the same shape (a variable answered by a function).
-* **What is established about where it is not:** the fact for the local is right (`facts --name result` lists
-  `139:10 result variable type auto`), `define` picks it, `type` answers it
-  (`` `result` is `shared_ptr<lsp::DocumentFormattingResult>` ``), and the offset is the same in all three commands.
-  The two commands differ only in the **function they call first**: `hover` goes through
-  `hover_text` -> `hover_of_the_program`, `define` calls `session.definition` directly; and `hover` also asks
-  `session.header_at` before that.
-* **Found, and fixed — it was the card, not the lookup.** The probe (`CPPLS_TRACE_HOVER=1`) printed what the two
-  queries answer and then what the card heard:
-
-  ```text
-  [hover] at 5546: picked Yes(ProjectDefinition { file: LSPHandle.cpp, fact: { name: "result", local: true } })
-  [card]  heard result local true type_of None => indexed .../xlocale:result      ← the card re-asked the index
-  ```
-
-  `declaration_markdown` re-asks the index for a declaration whose fact has no type, no return type and no parameter
-  list — which is **every fact built from a binding**, and a hover on a declaration's own name gets one. A binding
-  carries no type (deliberately: the type is a fact about the file's text), so the condition was always true for a
-  local, and the lookup was a **bare name**, because a local's `qualified_name()` is just its spelling — a function
-  body contributes no scope segment. `index.definition("result", LSPHandle.cpp)` answered the standard library's
-  `codecvt_base::result`; `LSP.cpp`'s `object` was answered by `basic_json::json_value::object`.
-* **The fix**: a local is never looked up by name in the index (`if !found.fact.local && …`). The card then keeps the
-  local's own fact, and the deduced-type note it already had fills the type in:
-  `` `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`, declared in `LSPHandle.cpp:139:10` ``.
-* **Pinned by** `reported_hover::a_local_is_not_answered_by_a_same_named_declaration_from_the_index`, a fixture whose
-  header declares `using result = int;` in another namespace and whose `.cpp` declares a local `auto result = 1;`.
-  Verified to fail without the guard (`let indexed = if true` in its place) and pass with it.
-
-### 8. `LSPHandle.cpp` cannot see `LanguageServer.h` — a bare quoted include and no compile database
-
-* **Reported from use** (picture 1): `_server->GetService<ConfigService>()` is underlined, and the hover says
-  "`LanguageServer*` has no member `GetService`".
-* **Measured**: the class is fine and its facts are fine (`facts --file CodeFormatServer/src/LanguageServer.h` lists all
-  30, including `44:14 GetService function in LanguageServer returns Service *`), but
-  `members --class LanguageServer --file <LSPHandle.cpp> --index` answers **0 members** while asking from the header
-  itself answers **21**. The cause is one line of the summary:
-
-  ```text
-  include "LanguageServer.h" -> unresolved        ← the other 16 resolve
-  ```
-
-  The project has **no `compile_commands.json` and no `.cppls.toml`**, so the search paths are the toolchain's only,
-  and a **quoted include with no directory** is exactly the case the fuzzy fallback refuses by contract
-  (`include::fuzzy::tests::a_bare_file_name_is_never_matched`). With the include directories stated,
-  `include "LanguageServer.h" -> .../CodeFormatServer/src/languageserver.h` and `members` answers **21**, including
-  `GetService`. A `.cppls.toml` naming the project's own `-I` directories is in that project now.
-* **Fixed in the resolver, not in the project.** `IncludeResolver::resolve`'s fuzzy fallback now answers a **quoted**
-  include with no directory when exactly one file under the root has that name
-  (`FuzzyIndex::the_only_file_named`) — one file is that file, two are an ambiguity and answer nothing, which is the
-  same rule the tail matcher applies. An **angled** include keeps the old refusal: `<vector>` is spelled without a
-  directory because the search path is meant to find it, and a project file named `vector` is not the standard
-  library.
-* **Measured after, with the project's `.cppls.toml` removed and its cache deleted** — i.e. the state the report came
-  from: `17 include(s) (17 resolved)`, `include "LanguageServer.h" -> .../CodeFormatServer/src/LanguageServer.h`,
-  `members_of(LanguageServer)` = **21**, and the hover on `_server->GetService<ConfigService>()` answers
-  `` `LanguageServer::GetService` — 2 declarations `` instead of "`LanguageServer*` has no member `GetService`".
-* **Pinned by** `include::tests::fuzzy_fallback::a_bare_quoted_include_finds_the_only_file_of_that_name` and
-  `…_with_two_files_of_that_name_is_unresolved`, and the old bare-name contract became
-  `a_bare_angled_name_is_left_to_the_search_path` (its `c/stdio.h` is unique under that root, and the angled spelling
-  still does not take it).
-
 ### 6. One keystroke of one file costs a whole-program read, and the pump never goes idle
 
 * **Reported from use.** "CPU 风扇转的程度…后台的计算量依旧巨大…几百行的文件不应该有如此之大的计算量".
@@ -374,6 +286,95 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   macro that expands to a brace is the first thing to look for there.
 
 ## Closed
+
+### 7. `hover` answers with an index fact while `define` answers with the file's own declaration
+
+* **Reported from use** on `C:\Users\zc\Desktop\github\EmmyLuaCodeStyle`, two pictures that look unrelated and are
+  the same defect:
+  * `LSPHandle.cpp:139`, `auto result = std::make_shared<lsp::DocumentFormattingResult>();` — hovering `result` shows
+    `` `codecvt_base::result` — a type of type `int`, in `codecvt_base`, declared in `xlocale:581:11` ``, with the
+    "inside a conditional block" caveat.
+  * `LSP.cpp:12`, `auto object = nlohmann::json::object();` — hovering the **variable** `object` shows the **static
+    function** `basic_json::object(initializer_list_t init = ...)`.
+* **Measured, and the two answers disagree about the same cursor** (`tools/inspect`, same project, same file):
+
+  ```text
+  inspect hover --project <p> --file CodeFormatServer/src/LSP/LSPHandle.cpp \
+      --needle 'auto result = std::make_shared<lsp::DocumentFormattingResult>' --shift 6 --index
+      hover at 139:11: `codecvt_base::result` — a type of type `int`, in `codecvt_base`
+  inspect define ... same offset --index
+      picked   LSPHandle.cpp:139:10   result   variable
+      found    LSPHandle.cpp:139:10   result   variable
+  inspect hover ... --cook          (no --index)
+      hover at 139:11: `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`
+  ```
+
+  So the **full index is what flips the answer**: with it, `hover` resolves the name to a fact of the same spelling
+  from the standard library; without it, to the local. `define` is right in both runs.
+* **The card's content is not wrong** — MSVC's `<xlocale>:581` really is `using result = int;` inside
+  `class codecvt_base`, and that line really is inside a conditional region. The defect is *which* `result` the hover
+  was asked about: a declared variable was answered with an unrelated type of the same name that happens to be in the
+  closure. `LSP.cpp:12`'s `object` is the same shape (a variable answered by a function).
+* **What is established about where it is not:** the fact for the local is right (`facts --name result` lists
+  `139:10 result variable type auto`), `define` picks it, `type` answers it
+  (`` `result` is `shared_ptr<lsp::DocumentFormattingResult>` ``), and the offset is the same in all three commands.
+  The two commands differ only in the **function they call first**: `hover` goes through
+  `hover_text` -> `hover_of_the_program`, `define` calls `session.definition` directly; and `hover` also asks
+  `session.header_at` before that.
+* **Found, and fixed — it was the card, not the lookup.** The probe (`CPPLS_TRACE_HOVER=1`) printed what the two
+  queries answer and then what the card heard:
+
+  ```text
+  [hover] at 5546: picked Yes(ProjectDefinition { file: LSPHandle.cpp, fact: { name: "result", local: true } })
+  [card]  heard result local true type_of None => indexed .../xlocale:result      ← the card re-asked the index
+  ```
+
+  `declaration_markdown` re-asks the index for a declaration whose fact has no type, no return type and no parameter
+  list — which is **every fact built from a binding**, and a hover on a declaration's own name gets one. A binding
+  carries no type (deliberately: the type is a fact about the file's text), so the condition was always true for a
+  local, and the lookup was a **bare name**, because a local's `qualified_name()` is just its spelling — a function
+  body contributes no scope segment. `index.definition("result", LSPHandle.cpp)` answered the standard library's
+  `codecvt_base::result`; `LSP.cpp`'s `object` was answered by `basic_json::json_value::object`.
+* **The fix**: a local is never looked up by name in the index (`if !found.fact.local && …`). The card then keeps the
+  local's own fact, and the deduced-type note it already had fills the type in:
+  `` `result` — a variable of type `shared_ptr<lsp::DocumentFormattingResult>`, declared in `LSPHandle.cpp:139:10` ``.
+* **Pinned by** `reported_hover::a_local_is_not_answered_by_a_same_named_declaration_from_the_index`, a fixture whose
+  header declares `using result = int;` in another namespace and whose `.cpp` declares a local `auto result = 1;`.
+  Verified to fail without the guard (`let indexed = if true` in its place) and pass with it.
+
+### 8. `LSPHandle.cpp` cannot see `LanguageServer.h` — a bare quoted include and no compile database
+
+* **Reported from use** (picture 1): `_server->GetService<ConfigService>()` is underlined, and the hover says
+  "`LanguageServer*` has no member `GetService`".
+* **Measured**: the class is fine and its facts are fine (`facts --file CodeFormatServer/src/LanguageServer.h` lists all
+  30, including `44:14 GetService function in LanguageServer returns Service *`), but
+  `members --class LanguageServer --file <LSPHandle.cpp> --index` answers **0 members** while asking from the header
+  itself answers **21**. The cause is one line of the summary:
+
+  ```text
+  include "LanguageServer.h" -> unresolved        ← the other 16 resolve
+  ```
+
+  The project has **no `compile_commands.json` and no `.cppls.toml`**, so the search paths are the toolchain's only,
+  and a **quoted include with no directory** is exactly the case the fuzzy fallback refuses by contract
+  (`include::fuzzy::tests::a_bare_file_name_is_never_matched`). With the include directories stated,
+  `include "LanguageServer.h" -> .../CodeFormatServer/src/languageserver.h` and `members` answers **21**, including
+  `GetService`. A `.cppls.toml` naming the project's own `-I` directories is in that project now.
+* **Fixed in the resolver, not in the project.** `IncludeResolver::resolve`'s fuzzy fallback now answers a **quoted**
+  include with no directory when exactly one file under the root has that name
+  (`FuzzyIndex::the_only_file_named`) — one file is that file, two are an ambiguity and answer nothing, which is the
+  same rule the tail matcher applies. An **angled** include keeps the old refusal: `<vector>` is spelled without a
+  directory because the search path is meant to find it, and a project file named `vector` is not the standard
+  library.
+* **Measured after, with the project's `.cppls.toml` removed and its cache deleted** — i.e. the state the report came
+  from: `17 include(s) (17 resolved)`, `include "LanguageServer.h" -> .../CodeFormatServer/src/LanguageServer.h`,
+  `members_of(LanguageServer)` = **21**, and the hover on `_server->GetService<ConfigService>()` answers
+  `` `LanguageServer::GetService` — 2 declarations `` instead of "`LanguageServer*` has no member `GetService`".
+* **Pinned by** `include::tests::fuzzy_fallback::a_bare_quoted_include_finds_the_only_file_of_that_name` and
+  `…_with_two_files_of_that_name_is_unresolved`, and the old bare-name contract became
+  `a_bare_angled_name_is_left_to_the_search_path` (its `c/stdio.h` is unique under that root, and the angled spelling
+  still does not take it).
+
 
 ### A body edit rebuilt the macro environment — 103.7 ms of closure walk per keystroke
 
