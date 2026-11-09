@@ -698,11 +698,12 @@ fn the_three_requests_about_one_open_file() {
                     || line.contains("hover:")
                     || line.contains("catch_up_upto")
                     || line.contains("request textDocument")
+                    || line.contains("dispatch:")
                     || line.contains("apply_upto")
                     || line.contains("diagnostic")
                     || line.contains("cook")
                 {
-                    if shown < 40 {
+                    if shown < 400 {
                         eprintln!("    {line}");
                     }
                     shown += 1;

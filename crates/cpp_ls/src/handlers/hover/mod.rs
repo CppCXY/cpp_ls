@@ -84,6 +84,16 @@ pub async fn on_hover(
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
+        struct Step(&'static str, std::time::Instant);
+        impl Drop for Step {
+            fn drop(&mut self) {
+                let ms = self.1.elapsed().as_millis();
+                if ms >= 15 {
+                    log::warn!("hover: stage {} took {ms} ms", self.0);
+                }
+            }
+        }
+        let _whole = Step("query", std::time::Instant::now());
         let path = uri_to_file_path(&uri)?;
 
         // **The two questions about the text are asked of the file's own text.**
@@ -108,7 +118,9 @@ pub async fn on_hover(
         //
         // **The cursor is read from the file's own text, then mapped into the rendering.** The two
         // steps are done in the order that cannot drift.
+        let view_step = Step("view_of_the_file", std::time::Instant::now());
         let written = session.view_of_the_file(&path)?;
+        drop(view_step);
         let in_the_file = file_offset_at_position(&written, position)?;
         // **The hover answers from the file's own text, not from its rendering** — and that is a fix, not a
         // simplification. `session.view` asks for a cook when the rendering is not cached, and the cache holds eight,
