@@ -617,6 +617,13 @@ fn the_three_requests_about_one_open_file() {
         let _ = version;
     };
 
+    if let Some(settle) = std::env::var("CPPLS_HOVER_SETTLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        eprintln!("  settling for {settle} ms before the first round");
+        std::thread::sleep(Duration::from_millis(settle));
+    }
     for round in 1..=3 {
         round_of(&mut server, &mut id, &format!("round {round}"), 1);
     }
