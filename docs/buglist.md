@@ -322,13 +322,22 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   So the fact is in the index, its file is visible, its spelling matches, and the **bare** name finds it — the
   **qualified** match is what fails, exactly as `files_declaring`'s `matches(fact, name)` compares the fact's
   `qualified_name()` with the written one.
-  1. **`map`**: print `fact.qualified_name()` for the one candidate `definitions("map")` answers. The suspicion is a
-     version namespace — libstdc++ wraps declarations in `_GLIBCXX_BEGIN_NAMESPACE_VERSION`, and a fact whose scope is
-     `std::__cxx11` matches `map` by its last segment but not `std::map` by its full spelling. The fix then belongs in
-     `matches`: a qualified spelling should match a fact in an **inline** namespace of that scope.
-  2. **`cout`**: it fails even **bare**, and its file (`iostream`) is reached **only** through the module, so the two
-     filters that can drop such a fact are `only_what_is_exported` (`through_an_import`) and the conditional guard of
-     `extern ostream cout;`. One print of both for that one candidate decides it.
+  The first version of this entry guessed a version namespace for `map`; the probe now says something else, and the
+  correction matters:
+  1. **`map`**: the one declaration `definitions("map")` answers is **`std::range_format::map`** (`<format>`'s
+     `using`/enum member) — *not* `std::map`. So `stl_map.h`'s fact is not merely mismatched on its scope: it is not in
+     the name index's answer at all, and the bare spelling finds a different `map` from a file that was read on its own.
+  2. **`cout`**: the fact in `iostream`'s summary is `scope Some("std")`, `exported false`, `guard Unconditional`,
+     `type Some("ostream")` — nothing there to reject it. It fails **bare** as well, so it is not the qualified match
+     either.
+  Both files are in the closure **and** the visible set **and** have a summary (`index.summary(..)` is `Some` for each;
+  `iostream`'s facts are readable through `summary.declarations`). What is left is the **name index**: `insert_a_reading`
+  adds postings only `if let Some(&sequence) = self.sequence.get(&path)` (project.rs, the insert above the `readings`
+  bookkeeping), and a query that walks postings filters by the reading it chooses for the file
+  (`visible_declarations_upto`'s `the_reading_for(file, asking)`, and the posting walk's
+  `posting.reading != the_reading_for(posting.file, None)`). The next print is those three values for these two files:
+  does the file have a `sequence`, what is `posting.reading`, and what does `the_reading_for` answer — with `asking`
+  `Some(program)` and `None`.
 ## Closed
 
 ### 7. `hover` answers with an index fact while `define` answers with the file's own declaration

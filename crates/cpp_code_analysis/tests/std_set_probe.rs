@@ -94,6 +94,34 @@ fn what_the_module_closure_holds() {
             other => eprintln!("definitions {name}: {other:?}"),
         }
     }
+    // **What the one candidate says about itself** — the qualified spelling, the export flag and the guard are
+    // the three filters that can drop a fact that is in the index and in a visible file.
+    if let cpp_code_analysis::Known::Yes(found) = session.index().definitions("map", &file) {
+        for definition in &found.found {
+            let fact = &definition.fact;
+            eprintln!(
+                "map candidate: qualified {:?} scope {:?} exported {} guard {:?}",
+                fact.qualified_name(),
+                fact.scope,
+                fact.exported,
+                fact.guard
+            );
+        }
+    }
+    let iostream = std::path::PathBuf::from(
+        r"c:/users/zc/desktop/mingw/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/iostream",
+    );
+    match session.index().summary(&iostream) {
+        Some(summary) => {
+            for fact in summary.declarations.iter().filter(|fact| fact.name == "cout") {
+                eprintln!(
+                    "cout fact: scope {:?} exported {} guard {:?} type {:?}",
+                    fact.scope, fact.exported, fact.guard, fact.type_of
+                );
+            }
+        }
+        None => eprintln!("iostream has no summary in this session"),
+    }
     let view = session.view_of_the_file(&file);
     if let Some(view) = &view {
         match &session.members_of(view, "std::map") {
