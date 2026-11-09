@@ -287,6 +287,77 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 
 
 
+### 13. A sweep of GCC's, Clang's and MSVC's own headers — three gaps fixed, one open
+
+* **Why this exists.** Section 12's `__real__` was found by chasing one name. The question after it was the right one:
+  how many more constructs of that kind are there? So the *instrument* came first — two of them, because a table and a
+  sweep answer different questions.
+* **`tests/extensions_comprehensive.rs`** — the checklist: **GCC 40**, **Clang 29**, **MSVC 55** constructs, one row
+  per extension a real header writes (`__attribute__` positions, statement expressions, `__typeof_unqual`,
+  `__builtin_offsetof`, GCC traits builtins, computed goto, `#pragma GCC`; Clang blocks, `_Nullable`/`__nullable`,
+  `__block`, `__builtin_assume`, `_BitInt`, `_Atomic`, `#pragma clang`; MSVC `__declspec(…)` family, SAL-shaped
+  `__pragma`, `__try`, C++/CLI's `gcnew`/`ref class`/`delegate`/`event`/`property`/`T^`/`T%`/`safe_cast`, and C++/CX's
+  `ref new`/`default` namespace). One run prints **every** row that fails. Current state: **all three tables pass.**
+* **`tests/extension_sweep.rs`** — the sweep: parse every header under `CPPLS_SWEEP_DIR` (`.h/.hpp/.hh/.hxx/.inl/.ipp/.ixx/.cppm`,
+  `CPPLS_SWEEP_LIMIT` files), rank the failures by **construct** with one example each, and count two kinds of
+  false positive apart: **fragments** (a header included inside an initializer list — `bits/text_encoding-data.h` —
+  whose first token is `{`, or one that says `# error "not a public header"`) and **macro-shaped** errors (a raw parse
+  cannot expand `_TRY_BEGIN`/`PB_DS_ASSERT_VALID`/`_COLLECTION_TRANSLATE`, so the error lands on the `}` or `if` after
+  an all-caps name).
+* **What the sweeps said.**
+
+  ```text
+  MSVC include tree, 166 headers:  286 errors in 23 files, 64 distinct constructs
+                            after: 201 errors in 21 files, 122 of them macro-shaped
+  GCC libstdc++ headers, 2 500:    1 500+ errors — 894 of them ONE fragment file, the rest macro-shaped
+                                   (`PB_DS_*`, `_PSTL_*`, `_GLIBCXX*`, `_GLIBCXX_DEBUG_ONLY`)
+  ```
+
+  The GCC side has **no defect left** once macro invocations are accounted for: every remaining row's construct is a
+  macro this parser's cook expands before it ever parses. The MSVC side had three real ones.
+* **Fixed, all measured on MSVC's own text.**
+  * **`gcnew` and `ref new`** — C++/CLI's and C++/CX's allocation. `marshal_atl.h:73` writes
+    `throw gcnew System::ArgumentNullException(_EXCEPTION_NULLPTR);` and `collection.h:39`
+    `throw ref new OutOfMemoryException;`. `gcnew` now goes through `parse_new_expr` (which bumps whichever keyword it
+    was called on), and `ref` is stepped over when the **next** token is `new` — so `int ref = 1;` still parses as a
+    variable.
+  * **`::default::char16`** — C++/CX's ABI namespace, written by `vccorlib.h:1163`:
+    `long __stdcall __Platform_WindowsCreateString(const ::default::char16*, unsigned int, __abi_HSTRING*);`
+    `default` is a name in exactly one position — a qualified-name segment — so the arm in `parse_name` demands the
+    `::` that follows it; `switch (n) { default: }` and `= default;` cannot reach a segment position.
+  * Measured on the MSVC tree: `vccorlib.h`'s `::default::char16` cluster (14 rows) and the `gcnew`/`ref new` clusters
+    (19 + 13 + 8) are gone from the sweep. The 37 `}`/31 `if` rows in `__msvc_ostream.hpp` are `_TRY_BEGIN`/`_CATCH_IO_END`
+    — macro-shaped, and the cook expands them, which is why `import std;` reads that header cleanly.
+* **Open: a definition whose head *and* first parameter are both `::`-qualified.**
+
+  ```cpp
+  inline bool ::Platform::Guid::Equals(::Platform::Guid __guidArg)   // vccorlib.h
+  ```
+
+  Bisected: `bool a::b::c(::a::b g);` parses, `bool ::a::b::c(::a::b g);` does not, and the **leading `::` on the
+  declarator** is the whole difference. `CPPLS_TRACE_DECLARATION=1` and a `std::backtrace` (the env-guarded trace is in
+  `stats.rs`; the parameter/`expect` prints were removed) say where it goes wrong:
+
+  ```text
+  [decl] the declaration reading failed at 11: "expected ), but get ::" at 26..28
+  backtrace: expect_token <- parse_decl_specifier_seq_with <- parse_declarator_with
+             <- decls::parse_expression_list <- decls::parse_declaration
+  ```
+
+  So the `(` was taken for a **direct-initialiser** (`parse_the_initializer` → `parse_expression_list`), whose first
+  element `::a::b g` is not an expression. The declarator's suffix loop — the rule that would read the parentheses as a
+  **parameter list** — never opened, because it opens on `named` or on `a_qualified_name_is_the_type`, and the
+  recorded declaration *type* name is `bool`: the qualified name here is the **declarator's**, not the type's.
+  * Two attempts were measured and **reverted**, because neither changed the outcome: saving/clearing the declaration
+    type record around `parse_parameter_list`, and accepting a qualified type followed by a declarator inside
+    `the_arguments_look_like_declarators`. A third — recording a **leading** `::` as "the declaration's type is
+    qualified" in `parse_name` — was reverted for the same reason. What the next attempt should do, on this evidence:
+    make the declarator's **own** qualified name count where `a_qualified_name_is_the_type` is asked (or refuse the
+    parenthesised initialiser for a declarator that read no name), and re-measure with `vccorlib.h`'s sweep row as the
+    number that has to fall.
+
+## Closed
+
 ### 12. `std::cout` and `std::map` were missing because the **parser** lost `<complex>`
 
 * **The report, and the challenge it earned**: after section 10 the two names answered, but the fix there was a
@@ -342,7 +413,7 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
 > the **source** mtime — so cargo did not rebuild and the "without the fix" run was really the "with" run. The test
 > looked unpinnable until the file was touched. Any restore that is meant to be observed must update the timestamp.
 
-## Closed
+
 
 ### 11. A module's partitions are found and their names are visible — `test_module` has an example now
 

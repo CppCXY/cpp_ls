@@ -874,6 +874,24 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // The arm used to be keyed on a keyword token, and the word was listed in [`is_expression_keyword`] to
         // keep the name branch from swallowing it. That list is for keywords some *other* rule consumes; with the
         // word lexed as an identifier the arm below is what claims it, and the entry is gone with the keyword.
+        // **C++/CLI's `gcnew` and C++/CX's `ref new`** — MSVC's managed dialects, which its **own** headers write:
+        //
+        // ```cpp
+        //   throw gcnew System::ArgumentNullException(_EXCEPTION_NULLPTR);   // marshal_atl.h:73
+        //   throw ref new OutOfMemoryException;                             // collection.h:39
+        // ```
+        //
+        // Both are the construct `new` already is: `gcnew` is one keyword, `ref new` is a `ref` that says the
+        // allocation is a managed one. `gcnew` is reserved to the implementation, and `ref` is only taken when the
+        // **next** token is `new`, so `int ref = 1;` keeps parsing as a variable.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "ref"
+                && p.peek_next_token() == CppTokenKind::NewKeyword =>
+        {
+            p.bump(); // `ref`
+            parse_unary_expr(p, fold_operand)
+        }
+        CppTokenKind::Identifier if p.current_token_text() == "gcnew" => parse_new_expr(p),
         CppTokenKind::Identifier if at_requires(p) && starts_a_requires_expression(p) => {
             parse_requires_expression(p)
         }

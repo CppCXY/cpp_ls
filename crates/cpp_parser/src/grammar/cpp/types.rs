@@ -3452,6 +3452,12 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
             // out as a type plus a nested `Declaration` (a recovery), which in MSVC's `<vector>` is an
             // empty-named fact filed in `std::vector` — enough to make `std::vector` itself ambiguous.
             CppTokenKind::Identifier => p.bump(),
+            // **`default` as a namespace name** — C++/CX's ABI namespace, which MSVC's own `vccorlib.h` writes:
+            // `long __Platform_WindowsCreateString(const ::default::char16*, unsigned int, __abi_HSTRING*);`. The
+            // keyword is a name here and nowhere else, which is why the arm demands the `::` that follows it: a
+            // `switch (n) { default: }` and `= default;` cannot reach a segment position at all, and this arm cannot
+            // take a `default` that is not qualifying something.
+            CppTokenKind::DefaultKeyword if p.peek_next_token() == CppTokenKind::Scope => p.bump(),
             // **`decltype(expr)` as the first segment of a qualified name**: `typename decltype(__pc)::iterator`.
             // The type it names is what the rest of the name is looked up in, so it stands where a namespace or a
             // class would. MSVC's `<format>` writes `same_as<typename decltype(__pc)::iterator>` in two

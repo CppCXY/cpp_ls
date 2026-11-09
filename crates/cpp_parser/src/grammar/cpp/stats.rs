@@ -1021,7 +1021,13 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             }
             Ok(marker)
         }
-        Err(_) => {
+        Err(err) => {
+            if std::env::var("CPPLS_TRACE_DECLARATION").is_ok() {
+                eprintln!(
+                    "[decl] the declaration reading failed at {}: {err:?}",
+                    p.current_token_range().start_offset
+                );
+            }
             // Not a declaration. Rewind **first**: the question below is asked about the token the statement began
             // at, and the failed attempt left the cursor somewhere past it.
             p.rollback(checkpoint);
