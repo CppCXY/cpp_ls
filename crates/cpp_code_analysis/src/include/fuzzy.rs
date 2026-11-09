@@ -196,6 +196,26 @@ impl FuzzyIndex {
         found.into_iter().map(|(_, path)| path.clone()).collect()
     }
 
+    /// **The one file named exactly `written`**, and nothing when there is none or several.
+    ///
+    /// The bare-name case [`FuzzyIndex::matching`] refuses, answered only where the answer is not a guess: one file
+    /// with that name under the root *is* that file, while two of them are an ambiguity that no search path could
+    /// settle either. It exists for a **quoted** include, which the compiler resolves against the including file's own
+    /// directory before any search path — and which a project with no compile database leaves with no search path at
+    /// all. Measured on `EmmyLuaCodeStyle`, whose `LSPHandle.cpp` writes `#include "LanguageServer.h"` one directory
+    /// up: unresolved, so `LanguageServer` had **0** members from every `.cpp` (`docs/buglist.md` section 8).
+    ///
+    /// An **angled** include never reaches this: `<vector>` is spelled without a directory because the search path is
+    /// meant to find it, and resolving it to a project file named `vector` would be the confident wrong answer the
+    /// fallback exists to avoid. The caller decides which form may ask.
+    pub fn the_only_file_named(&self, written: &str) -> Option<PathBuf> {
+        let candidates = self.by_name.get(&written.to_lowercase())?;
+        if candidates.len() == 1 {
+            return candidates.first().cloned();
+        }
+        None
+    }
+
     /// The root this index describes.
     pub fn root(&self) -> &Path {
         &self.root

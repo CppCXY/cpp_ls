@@ -78,10 +78,20 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   (`include::fuzzy::tests::a_bare_file_name_is_never_matched`). With the include directories stated,
   `include "LanguageServer.h" -> .../CodeFormatServer/src/languageserver.h` and `members` answers **21**, including
   `GetService`. A `.cppls.toml` naming the project's own `-I` directories is in that project now.
-* **What to build from it**: the analysis can infer include roots for a CMake project without a database — the two
-  conventions that would have found this one are "a directory whose name is `include`" and "a CMake target's `src`",
-  and the safe form is the one already documented for fuzzy includes: match only when the tail is **unique** under the
-  root, and prefer it for **quoted** includes (which the compiler resolves against the file's own directory first).
+* **Fixed in the resolver, not in the project.** `IncludeResolver::resolve`'s fuzzy fallback now answers a **quoted**
+  include with no directory when exactly one file under the root has that name
+  (`FuzzyIndex::the_only_file_named`) — one file is that file, two are an ambiguity and answer nothing, which is the
+  same rule the tail matcher applies. An **angled** include keeps the old refusal: `<vector>` is spelled without a
+  directory because the search path is meant to find it, and a project file named `vector` is not the standard
+  library.
+* **Measured after, with the project's `.cppls.toml` removed and its cache deleted** — i.e. the state the report came
+  from: `17 include(s) (17 resolved)`, `include "LanguageServer.h" -> .../CodeFormatServer/src/LanguageServer.h`,
+  `members_of(LanguageServer)` = **21**, and the hover on `_server->GetService<ConfigService>()` answers
+  `` `LanguageServer::GetService` — 2 declarations `` instead of "`LanguageServer*` has no member `GetService`".
+* **Pinned by** `include::tests::fuzzy_fallback::a_bare_quoted_include_finds_the_only_file_of_that_name` and
+  `…_with_two_files_of_that_name_is_unresolved`, and the old bare-name contract became
+  `a_bare_angled_name_is_left_to_the_search_path` (its `c/stdio.h` is unique under that root, and the angled spelling
+  still does not take it).
 
 ### 6. One keystroke of one file costs a whole-program read, and the pump never goes idle
 

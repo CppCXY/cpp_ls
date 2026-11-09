@@ -273,13 +273,28 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
             && let Some(root) = &self.config.root
             && let Some(index) = fuzzy::index_for(root)
         {
-            let matches = index.matching(&include.target);
-            if let Some(chosen) = matches.first() {
+            // **A quoted include with no directory is the one bare spelling that may be answered.** The compiler
+            // searches the including file's own directory for it before any `-I`, and a project with no compile
+            // database has no `-I` list — so `#include "LanguageServer.h"` one directory up is unresolvable, and a
+            // whole class goes with it. The answer is taken only when the name is **unique** under the root, which is
+            // the difference between this and the guess the refusal below is about.
+            //
+            // An angled include keeps the refusal: `<vector>` is spelled that way because the search path is meant
+            // to find it, and a project file named `vector` is not the standard library.
+            let bare_and_quoted = include.form == IncludeForm::Quote
+                && !include.target.contains('/')
+                && !include.target.contains('\\');
+            let chosen = if bare_and_quoted {
+                index.the_only_file_named(&include.target)
+            } else {
+                index.matching(&include.target).first().cloned()
+            };
+            if let Some(chosen) = chosen {
                 // Recorded under `LocalDirectory` because that is what it is in effect: the answer came from where
                 // the file is, not from a directory anything named. A consumer that shows `searched` shows every
                 // exact place that failed, and the resolved path is the answer, so nothing is hidden by this.
                 return Resolution::Resolved(self.resolved(
-                    chosen.clone(),
+                    chosen,
                     FoundIn::LocalDirectory,
                     interner,
                 ));
@@ -411,10 +426,18 @@ mod tests {
         }
 
         fn resolve(name: &str, config: &CompilerConfig) -> Option<std::path::PathBuf> {
+            resolve_as(name, IncludeForm::Quote, config)
+        }
+
+        fn resolve_as(
+            name: &str,
+            form: IncludeForm,
+            config: &CompilerConfig,
+        ) -> Option<std::path::PathBuf> {
             let resolver = IncludeResolver::new(&DiskFiles, config);
             let mut interner = PathInterner::new(false);
             let include = Include {
-                form: IncludeForm::Quote,
+                form,
                 target: name.into(),
                 is_next: false,
             };
@@ -485,14 +508,59 @@ mod tests {
         }
 
         #[test]
-        fn a_bare_name_is_left_to_the_search_path() {
+        fn a_bare_angled_name_is_left_to_the_search_path() {
             // `#include <vector>` spelled without a directory is spelled that way *because* the search path is meant
             // to find it, so a miss means the path is wrong rather than that the file is elsewhere. Matching it
-            // against whatever same-named file is under the root is the confident wrong answer this refuses.
+            // against whatever same-named file is under the root is the confident wrong answer this refuses — and
+            // `c/stdio.h` is the file that makes the point: it is the **only** file named `stdio.h` under this root,
+            // and the angled spelling still does not take it.
             let (_, config) = project("bare", &["a/vector", "b/vector", "c/stdio.h"]);
 
-            assert_eq!(resolve("vector", &config), None);
-            assert_eq!(resolve("stdio.h", &config), None);
+            assert_eq!(
+                resolve_as("vector", IncludeForm::Angle, &config),
+                None,
+                "two files of that name are an ambiguity"
+            );
+            assert_eq!(
+                resolve_as("stdio.h", IncludeForm::Angle, &config),
+                None,
+                "and even a unique one is not the standard library"
+            );
+        }
+
+        /// **A quoted include with no directory, answered when the name is unique under the root.**
+        ///
+        /// The compiler searches the including file's own directory first and the `-I` list after it — and a project
+        /// with no compile database has neither for `#include "LanguageServer.h"`, which sits one directory up from
+        /// the `.cpp` that writes it. Measured on `EmmyLuaCodeStyle`: unresolved, and `LanguageServer` answered **0**
+        /// members from every `.cpp` (`docs/buglist.md` section 8). A quoted include is the project's own by
+        /// convention, so one file of that name is that file.
+        #[test]
+        fn a_bare_quoted_include_finds_the_only_file_of_that_name() {
+            let (root, config) = project(
+                "bare-quoted",
+                &[
+                    "CodeFormatServer/src/LanguageServer.h",
+                    "CodeFormatServer/src/LSP/LSPHandle.cpp",
+                ],
+            );
+
+            assert_eq!(
+                resolve("LanguageServer.h", &config),
+                Some(root.join("CodeFormatServer/src/LanguageServer.h"))
+            );
+        }
+
+        /// **Two files of that name are an ambiguity, and no answer is the honest one** — the same rule the tail
+        /// matcher applies, and the reason this fallback is not simply "the first file called `config.h`".
+        #[test]
+        fn a_bare_quoted_include_with_two_files_of_that_name_is_unresolved() {
+            let (_, config) = project(
+                "bare-quoted-ambiguous",
+                &["a/LanguageServer.h", "b/LanguageServer.h"],
+            );
+
+            assert_eq!(resolve("LanguageServer.h", &config), None);
         }
 
         #[test]
