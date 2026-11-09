@@ -221,6 +221,21 @@ pub fn definition_across_files(
                 if let [only] = definitions.as_slice() {
                     return Known::Yes((*only).clone());
                 }
+                // **Several *definitions* of one type are a class template and its specializations**, and the general
+                // one is the one with the most template parameters: `std::vector` has the primary in `stl_vector.h`
+                // (two) and the `vector<bool>` specialization in `stl_bvector.h` (one), and a reader jumping on
+                // `std::vector` means the primary. Restricted to `Type`, because a **function** overload set is
+                // several definitions too and "the most parameters" would pick one for a call nobody made.
+                if definitions.len() > 1
+                    && definitions
+                        .iter()
+                        .all(|declaration| declaration.fact.kind == DeclKind::Type)
+                    && let Some(general) = definitions
+                        .iter()
+                        .max_by_key(|declaration| declaration.fact.parameters.len())
+                {
+                    return Known::Yes((*general).clone());
+                }
             }
             match found.found.len() {
                 1 => Known::Yes(found.found.remove(0)),

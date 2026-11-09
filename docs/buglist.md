@@ -326,6 +326,13 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   hover  std::cout → `std::cout` — a variable of type `ostream`, in `std`
   ```
 
+* **And the definition collapse now prefers the general one among types.** `std::vector` still answered `Ambiguous` for
+  goto-definition after the fix above, because the index holds two **definitions** of the name — the primary in
+  `stl_vector.h` (two template parameters) and the `vector<bool>` specialization in `stl_bvector.h` (one) — plus a
+  forward declaration in `<format>`. `definition_across_files` prefers a definition over a forward declaration already;
+  it now prefers, among **types**, the definition with the most template parameters. Restricted to `Type`: a function
+  overload set is several definitions too, and "the most parameters" would pick one for a call nobody made. Measured:
+  `define std::vector` → `stl_vector.h:458`.
 * **And the fallback is gone.** `a_broken_cook` is deleted from `visible_declarations_upto`; the policy that the asking
   program's own reading answers alone stands, because a name such a reading does not hold is a name that program
   decided against. What stayed is a genuine fix found on the way: the summary's postings carry reading id **0**, not
