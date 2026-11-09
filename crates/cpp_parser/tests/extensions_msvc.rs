@@ -60,3 +60,45 @@ fn the_msvc_gaps_are_named() {
         ],
     );
 }
+
+/// **A definition whose head and first parameter are both `::`-qualified** — MSVC's `vccorlib.h` writes every `Guid`
+/// member that way:
+///
+/// ```cpp
+/// inline bool ::Platform::Guid::Equals(::Platform::Guid __guidArg) { … }
+/// ```
+///
+/// The specifier sequence joined the whole qualified name into the type (`starts_an_out_of_class_member` only knew a
+/// leading *identifier*), so the declarator named nothing and the `(` was read as a direct-initialiser — which failed
+/// at the parameter's own `::` and cost the declaration. Measured before: 11 errors in `vccorlib.h` on the sweep, and
+/// after: none (`docs/buglist.md` section 13).
+///
+/// The check is on the **shape of the declaration**, not on the error count alone: a declaration read as a
+/// type-plus-initialiser can be error-free in the shapes where the initializer parses, and the parameter list is what a
+/// reader loses. (`CppDeclaration::get_name_text` answers the *first* segment of a qualified declarator — `Platform`
+/// here — which is a property of that accessor and not of this fix; the analysis layer's fact says `Equals` in
+/// `::Platform::Guid`, measured with `inspect facts`.)
+#[test]
+fn a_definition_whose_head_is_globally_qualified_keeps_its_parameter_list() {
+    use cpp_parser::CppAstNode;
+
+    let text = "inline bool ::Platform::Guid::Equals(::Platform::Guid g) { return true; }\n";
+    let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+    assert!(
+        tree.get_errors().is_empty(),
+        "the definition parses: {:?}",
+        tree.get_errors()
+    );
+    let declarations: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter_map(cpp_parser::CppDeclaration::cast)
+        .map(|declaration| declaration.syntax().text().to_string())
+        .collect();
+    assert!(
+        declarations
+            .iter()
+            .any(|text| text.contains("Equals(::Platform::Guid g)")),
+        "the parameter list belongs to the declaration: {declarations:?}"
+    );
+}

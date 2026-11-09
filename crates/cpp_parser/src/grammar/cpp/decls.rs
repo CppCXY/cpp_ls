@@ -670,6 +670,42 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     result
 }
 
+/// Does an access specifier at the cursor introduce a **class head** rather than label a member?
+///
+/// C++/CLI and C++/CX write the specifier in front of the head at namespace scope — `public ref class View`,
+/// `private ref class WriteOnlyArray<…>`, `public enum class E` — which is not C++ and which the declaration rule has
+/// to be told about. The head is one of the class keys, optionally behind the dialect's own word (`ref`, `value`,
+/// `interface`), and the answer is no when neither is there: `public:` inside a class is a label and is read by the
+/// member rule, and `protected private:` is two labels (`docs/buglist.md` section 13).
+fn an_access_specifier_introduces_a_class(p: &CppParser) -> bool {
+    let mut at = 1usize;
+    while matches!(
+        p.peek_token_kind_at(at..at + 1).first(),
+        Some(&CppTokenKind::PublicKeyword)
+            | Some(&CppTokenKind::PrivateKeyword)
+            | Some(&CppTokenKind::ProtectedKeyword)
+    ) {
+        at += 1;
+    }
+    let a_class_key = |kind: Option<&CppTokenKind>| {
+        matches!(
+            kind,
+            Some(&CppTokenKind::ClassKeyword)
+                | Some(&CppTokenKind::StructKeyword)
+                | Some(&CppTokenKind::UnionKeyword)
+                | Some(&CppTokenKind::EnumKeyword)
+        )
+    };
+    if a_class_key(p.peek_token_kind_at(at..at + 1).first()) {
+        return true;
+    }
+    matches!(
+        p.peek_token_kind_at(at..at + 1).first(),
+        Some(&CppTokenKind::Identifier)
+    ) && matches!(p.peek_token_text_at(at), "ref" | "value" | "interface")
+        && a_class_key(p.peek_token_kind_at(at + 1..at + 2).first())
+}
+
 fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let checkpoint = p.checkpoint();
@@ -708,6 +744,26 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
             p.bump();
         }
         // **The declaration after it**, which is what the caller is waiting for.
+        return parse_declaration(p);
+    }
+
+    // **An access specifier in front of a class head, at namespace scope** — C++/CLI's and C++/CX's
+    // `public ref class`, `private ref class`, `public enum class`:
+    //
+    // ```cpp
+    //   private ref class WriteOnlyArray<__TArg, 1> { … }     // MSVC's vccorlib.h
+    // ```
+    //
+    // `public:` is a *member label* and a bare `public` is not a specifier in C++, so the statement rule read the
+    // whole line as an expression and lost the class. The specifier is consumed and the declaration after it parsed
+    // by the rule that owns it; the guard requires a **class head** to follow, so a member label and
+    // `protected private:` (which C++/CX also writes, and which already parsed) are untouched.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::PublicKeyword | CppTokenKind::PrivateKeyword | CppTokenKind::ProtectedKeyword
+    ) && an_access_specifier_introduces_a_class(p)
+    {
+        p.bump(); // the access specifier
         return parse_declaration(p);
     }
 
@@ -2385,7 +2441,6 @@ pub fn parse_function_suffix_or_initializer(
     declarator_from: usize,
 ) -> ParseResult {
     let checkpoint = p.checkpoint();
-
     // A **macro invocation used where a definition goes**: `TEST(FormatPerformance, 1k_row) { … }`.
     //
     // This is how gtest, Catch2 and every benchmark library write a test, and the shape has no grammar behind it:
@@ -5058,11 +5113,25 @@ fn parse_conversion_operator_declaration(p: &mut CppParser) -> ParseResult {
 /// rather than a parameter list. A destructor's `~` is allowed only in the **last** segment, where the language puts
 /// it.
 pub(crate) fn starts_an_out_of_class_member(p: &CppParser) -> bool {
-    if p.current_token() != CppTokenKind::Identifier {
-        return false;
-    }
+    // **A leading `::` is the same shape, one token earlier.** `bool ::Platform::Guid::Equals(…)` is a definition of
+    // a qualified name written with the global scope operator — MSVC's `vccorlib.h` writes every `Guid` member that
+    // way — and without this arm the specifier sequence swallowed the whole qualified name as the *type*, the
+    // declarator named nothing, and the `(` was read as a direct-initialiser, which fails at the parameter's own `::`
+    // (`docs/buglist.md` section 13). The shape still has to end at `(`: `::Platform::Guid g;` is a variable whose
+    // type is qualified, and it must keep joining the type.
     let mut at = 1usize;
     let mut scopes = 0usize;
+    match p.current_token() {
+        CppTokenKind::Identifier => {}
+        CppTokenKind::Scope
+            if p.peek_token_kind_at(1..2).first() == Some(&CppTokenKind::Identifier) =>
+        {
+            // `::` `name` … — the first segment is at 1 and the leading scope counts as one.
+            at = 2;
+            scopes = 1;
+        }
+        _ => return false,
+    }
     loop {
         if p.peek_token_kind_at(at..at + 1).first() != Some(&CppTokenKind::Scope) {
             break;
@@ -5072,10 +5141,14 @@ pub(crate) fn starts_an_out_of_class_member(p: &CppParser) -> bool {
         if p.peek_token_kind_at(at..at + 1).first() == Some(&CppTokenKind::Tilde) {
             at += 1;
         }
-        if p.peek_token_kind_at(at..at + 1).first() != Some(&CppTokenKind::Identifier) {
-            return false;
+        match p.peek_token_kind_at(at..at + 1).first() {
+            Some(&CppTokenKind::Identifier) => at += 1,
+            // **An operator name ends a qualified path too** — `bool ::Platform::Guid::operator==(…)`, which
+            // `vccorlib.h` writes for every operator of `Guid`. A type can never continue with `operator`, so the
+            // qualified name is the declarator; the operator's own tokens are left to the declarator rule.
+            Some(&CppTokenKind::OperatorKeyword) => return true,
+            _ => return false,
         }
-        at += 1;
     }
     scopes > 0 && p.peek_token_kind_at(at..at + 1).first() == Some(&CppTokenKind::LeftParen)
 }

@@ -332,6 +332,28 @@ const MSVC: &[(&str, &str)] = &[
     ("a hat type", "void f() { Object^ o = nullptr; (void)o; }"),
     ("a percent reference", "void f(Object% r);"),
     ("a default namespace", "long f(const ::default::char16* p);"),
+    (
+        "a definition whose head is globally qualified",
+        "inline bool ::Platform::Guid::Equals(::Platform::Guid g) { return true; }",
+    ),
+    (
+        "an operator defined with a globally qualified head",
+        "inline bool ::Platform::Guid::operator==(::Platform::Guid a, ::Platform::Guid b) { return true; }",
+    ),
+    (
+        "an access specifier before a ref class",
+        "public ref class R { };",
+    ),
+    ("a private ref class", "private ref class R { };"),
+    (
+        "an access specifier before an enum class",
+        "public enum class E { A };",
+    ),
+    ("a public value class", "public value class V { };"),
+    (
+        "two access specifiers in one label",
+        "ref class R { protected private: int x; };",
+    ),
     ("a ref class keyword sequence", "ref class R sealed { };"),
     (
         "safe_cast on a handle",

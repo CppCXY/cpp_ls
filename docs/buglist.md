@@ -328,36 +328,49 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   * Measured on the MSVC tree: `vccorlib.h`'s `::default::char16` cluster (14 rows) and the `gcnew`/`ref new` clusters
     (19 + 13 + 8) are gone from the sweep. The 37 `}`/31 `if` rows in `__msvc_ostream.hpp` are `_TRY_BEGIN`/`_CATCH_IO_END`
     — macro-shaped, and the cook expands them, which is why `import std;` reads that header cleanly.
-* **Open: a definition whose head *and* first parameter are both `::`-qualified.**
+* **Fixed: a definition whose head *and* first parameter are both `::`-qualified.**
 
   ```cpp
   inline bool ::Platform::Guid::Equals(::Platform::Guid __guidArg)   // vccorlib.h
   ```
 
-  Bisected: `bool a::b::c(::a::b g);` parses, `bool ::a::b::c(::a::b g);` does not, and the **leading `::` on the
-  declarator** is the whole difference. `CPPLS_TRACE_DECLARATION=1` and a `std::backtrace` (the env-guarded trace is in
-  `stats.rs`; the parameter/`expect` prints were removed) say where it goes wrong:
+  Bisected: `bool a::b::c(::a::b g);` parsed, `bool ::a::b::c(::a::b g);` did not, and the **leading `::` on the
+  declarator** was the whole difference. `CPPLS_TRACE_DECLARATION=1` and a `std::backtrace` (the `[decl]` trace is in
+  `stats.rs`) put the failure inside the declaration reading, and the token trace said why: the declarator's suffix loop
+  never opened, because the specifier sequence had **joined the whole qualified name into the type**. The rule that
+  prevents exactly that is `starts_an_out_of_class_member` — and it only knew a leading **identifier**:
 
-  ```text
-  [decl] the declaration reading failed at 11: "expected ), but get ::" at 26..28
-  backtrace: expect_token <- parse_decl_specifier_seq_with <- parse_declarator_with
-             <- decls::parse_expression_list <- decls::parse_declaration
+  ```rust
+  if p.current_token() != CppTokenKind::Identifier { return false; }   // `::a::b::c(` refused
   ```
 
-  So the `(` was taken for a **direct-initialiser** (`parse_the_initializer` → `parse_expression_list`), whose first
-  element `::a::b g` is not an expression. The declarator's suffix loop — the rule that would read the parentheses as a
-  **parameter list** — never opened, because it opens on `named` or on `a_qualified_name_is_the_type`, and the
-  recorded declaration *type* name is `bool`: the qualified name here is the **declarator's**, not the type's.
-  * Two attempts were measured and **reverted**, because neither changed the outcome: saving/clearing the declaration
-    type record around `parse_parameter_list`, and accepting a qualified type followed by a declarator inside
-    `the_arguments_look_like_declarators`. A third — recording a **leading** `::` as "the declaration's type is
-    qualified" in `parse_name` — was reverted for the same reason. What the next attempt should do, on this evidence:
-    make the declarator's **own** qualified name count where `a_qualified_name_is_the_type` is asked (or refuse the
-    parenthesised initialiser for a declarator that read no name), and re-measure with `vccorlib.h`'s sweep row as the
-    number that has to fall.
+  It now accepts a leading `::`, requires the shape to end at `(`, and treats an **operator name** as the last segment
+  too (`::Platform::Guid::operator==` is the same construct). Measured:
+  * `bool ::Platform::Guid::Equals(::Platform::Guid g);` — error before, clean after;
+  * `inline bool ::Platform::Guid::operator==(…) { … }` — clean after;
+  * `public ref class`, `private ref class`, `public enum class`, `public value class` — clean after (C++/CX writes the
+    access specifier in front of the head at namespace scope; a **class head** after the specifier is the guard, so
+    `public:` labels and `protected private:` are untouched);
+  * `vccorlib.h` on the sweep: **11** `::Platform::Guid::…` rows → **0**, and the file 26 → **17** errors (6 of them
+    macro-shaped);
+  * the fact layer: `inspect facts` says `Equals` in `::Platform::Guid` with parameters `(::Platform::Guid g)` — the
+    leading `::` survives in the scope.
+  * Pinned by `extensions_msvc::a_definition_whose_head_is_globally_qualified_keeps_its_parameter_list` (the
+    declaration keeps its parameter list) and by six rows in `extensions_comprehensive`.
+* **Still open in `vccorlib.h`** — 17 errors, 6 macro-shaped, and the rest are one C++/CX shape this pass did not
+  reach:
 
-## Closed
+  ```cpp
+  template <typename __TArg>
+  private ref class WriteOnlyArray<__TArg, 1>
+  { … };
+  ```
 
+  a **partial specialization of a `ref class`** with an access specifier *and* a template head — the error is
+  `expected a type specifier` at `private`, so the head after `template <…>` is not reaching the access-specifier arm
+  (the arm fires at the start of a declaration, and after a template head the arm is reached only if the head rule
+  ends where it should). Also listed: `friend void* Details::Heap::Allocate(…)` (2 `expected ;` rows) and one
+  `unsigned` knock-on. Recorded here so the next pass starts from the shape and not from the file.
 ### 12. `std::cout` and `std::map` were missing because the **parser** lost `<complex>`
 
 * **The report, and the challenge it earned**: after section 10 the two names answered, but the fix there was a
