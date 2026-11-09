@@ -486,9 +486,47 @@ fn hover_of_the_program(
                 // its class's — and the answer listed the constructors as if a call were meant ("3 declarations …
                 // decided by the arguments"), about a name being *declared* in that very line. When one of the facts is
                 // a type, that is the one the reader named.
-                if let Some(the_type) = found.found.iter().find(|definition| {
-                    matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
-                }) {
+                // **Which of several types the reader named.** `std::vector<std::string>` has three type facts in
+                // the index: a **forward declaration** in `<format>` (`template <typename, typename> class vector;`),
+                // the **definition** in `stl_vector.h`, and the `vector<bool>` **specialization** in
+                // `stl_bvector.h`. `find(kind == Type)` answered the first, so the card described a class with no
+                // body, declared in a header the reader never included — reported with a picture ("the definition is
+                // incomplete, it points at the forward declaration in <format>").
+                //
+                // A **definition** beats a forward declaration, and among definitions the one with the **most
+                // template parameters** is the general one — a partial specialization is a narrower shape
+                // (`vector<bool>`'s pattern has one parameter, the primary's two), so the general one is what a
+                // spelling that did not write the specialization means.
+                if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
+                    eprintln!(
+                        "[types] {:?}",
+                        found
+                            .found
+                            .iter()
+                            .map(|definition| format!(
+                                "{} definition {} pattern {:?}",
+                                definition.file.display(),
+                                definition.fact.definition,
+                                definition.fact.pattern
+                            ))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                if let Some(the_type) = found
+                    .found
+                    .iter()
+                    .filter(|definition| {
+                        matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
+                    })
+                    .max_by_key(|definition| {
+                        // **More template parameters is the more general declaration** — `fact.parameters` is the
+                        // template head's own names, and it is what says which fact a partial specialization is:
+                        // the primary's are `[_Tp, _Alloc]`, `vector<bool>`'s are `[_Alloc]`, and a forward
+                        // declaration's are the empty names of `template <typename, typename>`. (`pattern` is `None`
+                        // for all three here, so it cannot separate them — measured, not assumed.)
+                        (definition.fact.definition, definition.fact.parameters.len())
+                    })
+                {
                     return Some(markdown(declaration_markdown(
                         session,
                         view,
@@ -1182,7 +1220,17 @@ fn declaration_markdown(
     // conditional block. `definitions` and `type_at` had the local right; only the card re-asked. `LSP.cpp:12`'s
     // `auto object = nlohmann::json::object();` was the same shape: a variable shown as the static function
     // `basic_json::object(initializer_list_t init = ...)`. See `docs/buglist.md` section 7.
+    // **A type is never re-asked either.** A class fact has no type, no return type and no parameter list — the
+    // fields the re-ask exists to recover from a *binding* — so the condition below was true for every class, and
+    // the name lookup replaced the declaration the caller had chosen with whatever the bare spelling answered:
+    // `std::vector<std::string>`'s card was a forward declaration in `<format>` and then the `vector<bool>`
+    // specialization, never the definition the hover had just selected (`CPPLS_TRACE_HOVER=1` shows
+    // `[card] heard vector … => indexed stl_bvector.h:vector`). See `docs/buglist.md` section 10.
     let indexed = if !found.fact.local
+        && !matches!(
+            found.fact.kind,
+            cpp_code_analysis::DeclKind::Type | cpp_code_analysis::DeclKind::Namespace
+        )
         && ((found.fact.type_of.is_none()
             && found.fact.returns.is_none()
             && found.fact.parameter_list.is_none())

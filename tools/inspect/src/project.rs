@@ -156,6 +156,11 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
     let opened_the_file = Instant::now();
     session.did_open(&file, &text);
     session.catch_up(&file);
+    // **The module interface units this file imports, read in** — the half the server does on `didOpen`
+    // (`handlers::read_the_modules` + the pump) and this tool used to leave out, so every `std::` name in an
+    // `import std;` file answered *nothing* here while the editor showed a card. Measured on `test_module`'s
+    // `std_module_demo.cpp` before this: `hover` on `std::vector`, `std::map` and `std::cout` were all `none`.
+    let _ = session.read_the_modules_a_file_imports(&file);
     let opened_the_file = opened_the_file.elapsed();
 
     let cooked = Instant::now();

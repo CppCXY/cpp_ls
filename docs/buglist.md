@@ -285,6 +285,50 @@ the machine. Each entry says how it was measured, so the next reader can reprodu
   (`CPPLS_DUMP_RENDERING_DIR`) against the source at 1253..1274, since the scope tree is built from the rendering and a
   macro that expands to a brace is the first thing to look for there.
 
+### 10. `import std;`: `vector` pointed at a forward declaration, and `map`/`cout` are not found at all
+
+* **Reported from use** on `C:\Users\zc\Desktop\test_module`, `src/std_module_demo.cpp` (an `import std;` file with no
+  includes): `std::vector`'s card described a class with no body, "declared in `format:3090:36`"; `std::map` and
+  `std::cout` had **no hover and no completion**.
+* **`vector` — fixed, two layers of it.**
+  1. The index holds three type facts named `std::vector`: a **forward declaration** in `<format>`
+     (`template <typename, typename> class vector;`), the **definition** in `stl_vector.h`, and the
+     `vector<bool>` **specialization** in `stl_bvector.h`. The hover's Ambiguous arm took the **first** fact whose kind
+     is `Type` — the forward declaration. It now takes the **definition** first and, among definitions, the one with
+     the **most template parameters** (the general declaration; a partial specialization is a narrower shape).
+  2. `declaration_markdown` then **re-asked the index** for the chosen fact (the re-ask exists to recover a *binding*'s
+     missing type/returns/parameters) — a class fact has none of those either, so the card was replaced by whatever the
+     bare spelling answered: traced with `CPPLS_TRACE_HOVER=1`, `[card] heard vector … => indexed stl_bvector.h`.
+     A `Type` or a `Namespace` is no longer re-asked.
+  Measured after: `` template <typename _Tp, typename _Alloc = …> class vector : _Vector_base<_Tp, _Alloc> `` with
+  "As written here: `std::vector<std::string>`".
+* **And the tool had to be told about modules to see any of this.** `inspect` never read the module interface units, so
+  every `std::` hover in that file was `none` while the editor showed a card. It now calls
+  `read_the_modules_a_file_imports` the way `handlers::read_the_modules` does on `didOpen`.
+* **`map` and `cout` — open, and narrowed to two questions.** The new probe
+  `crates/cpp_code_analysis/tests/std_set_probe.rs` (ignored) says, in one session:
+
+  ```text
+  read 1 interface unit(s), `std` -> .../include/c++/bits/std.cc
+  closure of `std`: 384 file(s) — contains stl_map.h, iostream, stl_vector.h, format
+  visible files from the demo: 527 — contains the same, each with a summary, same spelling
+  definition std::vector: Yes .../stl_vector.h      definition std::string: Yes .../stringfwd.h
+  definition std::map:    NotDeclaredHere           definition std::cout: NotDeclaredHere
+  definitions map:        1 declaration(s)          ← the BARE name finds it
+  definitions std::map:   NotDeclaredHere           ← the QUALIFIED name does not
+  members_of std::map:    NotDeclaredHere("map")
+  ```
+
+  So the fact is in the index, its file is visible, its spelling matches, and the **bare** name finds it — the
+  **qualified** match is what fails, exactly as `files_declaring`'s `matches(fact, name)` compares the fact's
+  `qualified_name()` with the written one.
+  1. **`map`**: print `fact.qualified_name()` for the one candidate `definitions("map")` answers. The suspicion is a
+     version namespace — libstdc++ wraps declarations in `_GLIBCXX_BEGIN_NAMESPACE_VERSION`, and a fact whose scope is
+     `std::__cxx11` matches `map` by its last segment but not `std::map` by its full spelling. The fix then belongs in
+     `matches`: a qualified spelling should match a fact in an **inline** namespace of that scope.
+  2. **`cout`**: it fails even **bare**, and its file (`iostream`) is reached **only** through the module, so the two
+     filters that can drop such a fact are `only_what_is_exported` (`through_an_import`) and the conditional guard of
+     `extern ostream cout;`. One print of both for that one candidate decides it.
 ## Closed
 
 ### 7. `hover` answers with an index fact while `define` answers with the file's own declaration
