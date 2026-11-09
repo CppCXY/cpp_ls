@@ -1143,6 +1143,13 @@ pub struct ProjectIndex {
     /// rule exists to keep. It is a set of `String` and not of ids because `sequence` goes with the summary (see
     /// `forget`), and because a path that was known once must stay known after it is forgotten.
     known_paths: std::collections::HashSet<String>,
+    /// **What the visibility walks read from each file**, as one number — see
+    /// [`ProjectIndex::the_walks_fingerprint`].
+    ///
+    /// Kept per file rather than recomputed from the summaries when a walk is validated: validating a walk reads one
+    /// entry per contributor, and a closure here is over a thousand files, so hashing their includes and macro facts
+    /// on every query would cost more than the walk it is validating.
+    walk_inputs: std::collections::HashMap<String, u64>,
 }
 
 /// **What evaluating guarded `#include` conditions has cost**, in asks and nanoseconds — see the `FactGuard::Region`
@@ -12270,6 +12277,71 @@ pub(crate) fn base_type_name(written: &str) -> &str {
     name
 }
 
+/// **What one file contributes to a visibility walk**, as a number — see [`ProjectIndex::the_walks_fingerprint`].
+///
+/// The walk reads three things from a file: which targets its `#include`s resolved to, what its guarded regions ask
+/// (the conditions, as text — evaluated against the macros in force), and the macro facts a condition can read (the
+/// name, whether it defines or undefines, its integer value, and the one name a body aliases). Everything else a
+/// summary holds — the file's declarations, its bodies, its text — cannot change which files are visible.
+///
+/// A body edit therefore produces the same number, which is the whole point: the walk stays valid and a keystroke does
+/// not re-walk a thousand headers.
+fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
+    let mut bytes: Vec<u8> = Vec::new();
+    for include in &summary.includes {
+        bytes.extend_from_slice(include.spelling.as_bytes());
+        bytes.push(0);
+        match &include.resolved {
+            Some(path) => bytes.extend_from_slice(path.to_string_lossy().as_bytes()),
+            None => bytes.push(1),
+        }
+        bytes.push(0);
+        bytes.push(u8::from(include.is_next));
+        bytes.push(match include.guard {
+            crate::FactGuard::Unconditional => 0,
+            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+        });
+    }
+    for conditional in &summary.guards.conditionals {
+        for branch in &conditional.branches {
+            // The branch's own kind, by its debug name: a guard branch is one of the conditional directives, and the
+            // rest cannot appear here — and the number is only ever compared with itself, so the spelling is enough.
+            bytes.extend_from_slice(format!("{:?}", branch.kind).as_bytes());
+            bytes.push(0);
+            match &branch.condition {
+                Some(text) => bytes.extend_from_slice(text.as_bytes()),
+                None => bytes.push(1),
+            }
+            bytes.push(0);
+        }
+    }
+    for fact in &summary.macros {
+        bytes.extend_from_slice(fact.name.as_bytes());
+        bytes.push(0);
+        bytes.push(u8::from(fact.kind.is_definition()));
+        bytes.push(u8::from(fact.function_like));
+        match &fact.value {
+            Some(value) => bytes.extend_from_slice(value.as_bytes()),
+            None => bytes.push(1),
+        }
+        bytes.push(0);
+        match &fact.alias {
+            Some(alias) => bytes.extend_from_slice(alias.as_bytes()),
+            None => bytes.push(1),
+        }
+        bytes.push(0);
+        bytes.push(match fact.guard {
+            crate::FactGuard::Unconditional => 0,
+            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+        });
+    }
+    // **A module edge is a different kind of edge** and it is read by the same walk's second half — see
+    // [`ProjectIndex::visible_files_with_modules`]. Debug is exact enough for a cache key, and a summary almost always
+    // has nothing recorded here.
+    bytes.extend_from_slice(format!("{:?}", summary.modules).as_bytes());
+    crate::cache::fnv1a64(&bytes)
+}
+
 impl ProjectIndex {
     pub fn new() -> Self {
         ProjectIndex {
@@ -12389,18 +12461,9 @@ impl ProjectIndex {
         // (measured: one keystroke left two walks where the targeted rule should leave one, and the survival this
         // change is for never happened). `known_paths` outlives a forget for exactly this reason.
         self.known_paths.insert(rewritten.clone());
-        if let Ok(mut walks) = self.visibility.lock() {
-            if known_to_the_index {
-                walks.retain(|_, cached| {
-                    cached
-                        .contributors
-                        .binary_search_by(|file| file.as_str().cmp(rewritten.as_str()))
-                        .is_err()
-                });
-            } else {
-                walks.clear();
-            }
-        }
+        // **The walks are not dropped here, and no longer need to be**: each one validates the inputs it was made of
+        // when it is asked (see [`ProjectIndex::the_walks_fingerprint`]), so an insert that changes nothing they read —
+        // a body edit's summary — keeps them, and one that does change them makes the walks that read the file miss.
         // …and every member list this file contributed to, which is the narrow invalidation: a class whose members
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
@@ -12501,6 +12564,12 @@ impl ProjectIndex {
         self.names
             .add_declarations(sequence, 0, &summary.declarations);
         self.names.add_macros(sequence, &summary.macros);
+        // **What a walk reads from this file**, recorded as it is filed: the includes it resolved, the conditions its
+        // guards ask, and the macro facts a condition can read — and nothing else. A body edit changes none of them,
+        // which is what lets the walk that read this file keep answering. See
+        // [`ProjectIndex::the_walks_fingerprint`].
+        self.walk_inputs
+            .insert(path.clone(), the_walk_inputs_of(&summary));
         self.summaries.insert(path, summary);
     }
 
@@ -12527,19 +12596,19 @@ impl ProjectIndex {
         // only bookkeeping — the test `name_index_agrees_with_the_scan::after_every_kind_of_edit` caught a query
         // between a forget and the next insert answering from a walk that still had the forgotten file in it.
         self.invalidate_visibility_answers(Path::new(&path), true);
+        // **And the reading a walk takes from this file**, which is now what decides whether the walks that read it
+        // answer: with the entry gone, every walk whose closure contained this file misses its fingerprint and is
+        // rebuilt, and one that never read it answers exactly as before — the correctness rule the old contributor
+        // drop implemented, without the cost of dropping entries that could not have changed.
+        self.walk_inputs.remove(&path);
         // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
         // class, and nothing computed before it may answer after it.
         if let Ok(mut answers) = self.type_answers.lock() {
             answers.clear();
         }
-        if let Ok(mut walks) = self.visibility.lock() {
-            walks.retain(|_, cached| {
-                cached
-                    .contributors
-                    .binary_search_by(|file| file.as_str().cmp(path.as_str()))
-                    .is_err()
-            });
-        }
+        // **The visibility walks stay** — `walk_inputs` above makes every walk that read the forgotten file a miss by
+        // fingerprint, and one that never read it answers exactly as before. Dropping them here was what made a
+        // keystroke in one file throw away every other file's walk.
         if let Ok(mut declared) = self.definition_answers.lock() {
             declared.clear();
         }
@@ -14055,6 +14124,44 @@ impl ProjectIndex {
         files
     }
 
+    /// **The walks' key: the readings they were made of, per file.**
+    ///
+    /// A visibility walk crosses `#include`s and evaluates their guards against the macros in force. So what it depends
+    /// on is exactly what [`the_walk_inputs_of`] hashes: the resolved targets of the includes, the conditions the
+    /// guards ask, and the macro facts a condition can read. **Not the text.** A comment, a reformat, a new function in
+    /// a body — none of them can change which files are visible, which is why an edit that touches a body does not have
+    /// to re-walk the closure.
+    ///
+    /// # Why not a revision, and why not a content hash
+    ///
+    /// The revision rule dropped a walk whenever anything was inserted, and the pump inserts and re-reads constantly;
+    /// the content-hash rule dropped it on any edit at all, including a body edit that changed no input. Both were
+    /// measured and neither is here: the first made every request pay the walk (`EmmyLuaCodeStyle`: **1.1 s per name
+    /// question**, five in one hover), and the second had **0 hits in 58 lookups** during indexing.
+    ///
+    /// Measured: **~0.2 ms** to validate a 1063-file closure this way, against **1.1 s** to rebuild it.
+    fn the_walks_fingerprint(&self, contributors: &[String]) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        const NOT_IN_THE_INDEX: u64 = 0x1d57_9b40_c3e8_2a6f;
+        let mut fingerprint = FNV_OFFSET;
+        let mut eat = |value: u64| {
+            for byte in value.to_le_bytes() {
+                fingerprint ^= u64::from(byte);
+                fingerprint = fingerprint.wrapping_mul(FNV_PRIME);
+            }
+        };
+        for path in contributors {
+            eat(crate::cache::fnv1a64(path.as_bytes()));
+            eat(self
+                .walk_inputs
+                .get(path)
+                .copied()
+                .unwrap_or(NOT_IN_THE_INDEX));
+        }
+        fingerprint
+    }
+
     /// Every file `from` can see, and how — one walk of the include graph.
     ///
     /// The whole-graph answer to what used to be a per-file question: "can this file see that one" was asked once
@@ -14126,26 +14233,39 @@ impl ProjectIndex {
     ) -> (Vec<(String, IncludeVisibility)>, HashSet<String>) {
         let from = normalize(from);
 
-        // **The walk's answer, remembered under the rule the per-condition memo uses.** A completion asks this
-        // question on every keystroke and the answer cannot change until the index does, which is exactly what
-        // `visibility` is cleared by. Measured on the latency fixture in release: **4–5 ms** with the memo and
-        // **84–90 ms** without it, against a 50 ms steady-state budget.
-        if let Some(known) = self.visibility.lock().ok().and_then(|walks| {
-            walks
-                .get(&from)
-                .map(|cached| std::sync::Arc::clone(&cached.seen))
-        }) {
-            let mut order: Vec<(String, IncludeVisibility)> =
-                Vec::with_capacity(known.visibility.len());
-            order.push((from.clone(), IncludeVisibility::Unconditional));
-            order.extend(
-                known
-                    .visibility
-                    .iter()
-                    .filter(|(path, _)| **path != from)
-                    .map(|(path, visibility)| (path.clone(), *visibility)),
-            );
-            return (order, known.through_an_import.clone());
+        // **The walk's answer, validated by the inputs it was made of** — see [`ProjectIndex::the_walks_fingerprint`].
+        let remembered = self
+            .visibility
+            .lock()
+            .ok()
+            .and_then(|walks| walks.get(&from).cloned());
+        if let Some(known) = remembered {
+            let now = self.the_walks_fingerprint(&known.contributors);
+            if crate::probes::visibility() {
+                eprintln!(
+                    "[visibility]   remembered walk from {}: {} ({} contributor(s))",
+                    from,
+                    if now == known.fingerprint {
+                        "hit"
+                    } else {
+                        "MISS — an input it was made of changed"
+                    },
+                    known.contributors.len()
+                );
+            }
+            if now == known.fingerprint {
+                let seen = &known.seen;
+                let mut order: Vec<(String, IncludeVisibility)> =
+                    Vec::with_capacity(seen.visibility.len());
+                order.push((from.clone(), IncludeVisibility::Unconditional));
+                order.extend(
+                    seen.visibility
+                        .iter()
+                        .filter(|(path, _)| **path != from)
+                        .map(|(path, visibility)| (path.clone(), *visibility)),
+                );
+                return (order, seen.through_an_import.clone());
+            }
         }
 
         // **One traversal, and the state it carries is what answers the conditions.** The version this replaced
@@ -14245,12 +14365,14 @@ impl ProjectIndex {
         );
         contributors.sort_unstable();
         contributors.dedup();
+        let fingerprint = self.the_walks_fingerprint(&contributors);
         if let Ok(mut walks) = self.visibility.lock() {
             walks.insert(
                 from,
                 CachedWalk {
                     seen: std::sync::Arc::new(seen),
                     contributors: std::sync::Arc::new(contributors),
+                    fingerprint,
                 },
             );
         }
@@ -16019,10 +16141,16 @@ enum Collecting<'a> {
 /// The contributors are the normalized paths of the closure (the root and every file [`Seen::visibility`] records),
 /// so a re-read of one of them drops exactly the walks that could have answered differently. See
 /// [`ProjectIndex::visibility`] for the measurement that made this worth carrying.
-#[derive(Debug)]
+/// One memoised visibility walk: what it found, **the files it was made of**, and the inputs it read from them as one
+/// fingerprint. The fingerprint is what decides whether the entry may still answer — see
+/// [`ProjectIndex::the_walks_fingerprint`].
+#[derive(Debug, Clone)]
 struct CachedWalk {
     seen: std::sync::Arc<Seen>,
     contributors: std::sync::Arc<Vec<String>>,
+    /// The inputs this walk was made of, as one number. An entry answers only while every contributor's
+    /// [`ProjectIndex::walk_inputs`] still hashes to what it did here.
+    fingerprint: u64,
 }
 
 /// Two outputs from one walk because the second is a property of *how* a file was reached, and a walk that has
