@@ -1709,6 +1709,65 @@ void f(NotHere* value) {}
     );
 }
 
+/// **A forward declaration in an included header satisfies the use.**
+///
+/// Reported from `EmmyLuaCodeStyle`, `LuaSyntaxTree.h`:
+///
+/// ```cpp
+/// #include "LuaParser/Parse/Mark.h"    // `class LuaParser;` — a forward declaration
+/// class LuaSyntaxTree {
+///     void BuildTree(LuaParser &p);     // a reference needs no more than that
+/// };
+/// ```
+///
+/// The rule found `luaparser.h` (the class's *definition*, which this header does not include), ignored the forward
+/// declaration the header can see through `Mark.h`, and told the reader to include `luaparser.h` — in a file that
+/// compiles as written, on the most ordinary C++ idiom there is: a reference parameter and a forward declaration.
+///
+/// The question the rule has to ask is *"is the name declared in anything this file reaches"*, not *"is its definition
+/// in a header this file includes"*. The second half of the fixture is the rule still firing when nothing declares it.
+#[test]
+fn a_forward_declaration_in_an_included_header_is_not_a_missing_include() {
+    let codes = codes_of_files(
+        &[
+            ("/p/mark.h", "class Parser;\n"),
+            (
+                "/p/tree.h",
+                "#include \"mark.h\"\nstruct Tree {\n    void Build(Parser& p);\n};\n",
+            ),
+            (
+                "/p/parser.h",
+                "class Parser {\npublic:\n    int Parse();\n};\n",
+            ),
+        ],
+        "/p/tree.h",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::MissingInclude),
+        "the forward declaration in mark.h is what the reference needs: {codes:?}"
+    );
+
+    // **And nothing declares it** — the rule's own case: a class that exists in the project, in a header this file
+    // neither includes nor forward-declares.
+    let codes = codes_of_files(
+        &[
+            (
+                "/p/tree.h",
+                "struct Tree {\n    void Build(Parser& p);\n};\n",
+            ),
+            (
+                "/p/parser.h",
+                "class Parser {\npublic:\n    int Parse();\n};\n",
+            ),
+        ],
+        "/p/tree.h",
+    );
+    assert!(
+        codes.contains(&DiagnosticCode::MissingInclude),
+        "nothing in this file reaches `Parser`: {codes:?}"
+    );
+}
+
 /// **The codes a file produces in a project of several files** — the shape a header has and a one-file fixture cannot.
 ///
 /// The defect this exists for needed three things a single-file fixture cannot express: the class in a **header**,

@@ -158,13 +158,24 @@ fn the_candidate(
         if fact.kind != DeclKind::Type {
             continue;
         }
-        // **Already reached** by an `#include`: visible as far as this rule is concerned, and a header the file
-        // includes is never suggested back to it.
+        // **A declaration this file already reaches settles the name, and that is a different question from "is the
+        // *definition* in an included header".**
+        //
+        // ```cpp
+        // #include "mark.h"        // `class LuaParser;`
+        // void BuildTree(LuaParser &p);
+        // ```
+        //
+        // The reference needs a declaration, not a definition, and the forward declaration is in a header this file
+        // includes — but the rule looked only for facts whose *file* it had not reached, found `luaparser.h` (the
+        // class's definition) and told the reader to include it. Reported from `EmmyLuaCodeStyle`'s `LuaSyntaxTree.h`,
+        // which compiles as written. So a reached declaration of the name means nothing is missing, whatever its kind
+        // and wherever the definition lives.
         if reached.contains(&crate::file::paths::normalize_path(
             &declaring,
             cfg!(windows),
         )) {
-            continue;
+            return None;
         }
         let rank = how_strongly_it_answers(&declaring, name, path);
         if best.as_ref().is_none_or(|(known, _)| rank < *known) {
