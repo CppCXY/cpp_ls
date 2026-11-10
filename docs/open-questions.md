@@ -30,12 +30,42 @@ Reported as "`std::endl` is not rendered as a function". Measured on `C:\Users\z
   builds it; the answer does not change).
 
 So this is **not** the classification this run fixed for macros (`6bbda4c8`): the fact is a function, in scope `std`.
-It is the resolution path — either visibility across the two include hops (`endl.cpp` → `<iostream>` → `<ostream>` →
-`__msvc_ostream.hpp`) or the qualified-name query. The next step is to trace `visible_declarations` for that path
-with a header that is two hops out, which MSVC 18's `__msvc_*` split makes ordinary.
+It is the **visibility walk** — and that is now reproducible without the toolchain.
 
-A fixture that reproduces the shape without the toolchain is three files: `c.cpp` includes `b.h`, `b.h` includes
-`a.h`, `a.h` declares `namespace std { void endl(); }`.
+### Reproduced without the toolchain: two include hops are one too many
+
+Three files under one project root:
+
+```text
+c.cpp   #include "b.h" + `void f() { std::endl(); }`
+b.h     #include "a.h"
+a.h     namespace std { void endl(); }
+```
+
+```text
+$ inspect define --file c.cpp --needle "std::endl" --shift 6 --cook
+picked   a.h:1:22   endl   function in std    ← one hop: c.cpp includes a.h
+
+$ # the same, with b.h in between
+picked   unknown — NotDeclaredHere("std::endl")   ← two hops
+
+$ CPPLS_TRACE_VISIBILITY=1 inspect define …
+[visibility] 2 file(s) after the order step, from …\c.cpp
+```
+
+**Two files** in both cases: the translation unit and its *direct* includes. `a.h` is never entered when it is
+`b.h`'s include, so `std::endl` is invisible — and in MSVC 18 that is the ordinary case, because `endl` lives in
+`__msvc_ostream.hpp`, one hop past `<ostream>`.
+
+The visibility set is produced by `ProjectIndex::the_visible_walk` → `visible_files_with_modules` →
+`macro_candidates(…, Collecting::Visibility(&mut seen), …)` (`index/project.rs`), so the descent that has to become
+transitive is the macro walk's include crossing — including the state it carries, since a guarded edge past the first
+hop is evaluated against an environment built by the files above it. The walk is measured in `docs/perf-progress.md`
+(a cold closure 0.1 ms–3.4 s), which is why this was not rushed.
+
+The next step is a probe inside `macro_candidates` at the point it pushes a child edge, on the three-file fixture:
+the question is whether `b.h` is entered at all, or entered and not descended.
+
 
 ## An inlay hint rendering a deduced type expanded instead of the alias the source wrote
 
