@@ -2450,6 +2450,34 @@ mod tests {
 
     use crate::Known;
 
+    /// **A parameter inside a template-id is still a parameter.**
+    ///
+    /// Reported from an editor: hovering `box.query(1)` on a `Box<int>` answered `std::optional<V> query(int key)` —
+    /// the class's own spelling. The substitution chain was verified up to this function (`substituted_members`
+    /// logged `base "Box"`, `names ["V"]`, `arguments ["int"]`), so the rewrite itself is the last link: `V` here sits
+    /// between `<` and `>`, and a word rule that needs whitespace around a name would leave it alone.
+    #[test]
+    fn a_parameter_inside_a_template_id_is_substituted() {
+        let names = vec!["V".to_string()];
+        let arguments = vec!["int".to_string()];
+        for (written, expected) in [
+            ("std::optional<V>", "std::optional<int>"),
+            ("const V&", "const int&"),
+            ("std::vector<V>", "std::vector<int>"),
+            ("V*", "int*"),
+            (
+                "std::optional<V> query(int key)",
+                "std::optional<int> query(int key)",
+            ),
+        ] {
+            assert_eq!(
+                substituted_spelling(written, &names, &arguments),
+                expected,
+                "`{written}`"
+            );
+        }
+    }
+
     /// The type of `name`, read the way a query reads it — see [`type_of_declarator`].
     ///
     /// The **last** declaration of that name, because every fixture declares before it uses and the question these
