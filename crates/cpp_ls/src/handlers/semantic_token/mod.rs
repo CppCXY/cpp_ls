@@ -785,6 +785,45 @@ void f() {
         }
     }
 
+    /// **The four cast operators are keywords**, and they were the one word in the line a client could not colour.
+    ///
+    /// Reported from an editor with a screenshot: `static_cast<std::size_t>(index)` arrived with a colour on every
+    /// name and none on `static_cast`. The lexer has a kind for each of the four (`CppTokenKind::StaticCastKeyword`
+    /// and its three siblings), and `cpp_parser::is_keyword` did not list them — so this pass, which colours by
+    /// *kind* and only falls back to text for the lexer's contextual keywords, skipped them entirely. The client's own
+    /// TextMate grammar does not know them either, which is why nothing at all was drawn.
+    #[test]
+    fn the_cast_operators_are_drawn_as_keywords() {
+        let text = "\
+void f(int index, int* p) {
+    auto a = static_cast<unsigned>(index);
+    auto b = dynamic_cast<void*>(p);
+    auto c = const_cast<int*>(p);
+    auto d = reinterpret_cast<char*>(p);
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        for word in [
+            "static_cast",
+            "dynamic_cast",
+            "const_cast",
+            "reinterpret_cast",
+        ] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(TypeKind::Keyword)),
+                "`{word}` is a keyword token, so it is drawn as one"
+            );
+        }
+    }
+
     /// **A template parameter is a `typeParameter`, and a variable template is a `variableTemplate`.**
     ///
     /// Two questions asked from an editor, and both are about what the *server* sends rather than about colour:

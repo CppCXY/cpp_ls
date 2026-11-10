@@ -203,6 +203,15 @@ pub fn is_keyword(kind: CppTokenKind) -> bool {
             | CppTokenKind::CoAwaitKeyword
             | CppTokenKind::CoReturnKeyword
             | CppTokenKind::CoYieldKeyword
+            // **The four cast operators are keywords too**, and leaving them out meant a highlighter had nothing to
+            // say about `static_cast` — reported from an editor: `static_cast<std::size_t>(index)` was the one word
+            // in the line the client's own grammar drew. They are also word-shaped, which the macro expander asks
+            // about (`finishes_a_word`): a `static_cast` pasted onto a following name is the same hazard as any
+            // other keyword's.
+            | CppTokenKind::StaticCastKeyword
+            | CppTokenKind::DynamicCastKeyword
+            | CppTokenKind::ConstCastKeyword
+            | CppTokenKind::ReinterpretCastKeyword
     )
 }
 

@@ -254,6 +254,79 @@ fn label_where_marked(source: &str) -> (String, Vec<String>, Option<usize>) {
 
 const SCALE: &str = "double scale(int count, double factor);\ndouble f() { return scale(|); }\n";
 
+/// **A member call's second argument is its second parameter** — reported from an editor as a screenshot.
+///
+/// The popup for `_server->SendRequest("…", nullptr)` bolded the **first** parameter while the reader's cursor stood
+/// in the second. It is the shape every real call has — a member call through a pointer, a string literal as the
+/// first argument, a keyword as the second — and none of it is in the fixture the mechanism was written against.
+///
+/// **And the callee is in a header**, which is what makes the cursor's file offset and its *reading* offset two
+/// different numbers: the rendering has the header spliced in above the call, so a signature answered at the file's
+/// offset counts the commas of the wrong region. That is the half this test would have caught and the single-file
+/// fixture above cannot.
+#[test]
+fn a_member_call_s_second_argument_is_its_second_parameter() {
+    let source = "\
+struct Server {
+    void SendRequest(const char* method, void* params);
+};
+struct Client {
+    void refresh() {
+        _server->SendRequest(\"textDocument/diagnostic/refresh\", |nullptr);
+    }
+    Server* _server;
+};
+";
+    let (label, spans, active) = label_where_marked(source);
+    assert_eq!(
+        spans,
+        vec!["const char* method".to_string(), "void* params".to_string()],
+        "the declaration's own parameters: {label:?}"
+    );
+    assert_eq!(
+        active,
+        Some(1),
+        "the cursor is past the comma, which is the second parameter: {label:?}"
+    );
+
+    // **The same call, with the callee in a header the file includes.** The rendering is longer than the file by
+    // everything the header contributes, so the offset the answer is computed at has to be the *reading's*.
+    let header = "\
+struct Server {
+    void SendRequest(const char* method, void* params);
+};
+";
+    let caller = "\
+#include \"server.h\"
+struct Client {
+    void refresh() {
+        _server->SendRequest(\"textDocument/diagnostic/refresh\", |nullptr);
+    }
+    Server* _server;
+};
+";
+    let offset = caller.find('|').expect("the fixture marks the cursor");
+    let without_marker = caller.replace('|', "");
+    let session = session_with(&[("/p/server.h", header), ("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
+        .expect("the cursor is in the rendering");
+    let signature = session
+        .signatures_at(&view, in_the_reading)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no signature at the cursor in {caller:?}"));
+    assert_eq!(
+        signature.active_parameter,
+        Some(1),
+        "with the header spliced in, the cursor is still in the second argument: {:?}",
+        signature.label
+    );
+}
+
 /// The signature is the declaration's own text, and the spans point at the parameters inside it.
 #[test]
 fn a_call_reports_the_declarations_own_signature() {
