@@ -100,16 +100,24 @@ from the buffer the reader is editing.
 the table are vocabulary the server knows:
 
 - **hover** on a command explains it, and a declaration's own comment is rendered in its card;
-- **completion** offers the command names (`/// @par` → `param`, `tparam`, `par`, `paragraph`) and, after a command
-  that takes one, the names of the declaration being documented (`@param |` → its parameters);
+- **completion** offers the command names (`/// @par` → `param`, `tparam`, `par`, `paragraph`); after a command that
+  takes a name, the parameters of the declaration being documented (`@param |` → its parameters); and after one that
+  takes a **reference** — `@see`, `@sa`, `@ref`, `@overload`, `@extends`, `@implements`, `@cite` — the program's
+  names, exactly as a `` [`…`] `` link gets them;
 - **semantic tokens** draw a command as `decorator`, which a client can remap on its own — the cppls extension draws
   `keyword.doxygen` from it;
 - a command's *body* is the reader's, and the server does not colour it.
 
-**Symbol references.** Rust's intra-doc link, in a C++ comment:
+**Code blocks.** `@code` … `@endcode` is an example of code, not prose, and it is treated as one: the block's
+keywords and resolvable names are coloured like the code around it, and completion inside the block offers what a
+statement offers — keywords and snippets included. The body is read **per line with the comment marker removed**, so
+`/// int main() { return 0; }` lexes as code rather than as another comment.
+
+**Symbol references.** Rust's intra-doc link, in a C++ comment — and Doxygen's own spelling of the same thing:
 
 ```cpp
 /// See [`Widget::grow`] for the rule, [`std::vector`] for the container, and [`grow()`] for the call.
+/// @see Widget::grow
 struct Widget { void grow(int by); };
 ```
 
@@ -117,16 +125,20 @@ struct Widget { void grow(int by); };
 | --- | --- |
 | The target | Coloured as the declaration it names — a function, a type, a macro — and **not** coloured when nothing declares it: a colour would say the name is known |
 | hover | The declaration's card, the same one a name gets |
-| definition | Jumps to the declaration; a macro's link jumps to its `#define`, which is the only place a reader can go for one |
-| completion | The names this file can see — and only names, never a snippet: a link takes a symbol |
+| definition | Jumps to the declaration; a macro's reference jumps to its `#define`, which is the only place a reader can go for one |
+| completion | The names this file can see — and only names, never a snippet: a reference takes a symbol |
 
-Three details worth stating, because they are decisions rather than accidents:
+Both spellings are one question, answered in one place (`cpp_code_analysis::doc`), which is why the colour, the card
+and the jump cannot disagree about what a reference names.
+
+Four details worth stating, because they are decisions rather than accidents:
 
 * **Only the backticked form.** `[target]` without the backticks is what Rust also accepts, and in a C++ comment it
   collides with the most ordinary prose there is: `arr[i]` and `matrix[row][col]`. The backtick is the whole
   disambiguator, and a target with whitespace in it is a title rather than a link.
 * **`()` and `!` are punctuation, not part of the name.** `` [`grow()`] `` says "this is a call" and `` [`MAX_SIZE!`] ``
   says "this is a macro"; both are trimmed before the lookup, and the range still covers what was written.
+* **A reference's body is prose.** `@see Foo for the rule` names `Foo`: a target never holds a space.
 * **Prose offers nothing.** A cursor anywhere else in a documentation comment completes nothing at all — a comment is
   not a place a C++ name goes — while ordinary identifiers still get the client's own colour.
 
