@@ -365,6 +365,23 @@ pub const KEYWORDS: &[Keyword] = &[
         use_kind: KeywordUse::Specifier,
         detail: "a module's exported declaration",
     },
+    // **The two other module words**, which are *context-sensitive* keywords: the lexer leaves `import` and `module`
+    // as identifiers because `int import = 1;` compiles, so they are not in `cpp_parser::is_keyword` and a completion
+    // that only offered the lexer's vocabulary never showed them — reported from an editor: typing `im` at file scope
+    // offered `if`/`inline`/`int` and no `import`, in the file whose first line is `import std;`.
+    //
+    // `Statement` rather than `Specifier`: a module declaration is a *declaration statement* at file scope, and the
+    // table's specifier tier would also offer them after `const`/`unsigned`, where they cannot appear.
+    Keyword {
+        spelling: "import",
+        use_kind: KeywordUse::Statement,
+        detail: "a module this file uses",
+    },
+    Keyword {
+        spelling: "module",
+        use_kind: KeywordUse::Statement,
+        detail: "the module this file defines",
+    },
     // Expressions.
     Keyword {
         spelling: "delete",

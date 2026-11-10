@@ -743,6 +743,59 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
     );
 }
 
+/// **The module words are offered**, which the lexer's vocabulary alone could not do.
+///
+/// Reported from an editor: typing `im` at file scope in a file whose first line is `import std;` offered
+/// `if`/`inline`/`int` and **no `import`**. `import` and `module` are *context-sensitive* keywords — the lexer leaves
+/// them as identifiers because `int import = 1;` compiles — so a completion table built from `is_keyword` never had
+/// them. `export` was there, which is what made the gap look like a ranking problem.
+#[test]
+fn the_module_words_are_offered() {
+    const FIXTURE: &str = "\
+import std;
+int main() {
+    im
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+    let at = FIXTURE.find("\n    im").expect("the fixture") + "\n    im".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    assert!(
+        labels.iter().any(|label| label == "import"),
+        "`import` is a word this file can write: {labels:?}"
+    );
+
+    // …and `module`, from the same tier, at the same position.
+    const MODULE: &str = "\
+int main() {
+    mod
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", MODULE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+    let at = MODULE.find("\n    mod").expect("the fixture") + "\n    mod".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    assert!(
+        labels.iter().any(|label| label == "module"),
+        "`module` is a word this file can write: {labels:?}"
+    );
+}
+
 /// **A keyword is not a name and a name is not a keyword**, so the two are ordered separately: a snippet the
 /// reader is about to write comes after their own variables and before a name from `<cstdio>`.
 #[test]
