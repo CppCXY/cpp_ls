@@ -389,6 +389,21 @@ impl FileView {
         // The written search comes first and the reporting one still follows it, because they are both right about
         // their own positions: a cursor on a `#define` line, or inside text a macro produced and this file did not
         // write, has no written span and keeps the answer it had.
+        // **The caret at the end of a word it is typing is still in that word.** The client's position is where the
+        // *next* character goes, so after `lis` it is one past the `s` — an offset no span contains, because a span is
+        // the token's own bytes. Asked in the **file's** coordinates, because that is the space the cursor is in and
+        // the one the written ranges live in; the rendering offset comes back out of `cooked`.
+        //
+        // Without this the lookup below answers `None` for the commonest position a completion is asked at: measured
+        // on a file whose first four lines are `#define`s and whose last line is `lis`, the caret at the end of `lis`
+        // mapped to nothing and the completion list was **empty**, while one byte earlier held every macro.
+        if let Some(previous) = self.reading.iter().rev().find(|span| {
+            span.written
+                .as_ref()
+                .is_some_and(|written| written.end_offset() == in_the_file)
+        }) {
+            return Some(ReadingOffset::new(previous.cooked.end_offset()));
+        }
         let span = self
             .reading
             .iter()
@@ -419,7 +434,17 @@ impl FileView {
             .reading
             .iter()
             .rev()
-            .find(|span| span.reported.end_offset() == in_the_file)
+            // **The end is compared in the file's coordinates, which is what this used to get wrong.** The test was
+            // `span.reported.end_offset() == in_the_file` — a *rendering* offset against a *file* one — and the two
+            // agree only while nothing before the cursor was deleted from the rendering. A file whose first lines are
+            // `#define`s has lost them, so the caret after a name at file scope matched nothing: measured on a file
+            // with four `#define`s and a trailing `lis`, this answered `None` and completion answered an **empty
+            // list** — the shape a reader reports as "completion does not work at all".
+            .find(|span| {
+                span.written
+                    .as_ref()
+                    .is_some_and(|written| written.end_offset() == in_the_file)
+            })
         {
             return Some(ReadingOffset::new(previous.cooked.end_offset()));
         }

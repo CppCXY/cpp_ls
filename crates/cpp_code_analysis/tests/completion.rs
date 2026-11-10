@@ -3569,3 +3569,62 @@ void f() {}
         "and it is code, so the keyword table belongs: {labels:?}"
     );
 }
+
+/// **A session over one file, built the way a server builds it** — the pump, the ask, the pump.
+fn session_of(source: &str) -> Session<MemoryFiles> {
+    let memory = MemoryFiles::new().with_file("/p/macros.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/macros.cpp")]);
+    session
+}
+
+/// **The file's own macros are offered at file scope, with the cursor at the end of what was typed.**
+///
+/// Reported from `EmmyLuaCodeStyle`: a file whose first forty lines are `#define lisl*(c) …` answered **no completion
+/// at all** when the reader typed `lis` at file scope.  Two defects met here, and both are asserted below:
+///
+/// * a `#define` is a preprocessing fact of *this* file, not a declaration in any scope, so the index half cannot see
+///   it — the macro tail of the query exists for that;
+/// * the **caret at the end of a word** mapped to no position in the rendering, because the mapping compared a
+///   *rendering* offset against a *file* one and the file's first four lines are `#define`s, which the rendering does
+///   not have.  Every completion asked with the caret after the letters already typed was answered from `None`, which
+///   the caller reports as "completion does not work at all".
+#[test]
+fn the_files_own_macros_are_offered_at_file_scope() {
+    let source = "\
+#define testprop(c, m) ((m) & MASK(c))
+#define lislalpha(c) testprop(c, MASK(ALPHABIT))
+#define lislalnum(c) testprop(c, MASK(ALPHABIT) | MASK(DIGITBIT))
+#define lisdigit(c) testprop(c, MASK(DIGITBIT))
+int f() { return 0; }
+lis
+";
+    let mut session = session_of(source);
+    let view = cooked_view(&mut session, "/p/macros.cpp");
+    // **The caret after the typed letters**, which is where a reader's is.
+    let cursor = source.find("\nlis\n").expect("the fixture") + "\nlis".len();
+
+    let set = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(cursor),
+    );
+    let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        set.items.iter().any(|item| item.label == "lislalpha"),
+        "the file defines it ten lines above the cursor: {labels:?}"
+    );
+    assert!(
+        set.items.iter().any(|item| item.label == "lislalnum"),
+        "and the second one: {labels:?}"
+    );
+    assert!(
+        !set.items.iter().any(|item| item.label == "testprop"),
+        "a macro that does not start with what the reader wrote is not offered: {labels:?}"
+    );
+}
