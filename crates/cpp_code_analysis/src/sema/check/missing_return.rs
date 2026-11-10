@@ -226,12 +226,61 @@ fn completes(statement: &CppStat) -> bool {
                 .get_body()
                 .is_none_or(|body| can_be_left(&body) || a_goto_could_leave(body.syntax()))
         }
-        // **`switch` and `try` are assumed to be able to complete**, and the assumption is the direction the rule needs: a
-        // case with no `break` falls through, an exception may be caught below, and a wrong "cannot complete" here would be
-        // an invented finding.
-        CppStat::SwitchStat(_) | CppStat::TryStat(_) => true,
+        // **A `switch` completes when it can be left through its end**, which is provable for the shape a reader
+        // writes most: a `default` and not one `break`, so fallthrough carries every path down to the last statement.
+        // `try` stays assumed, because an exception may be caught below and that is not readable here.
+        CppStat::SwitchStat(switch) => switch_completes(switch),
+        CppStat::TryStat(_) => true,
         _ => true,
     }
+}
+
+/// **Can a `switch` run to its end?** — the question `LuaParser::BlockFollow` needs, where every label returns.
+///
+/// The rule proves only the completion that cannot be doubted:
+///
+/// ```text
+///   no `default:`            a value that matches no label skips the whole body — it may complete
+///   a `break` anywhere       the break lands after the switch, which is exactly the completion being asked about
+///   a `goto` anywhere        the one exit the statement tree does not model
+///   last statement completes with none of those, every path that enters a label runs on (fallthrough) to the last
+///                            statement, so its end is the switch's end
+/// ```
+///
+/// Measured on `EmmyLuaCodeStyle`'s `LuaParser::BlockFollow`: four `return`s, a `default`, and the rule called the
+/// body one that "has no `return`".
+fn switch_completes(switch: &cpp_parser::CppSwitchStat) -> bool {
+    // **The switch's own children are its body**: the condition, then the labels and statements interleaved
+    // (`ParenExpr, CaseStat, ReturnStat, CaseStat, ReturnStat, DefaultStat, ReturnStat`) — this grammar does not put
+    // them in a compound block, and looking for one made the whole analysis unreachable.
+    let children: Vec<CppStat> = switch
+        .syntax()
+        .children()
+        .filter_map(CppStat::cast)
+        .collect();
+    // A `default` is what makes "every value takes some label" true.
+    let has_default = children
+        .iter()
+        .any(|statement| matches!(statement, CppStat::DefaultStat(_)));
+    if !has_default {
+        return true;
+    }
+    let statements: Vec<&CppStat> = children
+        .iter()
+        .filter(|statement| !matches!(statement, CppStat::CaseStat(_) | CppStat::DefaultStat(_)))
+        .collect();
+    // A `break` at any depth of the switch's own body leaves it at its end; a nested loop's or switch's does not.
+    if statements.iter().any(|statement| can_be_left(statement)) {
+        return true;
+    }
+    if a_goto_could_leave(switch.syntax()) {
+        return true;
+    }
+    // The last statement decides: with no `break`, every entered label falls through to it.
+    let Some(last) = statements.last() else {
+        return true;
+    };
+    completes(last)
 }
 
 /// **Can this loop body be left from inside it?** — a `break`, through any block or `if` of the loop's own, but not through

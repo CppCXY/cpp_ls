@@ -627,6 +627,14 @@ fn missing_return_is_a_control_flow_question() {
     let silent = [
         // Every path returns.
         "int both(int x) { if (x) return 1; else return 2; }",
+        // **A `switch` whose every label returns, and which has a `default`.** Reported from
+        // `EmmyLuaCodeStyle`'s `LuaParser::BlockFollow`, whose body is exactly this shape: reported "this function
+        // is declared to return `bool` and its body has no `return`" with four `return`s in it. A `switch` with a
+        // `default`, no `break`, and a last statement that does not complete cannot leave through its end: fallthrough
+        // carries every path that enters a label down to the same terminator.
+        "int by_switch(int x) { switch (x) { case 1: return 1; case 2: return 2; default: return 0; } }",
+        "int by_switch_with_blocks(int x) { switch (x) { case 1: { return 1; } default: { return 0; } } }",
+        "int by_switch_that_throws(int x) { switch (x) { case 1: return 1; default: throw x; } }",
         // A body that always throws never returns and needs no `return`: the user's own case.
         "int throws() { throw 1; }",
         "int throws_in_else(int x) { if (x) return 1; else throw 1; }",
@@ -1788,8 +1796,57 @@ void f() {
     );
 }
 
-/// **One candidate that takes the argument keeps the check silent** — the rule an overload set is judged by.
+/// **A default argument is written in the header and never repeated in the source**, so a call must be judged
+/// against the declaration that carries it.
 ///
+/// Reported from `EmmyLuaCodeStyle`: `void LuaExpectedError(std::string_view message, LuaTokenKind expectedToken = 0);`
+/// in `LuaParser.h`, and `void LuaParser::LuaExpectedError(std::string_view message, LuaTokenKind expectedToken)` in
+/// `LuaParser.cpp` — a definition may not repeat the default, so the definition alone says two arguments are required
+/// and **eight** calls were underlined as "needs 2 argument(s) and this call passes fewer".
+///
+/// The rule this asserts is the language's: a call is legal if *any* declaration of that signature can take it.
+#[test]
+fn a_default_argument_written_in_the_header_is_not_a_missing_argument() {
+    let header = "\
+void report(int a, int b = 0);
+int twice(int a, int b = 1);
+";
+    let source = "\
+#include \"api.h\"
+void report(int a, int b) { (void)a; (void)b; }
+int twice(int a, int b) { return a * b; }
+void use() {
+    report(1);
+    report(1, 2);
+    (void)twice(2);
+}
+";
+    let codes = codes_of_files(&[("/p/api.h", header), ("/p/a.cpp", source)], "/p/a.cpp");
+    assert!(
+        !codes.contains(&DiagnosticCode::ArgumentCount),
+        "both parameters are defaulted in the header: {codes:?}"
+    );
+
+    // **And the rule still fires when nothing is defaulted** — a fix that silenced the check would pass the half above.
+    let strict = "\
+#include \"api.h\"
+void only(int a, int b);
+void report(int a, int b) { (void)a; (void)b; }
+int twice(int a, int b) { return a * b; }
+void use() { only(1); }
+";
+    let header_with_only = format!("{header}void only(int a, int b);\n");
+    let codes = codes_of_files(
+        &[("/p/api.h", &header_with_only), ("/p/a.cpp", strict)],
+        "/p/a.cpp",
+    );
+    assert!(
+        codes.contains(&DiagnosticCode::ArgumentCount),
+        "`only` has no defaulted parameter: {codes:?}"
+    );
+}
+
+/// **One candidate that takes the argument keeps the check silent** — the rule an overload set is judged by.
 /// `resize(int)` and `resize(const char*)` are both `resize`, and `w.resize("wide")` is the second one: a check
 /// that reported "this passes a string where an `int` is declared" would be underlining a correct line, which is
 /// the failure mode this whole layer exists to avoid. So a finding needs **every** candidate to disagree — and the

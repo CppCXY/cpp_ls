@@ -100,16 +100,24 @@ impl Check for ArgumentCount {
                 continue;
             }
 
-            // **This file first, the index second.** A callee declared here is read from the tree, which is where its
-            // defaults and its `...` are; one declared in another file is a **fact** the cook already produced —
+            // **This file first, and the index too** — a callee declared here is read from the tree, which is where
+            // its `...` is; one declared in another file is a **fact** the cook already produced —
             // `DeclFact::parameter_list`, the field whose own documentation says it is stored *"because a query holds
-            // one file and the parameters are written in another"*.
-            // **Every declaration of that name** — this file first, the index second. A name with several used to
-            // be skipped whole; the set is what the resolver is for.
-            let declared = match callees.get(name.as_str()) {
-                Some(declared) if !declared.is_empty() => declared.clone(),
-                _ => callees_from_the_index(context, &name),
-            };
+            // one file and the parameters are written in another"*. Both are needed, and the reason is a default:
+            //
+            // ```text
+            //   LuaParser.h    void LuaExpectedError(std::string_view, LuaTokenKind expectedToken = 0);
+            //   LuaParser.cpp  void LuaParser::LuaExpectedError(std::string_view, LuaTokenKind expectedToken) { … }
+            // ```
+            //
+            // A definition may not repeat the default, so the definition alone says two arguments are required — and
+            // judged against it, every `LuaExpectedError(message)` in the file is one short. Eight of them were
+            // underlined on `EmmyLuaCodeStyle`. The declarations name one signature, so the call is legal if *any* of
+            // them can take it: see [`the_most_permissive_arity`].
+            let declared = the_most_permissive_arity(
+                callees.get(name.as_str()).cloned().unwrap_or_default(),
+                callees_from_the_index(context, &name),
+            );
             if declared.is_empty() {
                 continue;
             }
@@ -287,6 +295,37 @@ fn callees_in_this_file(
     callees
 }
 
+/// **One candidate per signature, at the most permissive arity any declaration of it allows.**
+///
+/// A function is declared more than once — a header and its source — and the *declarations* are not equal: a default
+/// argument is written once, in one of them, and the definition may not repeat it. The signature is the same
+/// (`parameters` is its types), so the call's legal arity is the most permissive answer among them:
+///
+/// ```text
+///   required   the minimum — a default in any declaration makes the argument optional for all of them
+///   written    the maximum — a `...` or an extra parameter widens what may be passed
+///   variadic   either — the widest the signature was ever declared
+/// ```
+///
+/// Measured on `EmmyLuaCodeStyle`: `LuaExpectedError`'s second parameter is defaulted in `LuaParser.h` only, and eight
+/// calls were reported as one argument short until the two halves were merged.
+fn the_most_permissive_arity(mut here: Vec<Callee>, also: Vec<Callee>) -> Vec<Callee> {
+    for candidate in also {
+        match here
+            .iter_mut()
+            .find(|known| known.parameters == candidate.parameters)
+        {
+            Some(known) => {
+                known.required = known.required.min(candidate.required);
+                known.written = known.written.max(candidate.written);
+                known.variadic |= candidate.variadic;
+            }
+            None => here.push(candidate),
+        }
+    }
+    here
+}
+
 fn at_most(name: &str, written: usize) -> String {
     t!(
         "`%{name}` takes %{written} argument(s) and this call passes more",
@@ -309,31 +348,34 @@ fn at_most(name: &str, written: usize) -> String {
 /// `None` as well for a declaration that is not a function, for one whose parameter list the reading could not
 /// reach, and for a name the index does not hold at all.
 fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee> {
-    let crate::Known::Yes(definitions) = context.index().definitions(name, context.path) else {
-        return Vec::new();
-    };
-    // A class's constructor and a free function may share a spelling; only the functions are this rule's question.
-
-    let functions: Vec<&crate::DeclFact> = definitions
-        .found
-        .iter()
-        .map(|definition| &definition.fact)
-        .filter(|fact| fact.kind == crate::DeclKind::Function)
-        .collect();
+    // **Every fact of that name the file can see, not the index's one chosen declaration.** A declaration and its
+    // definition are one entity and the lookup answers with the entity's best fact — but for this rule the two
+    // disagree, and the disagreement is the whole defect: a default argument is written in the *declaration* and may
+    // not be repeated in the definition, so the fact that is "best" for a jump (`LuaParser.cpp`'s definition) says two
+    // arguments are required while the header's declaration (`LuaParser.h`) says one is optional. Measured on
+    // `EmmyLuaCodeStyle`: eight `LuaExpectedError(message)` calls reported against a header that defaults the second.
+    //
+    // Visibility is the closure's, not the project's: a same-named function in a file this one cannot include is not
+    // a candidate for its call.
+    let visible = context.index().include_closure(context.path);
     let mut callees: Vec<Callee> = Vec::new();
-    for only in functions {
-        let Some(parameters) = only.parameter_list.as_deref() else {
+    for (file, fact) in context.index().every_fact_named(name) {
+        if fact.kind != crate::DeclKind::Function {
+            continue;
+        }
+        let normalized = crate::file::paths::normalize_path(&file, cfg!(windows));
+        if !visible.contains(&normalized) {
+            continue;
+        }
+        let Some(parameters) = fact.parameter_list.as_deref() else {
             continue;
         };
         let Some(callee) = the_callee_in(parameters) else {
             continue;
         };
-        if !callees
-            .iter()
-            .any(|known| known.parameters == callee.parameters)
-        {
-            callees.push(callee);
-        }
+        // **The same signature declared twice is one candidate at the most permissive arity** — see
+        // [`the_most_permissive_arity`].
+        callees = the_most_permissive_arity(callees, vec![callee]);
     }
     callees
 }
