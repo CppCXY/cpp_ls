@@ -173,7 +173,7 @@ key and passes without it.
 `StoreStats` and `UnitStats` cover parses and program reads. `inspect stats` prints all four groups:
 
 ```text
-stats: 198 file(s) in the project, summaries reused 9 built 0 not stored 0
+stats: 1 file(s) in the project, summaries reused 9 built 0 not stored 0
        units from memory 0 walked 0
        closure walks built 0 hit 0 met 0
        pulls hit 0 run 0
