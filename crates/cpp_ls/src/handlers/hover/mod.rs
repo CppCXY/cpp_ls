@@ -1436,10 +1436,11 @@ fn declaration_markdown(
     // `sema::constant`, which also says what it refuses; `enumerator_value` stays the question "is this an
     // enumerator at all", which decides the sentence below.
     let enumerator = enumerator_value(view, fact.name_range.start_offset);
-    let constant_value = session.constant_value_at(
-        view,
-        cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
-    );
+    // **The value is folded in the unit where the declaration is read**, not in the file the cursor happens to be
+    // in: a header's `UCHAR_MAX` comes from `<climits>`, which the header itself need not include — every `.cpp` that
+    // includes it does. See [`cpp_code_analysis::Session::constant_value_of_a_declaration`].
+    let constant_value =
+        session.constant_value_of_a_declaration(&found.file, fact.name_range, &view.path);
 
     // **The code block is generated from the model** — see [`cpp_code_analysis::sema::render`]. Not the declaration's
     // text, not the fact's strings joined together, and no `template <…>` cut out of the file: a type is a `Type`

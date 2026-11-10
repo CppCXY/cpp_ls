@@ -16833,6 +16833,20 @@ impl MacroEnvironment {
     }
 
     /// The in-force candidates, in no particular order: everything pasted in at or before `offset`.
+    /// **Every definition in force at `offset`, for a caller that can use agreement.** The strict `at` refuses a name
+    /// whose region cannot be decided, which is right for "go to definition" — one `#define` of two is a wrong jump.
+    /// For a *value* the question is different: when every definition in force folds to the same number, that number
+    /// is what the compilation has, whatever the preprocessor took.
+    ///
+    /// Measured on `EmmyLuaCodeStyle`: `const int FIRST_RESERVED = UCHAR_MAX + 1;` showed no value, and `UCHAR_MAX`'s
+    /// definition sits inside a conditional in the toolchain's `limits.h` — `at` answered
+    /// `Unknown(ConditionalCompilation)` and the fold had nothing to read.
+    pub fn definitions_in_force(&self, offset: usize) -> Vec<&MacroCandidate> {
+        self.in_force(offset)
+            .filter(|candidate| candidate.is_definition())
+            .collect()
+    }
+
     fn in_force(&self, offset: usize) -> impl Iterator<Item = &MacroCandidate> {
         self.candidates
             .iter()

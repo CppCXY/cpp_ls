@@ -5680,3 +5680,34 @@ fn a_class_whose_name_is_also_its_constructor_still_lists_its_members() {
         names.iter().take(12).collect::<Vec<_>>()
     );
 }
+
+/// **A macro whose region cannot be decided still has a value when every definition in force agrees.**
+///
+/// Reported from `EmmyLuaCodeStyle`: `const int FIRST_RESERVED = UCHAR_MAX + 1;` showed no value. `UCHAR_MAX` is
+/// defined inside a conditional in the toolchain's `limits.h`, and the *strict* question ("which `#define` is in
+/// force") answers `Unknown(ConditionalCompilation)` — right for a jump, useless for a number. All the candidates
+/// fold to the same one here, so the number is the compilation's whatever the preprocessor took; when they disagree
+/// the answer stays `None`, because a wrong number is worse than none.
+#[test]
+fn a_conditional_macros_value_is_folded_when_every_definition_agrees() {
+    let agreeing = "#ifdef WIDE\n\
+                    #define LIMIT 0x10\n\
+                    #else\n\
+                    #define LIMIT 0x10\n\
+                    #endif\n\
+                    const int VALUE = LIMIT * 2;\n";
+    let files = MemoryFiles::new().with_file("/p/agree.cpp", agreeing);
+    let fixture = Memory::new("a-conditional-macro-that-agrees", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/agree.cpp", agreeing);
+    session.index_everything();
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/agree.cpp"))
+        .expect("a view");
+    let at = agreeing.find("VALUE = ").expect("the fixture");
+    assert_eq!(
+        session.constant_value_at(&view, crate::file::coordinates::ReadingOffset::new(at)),
+        Some(32),
+        "both definitions in force say 0x10"
+    );
+}

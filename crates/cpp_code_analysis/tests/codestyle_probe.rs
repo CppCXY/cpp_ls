@@ -846,3 +846,59 @@ fn what_the_index_says_about_a_union() {
         );
     }
 }
+
+/// **Where a constant's value is lost** — `const int FIRST_RESERVED = UCHAR_MAX + 1;` in the real project.
+///
+/// ```text
+/// $env:CPPLS_CODESTYLE_PROJECT = "E:\EmmyLuaCodeStyle"
+/// cargo test --release -p cpp_code_analysis --test codestyle_probe what_a_constant_value_folds_to -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a probe, not a test: it prints which layer loses a constant's value in the real project"]
+fn what_a_constant_value_folds_to() {
+    let root = project();
+    let file = root
+        .join("LuaParser")
+        .join("include")
+        .join("LuaParser")
+        .join("Lexer")
+        .join("LuaTokenTypeDetail.h");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+    println!(
+        "UCHAR_MAX (in the header) = {:?}",
+        session.macro_body_at(&file, 0, "UCHAR_MAX")
+    );
+    for cpp in [
+        "LuaParser/src/Parse/LuaParser.cpp",
+        "LuaParser/src/Ast/LuaSyntaxTree.cpp",
+    ] {
+        let path = project().join(cpp);
+        println!(
+            "UCHAR_MAX (in {cpp}) = {:?}",
+            session.macro_body_at(&path, 0, "UCHAR_MAX")
+        );
+    }
+    for name in ["FIRST_RESERVED", "TK_AND"] {
+        let Some(at) = text.find(&format!(" {name} ")) else {
+            println!("{name}: not written");
+            continue;
+        };
+        println!(
+            "{name}: value at its own file = {:?}",
+            session.constant_value_of_a_declaration(
+                &file,
+                cpp_parser::SourceRange::new(at + 1, name.len()),
+                &file,
+            )
+        );
+    }
+}

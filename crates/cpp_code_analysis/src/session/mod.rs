@@ -9015,19 +9015,85 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **An object-like macro's body, as text**, for a name visible at `offset` in this file — `0xff` for
     /// `UCHAR_MAX`. `None` for a function-like macro (its body is not a value) and for a name that is not a macro
     /// here.
+    /// **The value of a declaration, folded in the unit where it is read.**
+    ///
+    /// [`Session::constant_value_at`] takes one view and one offset, which is right when a reader is looking at the
+    /// file that declares the constant. A **header** is the case it cannot answer: `UCHAR_MAX` is defined in the
+    /// toolchain's `limits.h`, and a header that uses it does not necessarily include that header itself — every
+    /// `.cpp` including it does. So the *names* are read from a real translation unit (`reader` when it can see the
+    /// declaration, otherwise the first file that includes it), while the **declaration's own text** still comes from
+    /// the file that declares it.
+    ///
+    /// Measured on `EmmyLuaCodeStyle`: `const int FIRST_RESERVED = UCHAR_MAX + 1;` in `LuaTokenTypeDetail.h` showed no
+    /// value, while the same fold in `LuaSyntaxTree.cpp` gave 256 — the header alone cannot see `<climits>`, and the
+    /// declaration is only ever compiled as part of some `.cpp`.
+    pub fn constant_value_of_a_declaration(
+        &self,
+        declared_in: &Path,
+        name_range: cpp_parser::SourceRange,
+        reader: &Path,
+    ) -> Option<i64> {
+        let view = self.view(declared_in)?;
+        // The unit whose macros the declaration is read with.
+        let mut unit = reader.to_path_buf();
+        if declared_in != reader
+            && !self
+                .index()
+                .visible_files(reader)
+                .iter()
+                .any(|(path, _)| std::path::Path::new(path) == declared_in)
+            && let Some(includer) = self.index().includers_of(declared_in).first()
+        {
+            unit = includer.clone();
+        }
+        // The end of that unit: every `#include` it writes has been pasted by then, which is the widest set of names
+        // it can offer. A macro redefined after the declaration's own line is not something this can know without
+        // the declaration's line in *that* file, and the answer is `None` rather than a guess in that case only when
+        // the two definitions disagree — see [`Session::macro_body_at`].
+        let at = self.text(&unit).map(|text| text.len()).unwrap_or(0);
+        crate::sema::constant::value_at(&view, name_range.start_offset, &|name| {
+            self.macro_body_at(&unit, at, name)
+        })
+    }
+
     pub fn macro_body_at(&self, path: &Path, offset: usize, name: &str) -> Option<String> {
         let environment = self.store.index().macro_environment(name, path);
-        let Known::Yes(found) = environment.at(offset) else {
-            return None;
-        };
-        let fact = found.fact();
+        // **The strict answer first**, which is the preprocessor's: the `#define` in force.
+        if let Known::Yes(found) = environment.at(offset) {
+            return self.the_macro_body(found);
+        }
+        // **Then what every definition in force agrees on.** `at` refuses a name whose region cannot be decided, and
+        // that is right for a jump — one `#define` of two is a wrong destination. A *value* is a different question:
+        // when every definition in force folds to the same number, that number is the compilation's, whatever the
+        // preprocessor took. Measured on `EmmyLuaCodeStyle`: `const int FIRST_RESERVED = UCHAR_MAX + 1;` showed no
+        // value, because `UCHAR_MAX`'s definition sits inside a conditional in the toolchain's `limits.h` and `at`
+        // answered `Unknown(ConditionalCompilation)`.
+        let mut agreed: Option<String> = None;
+        for candidate in environment.definitions_in_force(offset) {
+            let Some(body) = self.the_macro_body(candidate) else {
+                // A definition this layer cannot read makes agreement unprovable: two bodies may be the same, and a
+                // third unreadable one may not be.
+                return None;
+            };
+            match &agreed {
+                None => agreed = Some(body),
+                Some(known) if *known == body => {}
+                Some(_) => return None,
+            }
+        }
+        agreed
+    }
+
+    /// **One macro candidate's replacement list, as text** — `0xff` for `UCHAR_MAX`.
+    fn the_macro_body(&self, candidate: &crate::index::project::MacroCandidate) -> Option<String> {
+        let fact = candidate.fact();
         if fact.function_like {
             return None;
         }
         // **The body is a range in the defining file**, because a replacement list is text in *that* file and the fact
         // deliberately stores a shape rather than a copy of the tokens (see `MacroFact::body_range`).
         let range = fact.body_range?;
-        let text = self.text(found.file())?;
+        let text = self.text(candidate.file())?;
         let body = text.get(range.start_offset..range.end_offset())?;
         (!body.trim().is_empty()).then(|| body.trim().to_string())
     }
