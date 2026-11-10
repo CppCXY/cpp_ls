@@ -824,3 +824,70 @@ int f() { return LIMIT|; }
         "`LIMIT` is not a call"
     );
 }
+
+/// **A call of a class is a constructor call, and the constructor's parameters are the signature.**
+///
+/// `Widget(1, 2)` is a *temporary of `Widget`*, and the popup that matters while the reader types the arguments is the
+/// constructor's — the direct-initialization form `Widget w(1, 2)` already answered that way, and the call
+/// expression is the same question written as an expression. Reported with a screenshot from
+/// `EmmyLuaCodeStyle`: `LuaParser(file, tokens)` and `Widget(1, 2)` showed no signature at all.
+#[test]
+fn a_call_of_a_class_offers_its_constructors_signature() {
+    let source = "\
+struct Widget {
+    Widget(int width, int height);
+};
+Widget make() { return Widget(1, |); }
+";
+    let (_without, signature) = signature_where_marked(source);
+    let signature = signature.expect("a call of a class is a constructor call");
+    assert_eq!(signature.label, "Widget(int width, int height)");
+    assert_eq!(
+        signature.active_parameter,
+        Some(1),
+        "the cursor is in the second argument"
+    );
+}
+
+/// **A call of a class whose constructors are several and declared in a header.**
+///
+/// The shape `EmmyLuaCodeStyle` writes: `LuaParser(file, tokens)` with `LuaParser` declared in `lualexer.h` and four
+/// constructors, one of them taking the two arguments written. A popup that only answers when there is exactly one
+/// constructor answers nothing on the ordinary shape.
+/// **A call of a class whose constructors are several and declared in a header.**
+///
+/// The shape `EmmyLuaCodeStyle` writes: `LuaParser(file, tokens)` with `LuaParser` declared in `luaparser.h` and
+/// several constructors, one of them taking the two arguments written. A popup that only answers when there is
+/// exactly one constructor answers nothing on the ordinary shape.
+#[test]
+fn a_call_of_a_class_in_a_header_offers_every_constructor() {
+    let header = "\
+struct Source { int size; };
+struct Tokens { int count; };
+struct Widget {
+    Widget();
+    Widget(Source& source);
+    Widget(Source& source, Tokens& tokens);
+};
+";
+    let caller = "\
+#include \"widget.h\"
+Widget make(Source& source, Tokens& tokens) { return Widget(source, |tokens); }
+";
+    let offset = caller.find('|').expect("the fixture marks the cursor");
+    let without_marker = caller.replace('|', "");
+    let session = session_with(&[("/p/widget.h", header), ("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
+            offset,
+        ))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
+    assert!(
+        signatures
+            .iter()
+            .any(|signature| signature.label.contains("Tokens")),
+        "the header declares `Widget(Source&, Tokens&)`, and that is the call: {signatures:?}"
+    );
+}

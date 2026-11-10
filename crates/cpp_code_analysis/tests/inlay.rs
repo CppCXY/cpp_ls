@@ -215,8 +215,18 @@ int f(Widget& w) { return w.size_of(3); }
 /// `Widget(1, 2)` names a type, and a type's scope holds its *fields*, not the constructor's parameters — so a
 /// hint here would label the arguments with whatever names the class happens to declare. The refusal is the scope
 /// kind's: only a function scope has parameters.
+/// **A call of a class is a constructor call, and its arguments are the constructor's parameters.**
+///
+/// `Widget(1, 2)` names a type, and this used to refuse: "a type's scope holds its *fields*, not the constructor's
+/// parameters — so a hint here would label the arguments with whatever names the class happens to declare". That is
+/// right about the *scope* and wrong about the call: the class declares constructors, and a constructor declares
+/// parameters. Reported from `EmmyLuaCodeStyle`: `LuaParser(file, std::move(luaLexer.GetTokens()))` showed no hints,
+/// on the ordinary line of C++ that constructs an object.
+///
+/// The constructor is chosen by the argument count — the parameters of the declaration that can take this many
+/// arguments — and a class with **no** constructor written must stay silent rather than borrow a field's name.
 #[test]
-fn a_call_of_a_class_is_not_hinted() {
+fn a_call_of_a_class_is_hinted_with_its_constructors_parameters() {
     let source = "\
 struct Widget {
     int width;
@@ -224,6 +234,27 @@ struct Widget {
     Widget(int w, int h);
 };
 Widget make() { return Widget(3, 4); }
+";
+    let call = source.find("Widget(3").expect("the fixture") + "Widget(".len();
+    assert_eq!(
+        hints_of(source),
+        vec![
+            (call, "w".to_string()),
+            (call + "3, ".len(), "h".to_string())
+        ],
+        "the constructor's own parameter names"
+    );
+}
+
+/// **A class with no constructor written has no parameters to name**, and a field's name is not one.
+#[test]
+fn a_class_with_no_constructor_is_not_hinted() {
+    let source = "\
+struct Widget {
+    int width;
+    int height;
+};
+Widget make() { return Widget{3, 4}; }
 ";
     assert!(hints_of(source).is_empty());
 }

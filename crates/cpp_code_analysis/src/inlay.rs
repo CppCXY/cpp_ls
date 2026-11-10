@@ -364,47 +364,56 @@ where
         // repeated callee spelling is visible in it.
         let trace = crate::probes::inlay();
         let started = std::time::Instant::now();
-        let Known::Yes(callee) = callee_of_a_call(
-            index,
-            &mut |_: &Path| None,
-            &view.scopes,
-            &view.root,
-            &view.path,
-            &call,
-        ) else {
-            // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
-            // wrong parameter is a wrong answer printed into the code.
-            continue;
-        };
-        let resolved = started.elapsed();
-
+        // **The parameters of the call's declaration** — a function's own, or, when the callee names a **class**, the
+        // constructor's. `Widget(3, 4)` is a temporary of `Widget`: the class's scope holds fields, but the class also
+        // *declares constructors*, and a constructor declares parameters. Reported from `EmmyLuaCodeStyle`:
+        // `LuaParser(file, std::move(luaLexer.GetTokens()))` showed no hints at all — the constructor branch is what
+        // answers there, and the function branch below is unchanged for every other call.
         let names =
-            parameter_names_for(view, &callee, &mut declaring, &mut view_of).or_else(|| {
-                // **A declaration whose file has no rendering still has names.** The list is in its
-                // *fact*, which the index keeps as text — so the reading is made from the text
-                // instead of from the tree.
-                callee
-                    .parameters
-                    .as_deref()
-                    .and_then(parameter_names_from_text)
+            constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
+                let Known::Yes(callee) = callee_of_a_call(
+                    index,
+                    &mut |_: &Path| None,
+                    &view.scopes,
+                    &view.root,
+                    &view.path,
+                    &call,
+                ) else {
+                    // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
+                    // wrong parameter is a wrong answer printed into the code.
+                    return None;
+                };
+                let resolved = started.elapsed();
+
+                let names = parameter_names_for(view, &callee, &mut declaring, &mut view_of)
+                    .or_else(|| {
+                        // **A declaration whose file has no rendering still has names.** The list is in its
+                        // *fact*, which the index keeps as text — so the reading is made from the text
+                        // instead of from the tree.
+                        callee
+                            .parameters
+                            .as_deref()
+                            .and_then(parameter_names_from_text)
+                    });
+                if trace {
+                    eprintln!(
+                        "[inlay] {} -> {:?}: callee {:?}, names {:?}, {} name(s)",
+                        call.text()
+                            .to_string()
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(40)
+                            .collect::<String>(),
+                        callee.file.display(),
+                        resolved,
+                        started.elapsed() - resolved,
+                        names.as_ref().map(Vec::len).unwrap_or(0)
+                    );
+                }
+                names
             });
-        if trace {
-            eprintln!(
-                "[inlay] {} -> {:?}: callee {:?}, names {:?}, {} name(s)",
-                call.text()
-                    .to_string()
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(40)
-                    .collect::<String>(),
-                callee.file.display(),
-                resolved,
-                started.elapsed() - resolved,
-                names.as_ref().map(Vec::len).unwrap_or(0)
-            );
-        }
         let Some(names) = names else {
             continue;
         };
@@ -437,6 +446,71 @@ where
 }
 
 /// The parameter names of the declaration a call names, or `None` when they cannot be read.
+/// **The parameter names a call of a class hands its arguments** — the constructor's, chosen by the argument count.
+///
+/// `Widget(3, 4)` names a type, and a type's scope holds its *fields*: reading that scope would label `3` with some
+/// member's name, which is why this layer used to refuse a call of a class outright. The right answer is one step
+/// further: the class declares **constructors**, each with its own parameters, and the one that can take this many
+/// arguments is the one being called. `EmmyLuaCodeStyle`'s `LuaParser(file, std::move(luaLexer.GetTokens()))` is the
+/// shape — two arguments and a constructor taking two parameters.
+///
+/// The list is read from the **fact** (`DeclFact::parameter_list`), because the class is usually declared in a header
+/// and the hint must not wait for that header's rendering. When several constructors can take the arguments, the one
+/// with the fewest parameters wins: `Widget(Source&, Tokens&)` beats `Widget(Source&, Tokens&, int extra = 0)` for a
+/// two-argument call, and a constructor with defaults beyond the call's arity is not chosen over an exact one.
+///
+/// `None` for a class that writes no constructor at all — aggregate initialization names no parameters, and a field's
+/// name is not one.
+fn constructor_parameter_names(
+    index: &ProjectIndex,
+    view: &FileView,
+    call: &CppSyntaxNode,
+    passed: usize,
+) -> Option<Vec<Option<String>>> {
+    let callee = call.children().next()?;
+    let written = callee.text().to_string();
+    let written = written.trim();
+    // A qualified spelling names the class by its last segment: `ns::Widget(1, 2)`.
+    let name = written.rsplit("::").next().unwrap_or(written).trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let Known::Yes(found) = index.definitions(name, &view.path) else {
+        return None;
+    };
+    let mut best: Option<Vec<Option<String>>> = None;
+    for declaration in &found.found {
+        let fact = &declaration.fact;
+        // A constructor is filed under its class's name, in the class's own scope.
+        if fact.kind != crate::DeclKind::Function || fact.name != name {
+            continue;
+        }
+        let Some(scope) = fact.scope.as_deref() else {
+            continue;
+        };
+        if scope.rsplit("::").next().map(str::trim) != Some(name) {
+            continue;
+        }
+        let Some(list) = fact.parameter_list.as_deref() else {
+            continue;
+        };
+        let Some(names) = parameter_names_from_text(list) else {
+            continue;
+        };
+        if names.len() < passed {
+            continue;
+        }
+        if best.as_ref().is_none_or(|known| names.len() < known.len()) {
+            best = Some(names);
+        }
+    }
+    best
+}
+
 fn parameter_names_for<F>(
     view: &FileView,
     callee: &Callee,
