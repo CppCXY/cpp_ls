@@ -578,6 +578,77 @@ fn a_qualified_name_declared_in_a_header_has_its_type() {
     );
 }
 
+/// **A member of a class declared in a header has its type in the method's body.**
+///
+/// Reported from `EmmyLuaCodeStyle`: `LuaParser::_tokens` is `std::vector<LuaToken>` — its own hover says so, straight
+/// out of the index's member list — and yet `_tokens.size()` in `LuaParser.cpp` answered *"the type of `_tokens` is
+/// not known here"*, so `size` could not be resolved at all.
+///
+/// The reason is the two-layer split: the file's scope tree has no scope for a class declared in another file, and
+/// the index's unqualified lookup does not match a fact whose scope is `Parser`. The class is named by the
+/// *definition's* own declarator (`Parser::Parse`), and the query that knows a member of it is the one the hover uses.
+#[test]
+fn a_member_of_a_class_declared_in_a_header_has_its_type_in_the_body() {
+    let header = "\
+struct Token { int kind; };
+struct Parser {
+    Token _token;
+    int Parse();
+};
+";
+    let source = "\
+#include \"api.h\"
+int Parser::Parse() { return _token.kind; }
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/api.h", header)]);
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "_token").as_deref(),
+        Some("Token"),
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "kind").as_deref(),
+        Some("int"),
+        "and the member access through it reads the member's own type"
+    );
+}
+
+/// **The member is the class's, even when three classes declare that name.**
+///
+/// This is the real shape `EmmyLuaCodeStyle` has, and the one the first fixture above could not fail on: `_tokens`
+/// is a member of `LuaLexer`, `LuaParser` **and** `LuaSyntaxTree`, so the index's unqualified lookup answers
+/// `Ambiguous` — and the type engine had no way to ask "the class whose member function this is", which is what C++
+/// looks in first. Measured on `LuaParser.cpp`: `type_at("_tokens")` answered `Unknown(Ambiguous)`, so
+/// `_tokens.size()` could not resolve `size` at all.
+#[test]
+fn a_member_name_several_classes_declare_is_the_enclosing_classs() {
+    let header = "\
+struct Token { int kind; };
+struct Lexer {
+    Token _token;
+};
+struct Parser {
+    Token _token;
+    int Parse();
+};
+";
+    let source = "\
+#include \"api.h\"
+int Parser::Parse() { return _token.kind; }
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/api.h", header)]);
+    eprintln!(
+        "definition(_token) = {:?}",
+        session
+            .index()
+            .definition("_token", std::path::Path::new("/p/a.cpp"))
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "_token").as_deref(),
+        Some("Token"),
+        "the enclosing class's member, not an ambiguous name"
+    );
+}
+
 /// **A member of a class template has the type its arguments make it, not the parameters it was written with.**
 ///
 /// This is the shape a standard container is made of, and until the parameters were paired with the arguments the

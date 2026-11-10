@@ -716,3 +716,69 @@ fn what_the_checks_say_about_a_file() {
         );
     }
 }
+
+/// **Where a member's type is lost** — `_tokens.size()` in `LuaParser.cpp`, the reader's report.
+///
+/// ```text
+/// $env:CPPLS_CODESTYLE_PROJECT = "E:\EmmyLuaCodeStyle"
+/// cargo test --release -p cpp_code_analysis --test codestyle_probe what_a_member_type_answers -- --ignored --nocapture
+/// ```
+///
+/// Before the enclosing-class lookup in `declaration_of_expression`: `definition("_tokens")` was
+/// `Unknown(Ambiguous("_tokens"))` (three classes declare it) and `type_at` was the same, so `_tokens.size()`
+/// answered "the type of `_tokens` is not known here". This prints the four answers that decide it.
+#[test]
+#[ignore = "a probe, not a test: it prints the analysis's answer about a member in the real project"]
+fn what_a_member_type_answers() {
+    let root = project();
+    let file = root
+        .join("LuaParser")
+        .join("src")
+        .join("Parse")
+        .join("LuaParser.cpp");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+    println!(
+        "definition(\"_tokens\") = {:?}",
+        session.index().definition("_tokens", &file)
+    );
+    let Some(view) = session.view_of_the_file(&file) else {
+        println!("no view of LuaParser.cpp");
+        return;
+    };
+    let Some(start) = text.find("_tokens.size") else {
+        println!("the file no longer writes `_tokens.size`");
+        return;
+    };
+    let at = start + "_tokens".len() - 1;
+    println!(
+        "type_at(\"_tokens\") = {:?}",
+        session.type_at(
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+        )
+    );
+    let members = session.member_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(start + "_tokens.".len()),
+    );
+    match &members {
+        Known::Yes(one) => println!(
+            "members after `_tokens.` = {} (has `size`: {})",
+            one.members.members.len(),
+            one.members
+                .members
+                .iter()
+                .any(|member| member.fact.name == "size")
+        ),
+        other => println!("members after `_tokens.` = {other:?}"),
+    }
+}

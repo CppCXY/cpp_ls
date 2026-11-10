@@ -8468,6 +8468,27 @@ fn declaration_of_expression(
     match asked {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
+            // **C++'s unqualified member lookup comes first, and the class may be in another file.** Inside a member
+            // function a name is looked up in the class and its bases before the enclosing namespaces; the file's own
+            // scope tree has no scope for a class declared in a header, so the lookup above answered "not here" and
+            // the index-wide query is what answered next — and that query is `Ambiguous` when several classes declare
+            // the name. `EmmyLuaCodeStyle`'s `_tokens` is a member of `LuaLexer`, `LuaParser` **and** `LuaSyntaxTree`,
+            // so `type_at("_tokens")` in `LuaParser.cpp` answered `Unknown(Ambiguous("_tokens"))` and
+            // `_tokens.size()` could not resolve `size` at all. The class is named by the definition's own declarator
+            // (`LuaParser::Parse`), and [`a_member_of_the_enclosing_class`] is the query that knows it — the same one
+            // the hover uses.
+            //
+            // A finished type only: a member of a template base whose arguments the member list could not read is
+            // refused rather than answered with the parameter's spelling.
+            if let Some(member) =
+                a_member_of_the_enclosing_class(index, scopes, root, path, expression, true)
+            {
+                return Known::Yes(NamedDeclaration::Indexed(
+                    member.fact,
+                    member.file,
+                    TypeBindings::default(),
+                ));
+            }
             // **A name whose spelling carries a macro prefix is two spellings, and one of them is real.** `_STD`
             // is `::std::` to a compiler and an ordinary identifier to a file that has not read `<yvals.h>`, so
             // the expression reads the pair as one name — `_STD f`, `_CSTD memmove` — and the lookup then asks the
