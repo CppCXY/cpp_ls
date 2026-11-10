@@ -1646,6 +1646,61 @@ void f() {
     );
 }
 
+/// **A template parameter is not a missing include** — reported from an editor with a screenshot.
+///
+/// ```cpp
+/// // db.h
+/// template <class K, class V, class Container = std::unordered_map<K, V>>
+/// class DBase { … private: Container _hash; };
+/// ```
+///
+/// `Container` was reported as "declared in container.h, which this file does not include". It is the class's **own
+/// parameter**: the `template <…>` header declares it. The rule asked `summary.declarations` whether the file declares
+/// the name, and a template parameter is a *binding* — it is in the scope tree and in no fact list — so the candidate
+/// search found some other file's `class Container` and recommended an include for it.
+///
+/// The second half is the rule still doing its job: a name the file really does not declare, declared elsewhere in
+/// the project and not reached by an `#include`, is still reported.
+#[test]
+fn a_template_parameter_is_not_a_missing_include() {
+    const DB_H: &str = "\
+template <class K, class V, class Container>
+class DBase {
+public:
+    V* find(const K& key);
+private:
+    Container _hash;
+};
+";
+    let codes = codes_of_files(
+        &[
+            ("/p/container.h", "class Container {};\n"),
+            ("/p/db.h", DB_H),
+        ],
+        "/p/db.h",
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::MissingInclude),
+        "`Container` is the class's own template parameter: {codes:?}"
+    );
+
+    // **And the same file, using a type it did not declare and does not include**, is still a finding.
+    const USES_A_STRANGER: &str = "\
+void f(NotHere* value) {}
+";
+    let codes = codes_of_files(
+        &[
+            ("/p/nothere.h", "class NotHere {};\n"),
+            ("/p/uses.cpp", USES_A_STRANGER),
+        ],
+        "/p/uses.cpp",
+    );
+    assert!(
+        codes.contains(&DiagnosticCode::MissingInclude),
+        "a type the file neither declares nor includes is the rule's own case: {codes:?}"
+    );
+}
+
 /// **The codes a file produces in a project of several files** — the shape a header has and a one-file fixture cannot.
 ///
 /// The defect this exists for needed three things a single-file fixture cannot express: the class in a **header**,

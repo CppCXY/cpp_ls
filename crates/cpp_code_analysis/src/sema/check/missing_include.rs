@@ -25,7 +25,7 @@
 //!                 void f(Widget* p);   a type in a parameter list
 //!   not reported  w.grow()             a member access — `undefined-name`'s question
 //!                 ns::Widget w;        a qualified spelling: a namespace question, not this one
-//!                 T x;                 a template parameter: no file declares it, so no candidate
+//!                 Container _hash;     a name this file's own scopes bind — a template parameter
 //! ```
 //!
 //! # How it decides "not visible", and why that is *not* the visibility walk
@@ -73,6 +73,25 @@ impl Check for MissingInclude {
             .map(|fact| fact.name.clone())
             .collect();
 
+        // **And every name this file's own scopes *bind*** — which is a wider set than `summary.declarations`, and
+        // the difference is a template parameter. `template <class Container> class DBase { Container _hash; };`
+        // declares `Container` in the `template <…>` header, and a template parameter is a **binding** rather than a
+        // declaration fact: so the loop below treated `Container` as a name from elsewhere, found a `class Container`
+        // in another file of the project, and told the reader to include it — reported from an editor, about a
+        // parameter of the class on screen.
+        //
+        // The scope tree answers it directly and costs one pass over the file's bindings, which is nothing beside
+        // the candidate search it saves. A name bound here — a parameter, a local, an enumerator — is not a name this
+        // file forgot to include; the rule's whole premise is "nothing declares it **here**".
+        let bound: std::collections::HashSet<&str> = context
+            .view
+            .scopes
+            .scopes()
+            .iter()
+            .flat_map(|scope| scope.bindings.iter())
+            .filter_map(|binding| binding.name.identifier_text())
+            .collect();
+
         // **The files this file already reaches**, by `#include` — the cheap half of visibility, and the one that
         // decides whether a candidate header is worth mentioning at all. A graph walk with no guard evaluation: see
         // `ProjectIndex::include_closure` for why the full walk is not affordable on a keystroke.
@@ -94,6 +113,7 @@ impl Check for MissingInclude {
                 for name in type_names_in(&spelling) {
                     if name == fact.name
                         || own.contains(&name)
+                        || bound.contains(name.as_str())
                         || is_a_qualified_spelling(&name)
                         || !reported.insert(name.clone())
                     {
