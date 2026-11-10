@@ -62,10 +62,10 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 
 | Feature | Contents |
 | --- | --- |
-| Completion | Members after `.` / `->` / `::`, through pointers, smart pointers, bases and instantiated templates; names in scope |
+| Completion | Members after `.` / `->` / `::`, through pointers, smart pointers, bases and instantiated templates; names in scope; the Doxygen vocabulary and a symbol reference's target inside a documentation comment |
 | Hover | The declaration, the deduced type, and the doc comment (Doxygen commands included) |
 | Signature help | The parameter list being filled in, from the same facts the call is checked against |
-| Definition / type definition / implementation | Where a name, its type, or the override of a virtual function is written |
+| Definition / type definition / implementation | Where a name, its type, or the override of a virtual function is written — including a `` [`symbol`] `` a documentation comment refers to |
 | References, rename, document highlight | Every use in the project, and a rename that edits exactly those |
 | Call hierarchy, document and workspace symbols | Who calls what, and the shape of a file or a project |
 | Folding, selection range | Blocks, comments and regions; the syntactic unit around the cursor |
@@ -74,8 +74,8 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 **Editing and checking**
 
 - **Inlay hints** — the deduced type of `auto` and structured bindings, parameter names at a call.
-- **Semantic tokens** — names, types, keywords, documentation commands, and format strings (`formatSpecifier`,
-  `formatArgument`, `formatConversion`, `formatEscape`).
+- **Semantic tokens** — names, types, keywords, documentation commands and symbol references, and format strings
+  (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`).
 - **Code actions** — quick fixes from the same diagnostics.
 - **Diagnostics** — `textDocument/diagnostic` for pull-capable clients, otherwise versioned
   `textDocument/publishDiagnostics`, 26 codes: `syntax-error`, `include-not-found`,
@@ -88,6 +88,47 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 **C and CUDA.** C is a first-class dialect. CUDA is a **special toolchain case**: `.cu` and `.cuh` are read with
 `<<<…>>>` launch blocks and the CUDA keywords, and a `[cuda]` section tells the analysis where the toolkit's headers
 are. What a compiler enforces about device code is not modelled.
+
+## Documentation comments
+
+A documentation comment is **a language of its own**, not prose the analysis skips. `///` and `//!` mark one line;
+`/**` and `/*!` open a block that stays documentation until its `*/`. Everything below works in all four, and in the
+file's own text — a comment produces no tokens in the cooked reading, so every one of these questions is answered
+from the buffer the reader is editing.
+
+**Doxygen commands.** `@brief`, `@param`, `@return`, `@tparam`, `@exception`, `@see`, `@code`, `@name` and the rest of
+the table are vocabulary the server knows:
+
+- **hover** on a command explains it, and a declaration's own comment is rendered in its card;
+- **completion** offers the command names (`/// @par` → `param`, `tparam`, `par`, `paragraph`) and, after a command
+  that takes one, the names of the declaration being documented (`@param |` → its parameters);
+- **semantic tokens** draw a command as `decorator`, which a client can remap on its own — the cppls extension draws
+  `keyword.doxygen` from it;
+- a command's *body* is the reader's, and the server does not colour it.
+
+**Symbol references.** Rust's intra-doc link, in a C++ comment:
+
+```cpp
+/// See [`Widget::grow`] for the rule, [`std::vector`] for the container, and [`grow()`] for the call.
+struct Widget { void grow(int by); };
+```
+
+| Position | What happens |
+| --- | --- |
+| The target | Coloured as the declaration it names — a function, a type, a macro — and **not** coloured when nothing declares it: a colour would say the name is known |
+| hover | The declaration's card, the same one a name gets |
+| definition | Jumps to the declaration; a macro's link jumps to its `#define`, which is the only place a reader can go for one |
+| completion | The names this file can see — and only names, never a snippet: a link takes a symbol |
+
+Three details worth stating, because they are decisions rather than accidents:
+
+* **Only the backticked form.** `[target]` without the backticks is what Rust also accepts, and in a C++ comment it
+  collides with the most ordinary prose there is: `arr[i]` and `matrix[row][col]`. The backtick is the whole
+  disambiguator, and a target with whitespace in it is a title rather than a link.
+* **`()` and `!` are punctuation, not part of the name.** `` [`grow()`] `` says "this is a call" and `` [`MAX_SIZE!`] ``
+  says "this is a macro"; both are trimmed before the lookup, and the range still covers what was written.
+* **Prose offers nothing.** A cursor anywhere else in a documentation comment completes nothing at all — a comment is
+  not a place a C++ name goes — while ordinary identifiers still get the client's own colour.
 
 ## Getting started
 
@@ -137,9 +178,11 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
 
 ## Documentation
 
-[`docs/cpp-support.md`](docs/cpp-support.md)
+[`docs/cpp-support.md`](docs/cpp-support.md) ·
 [`docs/c-support.md`](docs/c-support.md) ·
-[`docs/configuration.md`](docs/configuration.md)
+[`docs/configuration.md`](docs/configuration.md) ·
+[`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
