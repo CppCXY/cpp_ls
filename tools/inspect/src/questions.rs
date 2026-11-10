@@ -680,13 +680,25 @@ pub fn the_format() -> Answer {
 }
 
 /// The session's own counters, for `--stats`.
+///
+/// The three groups are the three answers a performance question is made of, and each is a number rather than a
+/// duration so that two runs can be compared without a stopwatch: **parses** (`reused`/`rebuilt` — was the disk cache
+/// doing its job), **closure walks** (`built`/`hit`/`met` — did a query walk, and did single-flight save a second
+/// walk), and **pulls** (`hit`/`run` — was a diagnostics answer remembered). See `docs/perf-progress.md`.
 pub fn the_stats(opened: &Opened) -> String {
     let stats = opened.session.stats();
+    let units = opened.session.unit_stats();
+    let (walks_built, walks_hit, walks_met) = opened.session.index().walk_counts();
+    let (pull_hits, pull_runs) = opened.session.pull_counts();
     format!(
-        "stats: {} file(s) in the project, summaries reused {} built {} not stored {}",
+        "stats: {} file(s) in the project, summaries reused {} built {} not stored {}\n  units from memory {} \
+         walked {}\n  closure walks built {walks_built} hit {walks_hit} met {walks_met}\n  pulls hit {pull_hits} \
+         run {pull_runs}",
         opened.session.project_files().len(),
         stats.reused,
         stats.rebuilt,
-        stats.unstored
+        stats.unstored,
+        units.from_memory,
+        units.walked,
     )
 }

@@ -4626,6 +4626,151 @@ fn a_file_is_closure_ready_only_once_what_it_reaches_is_read() {
     );
 }
 
+/// **A keystroke in a file the closure does not reach does not re-run another file's pull.**
+///
+/// The memo's key used to carry the store's **global revision**, which moves on any insert — so editing any file in
+/// the project invalidated every other file's findings, and a reader typing in one file paid a full re-run (143 ms
+/// measured, 97% of it inference) for the file beside it. The review in `docs/perf-review.md` names it.
+///
+/// What replaces it is the closure: the file's own key, the content of every file it reaches, how many files the
+/// index holds, the rules and the language — see [`super::Session::the_state_of_a_pull`]. This test is both
+/// directions, because a key that is too narrow is a stale finding:
+///
+/// * an edit to a file **outside** the closure is a memo hit (the finding is the same answer);
+/// * an edit to a header **inside** it is a miss (the answer could have changed).
+#[test]
+fn a_keystroke_outside_the_closure_does_not_rerun_another_files_pull() {
+    let files = MemoryFiles::new()
+        .with_file("/p/h.h", "struct Widget { int size; };\n")
+        .with_file(
+            "/p/a.cpp",
+            "#include \"h.h\"\nint main() { int count = \"three\"; return 0; }\n",
+        )
+        .with_file("/p/b.cpp", "int other() { return 1; }\n");
+    let memory = Memory::new("pull-key", &files);
+    let mut session = memory.session();
+    let a = PathBuf::from("/p/a.cpp");
+    let b = PathBuf::from("/p/b.cpp");
+    session.add_project_files([a.clone(), b.clone()]);
+    session.index_everything();
+    session.cook(&a).expect("the file is cooked");
+    session.cook(&b).expect("the file is cooked");
+
+    let first = session.diagnostics(&a).expect("a cooked reading");
+    assert!(
+        !first.checks.is_empty(),
+        "the fixture has a finding to remember: {first:?}"
+    );
+    let (hits, runs) = session.pull_counts();
+
+    // **Outside the closure**: `b.cpp` is not in `a.cpp`'s program, so nothing `a.cpp` is checked against moved.
+    session.did_change(&b, "int other() { return 2; }\n");
+    session.advance(64);
+    session.cook(&b);
+
+    let unchanged = session.diagnostics(&a).expect("a cooked reading");
+    assert_eq!(
+        unchanged.checks, first.checks,
+        "the same findings, because nothing the pull read changed"
+    );
+    let (hits_after, runs_after) = session.pull_counts();
+    assert_eq!(
+        (hits_after - hits, runs_after - runs),
+        (1, 0),
+        "the pull was answered from the memo rather than run again"
+    );
+
+    // **Inside the closure**: the header `a.cpp` includes is re-read, which can change what a check says about it.
+    session.did_change(PathBuf::from("/p/h.h"), "struct Widget { long size; };\n");
+    session.advance(64);
+    session.cook(&a);
+    let _ = session.diagnostics(&a).expect("a cooked reading");
+    let (hits_last, runs_last) = session.pull_counts();
+    assert_eq!(
+        (hits_last - hits_after, runs_last - runs_after),
+        (0, 1),
+        "a header in the closure is a different state, so the rules run again"
+    );
+}
+
+/// **One cold closure, eight threads, one walk.**
+///
+/// A miss in the visibility memo is computed outside the lock that guards it — right for the lock, wrong for the
+/// work: two callers that miss the same entry used to build the same closure twice. The pair that does it in a
+/// server is the pump prewarming an open file and the reader's own request arriving, and `docs/perf-review.md`
+/// measured two concurrent cold walks of one closure at ~24 s each.
+///
+/// The claim is a `HashSet` of the roots being walked plus a `Condvar`, so the second caller waits for the first's
+/// answer instead of repeating it. This test is the measurement: eight threads released by one barrier, and the
+/// question is how many walks the index built.
+///
+/// **The negative measurement is the reason the test exists**: with the claim removed, `walks_built` reaches 8 (the
+/// threads all arrive inside the same millisecond), and `walks_met` is 0. With it, 1 and 7.
+#[test]
+fn a_cold_closure_is_walked_once_for_everyone_who_asks_at_the_same_time() {
+    // **A chain of headers**, so the walk is long enough for eight threads to arrive while it runs: forty files is
+    // ~1 ms, which is a thousand times the spread of a barrier's threads.
+    const DEPTH: usize = 40;
+    let mut files = MemoryFiles::new();
+    for depth in 0..DEPTH {
+        let next = match depth + 1 < DEPTH {
+            true => format!("#include \"h{}.h\"\n", depth + 1),
+            false => String::new(),
+        };
+        files = files.with_file(
+            format!("/p/h{depth}.h"),
+            format!("{next}struct S{depth} {{ int field; }};\n"),
+        );
+    }
+    files = files.with_file("/p/a.cpp", "#include \"h0.h\"\nint main() { return 0; }\n");
+
+    let memory = Memory::new("one-walk", &files);
+    let mut session = memory.session();
+    let path = PathBuf::from("/p/a.cpp");
+    session.add_project_files([path.clone()]);
+    session.index_everything();
+
+    // **Cold**: a dropped entry is a closure nobody has walked since, which is the state the first request after an
+    // edit is in. Without it the threads would all find the memo and this test would prove nothing.
+    session
+        .store
+        .forget(Path::new(&format!("/p/h{}.h", DEPTH - 1)));
+    let (built_before, _, _) = session.index().walk_counts();
+
+    const THREADS: usize = 8;
+    let barrier = std::sync::Barrier::new(THREADS);
+    let answers: Vec<usize> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    session.index().visible_files(&path).len()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a walker"))
+            .collect()
+    });
+
+    let (built, hits, met) = session.index().walk_counts();
+    assert!(
+        answers.iter().all(|seen| *seen == answers[0]),
+        "every caller gets the same closure: {answers:?}"
+    );
+    assert!(
+        answers[0] > 1,
+        "and it is the closure, not just the file: {} file(s)",
+        answers[0]
+    );
+    assert_eq!(
+        built - built_before,
+        1,
+        "one walk for eight callers ({met} met an in-flight walk, {hits} hit the memo)"
+    );
+}
+
 /// **A pull whose closure is not read does not run the rules, and says so.**
 ///
 /// The gate that withholds a check's finding used to be asked by the *server*, after [`Session::diagnostics`] had

@@ -1065,6 +1065,33 @@ pub struct ProjectIndex {
     /// the whole map, because a new file can change how an `#include "x.h"` resolves for a closure that does not
     /// contain it. See [`ProjectIndex::insert_at`] and [`ProjectIndex::forget`].
     visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<CachedWalk>>>,
+    /// **The walks being built right now**, by root — the single-flight that keeps one cold closure from being walked
+    /// twice.
+    ///
+    /// A miss in `visibility` is computed outside the lock that guards it, which is right (a walk is milliseconds and
+    /// a lock held across it is a lock every query waits on) and leaves the obvious hole: two callers that miss the
+    /// same entry at the same moment each build it. The review in `docs/perf-review.md` observed exactly that — two
+    /// cold walks of one closure, concurrently, each seconds long — because the pump's prewarm and a request from the
+    /// client are two threads asking the same question about the same file.
+    ///
+    /// So a walk is **claimed** here before it starts and released when it finishes, and a caller that finds its
+    /// root claimed waits for the claim to go rather than repeating the work. `walk_done` is what it waits on; the
+    /// mutex is held for the duration of a `HashSet` operation and never across a walk.
+    walking: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Signalled when a claimed walk is released — see [`ProjectIndex::walking`].
+    walk_done: std::sync::Condvar,
+    /// **How many visibility walks were built, and how many were answered from the memo** — the numbers that say
+    /// whether the memo is doing its job, and the ones a regression asserts. Counted rather than logged because a
+    /// test wants a number and a reader of a latency graph wants to know whether a request walked.
+    ///
+    /// `walks_built` counts *claims*, so with the single-flight in place a cold closure that two threads ask about
+    /// counts **1** and one thread's answer is the other's.
+    pub walks_built: std::sync::atomic::AtomicU64,
+    /// Memo hits in [`ProjectIndex::visible_files_with_modules`] — validated by the walk's own fingerprint.
+    pub walks_hit: std::sync::atomic::AtomicU64,
+    /// **Calls that found their root already being walked** — the work the single-flight removed. A number that
+    /// stays zero on a single-threaded run is the number that has to be non-zero before the claim is worth having.
+    pub walks_met: std::sync::atomic::AtomicU64,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -12362,8 +12389,68 @@ impl ProjectIndex {
             type_hits: std::sync::atomic::AtomicU64::new(0),
             type_misses: std::sync::atomic::AtomicU64::new(0),
             visibility: std::sync::Mutex::new(HashMap::new()),
+            walking: std::sync::Mutex::new(std::collections::HashSet::new()),
+            walks_built: std::sync::atomic::AtomicU64::new(0),
+            walks_hit: std::sync::atomic::AtomicU64::new(0),
+            walks_met: std::sync::atomic::AtomicU64::new(0),
             ..ProjectIndex::default()
         }
+    }
+
+    /// **One cold walk per root at a time** — see [`ProjectIndex::walking`].
+    ///
+    /// `true` means the caller owns the walk and must call [`ProjectIndex::a_walk_is_over`] when it is done, however
+    /// it ends (a guard at the call site makes that a `Drop`). `false` means somebody else is building the same
+    /// answer and this caller should wait.
+    fn claim_a_walk(&self, root: &str) -> bool {
+        match self.walking.lock() {
+            Ok(mut held) => held.insert(root.to_string()),
+            // A poisoned lock is a panicking walker. Walking without the claim is the honest reading: the work is
+            // the answer, and a cache that turns one thread's panic into another thread's panic is worse.
+            Err(_) => true,
+        }
+    }
+
+    /// Give up a claim and wake everyone waiting for it.
+    fn a_walk_is_over(&self, root: &str) {
+        if let Ok(mut held) = self.walking.lock() {
+            held.remove(root);
+            self.walk_done.notify_all();
+        }
+    }
+
+    /// **Wait until nobody is walking `root`** — the other half of [`ProjectIndex::claim_a_walk`].
+    ///
+    /// A timed wait in a loop rather than a plain `wait`: a notification that arrives between the caller's failed
+    /// claim and this call would otherwise be lost, and the caller would wait for a walk that has already finished.
+    /// The timeout costs one wakeup per 50 ms and makes a lost notification a delay instead of a hang.
+    fn wait_for_the_walk(&self, root: &str) {
+        let Ok(mut held) = self.walking.lock() else {
+            return;
+        };
+        while held.contains(root) {
+            match self
+                .walk_done
+                .wait_timeout(held, std::time::Duration::from_millis(50))
+            {
+                Ok((next, _)) => held = next,
+                // Poisoned: the walker panicked and its guard still released the claim, so there is nothing left to
+                // wait for.
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// **How many visibility walks this index has built, answered from its memo, and found already in flight.**
+    ///
+    /// The three numbers the review asked for, in the order they matter: a walk is seconds on a cold closure, a
+    /// memo hit is a fingerprint, and a "met" that is not zero is work the single-flight saved.
+    pub fn walk_counts(&self) -> (u64, u64, u64) {
+        (
+            self.walks_built.load(std::sync::atomic::Ordering::Relaxed),
+            self.walks_hit.load(std::sync::atomic::Ordering::Relaxed),
+            self.walks_met.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Tell the index what the **compilation** defines: the compiler's predefined names, then the command line's
@@ -14250,6 +14337,48 @@ impl ProjectIndex {
         self.visible_files_with_modules(from).0
     }
 
+    /// **The walk's answer, validated by the inputs it was made of** — see [`ProjectIndex::the_walks_fingerprint`].
+    ///
+    /// `None` is a miss, and a miss is the caller's cue to claim the walk (see
+    /// [`ProjectIndex::visible_files_with_modules`]). Split out of that function because the single-flight checks it
+    /// twice: once before claiming, and once after waiting for somebody else's walk.
+    fn the_remembered_walk(
+        &self,
+        from: &str,
+    ) -> Option<(Vec<(String, IncludeVisibility)>, HashSet<String>)> {
+        let remembered = self
+            .visibility
+            .lock()
+            .ok()
+            .and_then(|walks| walks.get(from).cloned())?;
+        let now = self.the_walks_fingerprint(&remembered.contributors);
+        if crate::probes::visibility() {
+            eprintln!(
+                "[visibility]   remembered walk from {from}: {} ({} contributor(s))",
+                if now == remembered.fingerprint {
+                    "hit"
+                } else {
+                    "MISS — an input it was made of changed"
+                },
+                remembered.contributors.len()
+            );
+        }
+        if now != remembered.fingerprint {
+            return None;
+        }
+
+        let seen = &remembered.seen;
+        let mut order: Vec<(String, IncludeVisibility)> = Vec::with_capacity(seen.visibility.len());
+        order.push((from.to_string(), IncludeVisibility::Unconditional));
+        order.extend(
+            seen.visibility
+                .iter()
+                .filter(|(path, _)| path.as_str() != from)
+                .map(|(path, visibility)| (path.clone(), *visibility)),
+        );
+        Some((order, seen.through_an_import.clone()))
+    }
+
     /// [`ProjectIndex::visible_files`], and **which of those files are in view only because of an `import`**.
     ///
     /// The second half is what the exported bit is applied against: a declaration written in a module interface
@@ -14265,40 +14394,46 @@ impl ProjectIndex {
     ) -> (Vec<(String, IncludeVisibility)>, HashSet<String>) {
         let from = normalize(from);
 
-        // **The walk's answer, validated by the inputs it was made of** — see [`ProjectIndex::the_walks_fingerprint`].
-        let remembered = self
-            .visibility
-            .lock()
-            .ok()
-            .and_then(|walks| walks.get(&from).cloned());
-        if let Some(known) = remembered {
-            let now = self.the_walks_fingerprint(&known.contributors);
-            if crate::probes::visibility() {
-                eprintln!(
-                    "[visibility]   remembered walk from {}: {} ({} contributor(s))",
-                    from,
-                    if now == known.fingerprint {
-                        "hit"
-                    } else {
-                        "MISS — an input it was made of changed"
-                    },
-                    known.contributors.len()
-                );
+        // **The memo first, then one walk at a time.** A miss used to be computed straight away, which is right for
+        // the lock (a walk is milliseconds, and a lock held across it is a lock every query waits on) and wrong for
+        // the work: two callers that miss the same entry build the same closure twice. That is not hypothetical —
+        // the pump prewarms the files a reader has open while the reader's own request arrives, and the review in
+        // `docs/perf-review.md` measured two concurrent cold walks of one closure. So a walk is claimed before it
+        // starts ([`ProjectIndex::claim_a_walk`]) and a caller that finds its root claimed waits for that answer
+        // instead of repeating it.
+        //
+        // The loop is what makes the wait safe in both directions: the memo is re-checked after every wait, and a
+        // walker that could not file an answer (a poisoned lock, a panic) leaves the next turn to become the walker.
+        let waiting_since = std::time::Instant::now();
+        let mut met = false;
+        loop {
+            if let Some(answer) = self.the_remembered_walk(&from) {
+                self.walks_hit
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return answer;
             }
-            if now == known.fingerprint {
-                let seen = &known.seen;
-                let mut order: Vec<(String, IncludeVisibility)> =
-                    Vec::with_capacity(seen.visibility.len());
-                order.push((from.clone(), IncludeVisibility::Unconditional));
-                order.extend(
-                    seen.visibility
-                        .iter()
-                        .filter(|(path, _)| **path != from)
-                        .map(|(path, visibility)| (path.clone(), *visibility)),
-                );
-                return (order, seen.through_an_import.clone());
+            if self.claim_a_walk(&from) {
+                break;
             }
+            if !met {
+                met = true;
+                self.walks_met
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // **A walk that never finishes must not wedge a request for ever.** The bound is absurdly generous for a
+            // real closure (the largest measured is 3.4 s) and exists only so that a defect in the walk is a slow
+            // answer rather than a deadlock.
+            if waiting_since.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
+            self.wait_for_the_walk(&from);
         }
+        self.walks_built
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _claim = WalkClaim {
+            index: self,
+            root: from.clone(),
+        };
 
         // **One traversal, and the state it carries is what answers the conditions.** The version this replaced
         // asked `environment::visibility_at` per guarded edge, and that call builds the file's whole closure state
@@ -16299,6 +16434,22 @@ struct CachedWalk {
     /// The value of [`ProjectIndex::changed`] when this entry was last built or validated: while the index has not
     /// changed since, there is nothing to validate and the fingerprint is not recomputed.
     stamp: u64,
+}
+
+/// **A claimed visibility walk**, released however the walk ends — see [`ProjectIndex::claim_a_walk`].
+///
+/// A guard rather than a call at the end of the walk because a walk has several exits (a file the index cannot
+/// describe, a module edge that resolves to nothing) and each of them must wake whoever is waiting. `Drop` is the
+/// only thing that runs on all of them.
+struct WalkClaim<'a> {
+    index: &'a ProjectIndex,
+    root: String,
+}
+
+impl Drop for WalkClaim<'_> {
+    fn drop(&mut self) {
+        self.index.a_walk_is_over(&self.root);
+    }
 }
 
 /// Two outputs from one walk because the second is a property of *how* a file was reached, and a walk that has

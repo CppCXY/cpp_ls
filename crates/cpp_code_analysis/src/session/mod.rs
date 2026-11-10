@@ -730,6 +730,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// inference. The findings themselves are plain data and a function of everything the pull reads, so the *answers*
     /// are what is remembered; the key names the state ([`Session::the_state_of_a_pull`]).
     checks_memo: std::sync::Mutex<Option<(u64, Vec<crate::sema::check::Finding>)>>,
+    /// **How many pulls were answered from [`Session::checks_memo`] and how many ran the rules** — the two numbers
+    /// that say whether the memo is worth its key, and the ones a regression can assert without a clock.
+    ///
+    /// `pull_runs` is the cost: one model and every enabled rule, measured at 143 ms on a real project. `pull_hits`
+    /// is the saving. The pair is what turns "the memo misses after an unrelated edit" into a number a test can fail
+    /// on, which is why they exist rather than a log line.
+    pull_hits: std::sync::atomic::AtomicU64,
+    pull_runs: std::sync::atomic::AtomicU64,
     /// **When this session last took an edit** — the clock the one indivisible piece of work in it is deferred by.
     ///
     /// A unit read ([`Session::prepare_a_unit_reading`]) is a walk, a render and a **parse of a whole program** in one
@@ -1911,6 +1919,8 @@ impl<F: FileProvider + Clone> Session<F> {
             programs_wanted: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
             checks_memo: std::sync::Mutex::new(None),
+            pull_hits: std::sync::atomic::AtomicU64::new(0),
+            pull_runs: std::sync::atomic::AtomicU64::new(0),
             unit_index: std::sync::Mutex::new(None),
             rendered_unit: std::sync::Mutex::new(None),
             unit_roots: std::sync::Mutex::new(HashMap::new()),
@@ -2403,6 +2413,18 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn stats(&self) -> StoreStats {
         self.store.stats()
+    }
+
+    /// **How many diagnostics pulls this session answered from the memo and how many ran the rules** — see
+    /// [`Session::pull_hits`].
+    ///
+    /// The two numbers a regression can assert without a clock: a pull that must be remembered is `pull_hits` going
+    /// up and `pull_runs` staying where it was.
+    pub fn pull_counts(&self) -> (u64, u64) {
+        (
+            self.pull_hits.load(std::sync::atomic::Ordering::Relaxed),
+            self.pull_runs.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// **How many guarded `#define`s the second pass has decided about** — `(files, offsets)`.
@@ -5912,16 +5934,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // — so moving it into the value that uses it costs nothing and removes a borrow that could not outlive this
         // function's own frame.
         // **The second pull of an unchanged file answers from the first one's findings.** The key names every input a
-        // finding can depend on: this file's key (content, context, environment), the closure's fingerprint (a
-        // `#define` in a header it includes), the store's revision (a summary dropped anywhere), the configuration, the
-        // file's language and whether the project is Unreal code.
+        // finding can depend on — see [`Session::the_state_of_a_pull`], which no longer includes the store's global
+        // revision.
         let state = self.the_state_of_a_pull(key, summary);
         if let Ok(memo) = self.checks_memo.lock()
             && let Some((remembered, findings)) = memo.as_ref()
             && *remembered == state
         {
+            self.pull_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return findings.clone();
         }
+        self.pull_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let model = self.semantic_model(view);
 
         // **The config, and the run.** The rules come from `.cppls.toml`'s `[diagnostics]` section when a project
@@ -5994,17 +6019,34 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **Everything a pull's findings are a function of**, as one number.
+    ///
+    /// # The revision is not in here
+    ///
+    /// It used to be, and it made the memo a one-slot cache for the *project* rather than for the file: `revision`
+    /// moves on any summary insert, so a keystroke in one file invalidated every other file's findings. The review in
+    /// `docs/perf-review.md` names it, and the numbers are one pull per keystroke instead of one pull per state.
+    ///
+    /// What replaces it is narrower and is enough:
+    ///
+    /// * **the file's own key** — content, context and environment, so its own edit invalidates;
+    /// * **the closure's fingerprint** — `(path, content_hash)` for every file the closure reaches, so an edit to a
+    ///   header this file includes invalidates, whether the edit is a macro, an include or a declaration;
+    /// * **how many files the index holds** — the one thing a check reads outside the closure: `missing-include`
+    ///   offers a header name from the directories the project is in, and a file *added* to or *removed* from the
+    ///   project changes that answer. An edit to a file outside the closure does not, which is the narrowing this is
+    ///   for;
+    /// * the rules enabled, the file's language, and whether the project is Unreal code.
+    ///
+    /// A closure too large to fingerprint answers `None`, and then the revision goes back in: a key that is too
+    /// coarse is a slow pull, while one that is too narrow is a wrong finding.
     fn the_state_of_a_pull(&self, key: &Path, summary: &crate::FileSummary) -> u64 {
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(format!("{:?}", summary.key).as_bytes());
-        bytes.extend_from_slice(
-            &self
-                .store
-                .the_closure_fingerprint(key)
-                .unwrap_or(0)
-                .to_le_bytes(),
-        );
-        bytes.extend_from_slice(&self.store.revision().to_le_bytes());
+        match self.store.the_closure_fingerprint(key) {
+            Some(closure) => bytes.extend_from_slice(&closure.to_le_bytes()),
+            None => bytes.extend_from_slice(&self.store.revision().to_le_bytes()),
+        }
+        bytes.extend_from_slice(&(self.store.index().len() as u64).to_le_bytes());
         let config = self.project_config();
         for rule in config
             .config
