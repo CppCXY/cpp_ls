@@ -270,7 +270,20 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
 /// the pump refine the closure. Measured on a three-file fixture, that difference is the whole answer — see
 /// `reported_defects::a_declaration_two_includes_away_is_visible`. This is the same question against the real
 /// toolchain, where the second hop is a header that is not a project file at all.
+///
+/// # Why it is ignored by default
+///
+/// It is the only test here that needs **the machine's own standard library** — a `#include <iostream>` is answered by
+/// whatever MSVC, libstdc++ or libc++ is installed, so on a machine without one there is nothing to measure and on a
+/// machine with one it costs about six seconds. A suite that is green only where a compiler happens to be installed is
+/// not a suite, and this is a probe rather than a regression guard: the guard for the same rule is the fixture in
+/// `reported_defects`, which needs no toolchain.
+///
+/// ```text
+/// cargo test --release -p cpp_code_analysis --test std_visibility_probe std_endl_resolves -- --ignored
+/// ```
 #[test]
+#[ignore = "a probe: needs the machine's standard library, and costs ~6 s"]
 fn std_endl_resolves_through_the_servers_path() {
     let root = std::env::temp_dir().join("cppls-std-endl");
     let _ = std::fs::remove_dir_all(&root);

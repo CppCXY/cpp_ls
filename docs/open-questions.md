@@ -12,13 +12,14 @@ stand, so the next run starts from evidence rather than from the report again.
   the declaration:
 
   ```text
-  $ cargo test -p cpp_code_analysis --test std_visibility_probe std_endl_resolves
+  $ cargo test -p cpp_code_analysis --test std_visibility_probe std_endl_resolves -- --ignored
   test result: ok
   ```
 
-  That is `std_endl_resolves_through_the_servers_path`. The fact is a `function` in scope `std`, declared at
-  `__msvc_ostream.hpp:1007` — MSVC 18 moved `endl` one hop past `<ostream>`, which is what made this look like a
-  visibility problem.
+  That is `std_endl_resolves_through_the_servers_path`, an **ignored probe**: it needs the machine's own standard
+  library and costs about six seconds, so it is run on demand rather than with the suite. The fact is a `function` in
+  scope `std`, declared at `__msvc_ostream.hpp:1007` — MSVC 18 moved `endl` one hop past `<ostream>`, which is what
+  made this look like a visibility problem.
 
 * **The `NotDeclaredHere` this file used to record was an artefact of `inspect`.** `inspect` asks for **one** file's
   reading; a header two hops out then has no summary, so the visibility walk enters it and finds nothing to report.
