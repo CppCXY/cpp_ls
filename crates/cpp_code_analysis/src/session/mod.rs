@@ -5769,9 +5769,20 @@ impl<F: FileProvider + Clone> Session<F> {
                     Vec::new()
                 };
             }
-            let checks = match &view {
-                Some(view) => self.checks_about(&key, view),
-                None => Vec::new(),
+            // **The gate is asked before the rules run.** A finding may only be published once this file's closure
+            // has been read ([`Session::is_closure_ready`]) — a check reads absence out of the index, and an index
+            // still filling answers "no such member" about a member whose header nobody has read. The server used to
+            // ask that question *after* this call, which meant every pull paid for four rules resolving types and
+            // then threw the answer away: measured on a 4 MB translation unit, that is seconds per pull, on the
+            // first pull of a window, for a file whose findings could not be shown anyway. Asking it here is the
+            // same decision at the only place where not paying for the work is still possible.
+            //
+            // Errors and notes are *not* gated: an error is about the text the reader wrote and is the same answer
+            // at any index state, and a note about a module is already withheld while the session has work.
+            let trusted = self.is_closure_ready(&key);
+            let checks = match (&view, trusted) {
+                (Some(view), true) => self.checks_about(&key, view),
+                _ => Vec::new(),
             };
 
             return Some(FileDiagnostics {
@@ -5810,6 +5821,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 },
                 notes,
                 checks,
+                checks_withheld: !trusted,
             });
         }
 
@@ -10800,6 +10812,15 @@ pub struct FileDiagnostics {
     /// `Known::Yes` or `Known::No`, and never an absence of an answer — so a consumer may show all of them
     /// without hedging, which is the property the layer exists to have.
     pub checks: Vec<crate::sema::check::Finding>,
+    /// **Were the checks withheld because this file's closure is not read yet?**
+    ///
+    /// A check reads the *index*, and an index still being built answers absence as if it were a fact — see
+    /// [`Session::is_closure_ready`] and the gate in `cpp_ls::handlers::diagnostic`. The gate used to be asked by the
+    /// server **after** this call had already run every rule, so a pull whose findings could not be published paid
+    /// for them anyway: measured on a 4 MB translation unit, four rules resolving types is seconds. The question is
+    /// asked here now, before [`crate::sema::check::run`], and this flag is what tells a caller *why*
+    /// [`FileDiagnostics::checks`] is empty — which is not the same answer as "nothing is wrong".
+    pub checks_withheld: bool,
 }
 
 /// **What reading a file the way a compiler reads it produced** — see [`Session::cook`].

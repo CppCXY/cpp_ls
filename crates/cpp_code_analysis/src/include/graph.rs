@@ -1149,9 +1149,11 @@ impl Marked {
     /// or anything at all in a file that may not have been included. From that point on the name is
     /// [`Lookup::Unanswered`](crate::Lookup::Unanswered) — not `0`, and not "defined".
     pub fn mark_uncertain(&mut self, name: &str) {
-        if !self.uncertain.iter().any(|held| &**held == name) {
-            self.uncertain.insert(name.into());
-        }
+        // **One hash, not a scan.** This and [`Marked::is_uncertain`] both walked the whole set for every question,
+        // and the set is not small: it holds a name per macro fact the walk could not place, which on a
+        // standard-library closure is thousands. See [`Marked::is_uncertain`] for the measurement and for why the
+        // cost of the scan is a property of the corpus.
+        self.uncertain.insert(name.into());
     }
 
     /// Is `name`'s status unknown — neither defined nor definitely not?
@@ -1180,7 +1182,17 @@ impl Marked {
 
     /// Is the name one this state passed without being able to decide?
     pub fn is_uncertain(&self, name: &str) -> bool {
-        self.uncertain.iter().any(|held| &**held == name)
+        // **A hash lookup, not a scan.** This is asked about every identifier of every condition of every guard the
+        // walk evaluates, and `uncertain` holds one entry per macro fact the walk could not place — thousands on a
+        // standard-library closure. `iter().any()` made every one of those questions linear in that set.
+        //
+        // Measured: on this machine's corpora the set stays small enough that the scan was a few per cent of a cold
+        // program read (`tests/unit_read_probe.rs` on 39 MSVC headers: 9.06 s → 8.76 s, and indexing their closure
+        // 8.25 s → 7.37 s), while the report that found it measured a closure where the same scan was **23.84 s of
+        // a 24.2 s walk** — the cost is a function of how many facts a walk cannot place, and that is a property of
+        // the corpus, not of the code. The set is a hash set and the question is a membership test; `contains` is
+        // the answer at every size. See `docs/perf-review.md` §2 and `docs/perf-progress.md`.
+        self.uncertain.contains(name)
     }
 
     /// The state a translation unit starts in: the compiler's own definitions.

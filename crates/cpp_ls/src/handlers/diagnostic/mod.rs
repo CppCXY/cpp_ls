@@ -60,7 +60,8 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
     // edit. The numbers say which channel was empty and whether the reading was the cooked one, and without them a
     // pull that answers `[]` to a file with a missing `;` is indistinguishable from a file that parses.
     debug!(
-        "diagnose {}: {} byte(s) held, reading {:?}, {} error(s), {} unplaced, {} note(s), {} check(s)",
+        "diagnose {}: {} byte(s) held, reading {:?}, {} error(s), {} unplaced, {} note(s), {} check(s), checks \
+         withheld {}",
         path.display(),
         held.text.len(),
         found.reading,
@@ -68,6 +69,7 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         found.unplaced,
         found.notes.len(),
         found.checks.len(),
+        found.checks_withheld,
     );
     if found.unplaced > 0 {
         // **Said out loud rather than dropped.** A reading whose errors land in another file's macro bodies cannot
@@ -128,69 +130,26 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
         // and editing any character made the finding go away. The member was in the index; the report was computed
         // before the index had finished, and a check turns every hole in it into a claim about correct code.
         //
-        // What is withheld is now `checks_may_be_trusted`'s question and nothing coarser: the answer must not
-        // disappear and come back, but it also must not wait for files this one cannot see.
-        .chain(if checks_may_be_trusted(session, path) {
-            check_findings(&found.checks, held).collect::<Vec<Diagnostic>>()
-        } else {
-            Vec::new()
-        })
+        // What is withheld is the analysis's answer and not a second opinion: `FileDiagnostics::checks_withheld`
+        // says the session asked `is_closure_ready` before running any rule, and `checks` is empty for that reason
+        // and no other. This layer used to ask the same question again after the rules had run — two places
+        // deciding one thing, and the later one deciding it after the cost was paid.
+        .chain(check_findings(&found.checks, held))
         .collect();
 
-    Some((uri, diagnostics))
-}
-
-/// **May a check's finding be published yet?** — the gate described where it is used.
-///
-/// A check reads the **index**, and an index still being built answers *absence* as if it were a fact:
-/// `undefined-field` asks which members a class has, and a class whose header has not been read yet answers "none".
-/// Reported against a lightweight project, on the first report after a window opened:
-///
-/// ```text
-/// anotherVec has no member `push_back`      cppls(undefined-field)
-/// ```
-///
-/// while hovering that same name answered **three declarations**, and editing any character made the finding go
-/// away. The member was in the index; the report was computed before the index had finished.
-///
-/// # The question, and the half of it that had to go
-///
-/// `Session::is_closure_ready` — the file's summary exists and every file it **unconditionally includes** has one —
-/// is the set of facts a check about this file reads. It was, until phase 0 of `docs/indexing-design.md`, asked
-/// together with "nothing about this file or its closure is queued for the second pass"
-/// (`Session::its_closure_is_owed`).
-///
-/// **That second half is unsatisfiable now, and it withheld every finding for ever.** Phase 0 (`7bc4c60`) stopped a
-/// start from refining the project: the second-pass backlog is built by the first pass and drained only for the files
-/// somebody *asks* about. `its_closure_is_owed` therefore answers `true` for every file the run has read and no
-/// request has asked for — which is all of them — so the gate never opened, `diagnose_file` published errors and
-/// never a finding, and a client that expected a finding waited for one that could not arrive. Measured on
-/// `diagnostics_stable`'s own log, on a fixture with one `int count = "three";`:
-///
-/// ```text
-/// checks withheld for …: closure ready true, closure owed a re-read true, re-read backlog 1
-/// pull: … -> 0 item(s)                       ← the finding exists (`1 check(s)`) and is not published
-/// ```
-///
-/// What the withdrawal was protecting against is now answered differently and better: a reading the run has not
-/// refined is the **shape-only** reading the index promises to answer from (§2.6 of the design), not a reading about
-/// to be *revised* under the answer's feet. The revision happens on request — `catch_up` and the pull's own
-/// `prepare_for_a_diagnostic` ask for it — so a finding published from L1 is the answer for the snapshot the client
-/// is looking at, and the next pull answers from the refined reading.
-///
-/// A named function rather than the expression at the call site, because it is the *decision* and it should be
-/// readable and testable as one — the session state that drives it is not something a fixture can hold still.
-pub fn checks_may_be_trusted(session: &Session<DiskFiles>, path: &std::path::Path) -> bool {
-    let ready = session.is_closure_ready(path);
-    if !ready {
-        log::debug!(
+    if found.checks_withheld {
+        // **Said out loud, because an empty `checks` is otherwise indistinguishable from a clean file.** The
+        // analysis answers `checks_withheld` when it decided not to run the rules at all — see
+        // `FileDiagnostics::checks_withheld` for why the question has to be asked before them.
+        debug!(
             "checks withheld for {}: its closure is not read yet ({} file(s) to read, {} to re-read)",
             path.display(),
             session.pending(),
             session.re_read_backlog(),
         );
     }
-    ready
+
+    Some((uri, diagnostics))
 }
 
 /// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.
@@ -324,7 +283,7 @@ impl RegisterCapabilities for DiagnosticCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::{checks_may_be_trusted, diagnose_file};
+    use super::diagnose_file;
     use cpp_code_analysis::{
         CompilerConfig, DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
     };
@@ -422,9 +381,14 @@ mod tests {
             session.is_closure_ready(&path),
             "the fixture's own file is read, so its closure is ready"
         );
+        // …and the analysis reached the same conclusion *before* running the rules, which is what `checks_withheld`
+        // records — see `FileDiagnostics::checks_withheld`. It used to be the server that asked, after the fact.
+        let found = session
+            .diagnostics(&path)
+            .expect("the fixture's file is cooked");
         assert!(
-            checks_may_be_trusted(&session, &path),
-            "…so its checks are trusted"
+            !found.checks_withheld,
+            "…so its checks ran, and were not withheld"
         );
 
         let (_, found) = diagnose_file(&session, &path).expect("the file is held");

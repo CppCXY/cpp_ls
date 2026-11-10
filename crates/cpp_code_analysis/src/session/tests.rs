@@ -4625,6 +4625,61 @@ fn a_file_is_closure_ready_only_once_what_it_reaches_is_read() {
         "but a name declared in `deep.h` has no classification, which is the question colouring asks"
     );
 }
+
+/// **A pull whose closure is not read does not run the rules, and says so.**
+///
+/// The gate that withholds a check's finding used to be asked by the *server*, after [`Session::diagnostics`] had
+/// already run every rule: a file whose closure was still filling paid for four rules resolving types and then had
+/// its answer thrown away. Measured on a 4 MB translation unit, that is seconds per pull, on the first pull after a
+/// window opens — the one pull a reader is waiting for.
+///
+/// The question is the same one ([`Session::is_closure_ready`]); what changed is where it is asked. This test is the
+/// state that matters and that a settled project does not show, built the way the test above builds it: the summary
+/// of one file in the closure is dropped, which is what a project mid-index looks like.
+#[test]
+fn a_pull_whose_closure_is_unread_withholds_its_checks_and_says_so() {
+    let files = MemoryFiles::new()
+        .with_file("/p/mid.h", "#include \"deep.h\"\n")
+        // A check that will fire: `count` is initialized from a string literal.
+        .with_file("/p/deep.h", "namespace std { int endl(); }\n")
+        .with_file(
+            "/p/a.cpp",
+            "#include \"mid.h\"\nint main() { int count = \"three\"; return 0; }\n",
+        );
+    let memory = Memory::new("checks-withheld", &files);
+    let mut session = memory.session();
+    let path = PathBuf::from("/p/a.cpp");
+    session.add_project_files([path.clone()]);
+    session.index_everything();
+    session.cook(&path).expect("the file is cooked");
+
+    let ready = session.diagnostics(&path).expect("a cooked reading");
+    assert!(
+        !ready.checks_withheld,
+        "every file in the closure is read, so the rules run: {:?}",
+        ready.checks
+    );
+
+    // **The closure goes cold**, which is the state the index is in while the queue is still being read.
+    session.store.forget(Path::new("/p/deep.h"));
+    assert!(
+        !session.is_closure_ready(&path),
+        "the deepest file's summary is gone"
+    );
+
+    let withheld = session
+        .diagnostics(&path)
+        .expect("the file's own reading is untouched — it is the closure that is cold");
+    assert!(
+        withheld.checks_withheld,
+        "the pull says why its checks are empty: {withheld:?}"
+    );
+    assert!(
+        withheld.checks.is_empty(),
+        "and it ran none of them: {:?}",
+        withheld.checks
+    );
+}
 /// **CUDA's vocabulary is offered in a CUDA project and nowhere else** — the completion half of the family switch.
 ///
 /// `__global__` is an identifier to the lexer and a specifier to `nvcc`, so the list of what may be written at a

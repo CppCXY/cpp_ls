@@ -4363,17 +4363,33 @@ impl<'a> DeclarationFacts<'a> {
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("facts loop");
         let qualifying = std::time::Instant::now();
-        for (binding, scope, parameters) in qualified_declarations(root) {
+        // **By offset, because the scan this replaces was quadratic in the program.** The loop below used to ask
+        // `facts.iter_mut().find(..)` for every qualified declaration — a linear scan of a list a standard-library
+        // closure makes tens of thousands of entries long, so the cost was the *product* of the two lists.
+        //
+        // Measured on the three projects to hand, the product that matters is one-sided: `Selection.cpp` has **1**
+        // qualified declaration and `CodeFormat.cpp` **0**, against 45 597 and 49 406 facts, so the scan was never
+        // the cost there and this map changed nothing. It is kept because the shape is wrong in principle and
+        // cheap to get right: a translation unit with a thousand `Class::Method` definitions against a
+        // standard-library closure is fifty million string comparisons, and the map is one hash per question.
+        // **What the 360–400 ms this phase prints actually is** is `qualified_declarations`' own walk of the tree —
+        // see the note there.
+        let mut by_offset: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::with_capacity(facts.len());
+        for (at, fact) in facts.iter().enumerate() {
+            by_offset.entry(fact.name_range.start_offset).or_insert(at);
+        }
+        let qualified = qualified_declarations(root);
+        let qualified_count = qualified.len();
+        for (binding, scope, parameters) in qualified {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
             // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a
             // plain function of this file, because the class is in a header the file only includes: its fact came out
             // with `scope: None`, so "go to implementation" on the header's `GetErrors` found nothing — it looks for the
             // same name whose scope is `LuaLexer`. The walker's fact is the better one (it has the parameters and the
             // return type), so this **adopts** it and supplies the scope instead of skipping it.
-            if let Some(existing) = facts
-                .iter_mut()
-                .find(|fact| fact.name_range.start_offset == binding.name_range.start_offset)
-            {
+            if let Some(&at) = by_offset.get(&binding.name_range.start_offset) {
+                let existing = &mut facts[at];
                 if existing.scope.is_none() {
                     existing.scope = Some(scope);
                 }
@@ -4399,6 +4415,9 @@ impl<'a> DeclarationFacts<'a> {
                 if fact.parameter_list.is_none() {
                     fact.parameter_list = parameters;
                 }
+                by_offset
+                    .entry(fact.name_range.start_offset)
+                    .or_insert(facts.len());
                 facts.push(fact);
             }
         }
@@ -4413,20 +4432,17 @@ impl<'a> DeclarationFacts<'a> {
         // declaration — measured on a folding fixture that includes `<string>` and `<vector>`: the server took longer
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
+        let freeing = std::time::Instant::now();
         fill_the_frees(root, &mut facts);
+        let freed = freeing.elapsed();
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("frees");
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
-        if crate::probes::units() {
-            eprintln!(
-                "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms",
-                walked.as_secs_f64() * 1000.0,
-                qualifying.elapsed().as_secs_f64() * 1000.0
-            );
-        }
+        let reflecting = std::time::Instant::now();
         fill_the_reflection(root, &rendered, &mut facts);
+        let reflected = reflecting.elapsed();
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("reflection");
 
@@ -4434,9 +4450,26 @@ impl<'a> DeclarationFacts<'a> {
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
+        let guarding = std::time::Instant::now();
         assign_guards(&mut targets, preprocessing, &mut guards);
+        let guarded = guarding.elapsed();
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("guards");
+
+        // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
+        // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.
+        if crate::probes::units() {
+            eprintln!(
+                "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms ({} declaration(s))  frees {:>6.1} ms  \
+                 reflection {:.1} ms  guards {:.1} ms",
+                walked.as_secs_f64() * 1000.0,
+                qualifying.elapsed().as_secs_f64() * 1000.0,
+                qualified_count,
+                freed.as_secs_f64() * 1000.0,
+                reflected.as_secs_f64() * 1000.0,
+                guarded.as_secs_f64() * 1000.0
+            );
+        }
 
         (facts, guards)
     }
@@ -4455,6 +4488,20 @@ impl<'a> DeclarationFacts<'a> {
 /// The binding's `scope` field is [`ScopeId`]`(0)` and unused: [`fact_for`] takes the scope as its own argument, and the
 /// scope a qualified declaration belongs to is the **spelling**, not a scope in this file's tree (the class is usually
 /// in a header this tree has never seen).
+///
+/// # What this costs, and what it finds
+///
+/// It walks **every declaration in the tree it is given**, which for a program's reading is the whole rendering — a
+/// standard-library closure included. Measured, that walk is **360–400 ms** of a 4–5 MB program read, and the pass
+/// finds **0** qualified declarations in `CodeFormat.cpp` and **1** in `Selection.cpp`: the two corpora that were
+/// measured are `.cpp` files whose classes are defined inline in headers. So this is 7% of a program read spent
+/// looking for something that, in these projects, is not there.
+///
+/// It is not skipped when there is nothing to find, and the reason is that "is there anything to find" is the same
+/// walk. A cheap pre-filter — asking whether the *text* contains `::` — is not enough: `std::` and every call site
+/// spell it too. What would remove the cost is folding the pass into the scope walk, which already visits every
+/// declaration and knows which of them the walker refused to bind; that is the shape the next round of this work
+/// should take (see `docs/perf-progress.md`).
 fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<String>)> {
     use cpp_parser::{
         CppAstNode, CppAstToken, CppCompoundStat, CppDeclaration, CppDeclarator, CppNameExpr,
