@@ -11950,7 +11950,17 @@ fn fact_from_binding_with(
         // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
         // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
         reflection: None,
-        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding),
+        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding).or_else(|| {
+            // **A member whose type is an unnamed class body**, named the way the index names it — see
+            // [crate::sema::declarations::an_unnamed_class_body_named]. The two paths that build a fact must
+            // agree, and this one is what a member query against the open file uses.
+            crate::sema::declarations::an_unnamed_class_body_named(
+                Some(class),
+                &binding.name.text(),
+                shapes,
+                binding,
+            )
+        }),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
         // **The deduction, when the file wrote no return type.** `declared_returns_of_in` answers only what is written, and

@@ -178,6 +178,63 @@ fn using_alias_target(shapes: &DeclarationShapes, name: cpp_parser::SourceRange)
 /// The **start**, not the whole range, for the reason the types module gives: a declarator's span ends at its own
 /// last child, and for `* p` that child is the `PointerType` — so the span is `(50, 52)` while the name is
 /// `(52, 53)`, and a test for full containment refuses the very declarator it is looking for.
+/// **The type name an unnamed class body's member is keyed by**, or `None` when the type is written.
+///
+/// ```cpp
+/// struct MarkEvent {
+///     union { struct { … } Start; } U;      `U` and `Start` have no type *spelling*
+/// };
+/// ```
+///
+/// A member whose type is an unnamed `struct`/`union` body records nothing in `type_of` — there is no name to record —
+/// and every access through it stopped: on `EmmyLuaCodeStyle`, `e.U.Start.Kind` in `LuaSyntaxTree.cpp` answered "the
+/// type of `e.U` is not known here", so the member chain broke at `U`.
+///
+/// The name is the one the parser already gives the anonymous type's **own members**: their scope is
+/// `MarkEvent::U` — the enclosing class and the member that declares the body — so that is the type's name, and the
+/// member lookup of `Start` keys on the same string. Nothing is invented: the two paths meet at the scope the scope
+/// walk assigned.
+pub(crate) fn an_unnamed_class_body_named(
+    scope: Option<&str>,
+    name: &str,
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
+    let scope = scope.filter(|scope| !scope.is_empty())?;
+    if name.is_empty() {
+        return None;
+    }
+    // The **innermost** specifier sequence on the path is the declaration's own, the same reading
+    // [`declared_type_of_with`] makes above.
+    let mut unnamed = false;
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if let Some(specifiers) = &shape.specifiers {
+            unnamed = a_class_body_without_a_tag(specifiers);
+        }
+    });
+    unnamed.then(|| format!("{scope}::{name}"))
+}
+
+/// Does this specifier sequence hold an **unnamed class body** — `struct { … }` with no tag of its own?
+///
+/// The shape whose type has no spelling, which [`an_unnamed_class_body_named`] names by the scope the parser gives
+/// its members.
+fn a_class_body_without_a_tag(specifiers: &CppSyntaxNode) -> bool {
+    let Some(body) = specifiers.children().find(|child| {
+        matches!(
+            cpp_parser::CppSyntaxKind::from(child.kind()),
+            cpp_parser::CppSyntaxKind::ClassDef
+                | cpp_parser::CppSyntaxKind::StructDef
+                | cpp_parser::CppSyntaxKind::UnionDef
+        )
+    }) else {
+        return false;
+    };
+    !body.children().any(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+    })
+}
+
 fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool {
     let span = node.text_range();
     usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
@@ -3472,6 +3529,12 @@ fn fact_for(
             // character after the name cannot answer: the binding's range and the text `fact_for` is handed are not
             // always the same ruler, and a header's alias was filed with no target because of it.
             .or_else(|| declared_namespace_alias_target_with(root, binding))
+            // **A member whose type is an unnamed class body** — `union { … } U;`. The type has no spelling, so
+            // `type_of` was `None` and every access through the member stopped there: measured on
+            // `EmmyLuaCodeStyle`, `e.U.Start.Kind` answered "the type of `e.U` is not known here". The name used is
+            // the one the parser already gives the anonymous type's **own members** as their scope —
+            // `MarkEvent::U` — which is what makes the member lookup below it work.
+            .or_else(|| an_unnamed_class_body_named(scope.as_deref(), &name, shapes, binding))
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`

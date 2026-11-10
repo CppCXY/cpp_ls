@@ -649,6 +649,49 @@ int Parser::Parse() { return _token.kind; }
     );
 }
 
+/// **A union's members are reachable through the union, and the union has no spelling of its own.**
+///
+/// Reported from `EmmyLuaCodeStyle`, `Mark.h`:
+///
+/// ```cpp
+/// struct MarkEvent {
+///     MarkEventType Type;
+///     union {
+///         struct { std::size_t Parent; LuaSyntaxNodeKind Kind; } Start;
+///         struct { std::size_t Index; LuaTokenKind Kind; } Token;
+///         struct { LuaTokenKind TokenKind; LuaParserErrorKind ErrorKind; } Error;
+///     } U;
+/// };
+/// ```
+///
+/// `e.U.Start.Kind` in `LuaSyntaxTree.cpp` answered *"the type of `e.U` is not known here"*: `U`'s type is an unnamed
+/// union, so the fact recorded no `type_of` at all, and the chain stopped at `U`. The type's name is the one the
+/// parser already gives the anonymous type's **members** — `MarkEvent::U` — and that is what this asserts, member by
+/// member down the chain.
+#[test]
+fn a_member_of_an_unnamed_union_has_a_type_and_its_members_are_reachable() {
+    let source = "\
+struct MarkEvent {
+    int Type;
+    union {
+        struct { int Parent; int Kind; } Start;
+        struct { int Index; } Token;
+    } U;
+};
+int f(MarkEvent e) { return e.U.Start.Kind; }
+";
+    assert_eq!(type_of_use(source, "U").as_deref(), Some("MarkEvent::U"));
+    assert_eq!(
+        type_of_use(source, "Start").as_deref(),
+        Some("MarkEvent::U::Start")
+    );
+    assert_eq!(
+        type_of_use(source, "Kind").as_deref(),
+        Some("int"),
+        "the chain ends at the real member's type"
+    );
+}
+
 /// **A member of a class template has the type its arguments make it, not the parameters it was written with.**
 ///
 /// This is the shape a standard container is made of, and until the parameters were paired with the arguments the

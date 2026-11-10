@@ -782,3 +782,67 @@ fn what_a_member_type_answers() {
         other => println!("members after `_tokens.` = {other:?}"),
     }
 }
+
+/// **What the index holds for an anonymous union member** — `MarkEvent::U` in `Mark.h`, and `U.Start.Kind`.
+///
+/// ```text
+/// $env:CPPLS_CODESTYLE_PROJECT = "E:\EmmyLuaCodeStyle"
+/// cargo test --release -p cpp_code_analysis --test codestyle_probe what_the_index_says_about_a_union -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a probe, not a test: it prints the index's facts for the real project's anonymous union"]
+fn what_the_index_says_about_a_union() {
+    let root = project();
+    let file = root
+        .join("LuaParser")
+        .join("src")
+        .join("Ast")
+        .join("LuaSyntaxTree.cpp");
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+    for (path, fact) in session.index().every_fact_named("U") {
+        println!(
+            "U: kind {:?} scope {:?} type_of {:?} in {}",
+            fact.kind,
+            fact.scope,
+            fact.type_of,
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    for name in ["Start", "Token", "Error", "MarkEvent"] {
+        for (path, fact) in session.index().every_fact_named(name) {
+            println!(
+                "{name}: kind {:?} scope {:?} type_of {:?} in {}",
+                fact.kind,
+                fact.scope,
+                fact.type_of,
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    let Some(view) = session.view_of_the_file(&file) else {
+        println!("no view");
+        return;
+    };
+    for (offset, name) in [("e.U.Start", "U"), ("e.U.Start.Kind", "Start")] {
+        let Some(found) = text.find(&format!("{name} ")) else {
+            continue;
+        };
+        let at = found + offset.find(name).unwrap_or(0) + name.len() - 1;
+        println!(
+            "type_at `{name}` at {at} = {:?}",
+            session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at)
+            )
+        );
+    }
+}

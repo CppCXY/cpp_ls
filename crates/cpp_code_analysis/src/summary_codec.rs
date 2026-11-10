@@ -242,7 +242,15 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// text because the macros expand to nothing. A hover on a `UPROPERTY` member and the `ue-specifier` rule both need it,
 /// and neither can recover it from the tree. An entry written before this describes every declaration as unannotated,
 /// which is a wrong answer rather than an old one — the case this number exists for.
-pub const CODEC_VERSION: u32 = 36;
+///
+/// # Version 36
+///
+/// A declaration whose type is an **unnamed class body** — `union { … } U;` — now records `type_of`, spelled by the
+/// scope the parser gives the anonymous type's own members (`MarkEvent::U`), where it recorded nothing before. An old
+/// entry says the member has no type, which stops every access through it: measured on `EmmyLuaCodeStyle`,
+/// `e.U.Start.Kind` answered "the type of `e.U` is not known here". The field is the same one, so the layout is
+/// unchanged and only a re-read fills it — which is precisely what a version bump costs and what it is for.
+pub const CODEC_VERSION: u32 = 37;
 
 /// Write a summary as bytes.
 ///
