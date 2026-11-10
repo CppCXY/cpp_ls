@@ -6774,3 +6774,83 @@ void f() {}
         );
     }
 }
+
+/// **A documentation comment's completion carries the edit that replaces the word being typed.**
+///
+/// Reported from an editor: after `@see`, accepting a name with Tab "把前面的补全吃掉" — it removed the text before the
+/// cursor. The cause was a range: the doc reader measured the word from the comment's text, but the name query ran at
+/// **offset 0** (a comment has no tree node to ask about), and its answer carried a range from the top of the file,
+/// which the client then replaced. The item has to say *where* it goes — a `textEdit` over the typed word — and not
+/// leave the client to insert at the cursor.
+#[test]
+fn a_doc_links_completion_carries_the_edit_for_the_word() {
+    let project = Project::new("doc-link-edit");
+    let source = "/** A ship. @see Widget */\nstruct Widget { int size; };\n";
+    project.write("a.cpp", source);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "textDocument": { "completion": { "completionItem": { "textEditSupport": true } } },
+            },
+        }),
+    );
+    assert!(capabilities["result"].is_object(), "{capabilities}");
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source } }),
+    );
+
+    // The cursor is at the end of `Wid`, the word the reader has typed after `@see`.
+    let character = "/** A ship. @see Wid".len() as u64;
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": 0, "character": character },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("Widget")))
+        },
+    );
+
+    let items = answer["result"]["items"].as_array().expect("a list");
+    let item = items
+        .iter()
+        .find(|item| item["label"] == json!("Widget"))
+        .expect("the closure accepted this");
+    let edit = &item["textEdit"];
+    assert!(
+        edit.is_object(),
+        "the client must be told where the name goes: {item}"
+    );
+    assert_eq!(
+        edit["range"]["start"],
+        json!({ "line": 0, "character": character - 3 }),
+        "the edit starts at the word, not at the `@see` before it: {item}"
+    );
+    assert_eq!(
+        edit["range"]["end"],
+        json!({ "line": 0, "character": character }),
+        "{item}"
+    );
+    assert_eq!(edit["newText"], json!("Widget"), "{item}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

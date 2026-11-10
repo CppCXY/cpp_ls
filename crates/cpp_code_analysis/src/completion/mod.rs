@@ -489,10 +489,10 @@ pub fn completion_with(
             members(index, scopes, root, path, &access, offset, budget).set
         }
         CompletionContext::Qualified(position) => names(
-            index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
+            index, scopes, root, path, &position, offset, false, cuda, budget, unincluded, None,
         ),
         CompletionContext::Name(position) => names(
-            index, scopes, root, path, &position, offset, true, cuda, budget, unincluded,
+            index, scopes, root, path, &position, offset, true, cuda, budget, unincluded, None,
         ),
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
         // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
@@ -511,7 +511,7 @@ pub fn completion_with(
             // what the program already declares. No keywords and no snippets — a macro's name is an identifier, and
             // a control-flow statement is not one — which is why this goes through the name query only.
             names(
-                index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
+                index, scopes, root, path, &position, offset, false, cuda, budget, unincluded, None,
             )
         }
         CompletionContext::Include {
@@ -549,7 +549,7 @@ pub fn completion_with(
                 range,
             };
             names(
-                index, scopes, root, path, &position, 0, true, cuda, budget, unincluded,
+                index, scopes, root, path, &position, 0, true, cuda, budget, unincluded, None,
             )
         }
     }
@@ -582,12 +582,32 @@ fn doc_link_names(
         None => (String::new(), written.to_string()),
     };
     let position = crate::sema::resolve::NamePosition {
-        scope,
-        written,
+        scope: scope.clone(),
+        written: written.clone(),
         range,
     };
+    // **A documentation comment is not a scope, and that is the whole of this fix.**
+    //
+    // The name query asks the *tree* what is written before the cursor, and a comment has no node: at the comment's
+    // offset the query answers "nothing is declared here", and asking it at offset 0 — which is what this did —
+    // answered about the **start of the file**, and took the edit's range from there. The client then replaced a
+    // token at the top of the file instead of the word being typed: reported as "按 Tab 会把前面的补全吃掉". The
+    // listing is the index's (the names visible in this file, prefix-filtered) and the range is the word the doc
+    // reader measured — both of which are what a comment can honestly say.
+    let listing =
+        crate::index::project::names_for_a_doc_comment(index, path, &scope, &written, range);
     names(
-        index, scopes, root, path, &position, 0, false, cuda, budget, unincluded,
+        index,
+        scopes,
+        root,
+        path,
+        &position,
+        0,
+        false,
+        cuda,
+        budget,
+        unincluded,
+        Some(Known::Yes(listing)),
     )
 }
 
@@ -1251,6 +1271,11 @@ fn names(
     cuda: bool,
     budget: usize,
     unincluded: &[Unincluded],
+    // **The listing, when the caller already has it.** A documentation comment has no scope and no tree node, so the
+    // index query at its offset answers nothing; the doc reader has already listed the names it wants (see
+    // [crate::index::project::names_for_a_doc_comment]). None for every other caller, which is every ordinary
+    // name position.
+    listed_by_the_caller: Option<Known<crate::index::project::NameCompletions>>,
 ) -> CompletionSet {
     let mut scored: Vec<Scored> = Vec::new();
     let mut listed_scope = position.scope.clone();
@@ -1267,7 +1292,9 @@ fn names(
     // so asking the tree at that offset answers about a different position — measured: `std::ve` in a real file resolved
     // to scope `std` at the written offset and to an **empty** scope at the rendering's, which produced a list of zero
     // items. The scope is already known; only the prefix has to come from the caller.
-    let listed = if inside_a_scope {
+    let listed = if let Some(listed) = listed_by_the_caller {
+        listed
+    } else if inside_a_scope {
         Known::Yes(crate::index::project::NameCompletions {
             scope: position.scope.clone(),
             prefix: position.written.clone(),

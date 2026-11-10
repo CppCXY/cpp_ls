@@ -3230,6 +3230,46 @@ pub struct NameCompletions {
 ///   way to say it is empty.
 /// * `Unknown(ConditionalCompilation)` — the scope is declared, but only in a file reached through a guarded
 ///   `#include`, so whether these names are visible depends on macros this layer does not have.
+///
+/// **The names a documentation comment's target may be**, listed from the index rather than from the tree.
+///
+/// A doc comment is **not a scope**: `@see Wid|` sits in prose, the parser builds no name node there, and the name
+/// query at that offset answers "nothing is declared here" — which is true and useless. What the reader means is a
+/// program name, and the names visible in this file are exactly that: the same global list a name position gets, with
+/// the same prefix filter and the same ranking.
+///
+/// `range` is the word being typed, in the text the client holds — the whole of what the edit must cover. It is
+/// carried here rather than computed later because the doc comment is the only reader that knows it: the tree has no
+/// node whose range is a comment's word, and a caller that had to re-derive it would be a second reader of the same
+/// rule, free to disagree.
+pub fn names_for_a_doc_comment(
+    index: &ProjectIndex,
+    path: &Path,
+    scope: &str,
+    written: &str,
+    range: cpp_parser::SourceRange,
+) -> NameCompletions {
+    let names = if scope.is_empty() {
+        declarations_in_scope(index, path, None, written)
+    } else {
+        declarations_in_scope(index, path, Some(scope), written)
+    };
+    NameCompletions {
+        scope: scope.to_string(),
+        names: names
+            .into_iter()
+            .map(|candidate| OfferedName {
+                fact: candidate.fact,
+                file: candidate.file,
+                depth: 0,
+                from: candidate.from,
+            })
+            .collect(),
+        prefix: written.to_string(),
+        name_range: range,
+    }
+}
+
 pub fn name_completions_at(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
