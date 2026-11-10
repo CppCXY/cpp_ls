@@ -6437,8 +6437,14 @@ fn a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines() {
         "`fprintf` has a signature to show: {asked}"
     );
     let label = signatures[0]["label"].as_str().unwrap_or_default();
+    // **The parameter's spelling is the implementation's.** The claim is that the label is `fprintf`'s own
+    // declaration — the one with a format parameter and a variadic tail — and not the file's `local_helper` or a
+    // neighbour in `<stdio.h>`. How that parameter is *spelled* is not this server's: glibc writes `format`, MSVC's
+    // UCRT writes `_Format`, and musl writes `__format`. Matching the lowercased label asks the question the test
+    // means and answers the same on all three.
+    let folded = label.to_lowercase();
     assert!(
-        label.contains("fprintf") && label.contains("format"),
+        folded.contains("fprintf") && folded.contains("format"),
         "and it is `fprintf`'s own: {label}"
     );
 
