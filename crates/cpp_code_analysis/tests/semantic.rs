@@ -2279,3 +2279,56 @@ void f() {
         assert!(!found.declaration, "and it declares nothing: {found:?}");
     }
 }
+
+/// **A symbol reference in a documentation comment is coloured as what it names** — Rust's ``[`Widget::grow`]``.
+///
+/// A comment is trivia, so the walk that classifies a file sees none of it: every name is a token in the tree, and
+/// a comment has no tokens. The answer is read from the file's *text* instead, in the file's own coordinates, and
+/// each target is resolved with the same query a jump uses — so the colour, the hover's card and the jump cannot
+/// disagree about what a link means.
+///
+/// The negative half is why the gate exists: `[`…`]` is also a fine thing to write in a string, and a string is not
+/// documentation. And a target nothing declares is not coloured — a colour would say the name is known.
+#[test]
+fn a_documentation_link_is_coloured_as_the_declaration_it_names() {
+    let source = "\
+struct Widget {
+    /// See [`Widget::grow`] and [`nowhere::at_all`].
+    void shrink(int by);
+    void grow(int by);
+};
+static const char* text = \"[`Widget::grow`] in a string is not a link\";
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names = session.classified_names(&view);
+
+    let link: Vec<(String, NameKind)> = names
+        .iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()].to_string(),
+                name.kind,
+            )
+        })
+        .collect();
+
+    assert!(
+        link.iter()
+            .any(|(text, kind)| text == "Widget::grow" && *kind == NameKind::Method),
+        "the link in the comment is the method it names: {link:?}"
+    );
+    assert!(
+        !link.iter().any(|(text, _)| text == "nowhere::at_all"),
+        "a target nothing declares is not coloured: {link:?}"
+    );
+    // The string literal's copy of the same spelling is **not** documentation, and the gate is what tells them apart.
+    let in_the_string = source.find("in a string").expect("the fixture writes it");
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.range.start_offset < in_the_string
+                && name.range.end_offset() > in_the_string),
+        "a string literal is not documentation: {link:?}"
+    );
+}

@@ -10134,6 +10134,44 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
+        // **And the symbol references in the file's documentation comments.** A comment is trivia, so the rendering
+        // has none of it and neither walk above sees a link — the answer is read from the **written** text, in the
+        // file's own coordinates, and each target is resolved with the same query a jump and the hover use
+        // (`ProjectIndex::definition`), so the colour, the card and the jump cannot disagree about what a link names.
+        //
+        // A link whose target resolves to nothing is **not** coloured, which is the same answer an identifier the
+        // analysis cannot place gets: a colour would say the name is known.
+        //
+        // Read here rather than in the server's token pass because this is the layer with the index in hand: a
+        // spelling in a comment has no tree position to resolve from, and the pass that draws tokens has no session.
+        if let Some(text) = view.written_text().or(Some(&view.source)) {
+            for link in cpp_parser::doc_links(text, cpp_parser::SourceRange::new(0, text.len())) {
+                if !inside_a_documentation_comment(text, link.range.start_offset) {
+                    continue;
+                }
+                let Some(kind) = self
+                    .store
+                    .index()
+                    .definition(&link.target, &view.path)
+                    .value()
+                    .and_then(|found| {
+                        crate::semantic::kind_of_index(crate::index::project::IndexedKind::of(
+                            &found.fact,
+                        ))
+                    })
+                else {
+                    continue;
+                };
+                names.push(crate::semantic::Name {
+                    range: link.range,
+                    kind,
+                    declaration: false,
+                    modifiers: Vec::new(),
+                    provenance: crate::semantic::Provenance::Found,
+                });
+            }
+        }
+
         // **And re-sorted, because the crossing is not order-preserving.** The walk answers in the rendering's order,
         // and a token a macro produced maps back to *where the macro was invoked* — which can be before a name that
         // preceded it in the rendering. The consumer builds a **delta walk** (`SemanticTokens`, where every token is
@@ -11755,3 +11793,32 @@ mod tests;
 /// `stl_bvector.h` about 440. Sixteen of the largest is a few tens of thousands of entries.
 const RENDERING_SUMMARY_ENTRIES: usize = 16;
 const RENDERING_SUMMARY_BYTES: usize = 40_000;
+
+/// **Is this offset inside a documentation comment?** — the gate a doc link has to pass before it is coloured.
+///
+/// A doc link is read from the file's *text*, and the text is also where strings and ordinary comments live: a
+/// fixture that prints `` "[`x`]" `` in a string literal is not documentation, and neither is the same spelling in a
+/// `//` comment that is not a doc comment. The rule is the one the hover's `doc_command_at` states for the same
+/// question, in the same words: a line that begins with a documentation marker, or a position inside a `/**`-`*/`
+/// block that has not closed yet.
+fn inside_a_documentation_comment(text: &str, offset: usize) -> bool {
+    let offset = offset.min(text.len());
+    let before = &text[..offset];
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let trimmed = text[line_start..].trim_start();
+
+    if trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("/**") {
+        return true;
+    }
+
+    // A `/** … */` block's *middle* lines do not begin with the marker, so the block itself is the question: the
+    // nearest opener is the one that matters, and it counts only if nothing closed it first.
+    match (before.rfind("/*"), before.rfind("*/")) {
+        (Some(opened), closed) => {
+            let still_open = closed.is_none_or(|closed| closed < opened);
+            still_open
+                && (before[opened..].starts_with("/**") || before[opened..].starts_with("/*!"))
+        }
+        _ => false,
+    }
+}

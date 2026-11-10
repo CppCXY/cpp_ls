@@ -16946,7 +16946,7 @@ pub struct IndexedKind {
 
 impl IndexedKind {
     /// The answer for one declaration.
-    fn of(found: &DeclFact) -> IndexedKind {
+    pub(crate) fn of(found: &DeclFact) -> IndexedKind {
         IndexedKind {
             kind: found.kind,
             scope: found.scope.clone().map(Box::from),

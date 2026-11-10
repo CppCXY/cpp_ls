@@ -383,3 +383,53 @@ fn a_local_is_not_answered_by_a_same_named_declaration_from_the_index() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A documentation link's target has a card** — Rust's ``[`Widget::grow`]``, hovered.
+///
+/// The link is read from the file's own text (a comment is trivia, so the rendering has none of it) and the target
+/// is resolved with the same query a jump uses, so the card and the jump cannot disagree.
+#[test]
+fn a_documentation_links_target_has_a_card() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-doc-link");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "\
+struct Widget {
+    /// See [`Widget::grow`] for the rule.
+    void grow(int by);
+};
+";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("See [`").expect("the fixture") + "See [`Widget::".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a link has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("void grow(int by)"),
+        "the card is the declaration the link names: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

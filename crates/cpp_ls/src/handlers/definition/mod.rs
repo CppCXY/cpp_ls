@@ -140,6 +140,10 @@ pub async fn on_goto_definition_handler(
             return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
         }
 
+        if let Some(found) = definition_of_a_documentation_link(session, &view, in_the_file) {
+            return Some(GotoDefinitionResponse::Scalar(found));
+        }
+
         let Known::Yes(found) = session.definitions(&view, offset) else {
             return None;
         };
@@ -211,6 +215,38 @@ fn location_of_a_file(
     Some(Location {
         uri,
         range: Range::new(lsp_types::Position::new(0, 0), end),
+    })
+}
+
+/// **Where the symbol a documentation comment names is declared** — Rust's ``[`Widget::grow`]``.
+///
+/// A comment is trivia, so the rendering has none of it and every declaration query in this handler answers about
+/// the token *after* the comment. The link is read from the file's own text and the target resolved with the same
+/// query a name jump uses — `ProjectIndex::definition` — so the jump and the hover's card about it cannot disagree.
+///
+/// A link whose target nothing declares answers `None`, which is the same "nothing to go to" a name the analysis
+/// cannot place gets.
+fn definition_of_a_documentation_link<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &Session<F>,
+    view: &cpp_code_analysis::FileView,
+    in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
+) -> Option<Location> {
+    let (_, target) = crate::handlers::hover::doc_link_at(
+        view.written_text().unwrap_or(&view.source),
+        in_the_file.get(),
+    )?;
+    let Known::Yes(found) = session.index().definition(&target, &view.path) else {
+        return None;
+    };
+
+    let uri = path_to_uri(&found.file)?;
+    let declaring = session.files().held(&found.file)?;
+    Some(Location {
+        uri,
+        range: Range::new(
+            position_in_file(declaring, found.fact.name_range.start_offset)?,
+            position_in_file(declaring, found.fact.name_range.end_offset())?,
+        ),
     })
 }
 
@@ -403,6 +439,48 @@ mod tests {
     use cpp_code_analysis::{
         CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
     };
+
+    /// **A documentation link jumps to what it names** — Rust's ``[`Widget::grow`]``.
+    ///
+    /// The link is read from the file's own text (a comment is trivia, so the rendering has none of it) and its
+    /// target is resolved with the same query a name jump uses, so the card and this answer cannot disagree.
+    #[test]
+    fn a_documentation_link_jumps_to_the_declaration_it_names() {
+        let source = "\
+struct Widget {
+    /// See [`Widget::grow`] for the rule.
+    void grow(int by);
+};
+";
+        let memory = MemoryFiles::new()
+            .with_file("/p/a.cpp", source)
+            .with_file("/p/b.cpp", "int main() { return 0; }\n");
+        let providers = SessionFiles::new(OpenDocuments::new(), memory);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        session.index_everything();
+        session.load("/p/a.cpp");
+
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("the written text");
+        let at = source.find("See [`").expect("the fixture") + "See [`Widget::".len();
+        let found = definition_of_a_documentation_link(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        )
+        .expect("a link jumps");
+
+        // The declarator's name — `    void grow(int by);` is line 2 (zero-based), column 9.
+        assert_eq!(found.range.start.line, 2, "{found:?}");
+        assert_eq!(found.range.start.character, 9, "{found:?}");
+    }
 
     /// **A forward declaration is not a place a definition lives.**
     ///

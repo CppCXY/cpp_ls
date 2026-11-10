@@ -899,7 +899,7 @@ fn kind_of_binding(
 /// *spelling* and not whether it is a class, so `std::to_string` arrives looking exactly like a member. The
 /// alternative is to draw every library function as a free one, which is wrong about all of them; this is wrong
 /// about the ones in a namespace, and only in the modifier a client draws differently.
-fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
+pub(crate) fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
     Some(match found.kind {
         DeclKind::Type => NameKind::Type,
         DeclKind::Function if found.scope.is_some() => NameKind::Method,

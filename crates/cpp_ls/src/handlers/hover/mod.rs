@@ -205,6 +205,27 @@ fn doc_command_at(text: &str, offset: usize) -> Option<String> {
     None
 }
 
+/// **A symbol reference in a doc comment, when the cursor is on it** — Rust's ``[`Widget::grow`]``.
+///
+/// Read from the file's own text, like [`doc_command_at`], and for the same reason: a comment is trivia, so the
+/// rendering has none of it and every tree-based question would answer about the token *after* the comment. The
+/// range comes back in the file's coordinates, which is what the caller places it with.
+pub(crate) fn doc_link_at(text: &str, offset: usize) -> Option<(cpp_parser::SourceRange, String)> {
+    let offset = offset.min(text.len());
+    let before = text.get(..offset)?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let line_end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |at| offset + at);
+    let line = text.get(line_start..line_end)?;
+
+    let links = cpp_parser::doc_links(line, cpp_parser::SourceRange::new(line_start, line.len()));
+    links
+        .into_iter()
+        .find(|link| link.range.start_offset <= offset && offset <= link.range.end_offset())
+        .map(|link| (link.range, link.target))
+}
+
 /// What the name at `offset` is — `None` when it does not name anything the analysis can answer about.
 ///
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
@@ -344,6 +365,19 @@ pub fn hover(
         {
             return Some(markdown(text));
         }
+    }
+
+    // **A symbol reference in a documentation comment** — Rust's ``[`Widget::grow`]``. Asked here, after the
+    // program's own answer (a comment declares nothing, so the two cannot collide) and before the command table:
+    // a link is the one place a reader expects a card about *another* declaration, and the target is resolved with
+    // the same query a jump uses, so the card and the jump cannot disagree.
+    if let Some((range, target)) = doc_link_at(
+        view.written_text().unwrap_or(&view.source),
+        in_the_file.get(),
+    ) && let Known::Yes(found) = session.index().definition(&target, &view.path)
+    {
+        let _ = range;
+        return Some(markdown(declaration_markdown(session, view, &found, None)));
     }
 
     // **A Doxygen command**, asked of the file's own text: a comment is trivia, so the rendering has none of it —
