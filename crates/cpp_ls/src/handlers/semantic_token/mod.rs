@@ -2434,4 +2434,38 @@ void f(int width, double d) {
             "a keyword the client cannot draw as a modifier is drawn as a keyword: {fallback:?}"
         );
     }
+    /// **`std::endl` passed as a pointer, not called** — the shape the report was about: `std::cout << std::endl;`.
+    ///
+    /// The earlier fixture for a qualified function wrote `std::endl()`, a *call*. `<< std::endl` is the other
+    /// position: the name is an overload set used as a value (it is passed as `Out& (*)(Out&)`), and the two are
+    /// resolved by different questions — a call goes through the callee path, a value through the ordinary name walk.
+    /// Reported from an editor as drawn like a variable, so this asks the value position directly.
+    #[test]
+    fn a_qualified_function_passed_as_a_pointer_is_still_drawn_as_a_function() {
+        let text = "\
+namespace std {
+    struct Out { Out& operator<<(Out& (*f)(Out&)); };
+    Out& endl(Out&);
+    extern Out cout;
+}
+void f() { std::cout << std::endl; }
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let at = text.rfind("std::endl").expect("the fixture") + "std::".len();
+        assert!(
+            matches!(
+                at_type.get(&at),
+                Some(&kind) if kind == index_of(TypeKind::Function)
+                    || kind == index_of(TypeKind::Method)
+            ),
+            "a function passed as a pointer is a function, not a value: {:?}",
+            at_type.get(&at)
+        );
+    }
 }
