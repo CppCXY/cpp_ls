@@ -346,12 +346,10 @@ void Widget::grow(int by) {
 #[test]
 fn a_header_s_macro_ranks_after_a_keyword_and_names_its_own_file() {
     const HEADER: &str = "#define FROM_THE_HEADER 1\n";
-    const SOURCE: &str = "\
-#include \"h.h\"
-int main() {
-    
-}
-";
+    // The cursor's line is **indented and otherwise empty**, which is where it is in a body being typed. Written as
+    // one escaped literal rather than a multi-line one because the indentation is inside the string: as a real blank
+    // line of four spaces it is trailing whitespace in this file, which the repository's own hook refuses.
+    const SOURCE: &str = "#include \"h.h\"\nint main() {\n    \n}\n";
     let memory = MemoryFiles::new()
         .with_file("/p/h.h", HEADER)
         .with_file("/p/a.cpp", SOURCE);
