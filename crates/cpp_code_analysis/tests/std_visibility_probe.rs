@@ -259,3 +259,49 @@ fn what_the_index_of_std_holds_and_who_can_see_it() {
         labels[..labels.len().min(14)].join(", ")
     );
 }
+
+/// **Does `std::endl` resolve through the path the server actually takes?**
+///
+/// Reported from an editor: `std::endl` drawn as a variable, i.e. no semantic token at all. In MSVC 18 it lives in
+/// `__msvc_ostream.hpp`, one hop past `<ostream>` — so the question is whether an ordinary file's closure reaches it.
+///
+/// The distinction this test exists to draw: `inspect` asks for **one file's reading**, and a header two hops out has
+/// no summary then, so the query answers `NotDeclaredHere`. The server asks for every project file's reading and lets
+/// the pump refine the closure. Measured on a three-file fixture, that difference is the whole answer — see
+/// `reported_defects::a_declaration_two_includes_away_is_visible`. This is the same question against the real
+/// toolchain, where the second hop is a header that is not a project file at all.
+#[test]
+fn std_endl_resolves_through_the_servers_path() {
+    let root = std::env::temp_dir().join("cppls-std-endl");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("endl.cpp");
+    let source = "#include <iostream>\nvoid f() { std::cout << std::endl; }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    session.want_cooked_reading(&file);
+    for _ in 0..6 {
+        session.index_everything();
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let found = session.index().definition("std::endl", &file);
+    eprintln!("[std] std::endl -> {found:?}");
+    assert!(
+        matches!(found, cpp_code_analysis::Known::Yes(_)),
+        "std::endl is declared in <__msvc_ostream.hpp> and reached through <ostream>: {found:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

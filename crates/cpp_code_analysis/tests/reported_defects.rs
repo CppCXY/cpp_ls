@@ -956,3 +956,38 @@ fn a_generic_lambda_called_with_an_int_returns_an_int() {
         "`v * 2` with `v` a `double` is a `double`"
     );
 }
+
+/// **A declaration two `#include`s away is visible** — `c.cpp` → `b.h` → `a.h`, the shape MSVC 18 gives
+/// `std::endl` (it lives in `__msvc_ostream.hpp`, one hop past `<ostream>`).
+///
+/// Reported from an editor as "`std::endl` is not rendered as a function". Measured through `inspect`, which asks for
+/// one file's reading rather than the whole closure, a chain like this answers `NotDeclaredHere` for the second hop
+/// and `Yes` for the first — so this test asks the same question after the same ask the server makes (every project
+/// file's reading), which is where the answer has to be right.
+#[test]
+fn a_declaration_two_includes_away_is_visible() {
+    let session = session_with(&[
+        ("/p/a.h", "namespace std { void endl(); }\n"),
+        ("/p/b.h", "#include \"a.h\"\nint in_b;\n"),
+        (
+            "/p/c.cpp",
+            "#include \"b.h\"\nvoid f() { std::endl(); }\nvoid g() { in_b = 1; }\n",
+        ),
+    ]);
+
+    let from = std::path::Path::new("/p/c.cpp");
+    // The first hop, which has always worked — the control.
+    assert!(
+        matches!(
+            session.index().definition("in_b", from),
+            cpp_code_analysis::Known::Yes(_)
+        ),
+        "the direct include's own declaration is visible"
+    );
+
+    let found = session.index().definition("std::endl", from);
+    assert!(
+        matches!(found, cpp_code_analysis::Known::Yes(_)),
+        "the declaration one hop past the direct include is visible too: {found:?}"
+    );
+}
