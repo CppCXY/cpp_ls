@@ -231,14 +231,14 @@ fn definition_of_a_documentation_link<F: cpp_code_analysis::FileProvider + Clone
     view: &cpp_code_analysis::FileView,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Location> {
-    let (_, target) = crate::handlers::hover::doc_link_at(
+    let target = cpp_code_analysis::doc::target_at(
         view.written_text().unwrap_or(&view.source),
         in_the_file.get(),
     )?;
-    // **The spellings a link may add**: ``[`f()`]`` and ``[`MAX!`]`` say what a reader means, and neither the
+    // **The punctuation a reference may add**: ``[`f()`]`` and ``[`MAX!`]`` say what a reader means, and neither the
     // parentheses nor the bang is part of the name.
-    let target = target.trim_end_matches("()").trim_end_matches('!').trim();
-    if let Known::Yes(found) = session.index().definition(target, &view.path) {
+    let spelling = target.spelled_for_a_lookup();
+    if let Known::Yes(found) = session.index().definition(spelling, &view.path) {
         let uri = path_to_uri(&found.file)?;
         let declaring = session.files().held(&found.file)?;
         return Some(Location {

@@ -178,6 +178,78 @@ pub fn doc_links(text: &str, range: SourceRange) -> Vec<DocLink> {
     links
 }
 
+/// **A symbol reference a command names** — `@see Widget::grow`, `@ref widget.h`.
+///
+/// Doxygen's own cross-reference, and the older of the two spellings a project may use: `@see`, `@sa`, `@ref`,
+/// `@overload`, `@extends`, `@implements` and `@cite` all take a *reference* as their first argument (see
+/// [`DocCommandArgs::ReferenceAndBody`]), and the server treated that argument as a parameter name — the wrong
+/// vocabulary — and could not colour, hover or jump it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocReference {
+    /// The target's span, in the file.
+    pub range: SourceRange,
+    /// The spelling the command names, as written.
+    pub target: String,
+}
+
+/// Every reference a documentation comment writes with a command, in `text` — `range` being where that text starts.
+///
+/// Read **line by line**, because a command's argument never runs past the line the command was written on, and a
+/// reference may be qualified (`Widget::grow`), templated (`vector<int>`) or a file name (`widget.h`) — so the target
+/// is the run of non-space characters after the command, minus the punctuation a sentence uses (`@see Foo.` names
+/// `Foo`).
+pub fn doc_references(text: &str, range: SourceRange) -> Vec<DocReference> {
+    let mut found = Vec::new();
+    let mut line_start = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut at = 0usize;
+
+        while let Some(offset) = line[at..].find(['@', '\\']) {
+            let introducer = at + offset;
+            let mut end = introducer + 1;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            if end == introducer + 1 {
+                at = introducer + 1;
+                continue;
+            }
+
+            let command = &line[introducer + 1..end];
+            at = end;
+            if command_args(command) != DocCommandArgs::ReferenceAndBody {
+                continue;
+            }
+
+            let Some(start) = line[end..]
+                .find(|character: char| !character.is_whitespace())
+                .map(|offset| end + offset)
+            else {
+                continue;
+            };
+            let mut close = start;
+            while close < bytes.len() && !bytes[close].is_ascii_whitespace() {
+                close += 1;
+            }
+            // A sentence's punctuation is not part of a name: `@see Foo.` names `Foo`.
+            let target = line[start..close].trim_end_matches(['.', ',', ';', ':', ')']);
+            if !target.is_empty() {
+                found.push(DocReference {
+                    range: SourceRange::new(range.start_offset + line_start + start, target.len()),
+                    target: target.to_string(),
+                });
+            }
+            at = close;
+        }
+
+        line_start += line.len();
+    }
+
+    found
+}
+
 /// Parse a run of consecutive comments as one documentation block.
 ///
 /// The run becomes a single [`CppSyntaxKind::DocComment`] node whose children are the parsed

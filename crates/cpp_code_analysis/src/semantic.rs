@@ -126,6 +126,12 @@ pub enum NameKind {
     Parameter,
     /// A name this file `#define`s.
     Macro,
+    /// **A keyword written inside an `@code` block of a documentation comment** — where an example is code.
+    ///
+    /// The one name this layer reports for *text in a comment*. A code block is an example of the language, and a
+    /// reader expects `for` and `return` inside it to look like `for` and `return` — the tree has no tokens there
+    /// (a comment is trivia), so the only layer that can say so is this one, which has the file's text.
+    Keyword,
 }
 
 /// Where a classification came from — which layer answered, and therefore how strong the answer is.

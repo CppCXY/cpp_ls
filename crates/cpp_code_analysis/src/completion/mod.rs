@@ -540,6 +540,18 @@ pub fn completion_with(
         CompletionContext::DocLink { written, range } => doc_link_names(
             index, scopes, root, path, &written, range, cuda, budget, unincluded,
         ),
+        // **A code block is code**, so it is answered with the same list a statement gets — keywords and snippets
+        // included, because that is what a reader writing an example is writing.
+        CompletionContext::DocCode { written, range } => {
+            let position = crate::sema::resolve::NamePosition {
+                scope: String::new(),
+                written,
+                range,
+            };
+            names(
+                index, scopes, root, path, &position, 0, true, cuda, budget, unincluded,
+            )
+        }
     }
 }
 
@@ -1278,8 +1290,22 @@ fn names(
     match listed {
         Known::Yes(listed) => {
             listed_scope = listed.scope.clone();
-            listed_prefix = listed.prefix.clone();
-            replace = listed.name_range;
+            // **The tree's answer is a refinement, and it can say nothing at all.** `name_completions_at` reads the
+            // position from the *tree*, and a documentation comment is not in the tree — a `[`Wid`]` target or an
+            // `@code` block's word has no node, so the answer comes back with an empty prefix and an empty range. The
+            // caller's `NamePosition` is then the only information there is: taking the tree's empty answer over it
+            // meant a list of every name in the file beside a replace range of zero characters, so typing `Wid` after
+            // `@see ` offered `grow` and `f` too.
+            if listed.prefix.is_empty() {
+                listed_prefix = position.written.clone();
+            } else {
+                listed_prefix = listed.prefix.clone();
+            }
+            replace = if listed.name_range.length == 0 {
+                position.range
+            } else {
+                listed.name_range
+            };
             inside_a_scope |= !listed_scope.is_empty();
 
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();

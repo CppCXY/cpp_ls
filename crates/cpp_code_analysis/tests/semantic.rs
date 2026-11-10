@@ -2372,3 +2372,48 @@ struct Widget {
         "the parentheses are punctuation around the name: {link:?}"
     );
 }
+
+/// **A command's reference and a code block's contents are program names too** — `@see Widget::grow`, and
+/// `@code … return … @endcode`.
+///
+/// Two shapes the first version of the documentation support got wrong in opposite directions: `@see`'s argument was
+/// read as a *parameter name* (the wrong vocabulary, and nothing coloured, hovered or jumped it), and an `@code` block
+/// was prose (so the example's own keywords had no colour, because a comment produces no tokens for the tree to
+/// colour). Both are read from the text now — see `cpp_code_analysis::doc`.
+#[test]
+fn a_reference_command_and_a_code_block_are_classified() {
+    let source = "\
+struct Widget { void grow(int by); };
+/// @see Widget::grow for the rule.
+/// @code
+/// int main() { return 0; }
+/// @endcode
+void f() {}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names = session.classified_names(&view);
+
+    let found: Vec<(String, NameKind)> = names
+        .iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()].to_string(),
+                name.kind,
+            )
+        })
+        .collect();
+
+    assert!(
+        found
+            .iter()
+            .any(|(text, kind)| text == "Widget::grow" && *kind == NameKind::Method),
+        "`@see Widget::grow` names the method: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(text, kind)| text == "return" && *kind == NameKind::Keyword),
+        "a keyword inside an `@code` block is a keyword: {found:?}"
+    );
+}

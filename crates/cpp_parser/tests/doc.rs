@@ -683,3 +683,37 @@ void f() {}
         );
     }
 }
+
+/// **A command may name a symbol** — `@see Widget::grow`, `@ref widget.h`.
+///
+/// `@see`, `@sa`, `@ref`, `@overload`, `@extends`, `@implements` and `@cite` take a *reference* as their first
+/// argument, and the server treated that argument as a parameter name: the completion offered the documented
+/// declaration's parameters, and nothing coloured, hovered or jumped it.
+///
+/// The punctuation a sentence uses is not part of the name, and a command's argument never runs past its own line.
+#[test]
+fn a_reference_command_names_the_symbol_after_it() {
+    let text = "\
+/// @see Widget::grow
+/// @sa std::vector<int>, and see below.
+/// @param x is a parameter, not a reference.
+/// @ref widget.h for the header.
+";
+    let references = cpp_parser::doc_references(text, cpp_parser::SourceRange::new(0, text.len()));
+
+    let targets: Vec<&str> = references.iter().map(|one| one.target.as_str()).collect();
+    assert_eq!(
+        targets,
+        vec!["Widget::grow", "std::vector<int>", "widget.h"],
+        "{references:?}"
+    );
+
+    // Every answer slices back to the spelling it names, which is what a consumer colours and resolves.
+    for reference in &references {
+        assert_eq!(
+            &text[reference.range.start_offset..reference.range.end_offset()],
+            reference.target,
+            "the range is the target itself"
+        );
+    }
+}

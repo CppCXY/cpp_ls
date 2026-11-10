@@ -205,25 +205,20 @@ fn doc_command_at(text: &str, offset: usize) -> Option<String> {
     None
 }
 
-/// **A symbol reference in a doc comment, when the cursor is on it** — Rust's ``[`Widget::grow`]``.
+/// **A symbol reference in a doc comment, when the cursor is on it** — Rust's ``[`Widget::grow`]``, or Doxygen's
+/// `@see Widget::grow`.
 ///
 /// Read from the file's own text, like [`doc_command_at`], and for the same reason: a comment is trivia, so the
-/// rendering has none of it and every tree-based question would answer about the token *after* the comment. The
-/// range comes back in the file's coordinates, which is what the caller places it with.
-pub(crate) fn doc_link_at(text: &str, offset: usize) -> Option<(cpp_parser::SourceRange, String)> {
-    let offset = offset.min(text.len());
-    let before = text.get(..offset)?;
-    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
-    let line_end = text[offset..]
-        .find('\n')
-        .map_or(text.len(), |at| offset + at);
-    let line = text.get(line_start..line_end)?;
-
-    let links = cpp_parser::doc_links(line, cpp_parser::SourceRange::new(line_start, line.len()));
-    links
-        .into_iter()
-        .find(|link| link.range.start_offset <= offset && offset <= link.range.end_offset())
-        .map(|link| (link.range, link.target))
+/// rendering has none of it and every tree-based question would answer about the token *after* the comment.
+///
+/// The rule itself lives one layer down, in [`cpp_code_analysis::doc`], because a symbol reference is one question
+/// with four consumers — the colour, this card, the jump and the completion — and a second copy of it here would be a
+/// second answer to disagree with the first.
+pub(crate) fn doc_target_at(
+    text: &str,
+    offset: usize,
+) -> Option<cpp_code_analysis::doc::DocTarget> {
+    cpp_code_analysis::doc::target_at(text, offset)
 }
 
 /// What the name at `offset` is — `None` when it does not name anything the analysis can answer about.
@@ -371,14 +366,19 @@ pub fn hover(
     // program's own answer (a comment declares nothing, so the two cannot collide) and before the command table:
     // a link is the one place a reader expects a card about *another* declaration, and the target is resolved with
     // the same query a jump uses, so the card and the jump cannot disagree.
-    if let Some((_, target)) = doc_link_at(
+    // **A symbol reference in a documentation comment** — Rust's ``[`Widget::grow`]``, or Doxygen's
+    // `@see Widget::grow`. Asked here, after the program's own answer (a comment declares nothing, so the two cannot
+    // collide) and before the command table: a reference is the one place a reader expects a card about *another*
+    // declaration, and the target is resolved with the same query a jump uses, so the card and the jump cannot
+    // disagree.
+    if let Some(target) = doc_target_at(
         view.written_text().unwrap_or(&view.source),
         in_the_file.get(),
     ) {
-        // **The spellings a link may add.** ``[`f()`]`` and ``[`MAX!`]`` say what a reader means — that it is a call,
-        // that it is a macro — and neither is part of the name.
-        let target = target.trim_end_matches("()").trim_end_matches('!').trim();
-        if let Known::Yes(found) = session.index().definition(target, &view.path) {
+        // **The punctuation a reference may add.** ``[`f()`]`` and ``[`MAX!`]`` say what a reader means — that it is a
+        // call, that it is a macro — and neither is part of the name.
+        let spelling = target.spelled_for_a_lookup();
+        if let Known::Yes(found) = session.index().definition(spelling, &view.path) {
             return Some(markdown(declaration_markdown(session, view, &found, None)));
         }
         // **A macro has no declaration to name**, so it is the second question rather than a spelling of the first —

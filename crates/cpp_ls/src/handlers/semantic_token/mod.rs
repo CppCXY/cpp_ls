@@ -89,6 +89,9 @@ fn type_of_a_name_kind(kind: NameKind) -> Option<TypeKind> {
         NameKind::VariableTemplate => TypeKind::VariableTemplate,
         NameKind::Parameter => TypeKind::Parameter,
         NameKind::Macro => TypeKind::Macro,
+        // **A keyword inside a documentation comment's code block** — the standard type, drawn as a keyword everywhere
+        // else in the file, so an example in a comment reads like the code around it.
+        NameKind::Keyword => TypeKind::Keyword,
     })
 }
 

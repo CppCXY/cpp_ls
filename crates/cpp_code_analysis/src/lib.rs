@@ -67,6 +67,7 @@ pub mod align;
 pub mod cache;
 pub mod completion;
 pub mod cuda;
+pub mod doc;
 pub mod effect;
 pub mod file;
 pub mod folding;

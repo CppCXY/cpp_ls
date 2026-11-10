@@ -9670,7 +9670,27 @@ impl<F: FileProvider + Clone> Session<F> {
             // lexer's tokens: a backtick is not a C++ token, so `` /// See [`Wid `` arrives as a comment followed by
             // an unrecognised character and an identifier — `in_prose` reads the identifier and answered "code",
             // which is how a link's question used to reach the code path.
-            if inside_a_documentation_comment(text, offset.get())
+            // **…and a code block is the exception**: `@code … @endcode` is an example of *code*, which is where a
+            // name does belong, and it is asked before the refusal so an example keeps its completion.
+            if crate::doc::inside_a_code_block(text, offset.get()) {
+                return crate::completion::completion_at(
+                    self.store.index(),
+                    &view.scopes,
+                    &view.root,
+                    &view.path,
+                    0,
+                    &self
+                        .headers
+                        .read()
+                        .map(|headers| headers.clone())
+                        .unwrap_or_default(),
+                    self.config.cuda(),
+                    self.the_completion_budget(),
+                    &[],
+                );
+            }
+
+            if crate::doc::is_a_documentation_comment(text, offset.get())
                 || crate::file::view::in_prose(text, offset.get())
             {
                 return crate::CompletionSet::default();
@@ -10156,33 +10176,31 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         // **And the symbol references in the file's documentation comments.** A comment is trivia, so the rendering
-        // has none of it and neither walk above sees a link — the answer is read from the **written** text, in the
-        // file's own coordinates, and each target is resolved with the same query a jump and the hover use
-        // (`ProjectIndex::definition`), so the colour, the card and the jump cannot disagree about what a link names.
+        // has none of it and neither walk above sees one — the answer is read from the **written** text, in the file's
+        // own coordinates, and each target is resolved with the same query a jump and the hover use
+        // (`ProjectIndex::definition`), so the colour, the card and the jump cannot disagree about what a reference
+        // names.
         //
-        // A link whose target resolves to nothing is **not** coloured, which is the same answer an identifier the
-        // analysis cannot place gets: a colour would say the name is known.
+        // **Both spellings**, through one reader: a `[`Widget::grow`]` link and a `@see Widget::grow` command's
+        // argument. They were two features — and the second was not a feature at all, only an argument the completion
+        // mistook for a parameter name — until `crate::doc` made them one question.
+        //
+        // A target that resolves to nothing is **not** coloured, which is the same answer an identifier the analysis
+        // cannot place gets: a colour would say the name is known.
         //
         // Read here rather than in the server's token pass because this is the layer with the index in hand: a
         // spelling in a comment has no tree position to resolve from, and the pass that draws tokens has no session.
-        if let Some(text) = view.written_text().or(Some(&view.source)) {
-            for link in cpp_parser::doc_links(text, cpp_parser::SourceRange::new(0, text.len())) {
-                if !inside_a_documentation_comment(text, link.range.start_offset) {
+        {
+            let text: &str = view.written_text().unwrap_or(&view.source);
+            for target in crate::doc::targets(text) {
+                if !crate::doc::is_a_documentation_comment(text, target.range.start_offset) {
                     continue;
                 }
-                // **The two spellings a link may add.** Rust's links are written ``[`f()`]`` and ``[`f!`]`` as well as
-                // ``[`f`]``, and a reader writing C++ prose will do the same — the parentheses say "this is a call",
-                // which is a thing a reader wants to say. They are punctuation around the name, not part of it, so
-                // they are dropped before the lookup and the range still covers what was written.
-                let target = link
-                    .target
-                    .trim_end_matches("()")
-                    .trim_end_matches('!')
-                    .trim();
+                let spelling = target.spelled_for_a_lookup();
                 let kind = self
                     .store
                     .index()
-                    .definition(target, &view.path)
+                    .definition(spelling, &view.path)
                     .value()
                     .and_then(|found| {
                         crate::semantic::kind_of_index(crate::index::project::IndexedKind::of(
@@ -10192,29 +10210,74 @@ impl<F: FileProvider + Clone> Session<F> {
                     // **A macro is a name too**, and the index holds no *declaration* for one: `[`MAX`]` names a
                     // `#define`, which is a fact about text. The environment the file is compiled in is the same
                     // question the classifier asks for a macro an `#include` brought in, so it is asked rather than
-                    // duplicated.
-                    // **A macro is a name too**, and the index holds no *declaration* for one: `[`MAX`]` names a
-                    // `#define`, which is a fact about text. The environment the file is compiled in is the same
-                    // question the classifier asks for a macro an `#include` brought in, so it is asked rather than
-                    // duplicated — and only for a target the index could not describe, which is what keeps a link to
-                    // an ordinary declaration free.
+                    // duplicated — and only for a target the index could not describe, which is what keeps a
+                    // reference to an ordinary declaration free.
                     .or_else(|| {
                         self.store
                             .index()
                             .macro_names_in_force(&view.path)
-                            .contains(target)
+                            .contains(spelling)
                             .then_some(crate::semantic::NameKind::Macro)
                     });
                 let Some(kind) = kind else {
                     continue;
                 };
                 names.push(crate::semantic::Name {
-                    range: link.range,
+                    range: target.range,
                     kind,
                     declaration: false,
                     modifiers: Vec::new(),
                     provenance: crate::semantic::Provenance::Found,
                 });
+            }
+        }
+
+        // **And the code inside a documentation comment's `@code` block**, which is an example rather than prose: its
+        // keywords are drawn as keywords and its identifiers resolved the way any other name is. The block is *text*
+        // — a comment produces no tokens, so the tree has nothing to say about it — and the lexer that reads it is the
+        // same one every other spelling in this project is read by.
+        {
+            let text: &str = view.written_text().unwrap_or(&view.source);
+            for block in crate::doc::code_blocks(text) {
+                let body = &text[block.start_offset..block.end_offset()];
+                let (tokens, _) = cpp_parser::lex(body, &cpp_parser::LexerConfig::default());
+                for token in tokens {
+                    let Some(spelling) =
+                        body.get(token.range.start_offset..token.range.end_offset())
+                    else {
+                        continue;
+                    };
+                    let is_a_keyword = cpp_parser::is_keyword(token.kind);
+                    if !is_a_keyword && token.kind != cpp_parser::CppTokenKind::Identifier {
+                        continue;
+                    }
+                    let kind = if is_a_keyword {
+                        Some(crate::semantic::NameKind::Keyword)
+                    } else {
+                        self.store
+                            .index()
+                            .definition(spelling, &view.path)
+                            .value()
+                            .and_then(|found| {
+                                crate::semantic::kind_of_index(
+                                    crate::index::project::IndexedKind::of(&found.fact),
+                                )
+                            })
+                    };
+                    let Some(kind) = kind else {
+                        continue;
+                    };
+                    names.push(crate::semantic::Name {
+                        range: cpp_parser::SourceRange::new(
+                            block.start_offset + token.range.start_offset,
+                            token.range.length,
+                        ),
+                        kind,
+                        declaration: false,
+                        modifiers: Vec::new(),
+                        provenance: crate::semantic::Provenance::Found,
+                    });
+                }
             }
         }
 
@@ -11839,32 +11902,3 @@ mod tests;
 /// `stl_bvector.h` about 440. Sixteen of the largest is a few tens of thousands of entries.
 const RENDERING_SUMMARY_ENTRIES: usize = 16;
 const RENDERING_SUMMARY_BYTES: usize = 40_000;
-
-/// **Is this offset inside a documentation comment?** — the gate a doc link has to pass before it is coloured.
-///
-/// A doc link is read from the file's *text*, and the text is also where strings and ordinary comments live: a
-/// fixture that prints `` "[`x`]" `` in a string literal is not documentation, and neither is the same spelling in a
-/// `//` comment that is not a doc comment. The rule is the one the hover's `doc_command_at` states for the same
-/// question, in the same words: a line that begins with a documentation marker, or a position inside a `/**`-`*/`
-/// block that has not closed yet.
-fn inside_a_documentation_comment(text: &str, offset: usize) -> bool {
-    let offset = offset.min(text.len());
-    let before = &text[..offset];
-    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
-    let trimmed = text[line_start..].trim_start();
-
-    if trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("/**") {
-        return true;
-    }
-
-    // A `/** … */` block's *middle* lines do not begin with the marker, so the block itself is the question: the
-    // nearest opener is the one that matters, and it counts only if nothing closed it first.
-    match (before.rfind("/*"), before.rfind("*/")) {
-        (Some(opened), closed) => {
-            let still_open = closed.is_none_or(|closed| closed < opened);
-            still_open
-                && (before[opened..].starts_with("/**") || before[opened..].starts_with("/*!"))
-        }
-        _ => false,
-    }
-}

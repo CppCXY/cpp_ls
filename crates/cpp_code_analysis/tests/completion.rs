@@ -3521,3 +3521,53 @@ fn the_views_adaptors_complete_after_the_scope() {
         );
     }
 }
+
+/// **A documentation comment completes symbols where it refers to one**, and code inside `@code`.
+///
+/// Two shapes the documentation support got wrong: `@see Widget::gr` offered the documented declaration's *parameters*
+/// (the command takes a reference, not a name it declares), and an `@code` block offered nothing at all, because the
+/// prose rule — right for the sentence around it — was applied to the example too.
+#[test]
+fn a_documentation_comment_completes_its_references_and_its_code() {
+    const SOURCE: &str = "\
+struct Widget { void grow(int by); };
+/// @see Wid
+/// @code
+/// Wid
+/// @endcode
+void f() {}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+
+    // The reference: names, filtered by what is typed — and no snippet, because a reference is not a statement.
+    let reference = SOURCE.find("@see Wid").expect("the fixture") + "@see Wid".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", reference);
+    assert!(
+        labels.iter().any(|label| label == "Widget"),
+        "`@see Wid` completes the name it refers to: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "class"),
+        "and not the keyword table: {labels:?}"
+    );
+
+    // The code block: an example is code, so its completion is the one a statement gets.
+    let inside_the_block = SOURCE.find("/// Wid").expect("the fixture") + "/// Wid".len();
+    let labels = labels_at(&mut session, "/p/a.cpp", inside_the_block);
+    assert!(
+        labels.iter().any(|label| label == "Widget"),
+        "a word inside `@code` completes the program's names: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "class"),
+        "and it is code, so the keyword table belongs: {labels:?}"
+    );
+}

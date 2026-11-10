@@ -141,6 +141,17 @@ pub enum CompletionContext {
         /// The span `written` covers, which is what a client replaces.
         range: SourceRange,
     },
+    /// **A word inside an `@code` … `@endcode` block** — an example of code, where a program name belongs.
+    ///
+    /// The rest of a documentation comment is prose and offers nothing; a code block is the exception, because that
+    /// is what it is *for*: `@code` exists so a reader can write the call they mean, and a completion that refused
+    /// while they write it is the same mistake as one that fired in the prose around it, in the other direction.
+    DocCode {
+        /// What has been typed of the word at the cursor.
+        written: String,
+        /// The span `written` covers, which is what a client replaces.
+        range: SourceRange,
+    },
 }
 
 /// The context at `offset`, read from the tree.
@@ -296,6 +307,23 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
         return None;
     }
 
+    // **A code block is an example of *code*** — `@code` … `@endcode` — so its words are the program's, and the
+    // answer there is the name completion a statement gets rather than the prose refusal below. Asked before every
+    // other documentation question, because a code block is the innermost scope a cursor in a comment can be in.
+    if crate::doc::inside_a_code_block(&root.text().to_string(), offset) {
+        let line_before_cursor = &line[..line.len().min(line.len())];
+        let typed = line_before_cursor
+            .trim_end()
+            .rsplit(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .next()
+            .unwrap_or("");
+        let start = line_start + line.len().saturating_sub(typed.len());
+        return Some(CompletionContext::DocCode {
+            written: typed.to_string(),
+            range: SourceRange::new(start, typed.len()),
+        });
+    }
+
     // **A symbol reference's target**, which is the one position in a comment where a program name belongs.
     //
     // ```cpp
@@ -356,6 +384,27 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
             text.chars()
                 .all(|character| character.is_ascii_alphanumeric() || character == '_')
         };
+
+        // **A command that takes a reference wants a symbol**, not a name the documented declaration declares:
+        // `@see Widget::gr` is the program's names, which is the same answer a ``[`…`]`` link gets. The argument is
+        // read as a *target* rather than as a word, because it may be qualified (`Widget::grow`) or templated
+        // (`vector<int>`) — the things a word test refuses.
+        if is_a_word(command)
+            && cpp_parser::command_args(command) == cpp_parser::DocCommandArgs::ReferenceAndBody
+        {
+            let typed = argument.trim();
+            // A body may follow the reference (`@see Foo for the rule`), and a target never holds a space — so once
+            // the reader is past one, the position is the body's and there is nothing to complete.
+            let target = typed.split_whitespace().next().unwrap_or("");
+            if typed.is_empty() || !typed.contains(char::is_whitespace) {
+                let start = line_start + line.len().saturating_sub(argument.len());
+                return Some(CompletionContext::DocLink {
+                    written: target.to_string(),
+                    range: SourceRange::new(start, target.len()),
+                });
+            }
+        }
+
         if is_a_word(command)
             && is_a_word(argument)
             && let Some(kind) = cpp_parser::command_kind(command)
@@ -363,7 +412,6 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
                 cpp_parser::command_args(command),
                 cpp_parser::DocCommandArgs::NameAndBody
                     | cpp_parser::DocCommandArgs::DirectionalNameAndBody
-                    | cpp_parser::DocCommandArgs::ReferenceAndBody
             )
         {
             // The name starts where the argument starts, which is **the cursor less what has been written** — the

@@ -9,8 +9,8 @@ mod syntax;
 mod text;
 
 pub use grammar::doc::{
-    DocCommandArgs, DocCommandKind, DocCommandSpec, DocLink, command_args, command_kind, doc_links,
-    every_command,
+    DocCommandArgs, DocCommandKind, DocCommandSpec, DocLink, DocReference, command_args,
+    command_kind, doc_links, doc_references, every_command,
 };
 pub use kind::*;
 pub use lexer::{
