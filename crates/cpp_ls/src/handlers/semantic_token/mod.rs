@@ -785,6 +785,44 @@ void f() {
         }
     }
 
+    /// **`std::endl` is a function**, not a variable — reported with a screenshot, where it was drawn as `end1`'s
+    /// neighbour: `variable.other.unknown.endl` in the client's own grammar and a `variable` token from this server.
+    ///
+    /// `endl` is a function template in `<ostream>`, and `kind_of_index` maps `DeclKind::Function` with a scope to
+    /// `Method` (a summary records the scope's *spelling*, not whether it is a class). This fixture is the smallest
+    /// shape of it: a namespace-scope function named by a qualified expression.
+    #[test]
+    fn a_qualified_function_is_drawn_as_a_function() {
+        let text = "\
+namespace std {
+    struct Out { Out& operator<<(Out& (*f)(Out&)); };
+    Out& endl(Out&);
+    extern Out cout;
+}
+void f() { std::cout << std::endl; }
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let at = text.rfind("std::endl").expect("the fixture") + "std::".len();
+        // **Function, or method — not a variable.** Which of the two a *namespace* function gets is a judgement the
+        // classifier makes from what a summary can see (a scope's spelling, not whether it is a class), and both say
+        // "this is called". The defect this guards is the third possibility.
+        assert!(
+            matches!(
+                at_type.get(&at),
+                Some(&kind) if kind == index_of(TypeKind::Function)
+                    || kind == index_of(TypeKind::Method)
+            ),
+            "a called name is a function, not a variable: {:?}",
+            at_type.get(&at)
+        );
+    }
+
     /// **A macro from a header is a macro**, and the index's declaration of the same spelling does not win.
     ///
     /// Reported from an editor with a screenshot: `CP_UTF8` — a `#define` in `<windows.h>`, behind a conditional —
