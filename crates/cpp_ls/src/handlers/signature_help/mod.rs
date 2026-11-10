@@ -69,6 +69,16 @@ pub async fn on_signature_help(
         // were done in this order.
         let written = session.view_of_the_file(&path)?;
         let in_the_file = crate::util::file_offset_at_position(&written, position)?;
+
+        // **A function-like macro is a call, and it exists only in the file's own text.** The engine below reads the
+        // *rendering*, where every macro is already expanded (`ADD(1, |)` is `((1) + ())`), so a macro call had no
+        // signature at all — on the shape C projects use for assertions and formatting. Asked first, because a macro
+        // shadows a function of the same name, and with the **file** offset the client's position names: mapping a
+        // position inside an expansion back to the file is not reliable.
+        if let Some(signature) = session.macro_signature_at(&written, in_the_file) {
+            return Some(signature_help_of(&[signature]));
+        }
+
         let view = session.view(&path)?;
         let offset = view.reading_offset_of(
             cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),

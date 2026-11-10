@@ -10425,6 +10425,25 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The documentation above each declaration is read here rather than by the caller: it is the same declaration
     /// the signature came from, and asking twice would be two lookups for one popup.
+    /// **The signature of a function-like macro call**, or `None` when the cursor is not inside one.
+    ///
+    /// A macro is expanded in a rendering, so the call the reader is typing exists only in the file's **own** text —
+    /// which is why this takes a view of that text and a **file offset**, and not the rendering-view pair the
+    /// function engine takes. `ADD(1, |)` is `((1) + ())` in the rendering: there is no call there to describe.
+    ///
+    /// A **file offset** rather than a reading offset is the other half of the same fact: mapping a position inside
+    /// a macro expansion back to the file is not reliable (the expansion's bytes come from the body, not from the
+    /// invocation), and a caller that already has the client's position has the file offset for free.
+    pub fn macro_signature_at(
+        &self,
+        view: &FileView,
+        offset: crate::file::coordinates::FileOffset,
+    ) -> Option<crate::signature::CallSignature> {
+        crate::signature::a_macro_signature(self.store.index(), view, offset.get(), &mut |path| {
+            self.view(path)
+        })
+    }
+
     pub fn signatures_at(
         &self,
         view: &FileView,

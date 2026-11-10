@@ -771,3 +771,56 @@ int f() {
     assert_eq!(spans.len(), 2, "two parameters: {spans:?}");
     assert_eq!(active, Some(1), "and the cursor is on the second");
 }
+
+/// **The signature of a function-like macro call at the cursor**, through the file's own text.
+///
+/// Not through `signatures_at`: that engine reads a *rendering*, and a macro is expanded there (`ADD(1, |)` is
+/// `((1) + ())`), so the call does not exist in it. `Session::macro_signature_at` is the written-text query, and it
+/// takes the **file** offset the client's position names.
+fn macro_signature_where_marked(source: &str) -> Option<CallSignature> {
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
+    let session = session_with(&[("/p/a.cpp", &without_marker)]);
+    let written = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is held");
+    session.macro_signature_at(
+        &written,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    )
+}
+
+/// **A function-like macro is a call, and its parameters are written by the `#define`.**
+///
+/// The signature engine reads the **rendering**, where a macro is already expanded: `ADD(1, |)` is `((1) + ())`
+/// there and there is no call left to describe. So the answer has to come from the file's own text — the text the
+/// reader is looking at, macro still in it — and that is what this asks about.
+#[test]
+fn a_function_like_macro_has_a_signature() {
+    let source = "\
+#define ADD(a, b) ((a) + (b))
+int f() { return ADD(1, |); }
+";
+    let signature = macro_signature_where_marked(source).expect("a macro call has a signature");
+    assert_eq!(signature.label, "ADD(a, b)");
+    assert_eq!(signature.parameters.len(), 2, "{:?}", signature.parameters);
+    assert_eq!(signature.active_parameter, Some(1));
+    assert_eq!(
+        signature.parameters[0].1.trim(),
+        "a",
+        "the parameter names are the macro's own"
+    );
+}
+
+/// **An object-like macro is not a call.**
+#[test]
+fn an_object_like_macro_is_not_a_signature() {
+    let source = "\
+#define LIMIT 10
+int f() { return LIMIT|; }
+";
+    assert!(
+        macro_signature_where_marked(source).is_none(),
+        "`LIMIT` is not a call"
+    );
+}

@@ -92,6 +92,14 @@ pub fn signatures_at<F>(
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
+    // **A macro call exists only in the file's own text.** The engine reads a *rendering*, and a macro is expanded
+    // there: `ADD(1, |)` is `((1) + ())`, so `call_around` finds no call and every macro's popup was empty — the
+    // shape every C project's `ASSERT(x, msg)` and most C++ projects' formatting macros use. The written text still
+    // has the macro in it, and so does the `#define` that declares its parameters; both are read below.
+    if let Some(signature) = a_macro_signature(index, view, offset, &mut view_of) {
+        return vec![signature];
+    }
+
     // **Direct initialization is a constructor call the grammar does not spell as one.** `LuaParser p(file, tokens);`
     // parses as a *declaration* whose declarator holds a parameter list, so `call_around` finds no call and the popup
     // was empty on the most ordinary line of C++ there is — measured on a real project (`CodeFormat.cpp:72`,
@@ -451,6 +459,165 @@ fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
     }
 
     constructors
+}
+
+/// **The signature of a function-like macro call**, read from the file's own text and from its `#define`.
+///
+/// # Why the written text, and not the rendering
+///
+/// The engine below asks a *rendering* for the call around the cursor, and a rendering has already expanded every
+/// macro: `ADD(1, |)` is `((1) + ())` there, so there is no call to describe. The file's own text still has the macro
+/// in it, and so does the `#define` that declares its parameters.
+///
+/// # The name, and the rule that decides whether it is a macro
+///
+/// The `(` enclosing the cursor is found by scanning backwards with a depth counter (the text is the reader's, so
+/// the innermost unclosed `(` is the call being typed). The word before it is the candidate name, and the index
+/// answers whether that name is a **function-like macro in force at the call** — the preprocessor's own question,
+/// asked with the preprocessor's own rule. Only when it is does this pay for reading another file's text.
+///
+/// A macro name is never qualified, so a `.`/`->`/`::` in front of it is not part of it; the scan takes the
+/// identifier-shaped run only, which is what keeps `obj.MACRO(` from being treated as a macro of that spelling.
+pub(crate) fn a_macro_signature<F>(
+    index: &ProjectIndex,
+    view: &FileView,
+    in_the_file: usize,
+    view_of: &mut F,
+) -> Option<CallSignature>
+where
+    F: FnMut(&Path) -> Option<FileView>,
+{
+    let text = view.written_text().unwrap_or(&view.source);
+    let before = text.get(..in_the_file)?;
+
+    // **The innermost unclosed `(` before the cursor** — the call being typed, in the reader's own text.
+    let mut depth = 0i32;
+    let mut open = None;
+    for (at, character) in before.char_indices().rev() {
+        match character {
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' => {
+                if depth == 0 {
+                    if character == '(' {
+                        open = Some(at);
+                    }
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+
+    // The word immediately before the `(`.
+    let head = before.get(..open)?;
+    let end = head.trim_end().len();
+    let start = head[..end]
+        .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .map(|at| at + 1)
+        .unwrap_or(0);
+    let name = &head[start..end];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+
+    let Known::Yes(found) = index.macro_definition(name, &view.path, in_the_file) else {
+        return None;
+    };
+    if !found.fact.function_like {
+        // An object-like macro is not a call.
+        return None;
+    }
+
+    // **The declaring text, where the `#define` is written.** A view of another file keeps its written text beside
+    // the rendering's, which is exactly what a macro question needs; a plain view's `source` is that text already.
+    let declared_in_the_text: String = if found.file == view.path {
+        text.to_string()
+    } else {
+        let other = view_of(&found.file)?;
+        other
+            .written_text()
+            .map(str::to_string)
+            .unwrap_or_else(|| other.source.to_string())
+    };
+    // From the macro's own name to its parameter list: the `(` is the first after the name.
+    let tail = declared_in_the_text.get(found.fact.range.start_offset..)?;
+    let name_end = name.len().min(tail.len());
+    let list_open = tail[name_end..].find('(')? + name_end;
+    let list_close = matching_paren(tail, list_open)?;
+    let inside = &tail[list_open + 1..list_close];
+
+    // **The parameters, split where the preprocessor splits them.** A comma at depth zero is a separator; one inside
+    // `()`/`<>`/`[]` belongs to a type or a default (`pair<int, int>`, `f(a, b)` in a default expression).
+    let mut parameters: Vec<(Range<usize>, String)> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut push = |start: usize, end: usize| {
+        let text = &inside[start..end];
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let leading = text.len() - text.trim_start().len();
+        let from = name.len() + 1 + start + leading;
+        parameters.push((from..from + trimmed.len(), trimmed.to_string()));
+    };
+    for (at, character) in inside.char_indices() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                push(start, at);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    push(start, inside.len());
+
+    // **Which parameter the cursor is in**, counted the same way: a comma at depth zero before it.
+    let mut active = 0usize;
+    let mut depth = 0i32;
+    for character in text.get(open + 1..in_the_file)?.chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => active += 1,
+            _ => {}
+        }
+    }
+
+    Some(CallSignature {
+        label: format!("{name}({inside})"),
+        parameters,
+        active_parameter: Some(active),
+        declared_in: found.file,
+        declared_at: found.fact.range.start_offset,
+        documentation: None,
+    })
+}
+
+/// The `)` that closes the `(` at `open`, in `text`.
+fn matching_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, character) in text[open..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The innermost call whose **arguments** contain `offset`.
