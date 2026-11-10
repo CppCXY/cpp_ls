@@ -517,7 +517,7 @@ impl ScopeWalker<'_> {
             // a storage class, and every consumer that treats an alias as a type — completion, semantic tokens, the
             // signature of a template — is saying the right thing about it. A new kind would have to be taught to all
             // of them to say the same.
-            CppSyntaxKind::ConceptDecl => self.concept_decl(node, scope),
+            CppSyntaxKind::ConceptDecl => self.concept_decl(node, scope, scope),
             // **A `friend` declaration wraps a declaration of its own** — `friend bool operator==(…) { … }` is
             // `FriendDecl { Declaration { … } }` — and nothing walked into it, so an inline friend's parameters and
             // body were bound nowhere: every use of `left`/`right` in the fixture above read as undeclared. The
@@ -962,7 +962,7 @@ impl ScopeWalker<'_> {
     /// along the declarator-to-name path**, which is what keeps it from binding the `b` of `a = b;` — and a
     /// `ConceptDecl` has no declarator at all, so that path finds nothing. The name is the `NameExpr` child, and the
     /// identifier inside it is read directly.
-    fn concept_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
+    fn concept_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId, parameters: ScopeId) {
         let Some(name_expr) = node
             .children()
             .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
@@ -992,6 +992,18 @@ impl ScopeWalker<'_> {
             node,
             cpp_parser::source_range(token.text_range()),
         );
+
+        // **And the constraint is walked inside the parameter list's scope.** `template <typename T> concept Number =
+        // std::integral<T> || …;` — the `T` inside the constraint is that parameter, and nothing walked the constraint
+        // *at all*: this function ended at the binding, so no `T` was ever bound in the constraint's body. Reported
+        // from an editor with a screenshot: the `T`s inside the concept were uncoloured, and the client's own grammar
+        // drew the `>` as `keyword.operator.comparison`. Measured through the semantic tokens: the `T` inside
+        // `std::integral<T>` had no token at all.
+        //
+        // The *name* is bound in `scope` and the *constraint* walked in `parameters`, which is the same split a class
+        // template makes: the class's name belongs where the template was written, and its body belongs where its
+        // parameters are visible.
+        self.items(node, parameters);
     }
 
     /// `typedef int Integer;`.
@@ -1169,10 +1181,21 @@ impl ScopeWalker<'_> {
         template: &CppSyntaxNode,
         scope: ScopeId,
     ) {
+        // **The parameters are in force for the whole declaration, not just for its header.** `scope_at` answers the
+        // *innermost scope whose range contains the offset*, so a range that stopped at the `>` of
+        // `template <typename T>` made `T` invisible everywhere the declaration actually used it — and for a
+        // `concept` there is no body scope below it to inherit the binding, so the constraint's `T` belonged to no
+        // scope at all. Reported from an editor with a screenshot: `template <typename T> concept Number =
+        // std::integral<T> || std::floating_point<T>;` drew nothing on either `T`, so the client's own grammar drew
+        // the `>` as a comparison operator. Measured through the semantic tokens: no token for the `T` inside
+        // `std::integral<T>`.
+        //
+        // The rule is the language's: a template parameter is visible from its declaration to the end of the
+        // template-declaration it introduces. `node` is exactly that span.
         let parameters = self.table.create_scope(
             ScopeKind::TemplateParameters,
             Some(scope),
-            Some(cpp_parser::source_range(template.text_range())),
+            Some(cpp_parser::source_range(node.text_range())),
         );
 
         for list in template
@@ -1222,7 +1245,7 @@ impl ScopeWalker<'_> {
         // Bound in `scope` and not in `parameters`, for the reason the `using` note above gives: a concept declares
         // its name where the template was written, exactly as a class template does.
         if let Some(concept) = first_child(node, CppSyntaxKind::ConceptDecl) {
-            self.concept_decl(&concept, scope);
+            self.concept_decl(&concept, scope, parameters);
             return;
         }
 

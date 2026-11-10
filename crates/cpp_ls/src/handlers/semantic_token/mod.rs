@@ -785,6 +785,36 @@ void f() {
         }
     }
 
+    /// **A concept's parameter is a type parameter inside its own constraint** — reported with a screenshot:
+    /// `template <typename T> concept Number = std::integral<T> || std::floating_point<T>;` drew nothing on the `T`s
+    /// inside the constraint, and the client's own grammar drew the `>` as a comparison operator.
+    ///
+    /// The parse is right (the fixture's `T` sits in `TemplateArgumentList > TemplateArgument > TypeId`), so what is
+    /// asked here is the *classification*: the `template <typename T>` header binds `T` in a parameter scope, and that
+    /// scope has to cover the `= …` constraint as well as the declaration it heads.
+    #[test]
+    fn a_concepts_parameter_is_a_type_parameter_inside_its_constraint() {
+        let text = "\
+template <typename T>
+concept Number = std::integral<T> || std::floating_point<T>;
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        for word in ["std::integral<T>", "std::floating_point<T>"] {
+            let at = text[..text.find(word).expect("the fixture writes it")].len() + word.len() - 2;
+            assert_eq!(
+                at_type.get(&at),
+                Some(&index_of(TypeKind::TypeParameter)),
+                "the `T` in `{word}` is the concept's own parameter"
+            );
+        }
+    }
+
     /// **The four cast operators are keywords**, and they were the one word in the line a client could not colour.
     ///
     /// Reported from an editor with a screenshot: `static_cast<std::size_t>(index)` arrived with a colour on every
@@ -906,12 +936,12 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
             "a client that cannot draw `variableTemplate` is answered with `variable`"
         );
 
-        // **The declaration is coloured and the uses inside a macro's argument list are not**, which is a separate
-        // defect and is recorded rather than asserted away. Measured: `T` in `__is_trivially_destructible(T)` gets no
-        // token, because a call to a name the preprocessor knows as a macro is not classified as an expression — so
-        // a client draws the declaration as a `typeParameter` and the use by whatever TextMate guessed, which is
-        // one name in two colours. The assertion below states the half that works; the other half is the next thing
-        // to fix, and it belongs in the analysis layer where the macro is known.
+        // **The uses inside a macro's argument list are coloured too, and that used to be a recorded defect.**
+        // Measured before the parameter scope's range was fixed: `T` in `__is_trivially_destructible(T)` got no token,
+        // because `scope_at` answers the innermost scope whose *range* contains the offset, and the parameters scope
+        // was created over `template <class T>` alone — so the parameter was invisible past the `>` of its own list.
+        // A client drew the declaration as a `typeParameter` and the use by whatever TextMate guessed: one name in
+        // two colours. It is one colour now, and the assertion below states it rather than excusing it.
         assert_eq!(
             at_type.get(&text.find("T>").expect("the fixture writes it")),
             Some(&index_of(TypeKind::TypeParameter)),
@@ -920,8 +950,8 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         let in_the_macro = text.rfind("(T)").expect("the fixture writes it") + 1;
         assert_eq!(
             at_type.get(&in_the_macro),
-            None,
-            "NOT YET: a template parameter written as a macro's argument gets no token"
+            Some(&index_of(TypeKind::TypeParameter)),
+            "and a use of it inside a macro's argument list is the same parameter"
         );
     }
 
