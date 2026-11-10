@@ -113,6 +113,71 @@ impl CommentSource {
     }
 }
 
+/// **A symbol reference written in a doc comment** — Rust's `` [`Widget::grow`] ``.
+///
+/// C++ has no such syntax, and a documentation comment is where a reader most often wants one: the sentence that
+/// says *"see `Widget::grow`"* is asking for a jump, and every other place a name is written already has one. The
+/// spelling is Rust's because it is unambiguous in prose: an array index (`a[0]`) is not backticked, and a code
+/// span (`` `Widget` ``) has no bracket around it.
+///
+/// `range` is the **target spelling**, between the backticks, in the file's own coordinates. The brackets and
+/// backticks are the syntax around it and are not part of the answer: a consumer that highlights the range draws
+/// the name, and one that resolves it asks about the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocLink {
+    pub range: SourceRange,
+    /// The spelling between the backticks, as written — `Widget::grow`, `std::vector`, `operator==`.
+    pub target: String,
+}
+
+/// Every ``[`target`]`` in one comment's text.
+///
+/// `range` is where that text starts in the file, so the answers come back in the file's coordinates — which is
+/// what every consumer of a doc comment uses (the semantic tokens place them with the VFS's line index, and the
+/// hover and the jump are asked at a file offset).
+///
+/// **Only the backticked form**, deliberately. `[target]` without the backticks is what Rust accepts too, and in a
+/// C++ comment it collides with the most ordinary prose there is: `arr[i]` and `matrix[row][col]` are how a
+/// documentation comment explains an algorithm. The backtick is the whole disambiguator.
+///
+/// A target with whitespace in it is not a symbol name and is not reported: `[`a b`]` is a title, not a link.
+pub fn doc_links(text: &str, range: SourceRange) -> Vec<DocLink> {
+    let mut links = Vec::new();
+    let bytes = text.as_bytes();
+    let mut at = 0usize;
+
+    while let Some(offset) = text[at..].find('[') {
+        let open = at + offset;
+        // `[` then a backtick, or it is prose.
+        if bytes.get(open + 1) != Some(&b'`') {
+            at = open + 1;
+            continue;
+        }
+
+        let start = open + 2;
+        let Some(offset) = text[start..].find('`') else {
+            break;
+        };
+        let close = start + offset;
+        // A closing backtick and then `]`, and at least one character between them.
+        if close == start || bytes.get(close + 1) != Some(&b']') {
+            at = close + 1;
+            continue;
+        }
+
+        let target = &text[start..close];
+        if !target.chars().any(|character| character.is_whitespace()) {
+            links.push(DocLink {
+                range: SourceRange::new(range.start_offset + start, target.len()),
+                target: target.to_string(),
+            });
+        }
+        at = close + 2;
+    }
+
+    links
+}
+
 /// Parse a run of consecutive comments as one documentation block.
 ///
 /// The run becomes a single [`CppSyntaxKind::DocComment`] node whose children are the parsed

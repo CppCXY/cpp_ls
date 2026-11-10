@@ -652,3 +652,34 @@ fn a_realistic_module_unit_yields_its_documentation() {
         "{commands:?}"
     );
 }
+
+/// **A doc comment names the symbols it refers to** — Rust's ``[`Widget::grow`]``, in a C++ comment.
+///
+/// The lexer's doc tokens carry `@param`-style commands; a symbol reference is not a command but a *position*, and
+/// the parser is where a position can be read: the answer is the target's span in the file, which is what a
+/// highlighter draws and what a jump is asked about.
+///
+/// The negative half is the one that matters: `arr[i]` and `matrix[row][col]` are how every comment about an
+/// algorithm is written, and a rule that read `[…]` as a link would underline half of them.
+#[test]
+fn a_doc_comment_names_the_symbols_it_refers_to() {
+    let text = "\
+/// See [`Widget::grow`] and [`std::vector`].
+/// The index `arr[i]` is not a link, and neither is `matrix[row][col]`.
+/// A title [`a b`] is prose.
+void f() {}
+";
+    let links = cpp_parser::doc_links(text, cpp_parser::SourceRange::new(0, text.len()));
+
+    let targets: Vec<&str> = links.iter().map(|link| link.target.as_str()).collect();
+    assert_eq!(targets, vec!["Widget::grow", "std::vector"], "{links:?}");
+
+    // Every answer is a span of the file that slices back to the spelling it names.
+    for link in &links {
+        assert_eq!(
+            &text[link.range.start_offset..link.range.end_offset()],
+            link.target,
+            "the range is the target itself, not the brackets around it"
+        );
+    }
+}
