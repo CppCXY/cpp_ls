@@ -335,6 +335,14 @@ fn the_safe_shapes_are_silent() {
         "int* p = nullptr; int& f() { return *p; }",
         // `*this`'s member outlives the call by the caller's own obligation.
         "struct S { std::string name; std::string_view get() { return name; } };",
+        // **A view of a view.** The local is a `string_view`, and returning a copy of it — or a subrange of it —
+        // copies the pointer and the length, not the bytes. The bytes belong to whatever the view was made from, which
+        // outlives this call; destroying the *view* destroys nothing. Reported from `EmmyLuaCodeStyle`'s
+        // `LuaSource::Slice`, whose body is `std::string_view source = GetSource(); … return source.substr(…)`:
+        // the rule called `source` "a local that is destroyed" and the reader's correct code was underlined.
+        "std::string_view f() { std::string_view v; return v; }",
+        "std::string_view g(); std::string_view f() { std::string_view s = g(); return s.substr(0, 1); }",
+        "std::string_view g(); std::string_view f() { std::string_view s = g(); return s; }",
         // A call whose body nobody can see is not evidence.
         "int& f(); int& g() { return f(); }",
     ];

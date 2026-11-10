@@ -639,3 +639,80 @@ fn what_keeps_the_pump_busy() {
     println!("store stats: {stats:?}");
     println!("words: {}", session.cache_sizes().summaries);
 }
+
+/// **Every check finding for one file of the real project**, with the code, the line and the message.
+///
+/// ```text
+/// $env:CPPLS_CODESTYLE_PROJECT = "E:\EmmyLuaCodeStyle"
+/// $env:CPPLS_FILE = "LuaParser\src\File\LuaSource.cpp"
+/// cargo test --release -p cpp_code_analysis --test codestyle_probe what_the_checks_say_about_a_file -- --ignored --nocapture
+/// ```
+///
+/// A probe because a finding is a fact about the **project's** closure: `std::string_view` in `LuaSource.cpp` is a
+/// view only when the standard library resolved, and every fixture in `tests/lifetime.rs` writes the types without
+/// includes on purpose. This is the reading that says whether a fix holds where the reader saw the defect.
+#[test]
+#[ignore = "a probe, not a test: it prints the checks of one file in the real project"]
+fn what_the_checks_say_about_a_file() {
+    let root = project();
+    let file = std::env::var("CPPLS_FILE")
+        .map(PathBuf::from)
+        .map(|file| {
+            if file.is_absolute() {
+                file
+            } else {
+                root.join(file)
+            }
+        })
+        .unwrap_or_else(|_| {
+            root.join("LuaParser")
+                .join("src")
+                .join("File")
+                .join("LuaSource.cpp")
+        });
+    let text = std::fs::read_to_string(&file).expect("the file reads");
+
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.index_everything();
+    session.did_open(&file, &text);
+    session.index_everything();
+    session.catch_up(&file);
+    session.want_cooked_reading(&file);
+    session.index_everything();
+
+    let Some(found) = session.diagnostics(&file) else {
+        println!(
+            "no diagnostics for {} — the reading is not there",
+            file.display()
+        );
+        return;
+    };
+    println!(
+        "{}: {:?}, {} error(s), {} check finding(s)",
+        file.display(),
+        found.reading,
+        found.errors.len(),
+        found.checks.len()
+    );
+    let line_of = |offset: usize| text[..offset.min(text.len())].matches('\n').count() + 1;
+    for finding in &found.checks {
+        println!(
+            "  line {:>4}  {:?}  {}",
+            line_of(finding.range.start_offset),
+            finding.code,
+            finding.message
+        );
+    }
+    for error in &found.errors {
+        println!(
+            "  line {:>4}  {:?}  {}",
+            line_of(error.start),
+            error.code,
+            error.message
+        );
+    }
+}

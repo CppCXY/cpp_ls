@@ -62,6 +62,11 @@ pub(crate) struct Borrowed {
     pub(crate) through: Option<&'static str>,
     /// Is this the **address** of the referent (`&x`)?
     pub(crate) address_of: bool,
+    /// **Is the local the borrow comes from itself a view?** A `string_view` local owns no bytes: handing out a copy of
+    /// it, or a subrange of it, copies a pointer and a length, so destroying it destroys nothing and `dangling-return`
+    /// must not call it "a local that is destroyed". Measured on `EmmyLuaCodeStyle`'s `LuaSource::Slice`
+    /// (`std::string_view source = GetSource(); … return source.substr(…)`), whose correct code was underlined.
+    pub(crate) owner_is_a_view: bool,
 }
 
 /// **A view type, by the name every library spells it with.**
@@ -171,6 +176,8 @@ pub(crate) fn origin_of(
                 description,
                 through: None,
                 address_of: false,
+                owner_is_a_view: origin == Origin::Local
+                    && the_binding_is_a_view(context, &binding),
             })
         }
         // `x.member` is a subobject of what `x` is: the local dies with its member. `v[i]` is an element of `v`, which is the
@@ -192,6 +199,7 @@ pub(crate) fn origin_of(
             description: "this".to_string(),
             through: None,
             address_of: false,
+            owner_is_a_view: false,
         }),
         CppExpr::UnaryExpr(unary) => {
             let operator = unary.get_operator_text();
@@ -271,6 +279,7 @@ pub(crate) fn origin_of(
                 description: literal.syntax().text().to_string(),
                 through: None,
                 address_of: false,
+                owner_is_a_view: false,
             })
         }
         _ => Some(unknown(expression.text().to_string())),
@@ -299,12 +308,42 @@ fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &crate::Bindi
         .is_some_and(|declarator| declarator.is_a_reference())
 }
 
+/// **Is the declaration that binds this name itself a view?**
+///
+/// A `std::string_view` local owns no bytes: a copy of it, and a subrange of it, are a pointer and a length, so
+/// destroying the local destroys nothing and handing one out is not a defect. `dangling-return` reports a local
+/// *owner* handed out as a view (`std::string s; return s;`), and this is the test that keeps it from reporting the
+/// other shape — measured on `EmmyLuaCodeStyle`'s `LuaSource::Slice`, which is
+/// `std::string_view source = GetSource(); … return source.substr(…)`.
+///
+/// The declaration is found the way [`declared_static`] finds it: the innermost declaration containing the name.
+fn the_binding_is_a_view(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+    let name_start = binding.name_range.start_offset;
+    let declaration = context
+        .own::<cpp_parser::CppDeclaration>()
+        .filter(|declaration| {
+            let range = declaration.syntax().text_range();
+            usize::from(range.start()) <= name_start && name_start < usize::from(range.end())
+        })
+        .max_by_key(|declaration| usize::from(declaration.syntax().text_range().start()));
+    let Some(specifiers) = declaration.and_then(|declaration| declaration.get_decl_specifiers())
+    else {
+        return false;
+    };
+    let written = specifiers
+        .get_type_name()
+        .map(|name| name.get_qualified_name())
+        .unwrap_or_else(|| specifiers.get_type_text());
+    view_name_of(&written).is_some()
+}
+
 fn unknown(description: String) -> Borrowed {
     Borrowed {
         kind: Origin::Unknown,
         description,
         through: None,
         address_of: false,
+        owner_is_a_view: false,
     }
 }
 
@@ -314,6 +353,7 @@ fn temporary(expression: &cpp_parser::CppSyntaxNode) -> Borrowed {
         description: expression.text().to_string(),
         through: None,
         address_of: false,
+        owner_is_a_view: false,
     }
 }
 

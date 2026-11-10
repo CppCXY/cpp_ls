@@ -116,6 +116,12 @@ impl Check for DanglingReturn {
                 }
             } else if let Some(view) = view.as_deref() {
                 match borrowed.kind {
+                    // **A view of a view is not a dangling view.** The local is itself non-owning, so a copy of it — or
+                    // a subrange of it — carries a pointer and a length that outlive the local; what it points into is
+                    // whatever the view was made from, which this function never owned. Reported from
+                    // `EmmyLuaCodeStyle`'s `LuaSource::Slice`: `std::string_view source = GetSource(); return
+                    // source.substr(…)` was underlined as "a local that is destroyed".
+                    Origin::Local if borrowed.owner_is_a_view => None,
                     Origin::Local => Some(format!(
                         "the returned `{view}` refers to `{name}`, a local that is destroyed when the function \
                          returns",
