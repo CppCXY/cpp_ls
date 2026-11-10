@@ -348,7 +348,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             };
             let Some(fact) = include_fact(
                 &spanned.directive,
-                spanned.range,
+                spanned.line,
                 directory,
                 &resolver,
                 &mut interner,
@@ -846,7 +846,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 .filter_map(|spanned| {
                     include_fact(
                         &spanned.directive,
-                        spanned.range,
+                        spanned.line,
                         directory,
                         &resolver,
                         &mut interner,
@@ -1023,7 +1023,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 .filter_map(|spanned| {
                     include_fact(
                         &spanned.directive,
-                        spanned.range,
+                        spanned.line,
                         directory,
                         &resolver,
                         &mut interner,
@@ -1270,7 +1270,9 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             // An `#undef` has no value: the name stops being a macro, which is the whole of what it says.
             value: None,
             alias: None,
-            range: spanned.range,
+            // **The directive's own line**, as for an #include: the tree's span runs on through the newline and the
+            // comment under it, and a jump to an #undef should land on the line that wrote it.
+            range: spanned.line,
             body_range: None,
             guard: crate::summary::FactGuard::Unconditional,
             settles_the_name: false,
@@ -1721,6 +1723,13 @@ use crate::preprocess::directive::fold_quoted_header_names;
 ///
 /// A resolution failure is not an error here: an include that was not found is stored with its spelling and no
 /// path, which is what a consumer needs to report "cannot find `widget.h`" rather than to hide it.
+/// One `#include` of a file, as a fact — see [`IncludeFact`].
+///
+/// `range` is **the directive's own line**, not the span the tree gives it: a [`SpannedDirective::range`] runs
+/// through the trailing trivia to the next real token, so it swallows the newline, any blank lines and the comment
+/// before the following line — and a diagnostic drawn on that range underlines the next line too. Measured from an
+/// editor: `#include <asio.hpp>` on line 4 and a URL comment on line 5 were squiggled by one `include-not-found`.
+/// [`SpannedDirective::line`] is the same directive without that trivia, and it is what a fact's range should be.
 fn include_fact<F: FileProvider>(
     directive: &Directive,
     range: cpp_parser::SourceRange,
@@ -2503,7 +2512,7 @@ mod tests {
             .filter_map(|spanned| {
                 include_fact(
                     &spanned.directive,
-                    spanned.range,
+                    spanned.line,
                     Path::new("/p"),
                     &resolver,
                     &mut interner,

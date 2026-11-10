@@ -333,6 +333,146 @@ void Widget::grow(int by) {
         "the class's own members come from the file that declares them: {offered:?}"
     );
 }
+/// **A macro from a header ranks as a header's, not as the reader's own.**
+///
+/// Reported as "`nullptr` is not in the completion list": in a file including four standard headers, the macro tail
+/// was filed with `NameProvenance::ThisFile` — every macro, including the ones from `<atomic>` — so a hundred and
+/// fifty MSVC names tied with the reader's own locals and ranked **above every keyword**. Measured at an argument of
+/// such a file, `nullptr` was item **102 of 266**; it is **59 of 238** now, and typing `nul` puts it first.
+///
+/// Two claims, because they failed for two reasons: the ranking (a keyword must come before a header's macro), and
+/// the identity (a macro's `(file, offset)` must name the header that wrote it, or `completionItem/resolve` reads a
+/// declaration at that offset in the *cursor's* file).
+#[test]
+fn a_header_s_macro_ranks_after_a_keyword_and_names_its_own_file() {
+    const HEADER: &str = "#define FROM_THE_HEADER 1\n";
+    const SOURCE: &str = "\
+#include \"h.h\"
+int main() {
+    
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/h.h", HEADER)
+        .with_file("/p/a.cpp", SOURCE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/h.h"),
+    ]);
+    session.index_everything();
+
+    let at = SOURCE.find("\n    \n").expect("the blank line") + 5;
+    let labels = labels_at(&mut session, "/p/a.cpp", at);
+    let keyword = position(&labels, "nullptr");
+    let macro_at = position(&labels, "FROM_THE_HEADER");
+    assert!(
+        keyword < macro_at,
+        "a keyword is something the reader can always write; a header's macro is not nearer than it: \
+         `nullptr` at {keyword}, `FROM_THE_HEADER` at {macro_at}"
+    );
+
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    let offered = match session.name_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    ) {
+        Known::Yes(found) => found,
+        other => panic!("a blank cursor in a body is answerable: {other:?}"),
+    };
+    let macro_name = offered
+        .names
+        .iter()
+        .find(|name| name.fact.name == "FROM_THE_HEADER")
+        .expect("the header's macro is offered");
+    assert_eq!(
+        macro_name.file,
+        std::path::PathBuf::from("/p/h.h"),
+        "a macro's identity is the file that wrote it, or the item resolves against a stranger"
+    );
+}
+
+/// **A `std::` list does not begin with the implementation's own names** — the reader's rule, asked for with a
+/// screenshot.
+///
+/// The reserved-name rule already existed, but only on the **unqualified** list: a written scope (`std::`) is answered
+/// straight from the scope's declarations, so `_Adl_verify_range`, `_Add_alloc_size` and `_Adjust_manually_vector_aligned`
+/// — MSVC's internals — filled the list of a reader typing `std::`. The rule asked for is the reader's own: **if what
+/// has been typed does not begin with `_`, do not offer what does**; typing `_` brings them back, which is what keeps
+/// every one of them reachable for somebody who has a reason to reach for one.
+#[test]
+fn a_scope_list_does_not_open_with_the_implementations_names() {
+    const FIXTURE: &str = "\
+namespace std {
+    void _Adl_verify_range();
+    void _Add_alloc_size();
+    void swap();
+    void sort();
+}
+int main() {
+    std::
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+
+    let bare = labels_at(
+        &mut session,
+        "/p/a.cpp",
+        FIXTURE.find("std::").expect("the fixture") + 5,
+    );
+    assert!(
+        bare.iter().any(|label| label == "swap"),
+        "the scope's ordinary names are offered: {bare:?}"
+    );
+    assert!(
+        !bare.iter().any(|label| label.starts_with('_')),
+        "and none of the implementation's: {bare:?}"
+    );
+
+    // **Typing the underscore brings them back**, which is what makes the rule safe rather than a hole.
+    const ASKED: &str = "\
+namespace std {
+    void _Adl_verify_range();
+    void swap();
+}
+int main() {
+    std::_
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", ASKED);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+    let asked = labels_at(
+        &mut session,
+        "/p/a.cpp",
+        ASKED.find("std::_").expect("the fixture") + 6,
+    );
+    assert!(
+        asked.iter().any(|label| label == "_Adl_verify_range"),
+        "a reader typing `_` is asking for exactly these: {asked:?}"
+    );
+}
+
 /// **The names the implementation owns are not offered**, and the user's own underscored names still are.
 ///
 /// The standard's three rules (`__name`, `_Name`, `_name` in the global name space), applied where a *suggestion*

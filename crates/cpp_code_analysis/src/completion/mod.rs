@@ -989,6 +989,11 @@ fn members(
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for member in &members.members {
+        // **A name the implementation owns is not offered to a reader who is not typing one.** See
+        // [`reserved_for_the_implementation`] for the rule and the screenshot behind it.
+        if reserved_for_the_implementation(&member.fact.name, &prefix) {
+            continue;
+        }
         // **A member the reader cannot name is not offered** — and that decision is the *query's*, not this
         // layer's: `member_completions_at` compares each member's access level with the classes the cursor is in
         // and reports what it kept out (`MemberCompletions::hidden_by_access`). Filtering here as well would be a
@@ -1103,6 +1108,20 @@ struct MemberAnswer {
     set: CompletionSet,
     /// A sentence for a log line: what was looked up and what came back.
     why: String,
+}
+
+/// **A name whose spelling the implementation reserved, offered to a reader who is not typing one.**
+///
+/// Reported with a screenshot: typing `_ser` in a project file produced a list that began
+/// `_Adl_verify_range`, `_Add_alloc_size`, `_Adjacent_difference_no_overlap`, `_Adjust_manually_vector_aligned` —
+/// MSVC's `std` internals, which are not names a program may write. The rule asked for is the reader's own: **if what
+/// has been typed does not begin with `_`, do not offer what does**.
+///
+/// It is a *filter* and not a ranking, because a list of forty internals pushes the four names the reader wanted past
+/// the budget: on a `std::` completion the reserved names are the majority. Typing `_` brings them back, which is what
+/// makes it safe — every one of them is still reachable when somebody has a reason to reach for one.
+fn reserved_for_the_implementation(name: &str, typed: &str) -> bool {
+    name.starts_with('_') && !typed.starts_with('_')
 }
 
 /// The names visible at a cursor, from the scope tree and the index.
@@ -1227,6 +1246,12 @@ fn names(
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
             for offered in &listed.names {
+                // **A name the implementation owns is not offered to a reader who is not typing one.** This is what
+                // kept the `std::` list full of `_Adl_verify_range`, `_Add_alloc_size`, `_Allocate_at_least_helper` —
+                // reported with a screenshot from an editor. See [`reserved_for_the_implementation`].
+                if reserved_for_the_implementation(&offered.fact.name, &listed_prefix) {
+                    continue;
+                }
                 // The query hides what an inner scope hides. What it cannot hide is one spelling listed twice by
                 // *two files* — a namespace two headers reopen, a declaration and its redeclaration — and the list
                 // is a list of things to type.

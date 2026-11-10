@@ -236,6 +236,43 @@ fn include_not_found_is_reported_for_a_header_nobody_has() {
     );
 }
 
+/// **The underline is the `#include` line, not the line after it.**
+///
+/// Reported from an editor with a screenshot: `#include <asio.hpp>` on line 4 and a URL comment on line 5 were
+/// squiggled by **one** `include-not-found`, so the message looked like it was about the comment. The range came from
+/// the directive's tree span, which runs through the trailing trivia to the next real token — the newline, blank
+/// lines and the comment under them — where the directive's own line ends at its last real token.
+#[test]
+fn an_unresolved_include_is_underlined_on_its_own_line() {
+    const SOURCE: &str = "#include <asio.hpp>\n// https://stackoverflow.com/questions/1598985/c-read-binary-stdin\n\
+                          #ifdef _WIN32\n#include <fcntl.h>\n#endif\nint main() { return 0; }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    let path = std::path::Path::new("/p/a.cpp");
+    session.add_project_files([std::path::PathBuf::from(path)]);
+    session.want_cooked_reading(path);
+    session.index_everything();
+    let found = session.diagnostics(path).expect("a cooked reading");
+
+    let underlined: Vec<&str> = found
+        .checks
+        .iter()
+        .filter(|finding| finding.code == DiagnosticCode::IncludeNotFound)
+        .map(|finding| &SOURCE[finding.range.start_offset..finding.range.end_offset()])
+        .collect();
+    assert_eq!(
+        underlined,
+        vec!["#include <asio.hpp>", "#include <fcntl.h>"],
+        "one finding per directive, each on its own line — and never the comment under it: {underlined:?}"
+    );
+}
+
 #[test]
 fn macro_redefined_is_reported_for_a_second_different_definition() {
     let codes = codes_of("#define MAX 10\n#define MAX 20\nint main() { return MAX; }\n");

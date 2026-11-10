@@ -147,6 +147,13 @@ use std::path::{Path, PathBuf};
 /// reported the initialisation as a conversion "from `int` to `void`". The bytes are unchanged, so an old entry decodes
 /// happily and keeps the wrong type — the case this constant is for.
 ///
+/// # Why this moved to 16
+///
+/// **An `#include`'s range is the directive's own line**, where it used to be the tree's span: that one runs through
+/// the trailing trivia to the next real token, so `include-not-found` underlined the comment *under* the directive as
+/// well (reported from an editor with a screenshot). The bytes are unchanged, so an old entry decodes happily and
+/// keeps the wide range — and the diagnostic stays two lines tall until the file is re-read.
+///
 /// # Why this moved to 15
 ///
 /// **`T x(a, b);` is read as an initialisation when `a` is a value** (the most vexing parse, resolved by lookup), and a
@@ -170,7 +177,7 @@ use std::path::{Path, PathBuf};
 /// unchanged, so an entry from before this bump decodes happily and keeps the answer — measured: the stale `C:\p\.cppls`
 /// of the `/p` fixtures made `a_function_with_no_written_return_type_states_one_in_its_body` fail for a fix that was in the
 /// binary, and pass on a cold cache.
-pub const FORMAT_VERSION: u32 = 15;
+pub const FORMAT_VERSION: u32 = 16;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

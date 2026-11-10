@@ -3313,9 +3313,21 @@ pub fn name_completions_at(
         // resolve looked up `int main()` and the popup showed `FULL_NAME_FORMAT` with the detail
         // **`int ()`**. Measured twice: once before the clone's fields were cleared, and again
         // after they were, because the range was the field nobody had replaced.
-        let mut offered_macros: Vec<(&str, bool, cpp_parser::SourceRange)> = Vec::new();
+        // **The macro's own file, not the file that includes it.** A `#define` in `<atomic>` is a fact of `<atomic>`:
+        // the identity a client echoes back to `completionItem/resolve` is a `(file, offset)` pair, so filing a
+        // header's macro under the cursor's file pointed at an offset in a *different* file. And the provenance is
+        // what the ranking reads — every one of these used to be `ThisFile`, which made a hundred MSVC macros tie
+        // with the reader's own locals and rank **above `nullptr` and every other keyword**: measured at an argument
+        // of a file including `<atomic>`, `<bitset>`, `<chrono>` and `<complex>`, the list opened with
+        // `ATOMIC_BOOL_LOCK_FREE` and `nullptr` was past the twentieth item. See `NameProvenance` for the tiers.
+        let mut offered_macros: Vec<(&str, bool, cpp_parser::SourceRange, &Path)> = Vec::new();
         for fact in &summary.macros {
-            offered_macros.push((fact.name.as_str(), fact.function_like, fact.range));
+            offered_macros.push((
+                fact.name.as_str(),
+                fact.function_like,
+                fact.range,
+                &summary.path,
+            ));
         }
         for include in &summary.includes {
             let Some(resolved) = &include.resolved else {
@@ -3325,13 +3337,18 @@ pub fn name_completions_at(
                 continue;
             };
             for fact in &included.macros {
-                offered_macros.push((fact.name.as_str(), fact.function_like, fact.range));
+                offered_macros.push((
+                    fact.name.as_str(),
+                    fact.function_like,
+                    fact.range,
+                    included.path.as_path(),
+                ));
             }
         }
         offered_macros.sort_by(|left, right| left.0.cmp(right.0));
         offered_macros.dedup_by(|left, right| left.0 == right.0);
 
-        for (name, function_like, range) in offered_macros {
+        for (name, function_like, range, written_in) in offered_macros {
             if !position.written.is_empty() && !name.starts_with(&position.written) {
                 continue;
             }
@@ -3370,11 +3387,15 @@ pub fn name_completions_at(
             // **A function-like macro is offered with its parenthesis**, which is the only hint a completion item can carry
             // about how it is used: `MAX(` tells the reader the name takes arguments, and `MAX` alone does not.
             declaration.parameter_list = function_like.then(|| "(".to_string());
+            let ours = written_in == summary.path.as_path();
             names.push(OfferedName {
-                file: path.to_path_buf(),
+                file: written_in.to_path_buf(),
                 fact: declaration,
                 depth: 0,
-                from: NameProvenance::ThisFile,
+                from: match ours {
+                    true => NameProvenance::ThisFile,
+                    false => NameProvenance::DirectInclude,
+                },
             });
         }
     }
