@@ -35,10 +35,7 @@ struct State {
 
 /// Is the instrument on? Read once; a probe variable set to nothing is off.
 fn on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("CPPLS_PARSER_STATS").is_some_and(|value| !value.is_empty())
-    })
+    crate::probes::stats()
 }
 
 /// **Time one run of a phase**, from construction to drop.
