@@ -6684,3 +6684,93 @@ struct Widget {
         "and it starts where the target does (line 1, character 14): {data:?}"
     );
 }
+
+/// **A documentation comment's prose offers no code**, and its ``[`…`]`` offers names — asked over the wire.
+///
+/// Reported from an editor: typing in a `///` comment produced the file's classes and functions as completions.
+/// The answer has to be "nothing" in prose — a comment is not a place a C++ name goes — while a symbol reference is
+/// exactly the place one does, which is why the two positions are asked separately here.
+#[test]
+fn a_documentation_comment_offers_code_only_inside_a_link() {
+    const SOURCE: &str = "\
+struct Widget { int grow; };
+/// Hello w
+/// See [`Wid
+void f() {}
+";
+    let project = Project::new("doc-complete");
+    project.write("a.cpp", SOURCE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "completion": { "completionItem": { "snippetSupport": false } } } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    // --- prose: `/// Hello w` — the cursor is at the end of the line ------------------------------------------
+    let prose = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": 1, "character": 11 } },
+        })
+    });
+    let empty: Vec<serde_json::Value> = Vec::new();
+    let items = prose["result"]["items"].as_array().unwrap_or(&empty);
+    assert!(
+        items.is_empty(),
+        "a comment's prose is not a place a code name goes, and this offered {} item(s): {:?}",
+        items.len(),
+        items
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .take(8)
+            .collect::<Vec<_>>()
+    );
+
+    // --- inside the link: `/// See [`Wid` — a name belongs here --------------------------------
+    let link = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": { "textDocument": { "uri": uri }, "position": { "line": 2, "character": 13 } },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("Widget")))
+        },
+    );
+    let items = link["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        items.iter().any(|item| item["label"] == json!("Widget")),
+        "a symbol reference completes the project's names: {link}"
+    );
+    // …and it completes **names**, not statements: a link takes a symbol, and a snippet is not one.
+    for snippet in ["class", "dowhile", "forr", "function"] {
+        assert!(
+            !items.iter().any(|item| item["label"] == json!(snippet)),
+            "`{snippet}` is a snippet, and a reference wants a name: {link}"
+        );
+    }
+}

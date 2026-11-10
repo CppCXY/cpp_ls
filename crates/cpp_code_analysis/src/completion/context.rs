@@ -128,6 +128,19 @@ pub enum CompletionContext {
     },
     /// Prose, or a position where nothing can be written.
     Nothing,
+    /// **A symbol reference in a documentation comment** — the target of ```[`Widget::grow`]```, while it is being
+    /// typed.
+    ///
+    /// The one place inside a comment where a *program* name belongs: the prose around it wants nothing, and the
+    /// reference wants the names this file can see. A link takes a **name**, not a statement, so the answer is the
+    /// name list without the keyword/snippet table — `class` and `dowhile` are what a code position offers and what a
+    /// reference must not.
+    DocLink {
+        /// What has been typed of the target: `Wid`, or `Widget::gr`.
+        written: String,
+        /// The span `written` covers, which is what a client replaces.
+        range: SourceRange,
+    },
 }
 
 /// The context at `offset`, read from the tree.
@@ -281,6 +294,33 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
     };
     if !inside_a_documentation_block {
         return None;
+    }
+
+    // **A symbol reference's target**, which is the one position in a comment where a program name belongs.
+    //
+    // ```cpp
+    // /// See [`Wid|`] and [`Widget::gr|`]     ← a name
+    // /// See it in| prose                     ← nothing
+    // ```
+    //
+    // Decided on the line's text, for the reason the command question is: an unfinished link is not the tree's shape,
+    // and the `` [` `` opener plus a cursor before the closing backtick is what "inside the target" means. Asked
+    // **before** the command questions, because a `@` in front of a link is prose (`@see [`x`]` — `see` is the
+    // command and the link after it is its argument).
+    if let Some(opened) = before[line_start..].rfind("[`") {
+        let target_start = opened + 2;
+        let typed = &line[target_start..];
+        if !typed.contains('`') && !typed.contains(']') {
+            let written = typed.trim();
+            return Some(CompletionContext::DocLink {
+                written: written.to_string(),
+                // The word the client replaces is the one being typed, not the indentation before it.
+                range: SourceRange::new(
+                    line_start + target_start + typed.len() - typed.trim_start().len(),
+                    written.len(),
+                ),
+            });
+        }
     }
 
     // **A command's own name**: an `@` (or Doxygen's `\`) and the word after it, with the cursor still in it.

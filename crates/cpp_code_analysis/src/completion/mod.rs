@@ -537,7 +537,46 @@ pub fn completion_with(
             range,
             wants,
         } => doc_comments(index, path, &written, range, wants),
+        CompletionContext::DocLink { written, range } => doc_link_names(
+            index, scopes, root, path, &written, range, cuda, budget, unincluded,
+        ),
     }
+}
+
+/// **What a documentation reference may name** — the names this file can see, without the keyword table.
+///
+/// A link takes a *symbol*: `class` and `dowhile` are what a statement position offers, and offering them inside
+/// ``[`…`]`` is the same mistake as offering them in the prose around it. `with_table` is the switch that decides
+/// that, so it is passed `false` here and nothing else changes.
+///
+/// A qualified prefix is split off — `Widget::gr` asks about the scope `Widget`, which is what the index can answer.
+///
+/// The lookup is asked at the rendering's **start**: a link has no reading position, because a comment is trivia and
+/// the cook removes it, and the first byte of a translation unit is the one place whose enclosing scope is the file
+/// itself — which is the question "what can this file name".
+fn doc_link_names(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    written: &str,
+    range: SourceRange,
+    cuda: bool,
+    budget: usize,
+    unincluded: &[Unincluded],
+) -> CompletionSet {
+    let (scope, written) = match written.rsplit_once("::") {
+        Some((scope, rest)) => (scope.to_string(), rest.to_string()),
+        None => (String::new(), written.to_string()),
+    };
+    let position = crate::sema::resolve::NamePosition {
+        scope,
+        written,
+        range,
+    };
+    names(
+        index, scopes, root, path, &position, 0, false, cuda, budget, unincluded,
+    )
 }
 
 /// **What the completion made of a cursor** — the one diagnosis this layer is worth logging.

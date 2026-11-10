@@ -9618,7 +9618,15 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
-        if let Some(written) = view.written_text() {
+        // **A comment is prose in whichever reading answered.** The check below used to live inside the
+        // `written_text` branch, which meant a file with **no rendering yet** — a buffer just opened, and every file
+        // `inspect` asks about — was never asked whether the cursor is in a comment at all: measured, `inspect
+        // complete` in `/// Hello w` answered the file's classes and functions, and the same happens in an editor
+        // between opening a file and the cook finishing. So the text is chosen once, and the tree whose text it is
+        // is the view's own for a file view and a parse of the written text for a rendering.
+        let written_text = view.written_text();
+        let text: &str = written_text.unwrap_or(&view.source);
+        {
             // **A documentation comment is prose to the renderer and a language of its own to a reader.**
             //
             // The refusal below is right for every other question — a `w.` in a comment is a member access only to
@@ -9628,10 +9636,17 @@ impl<F: FileProvider + Clone> Session<F> {
             // is editing: same shortcut as a `#include`, and for the same reason.
             //
             // Asked before `in_prose`, which is the line that would otherwise turn the whole of a comment away.
-            let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
-            let written_root = tree.get_red_root();
-            if let Some(context @ crate::completion::CompletionContext::DocComment { .. }) =
-                crate::completion::doc_comment_at(&written_root, offset.get())
+            let written_root = match written_text {
+                Some(written) => {
+                    cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default())
+                        .get_red_root()
+                }
+                None => view.root.clone(),
+            };
+            if let Some(
+                context @ (crate::completion::CompletionContext::DocComment { .. }
+                | crate::completion::CompletionContext::DocLink { .. }),
+            ) = crate::completion::doc_comment_at(&written_root, offset.get())
             {
                 return crate::completion::completion_with(
                     self.store.index(),
@@ -9651,7 +9666,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
             }
 
-            if crate::file::view::in_prose(written, offset.get()) {
+            // **A documentation comment's prose offers nothing**, and it is asked of the text rather than of the
+            // lexer's tokens: a backtick is not a C++ token, so `` /// See [`Wid `` arrives as a comment followed by
+            // an unrecognised character and an identifier — `in_prose` reads the identifier and answered "code",
+            // which is how a link's question used to reach the code path.
+            if inside_a_documentation_comment(text, offset.get())
+                || crate::file::view::in_prose(text, offset.get())
+            {
                 return crate::CompletionSet::default();
             }
             let context = crate::completion::context_at(&written_root, offset.get());
