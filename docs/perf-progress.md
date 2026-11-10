@@ -183,13 +183,59 @@ They are **counts, not durations**, which is what lets a regression assert them 
 `cargo test --workspace --all-features` on the debug profile, where a latency threshold is noise. The three
 assertions that exist are the three numbers above, and each fails on the behaviour rather than on the clock.
 
-## 8. What is still open
+## 8. Pacing: measured, and there is nothing left to pace
 
-- **Background pacing.** Index workers and the cooking queue still compete with an interactive request; nothing in
-  this round touched the scheduler. The plan's §4 (limit the background pass, prefer the open file) is the next
-  piece.
+The plan's last item is "limit and time-slice the background index and prewarm, and prefer the open file and the
+interactive request". Before changing the scheduler, this is what the scheduler does today, and what it measures.
+
+`crates/cpp_ls/tests/latency.rs` is the harness: a real server over a fixture whose closure is four standard headers,
+twelve completions asked over the wire **while the index is filling**, and the server's own report of the longest it
+held the analysis.
+
+```text
+worst write hold, whole indexing pass      32 ms      (budget 1000 ms; the review's real project: 43 ms)
+completion #0                             ~700 ms     its own render — the file has not been cooked yet
+completion #1 … #11                       4–17 ms      one outlier at 450 ms in some runs (a cook)
+```
+
+So the background does not delay an interactive request on this corpus, and the four mechanisms that make that true
+are already in place, each measured by the round that added it:
+
+| mechanism | where | what it buys |
+|---|---|---|
+| the open file is read before the wave | `initialized`: `next_open_file_to_read` first | the file the reader is looking at is never queued behind the project |
+| the wave is sized by **write-hold time**, not by file count | `prepare_background_wave` + the pump's adaptation | 32 ms of writer per slice, so a request waits at most that |
+| the parse runs under the read lock, on a blocking thread | `run_blocking(prepare_background_wave)` | the write lock holds only the insert |
+| background CPU takes a **query permit** | `render_cooks`, the wave | a background render cannot run beside N requests; it waits for a permit |
+
+The one number that is *not* pacing is the first completion: 700 ms is the file's own cook, paid by the request
+because it arrives before the pump has cooked the file. That is a design gap (clangd answers it from a preamble),
+not a scheduling one, and pretending otherwise would be a scheduler change with no measurement behind it.
+
+### What the measurement did find, and why it was not shipped
+
+`ProjectIndex::visibility_answers` is cleared **whole** when a summary arrives for a path the index has never seen,
+which during a cold index is every insert. The intent is sound (a file that appears on disk can shadow an
+`#include`), and the cost looked like the review's "every completion re-evaluates its closure". A narrowed
+invalidation — the file and its dependents, as the re-read path already uses — was written and measured:
+
+```text
+                     before the change              after it
+completion #0        696 ms                         724 ms
+the slow attempts    #0 696, #2 449                #0 724, #3 450     (they move; the total does not)
+```
+
+The slow attempts are cooks, not memo misses, and the change was **reverted** rather than shipped as an
+unmeasured optimisation. The trace that settles it is `CPPLS_TRACE_TIME=1`, which prints a number only for a walk
+over 500 µs: **neither build printed one**, so no completion in this fixture re-walks its closure — the memo is not
+what the 700 ms is made of.
+
+## 9. What is still open
+
 - **`build_facts` walks the tree five times** — scopes, facts, qualified declarations, frees, reflection — and the
   qualified pass finds ~nothing on the corpora measured (0, 0 and 1 declarations). Folding it into the scope walk is
   the next structural win; see the note on `qualified_declarations`.
 - **`read_the_unit` is still 6.3 s** for a 5 MB program after the parser fix (parse 0.8 s, scopes 1.5 s, facts
   3.4 s of which the per-scope `fact_for` loop is 1.6 s). The next measurement is inside `fact_for`.
+- **The first completion after `didOpen` pays its own cook** (~700 ms on the latency fixture). That is a preamble,
+  not a scheduler, and it is the largest remaining thing a person feels.
