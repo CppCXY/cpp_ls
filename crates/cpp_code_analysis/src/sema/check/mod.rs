@@ -143,6 +143,10 @@ mod use_override;
 pub use config::CheckConfig;
 pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
 
+/// **The checks' behaviour, one diagnostic per test file** — see [`test`].
+#[cfg(test)]
+mod test;
+
 /// **What a check found**, in the form a diagnostics channel shows it.
 ///
 /// A `Finding` is a *claim about a place in a file*, so it carries the span, the code and the sentence together: a
