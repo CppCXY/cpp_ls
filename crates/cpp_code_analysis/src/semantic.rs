@@ -357,6 +357,33 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
             continue;
         }
 
+        // 3b. **A macro an `#include` brought in.** Asked here — before the index-wide name query below — for the same
+        //     reason step 2 is asked before it: the preprocessor sees text, so a name that is a macro in force **is**
+        //     the macro to a reader, and the declaration sharing its spelling is a different thing that happens to be
+        //     spelled the same way.
+        //
+        //     It used to be asked *after* the index, and that is what made one name two colours: reported from an
+        //     editor, `CP_UTF8` — a `#define` in `<windows.h>` — was described by the hover as *a macro whose `#define`
+        //     is inside a conditional block* while the semantic token said `variable`, because the index held some
+        //     declaration of that spelling and the macro was only consulted when the index had nothing to say. The
+        //     file's own `#define`s never had that problem: step 2 precedes the index for exactly this reason.
+        //
+        //     **One walk for the whole file**, not one per spelling, and it is a `OnceCell` — see
+        //     [`ProjectIndex::macro_names_in_force`] for the measurement (521 tokens took 526 ms when it was per
+        //     spelling). Hoisting it means the walk also happens for a file whose every name the index answers; that is
+        //     one walk of the include closure per file, which is the price of the two layers agreeing.
+        let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
+        if included.contains(text) {
+            out.push(Name {
+                range,
+                kind: NameKind::Macro,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: Provenance::Macro,
+            });
+            continue;
+        }
+
         // 4. The index, asked once per spelling — with the name as written, so a qualified one stays qualified.
         let written = qualified
             .get(&at)
@@ -379,32 +406,6 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 modifiers: Vec::new(),
                 provenance: Provenance::Found,
             });
-        }
-
-        // 4b. **A macro an `#include` brought in.** Step 2 answers for the `#define`s this file writes, and a file that
-        //     uses `<gtest/gtest.h>`'s `TEST(…)` or `LuaIdentify.h`'s `lisxdigit(…)` declares neither — measured from an
-        //     editor: both were drawn as ordinary identifiers while hovering them showed the `#define` perfectly, which
-        //     is the analysis saying it knows what the name is and the highlighter never asking.
-        //
-        //     Asked **after** the two resolution steps rather than before them, because the answer costs a walk of the
-        //     include graph and the common case in a header is a name the index can answer — while a macro that
-        //     *shadows* a resolvable name is rare, and keeps the colour of the name it shadows.
-        //
-        //     **One walk for the whole file**, not one per spelling. Measured on this repository's own
-        //     `codeformat.h`: 521 tokens took **526 ms**, because a header mentions a few hundred names that nothing
-        //     in it declares and each of those walked the include graph. The environment is a property of the *file*,
-        //     and [`ProjectIndex::macro_names_in_force`] is where the single walk lives.
-        let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
-        let is_a_macro = included.contains(text);
-        if is_a_macro {
-            out.push(Name {
-                range,
-                kind: NameKind::Macro,
-                declaration: false,
-                modifiers: Vec::new(),
-                provenance: Provenance::Macro,
-            });
-            continue;
         }
 
         // 5. Nothing. No token is emitted: the identifier keeps the client's own colour, which is the honest

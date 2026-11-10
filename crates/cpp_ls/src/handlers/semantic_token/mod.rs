@@ -785,6 +785,60 @@ void f() {
         }
     }
 
+    /// **A macro from a header is a macro**, and the index's declaration of the same spelling does not win.
+    ///
+    /// Reported from an editor with a screenshot: `CP_UTF8` — a `#define` in `<windows.h>`, behind a conditional —
+    /// was described by the hover as *a macro whose `#define` is inside a conditional block* while the semantic token
+    /// said `variable`. One name, two colours, from two layers that disagreed: the macro was only consulted when the
+    /// index had nothing to say, and the index had something.
+    ///
+    /// The rule is the one the file's own `#define`s always had (step 2 of the classifier): the preprocessor sees
+    /// text, so a name that is a macro in force **is** the macro to a reader.
+    #[test]
+    fn a_macro_from_a_header_is_drawn_as_a_macro() {
+        // **A declaration of the same spelling, on purpose.** The defect was a disagreement between two layers, and
+        // one layer needs something to disagree *with*: this enumerator is what the index answers for `CP_UTF8`, and
+        // the macro has to win.
+        let header = "#ifndef CP_UTF8\n\
+                      #define CP_UTF8 65001\n\
+                      #endif\n\
+                      namespace page { enum Codepage { CP_UTF8 = 65001 }; }\n";
+        let text = "#include \"h.h\"\nunsigned page = CP_UTF8;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/h.h", header)
+            .with_file("/p/a.cpp", text);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            std::path::PathBuf::from("/p/a.cpp"),
+            std::path::PathBuf::from("/p/h.h"),
+        ]);
+        session.load("/p/a.cpp");
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
+
+        let path = std::path::PathBuf::from("/p/a.cpp");
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let at = text
+            .rfind("CP_UTF8")
+            .expect("the fixture writes it once as a use");
+        assert_eq!(
+            at_type.get(&at),
+            Some(&index_of(TypeKind::Macro)),
+            "the macro in force is what the reader sees, not a declaration that shares the spelling"
+        );
+    }
+
     /// **A concept's parameter is a type parameter inside its own constraint** — reported with a screenshot:
     /// `template <typename T> concept Number = std::integral<T> || std::floating_point<T>;` drew nothing on the `T`s
     /// inside the constraint, and the client's own grammar drew the `>` as a comparison operator.
