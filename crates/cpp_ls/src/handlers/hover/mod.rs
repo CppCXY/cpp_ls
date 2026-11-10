@@ -1267,14 +1267,21 @@ fn declaration_markdown(
             found.fact.kind,
             cpp_code_analysis::DeclKind::Type | cpp_code_analysis::DeclKind::Namespace
         )
-        && ((found.fact.type_of.is_none()
-            && found.fact.returns.is_none()
-            && found.fact.parameter_list.is_none())
-            // **A binding carries no annotation either.** `UCLASS(Blueprintable)` is read into the fact from the file's
-            // text (`fill_the_reflection`), and a fact built from a *binding* — which is what a hover on the
-            // declaration's own name gets — has none of it. The index's fact is the one with it, so it is asked for
-            // whenever the field is missing.
-            || found.fact.reflection.is_none())
+        // **Nothing to render at all**, which is what a *binding* leaves behind: a binding is a place to jump to and
+        // carries no type, no return type, no parameter list and no annotation.
+        //
+        // **`||` here was a defect, and this is the line the whole `std::optional<V>` report ended at.** The
+        // annotation clause was the last one written, and as a disjunction it made the re-ask true for **every** fact
+        // without a reflection annotation — which is every ordinary declaration — so a fact that already had
+        // everything was thrown away and the *index's* copy asked for. The copy is unsubstituted by construction:
+        // `ProjectIndex::definition` answers the spelling the class wrote, while the caller here had a member list
+        // whose `Box<int>` arguments had already been substituted through it. Measured: `members_of("Box<int>")`
+        // answered `returns: Some("std::optional<int>")`, and the card printed `std::optional<V>` because of this
+        // `||`. A conjunction asks exactly the question the comment asks — "does this fact have nothing at all".
+        && found.fact.type_of.is_none()
+        && found.fact.returns.is_none()
+        && found.fact.parameter_list.is_none()
+        && found.fact.reflection.is_none()
     {
         session
             .index()

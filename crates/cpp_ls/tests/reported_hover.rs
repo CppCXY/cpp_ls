@@ -65,6 +65,67 @@ fn a_member_of_a_class_template_instantiation_is_named() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A member's card speaks in the instance's terms** — `Box<int>::query` returns `std::optional<int>`.
+///
+/// Reported with a screenshot: hovering `box.query(1)` on a `Box<int>` printed `std::optional<V> query(int key)` — the
+/// class's own spelling. The member list the card was built from had already substituted the arguments
+/// (`members_of("Box<int>")` answers `returns: Some("std::optional<int>")`, measured); what lost them was the card's
+/// own re-ask of the index, whose condition was `nothing to render || no annotation` — and every ordinary declaration
+/// has no annotation, so the substituted fact was replaced by the index's unsubstituted copy.
+#[test]
+fn a_member_of_an_instance_answers_in_the_instance_terms() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-instance");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "template <class V>\n\
+                  struct Box {\n\
+                      std::optional<V> query(int key);\n\
+                  };\n\
+                  struct C {\n\
+                      Box<int> box;\n\
+                      void f() {\n\
+                          auto x = box.query(1);\n\
+                      }\n\
+                  };\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("box.query").expect("the use") + "box.".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a member has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("std::optional<int>"),
+        "the arguments are substituted into the member's return type: {text}"
+    );
+    assert!(
+        !text.contains("std::optional<V>"),
+        "and the class's own parameter is not what the reader sees: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `cfoo.call(...)` on a `const Foo` showed the **non-const** `call`, and `Bar`'s `requires`-clause never appeared.
 ///
 /// A class may declare a name twice and tell the two apart by `const` (and by a trailing `requires`). The object's
