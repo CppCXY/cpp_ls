@@ -235,17 +235,33 @@ fn definition_of_a_documentation_link<F: cpp_code_analysis::FileProvider + Clone
         view.written_text().unwrap_or(&view.source),
         in_the_file.get(),
     )?;
-    let Known::Yes(found) = session.index().definition(&target, &view.path) else {
+    // **The spellings a link may add**: ``[`f()`]`` and ``[`MAX!`]`` say what a reader means, and neither the
+    // parentheses nor the bang is part of the name.
+    let target = target.trim_end_matches("()").trim_end_matches('!').trim();
+    if let Known::Yes(found) = session.index().definition(target, &view.path) {
+        let uri = path_to_uri(&found.file)?;
+        let declaring = session.files().held(&found.file)?;
+        return Some(Location {
+            uri,
+            range: Range::new(
+                position_in_file(declaring, found.fact.name_range.start_offset)?,
+                position_in_file(declaring, found.fact.name_range.end_offset())?,
+            ),
+        });
+    }
+
+    // **A macro has no declaration to go to**, so its `#define` is the answer — the same query the handler asks for
+    // a macro use, which reads the file's own text and the macro table.
+    let Known::Yes(found) = session.macro_at_a_file_offset(view, in_the_file) else {
         return None;
     };
-
     let uri = path_to_uri(&found.file)?;
     let declaring = session.files().held(&found.file)?;
     Some(Location {
         uri,
         range: Range::new(
-            position_in_file(declaring, found.fact.name_range.start_offset)?,
-            position_in_file(declaring, found.fact.name_range.end_offset())?,
+            position_in_file(declaring, found.fact.range.start_offset)?,
+            position_in_file(declaring, found.fact.range.end_offset())?,
         ),
     })
 }

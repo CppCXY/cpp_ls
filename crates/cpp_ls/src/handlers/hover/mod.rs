@@ -371,13 +371,26 @@ pub fn hover(
     // program's own answer (a comment declares nothing, so the two cannot collide) and before the command table:
     // a link is the one place a reader expects a card about *another* declaration, and the target is resolved with
     // the same query a jump uses, so the card and the jump cannot disagree.
-    if let Some((range, target)) = doc_link_at(
+    if let Some((_, target)) = doc_link_at(
         view.written_text().unwrap_or(&view.source),
         in_the_file.get(),
-    ) && let Known::Yes(found) = session.index().definition(&target, &view.path)
-    {
-        let _ = range;
-        return Some(markdown(declaration_markdown(session, view, &found, None)));
+    ) {
+        // **The spellings a link may add.** ``[`f()`]`` and ``[`MAX!`]`` say what a reader means — that it is a call,
+        // that it is a macro — and neither is part of the name.
+        let target = target.trim_end_matches("()").trim_end_matches('!').trim();
+        if let Known::Yes(found) = session.index().definition(target, &view.path) {
+            return Some(markdown(declaration_markdown(session, view, &found, None)));
+        }
+        // **A macro has no declaration to name**, so it is the second question rather than a spelling of the first —
+        // the same one the parser asks for a `#define` this file writes.
+        if let Known::Yes(found) = session.macro_at_a_file_offset(view, in_the_file) {
+            return Some(markdown(macro_markdown(
+                session,
+                view,
+                &found,
+                Some(in_the_file),
+            )));
+        }
     }
 
     // **A Doxygen command**, asked of the file's own text: a comment is trivia, so the rendering has none of it —

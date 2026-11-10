@@ -10149,17 +10149,42 @@ impl<F: FileProvider + Clone> Session<F> {
                 if !inside_a_documentation_comment(text, link.range.start_offset) {
                     continue;
                 }
-                let Some(kind) = self
+                // **The two spellings a link may add.** Rust's links are written ``[`f()`]`` and ``[`f!`]`` as well as
+                // ``[`f`]``, and a reader writing C++ prose will do the same — the parentheses say "this is a call",
+                // which is a thing a reader wants to say. They are punctuation around the name, not part of it, so
+                // they are dropped before the lookup and the range still covers what was written.
+                let target = link
+                    .target
+                    .trim_end_matches("()")
+                    .trim_end_matches('!')
+                    .trim();
+                let kind = self
                     .store
                     .index()
-                    .definition(&link.target, &view.path)
+                    .definition(target, &view.path)
                     .value()
                     .and_then(|found| {
                         crate::semantic::kind_of_index(crate::index::project::IndexedKind::of(
                             &found.fact,
                         ))
                     })
-                else {
+                    // **A macro is a name too**, and the index holds no *declaration* for one: `[`MAX`]` names a
+                    // `#define`, which is a fact about text. The environment the file is compiled in is the same
+                    // question the classifier asks for a macro an `#include` brought in, so it is asked rather than
+                    // duplicated.
+                    // **A macro is a name too**, and the index holds no *declaration* for one: `[`MAX`]` names a
+                    // `#define`, which is a fact about text. The environment the file is compiled in is the same
+                    // question the classifier asks for a macro an `#include` brought in, so it is asked rather than
+                    // duplicated — and only for a target the index could not describe, which is what keeps a link to
+                    // an ordinary declaration free.
+                    .or_else(|| {
+                        self.store
+                            .index()
+                            .macro_names_in_force(&view.path)
+                            .contains(target)
+                            .then_some(crate::semantic::NameKind::Macro)
+                    });
+                let Some(kind) = kind else {
                     continue;
                 };
                 names.push(crate::semantic::Name {

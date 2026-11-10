@@ -2332,3 +2332,43 @@ static const char* text = \"[`Widget::grow`] in a string is not a link\";
         "a string literal is not documentation: {link:?}"
     );
 }
+
+/// **A link may name a macro, or write the call it means** — ``[`MAX_SIZE`]``, ``[`Widget::grow()`]``.
+///
+/// Rust's links are written with `()` or `!` to say "this is a call" / "this is a macro", and a reader writing C++
+/// prose does the same. Neither is part of the name, and a macro has no *declaration* at all — its `#define` is a
+/// fact about text — so the two are the second question a resolution asks rather than a spelling of the first.
+#[test]
+fn a_documentation_link_may_name_a_macro_or_add_parentheses() {
+    let source = "\
+#define MAX_SIZE 16
+struct Widget {
+    /// See [`MAX_SIZE`] and [`Widget::grow()`] for the rule.
+    void grow(int by);
+};
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names = session.classified_names(&view);
+
+    let link: Vec<(String, NameKind)> = names
+        .iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()].to_string(),
+                name.kind,
+            )
+        })
+        .collect();
+
+    assert!(
+        link.iter()
+            .any(|(text, kind)| text == "MAX_SIZE" && *kind == NameKind::Macro),
+        "a macro in force is what the link names: {link:?}"
+    );
+    assert!(
+        link.iter()
+            .any(|(text, kind)| text == "Widget::grow()" && *kind == NameKind::Method),
+        "the parentheses are punctuation around the name: {link:?}"
+    );
+}

@@ -6559,3 +6559,128 @@ fn the_first_completion_after_an_open_answers_the_same_as_the_second() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// **A documentation comment's symbol reference works end to end** — Rust's ``[`Widget::grow`]``, over the wire.
+///
+/// The three layers are tested apart (`cpp_parser::doc_links`, the analysis's colouring, and the two handlers), and
+/// this is the one that says the pair an editor actually exercises — a hover and a jump — answer for a position
+/// **inside a comment**, which is where every other declaration query in the server answers about the token *after*
+/// it. It is also the check that the two handlers agree: both resolve the target with `ProjectIndex::definition`, so
+/// a card that has a declaration and a jump that has none would be a defect this catches.
+#[test]
+fn a_documentation_link_hovers_and_jumps_over_the_wire() {
+    const SOURCE: &str = "\
+struct Widget {
+    /// See [`Widget::grow`] for the rule.
+    void grow(int by);
+};
+";
+    let project = Project::new("doc-link");
+    project.write("a.cpp", SOURCE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    // `/// See [` is columns 0–9, so the target starts at character 10 on line 1.
+    let hover = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": 1, "character": 14 } },
+        })
+    });
+    let card = hover["result"]["contents"]["value"]
+        .as_str()
+        .or_else(|| hover["result"]["contents"].as_str())
+        .unwrap_or_else(|| panic!("a card was expected for the link, got {hover}"));
+    assert!(
+        card.contains("void grow(int by)"),
+        "the card is the declaration the link names: {card}"
+    );
+
+    let location = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/definition",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": 1, "character": 14 } },
+        })
+    });
+    assert!(
+        location["result"]["uri"]
+            .as_str()
+            .is_some_and(|found| found.ends_with("a.cpp")),
+        "the jump names the file that declares it: {location}"
+    );
+    assert_eq!(
+        location["result"]["range"]["start"]["line"],
+        json!(2),
+        "and the line of the declaration, which is below the comment: {location}"
+    );
+    assert_eq!(
+        location["result"]["range"]["start"]["character"],
+        json!(9),
+        "and the column of the name: {location}"
+    );
+
+    // --- and the colour ---------------------------------------------------------------------------
+    //
+    // A comment is trivia, so the token pass cannot find a link in the tree: the name is read from the file's own
+    // text and resolved by spelling, and it arrives in the same delta-encoded stream as every other name. A client
+    // that declares no `tokenTypes` is sent the server's whole legend, which is what this request relies on.
+    let tokens = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/semanticTokens/full",
+            "params": { "textDocument": { "uri": uri } },
+        })
+    });
+    let data = tokens["result"]["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a token stream was expected, got {tokens}"));
+
+    // Decode the delta walk: five numbers per token — `deltaLine`, `deltaStart`, `length`, `type`, `modifiers`.
+    let mut line = 0i64;
+    let mut character = 0i64;
+    let mut length_at_the_link = 0i64;
+    let mut at_the_link = None;
+    for token in data.chunks(5) {
+        let delta_line = token[0].as_i64().unwrap_or(0);
+        let delta_start = token[1].as_i64().unwrap_or(0);
+        line += delta_line;
+        character = if delta_line == 0 {
+            character + delta_start
+        } else {
+            delta_start
+        };
+        if line == 1 && character == 14 {
+            length_at_the_link = token[2].as_i64().unwrap_or(0);
+            at_the_link = token[3].as_i64();
+        }
+    }
+    assert_eq!(
+        length_at_the_link,
+        "Widget::grow".len() as i64,
+        "the token covers exactly the name between the backticks: {data:?}"
+    );
+    assert!(
+        at_the_link.is_some(),
+        "and it starts where the target does (line 1, character 14): {data:?}"
+    );
+}
