@@ -74,3 +74,21 @@ instantiation is known: `vector<LuaDiagnosticInfo>::reference` → `value_type&`
 
 **What it is not**: a table of member names per container. The alias chain is in the class's own facts; a project class
 with `using reference = T&;` must answer the same way, and a table would only answer for the library.
+
+### Round 1 finding (single file is already right)
+
+Springfield: the single-file fixture above **passes** — `name_level_offsets` answers 0 places for `Format::SpellCheck`
+even with `builder.SpellCheck(...)` in the same file, so the "class the cursor is in" filter is not what lets the other
+class's member through when everything is in one file. The reported case has the two classes in **different headers**, and
+the call inside the first class's *inline* body in its own header, while the target is defined in a `.cpp`. The next
+fixture is therefore cross-file:
+
+```text
+builder.h   struct Builder { int SpellCheck(int t) { return t; } };
+format.h    struct Format { int NameStyleCheck(Builder&, int); int SpellCheck(int); };
+format.cpp  #include "format.h"  int Format::NameStyleCheck(Builder &builder, int style) { return builder.SpellCheck(style); }
+```
+
+Ask for the uses of `Format::SpellCheck` (declared in `format.h`) and assert that `format.cpp`'s `builder.SpellCheck` is
+**not** one of them. If the cross-file fixture also passes, the report is about a shape neither fixture has — and the next
+step is to reproduce it from the editor's own file:line, not to change the filter.

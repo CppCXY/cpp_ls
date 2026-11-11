@@ -251,6 +251,53 @@ impl RegisterCapabilities for ReferencesCapabilities {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A member is attributed by its declaration, not by the class the cursor is in.**
+    ///
+    /// Two classes with a same-named member, and a call on an instance of the *other* class written inside the first:
+    /// the call names `Builder::SpellCheck` and is *written* in `Format`, so a filter that compares "the class the cursor
+    /// is in" passes it and Find References for `Format::SpellCheck` lists another class's member. Measured report: a
+    /// lens said 1 reference while Find All References showed the other class's function.
+    #[test]
+    fn a_member_use_on_another_class_is_not_this_members_use() {
+        const SOURCE: &str = "\
+struct Builder { int SpellCheck(int t) { return t; } };
+struct Format {
+    int NameStyleCheck(Builder &builder, int style) { return builder.SpellCheck(style); }
+    int SpellCheck(int t) { return t; }
+};
+";
+        let files = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
+        session.load("/p/a.cpp");
+        session.index_everything();
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+
+        let declaration = SOURCE
+            .rfind("int SpellCheck(int t) { return t; }")
+            .expect("Format's own member")
+            + "int ".len();
+        let places = super::name_level_offsets(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(declaration),
+            false,
+        );
+        assert_eq!(
+            places.len(),
+            0,
+            "nobody calls Format::SpellCheck; the call in NameStyleCheck is on a Builder"
+        );
+    }
     use super::locations;
     use cpp_code_analysis::{
         CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
