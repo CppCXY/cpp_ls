@@ -213,3 +213,31 @@ The next step is to make that list distinguish three targets rather than two —
 (class-narrowed, done), and a file-scope name (needs `definition_at` per candidate occurrence, which is one parse per
 candidate file and the same machinery the class filter already pays for). Until then a rename of a global is **not**
 safe, and the handler should refuse it rather than write half of it — the rule the macro path already states.
+## Rename of a file-scope name: the exact line it dies on
+
+Measured, in order, on a fixture (`int size = 0;` plus a function that declares its own `size` and a function that
+reads the global):
+
+```text
+definitions at the global's declaration   1 fact: ("size", local=false, Variable)   the target is found
+name_references(index, …, "size", [a.cpp]) 0 files                                  the scan refuses
+name_level_offsets(…, include_declaration=false) 0 places                           so rename has nothing to write
+```
+
+**The cause is one guard** in `crates/cpp_code_analysis/src/index/references.rs`:
+
+```rust
+// **A file that declares the spelling as a local is not searched.** Its uses may mean its own local.
+let declares_a_local = …any(|fact| fact.local && fact.name == name);
+if declares_a_local { found.not_looked_at.push(path); continue; }
+```
+
+`a.cpp` declares a local `size`, so the whole file is skipped — including the use of the *global* `size` in the other
+function. The guard is right for a list a reader reads (do not offer a maybe-use) and wrong for a rename, which needs
+every use or none.
+
+**The fix** is per-occurrence attribution, and both pieces already exist in this tree: do not skip the file, and drop the
+occurrences that resolve to a local — the handler parses each candidate already (the class filter) and
+`definition_at` answers "which declaration is this occurrence" for a file's own bindings. What it does not answer is a
+*member* name; that is the class filter's job, and the two together are the identity rule
+`name_level_offsets` is missing. Until then a rename of a file-scope name is refused, which is the safe half.
