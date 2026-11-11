@@ -116,6 +116,11 @@ fn starts_a_declaration(body: &str) -> bool {
         "enum",
         "namespace",
         "template",
+        // **A type fragment is not an expression.** `typename ::asio::detail::async_result_helper<ct, sig>::return_type`
+        // is what asio's `ASIO_INITFN_RESULT_TYPE` expands to, and a caller's expression is never spliced into a type.
+        // Measured on `async_result.hpp`: seven macros of this shape were reported as "a caller's expression is
+        // spliced in without its precedence".
+        "typename",
         "auto",
         "void",
         "char",
@@ -172,13 +177,28 @@ fn is_a_call(body: &str) -> bool {
 /// parentheses? A leading `-` or `!` is unary, and `->`, `>>` and `::` are not binary operators.
 fn has_a_loose_operator(body: &str) -> bool {
     let mut depth = 0i32;
+    // **A template-id is not a comparison.** `::asio::completion_handler_for<sig>` has a `<` and a `>`, and the
+    // scanner read the first as a binary operator — so every macro that expands to a *type* was a finding. Measured on
+    // asio's `async_result.hpp`: three macros naming a template-id and two expanding to a template parameter list, all
+    // reported as "a caller's expression is spliced in without its precedence", when no caller's expression ever
+    // reaches a type.
+    let mut skip_until = 0usize;
     for (index, character) in body.char_indices() {
+        if index < skip_until {
+            continue;
+        }
         match character {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '?' | '<' | '>' | '=' | '!'
                 if depth == 0 =>
             {
+                if character == '<'
+                    && let Some(end) = template_id_end(body, index)
+                {
+                    skip_until = end;
+                    continue;
+                }
                 let before = body[..index].chars().last();
                 let after = body[index + 1..].chars().next();
                 let is_unary = before.is_none()
@@ -200,4 +220,52 @@ fn has_a_loose_operator(body: &str) -> bool {
         }
     }
     false
+}
+
+/// **The end of a template-id that starts at `open`**, or `None` when the `<` there is a comparison.
+///
+/// This is the grammar's own disambiguation, as much of it as text can decide: a template argument list holds names,
+/// qualified names, numbers, template-ids of its own, `*`, `&`, `,` and spaces — and it **closes**. A comparison's
+/// right side runs into `;`, `)`, an operator or the end of the list, and none of those can appear inside a list.
+///
+/// The one shape it cannot tell apart is `x < y > z` written with nothing else around it, which is the same vexing
+/// parse a compiler resolves from the declaration; the answer here is the quiet one — a macro body of that shape is
+/// not reported, because "not reported" is the mistake this rule is allowed to make.
+fn template_id_end(body: &str, open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (at, character) in body[open..].char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    // An empty list is not a template-id (`a < > b`), and neither is one that starts at the `>`.
+                    return (at > 1).then_some(open + at + 1);
+                }
+            }
+            _ if depth > 0 => {
+                let allowed = character.is_alphanumeric()
+                    || matches!(
+                        character,
+                        '_' | ':'
+                            | ','
+                            | '.'
+                            | '*'
+                            | '&'
+                            | '('
+                            | ')'
+                            | '['
+                            | ']'
+                            | '-'
+                            | '\''
+                            | ' '
+                    );
+                if !allowed {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
 }

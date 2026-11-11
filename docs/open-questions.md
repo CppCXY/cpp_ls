@@ -56,3 +56,44 @@ cross-file answer that depends on the **closure** — two hops of `#include`, a 
 `#include` a cook never read — can be wrong there while being right in the editor. The two fixtures above are the
 minimal reproduction of that difference, and they are tests, so the next person to be misled by `inspect` can see it
 in one run rather than in six rounds.
+
+## Diagnostic false positives: how they are found, and what is left
+
+`crates/cpp_code_analysis/tests/diagnostics_sweep_probe.rs` pulls every file's diagnostics in one process and prints
+the findings grouped by code, with `file:line` and the message — the sweep a false-positive review needs. Run it with
+`--ignored`, and `CPPLS_SWEEP_FILES=<n>` to look at a slice:
+
+```text
+cargo test --release -p cpp_code_analysis --test diagnostics_sweep_probe -- --ignored --nocapture
+```
+
+Measured on `EmmyLuaCodeStyle`, the first 142 files (its `3rd/asio-1.24.0` included):
+
+```text
+before   32 findings:  macro-parentheses 27, missing-include 5
+after     1 finding:   missing-include  1
+```
+
+The two classes it found, and the fix each got:
+
+* **`macro-parentheses` on macros that expand to a type.** `typename ::asio::detail::async_result_helper<ct, sig>`
+  has a `<` and a `>`, and the scanner read the first as a binary operator. The scanner now recognises a **template-id**
+  (`template_id_end`: names, qualified names, numbers, nested template-ids, `*`, `&`, `,` and spaces, and it closes),
+  and a body headed by `typename` is a type fragment. A type has no precedence to get wrong — a caller's expression
+  never reaches it.
+* **`missing-include` naming a source file.** Four asio headers were told to include `gtest_unittest.cc`, because a
+  template parameter named `T` is also a *type fact* in a test file. A `.cc`, `.c` or `.cpp` is compiled rather than
+  included, so its declarations can never be made visible by naming it — the rule now skips a candidate that is a
+  source file.
+
+**What is left** (1 finding in the slice):
+
+```text
+associated_executor.hpp:155  `is_convertible` is declared in buffers_iterator.hpp, which this file does not include
+```
+
+`is_convertible` is used inside a dependent template-argument list (`constraint<is_convertible<…>::value>`), and the
+declaration the index offers for that spelling is a different entity in a header this file does not reach. The rule
+works from declaration *spellings* and cannot resolve a name, so the honest next step is to skip a spelling that
+appears **inside a template argument list of a template declaration** — a dependent name resolved at instantiation —
+rather than to add a word list.

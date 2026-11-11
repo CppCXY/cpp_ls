@@ -158,6 +158,13 @@ fn the_candidate(
         if fact.kind != DeclKind::Type {
             continue;
         }
+        // **A source file is never the header to include.** A declaration in a `.cc`, a `.c` or a `.cpp` is not made
+        // visible by including it — a source file is a translation unit, and `#include "x.cc"` is not the fix this
+        // rule's message proposes. Measured on `EmmyLuaCodeStyle`: four asio headers were told to include
+        // `gtest_unittest.cc`, because a template parameter named `T` is *also* a type fact in a test file.
+        if is_a_source_file(&declaring) {
+            continue;
+        }
         // **A declaration this file already reaches settles the name, and that is a different question from "is the
         // *definition* in an included header".**
         //
@@ -187,6 +194,20 @@ fn the_candidate(
         }
     }
     best.map(|(_, file)| file)
+}
+
+/// **Is this a file a translation unit is compiled from, rather than a header to include?**
+///
+/// The extension is the whole question: `.c`, `.cc`, `.cpp`, `.cxx` and their friends are *compiled*, and a
+/// declaration inside one is not made visible by naming it in an `#include`. A header — `.h`, `.hpp`, `.hxx`, `.inl`,
+/// or a file with no extension at all, which is how the standard library writes several of them — is.
+fn is_a_source_file(file: &Path) -> bool {
+    matches!(
+        file.extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+            .as_deref(),
+        Some("c" | "cc" | "cpp" | "cxx" | "c++" | "cp" | "cu" | "m" | "mm" | "ixx" | "cppm")
+    )
 }
 
 /// **How well a file answers "where is this type from"** — lower is stronger.

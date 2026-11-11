@@ -133,3 +133,30 @@ fn an_empty_body_and_a_statement_macro_are_not_reported() {
         "the body is a statement, and its operators are inside its own braces",
     );
 }
+
+/// **A macro that expands to a type is not this rule's shape**, however many `<` and `>` its spelling has.
+///
+/// Measured on asio's `async_result.hpp`: seven macros expanding to a template-id type —
+/// `typename ::asio::detail::async_result_helper<ct, sig>::return_type` — were reported as "a caller's expression is
+/// spliced in without its precedence". No caller's expression ever reaches a type: a template-id's `<` is not a
+/// comparison, and a `typename`-headed body is a type fragment.
+#[test]
+fn a_macro_that_expands_to_a_type_is_silent() {
+    let codes = codes_of(
+        "# define RESULT(ct, sig) \\\n  typename ::asio::detail::async_result_helper< \\\n    ct, sig>::return_type\n\
+         # define HANDLER(sig) ::asio::handler<sig>\nint f(int n) { return n + 1; }\n",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::MacroParentheses,
+        "a type fragment has no precedence to get wrong",
+    );
+
+    // …and the rule still reports the shape it exists for.
+    let still = codes_of("#define TWICE(x) x * 2\nint f(int n) { return TWICE(n + 1); }\n");
+    assert_reported(
+        &still,
+        DiagnosticCode::MacroParentheses,
+        "an expression body without its own parentheses is the finding",
+    );
+}

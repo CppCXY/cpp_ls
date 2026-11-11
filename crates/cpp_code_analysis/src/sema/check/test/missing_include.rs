@@ -123,3 +123,24 @@ fn a_name_the_file_binds_is_not_from_elsewhere() {
         "a declaration inside a body is local, and its type is not this rule's question",
     );
 }
+
+/// **A declaration in a source file is not a header to include.**
+///
+/// Measured on `EmmyLuaCodeStyle`: four asio headers were told to include `gtest_unittest.cc`, because a template
+/// parameter named `T` is also a *type fact* in a test file. A source file is compiled rather than included, so its
+/// declarations can never be made visible by naming it — and the message this rule prints proposes exactly that.
+#[test]
+fn a_type_declared_in_a_source_file_is_not_offered() {
+    let codes = codes_in(
+        &[
+            ("/p/detail/gtest_unittest.cc", "class T {};\n"),
+            ("/p/use.hpp", "void f(T value) {}\n"),
+        ],
+        "/p/use.hpp",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::MissingInclude,
+        "a `.cc` is a translation unit, not a header to include",
+    );
+}
