@@ -272,6 +272,31 @@ int f() { return grow(1) + grow(2); }
             vec!["2 references".to_string()],
             "the header's declaration counts the same uses"
         );
+
+        // **Find References' own list says the same two places**, and `include_declaration` adds the two places the name
+        // is *introduced* — the header's declaration and the `.cpp` definition. That distinction is what a count needs:
+        // measured before it existed, the same query answered 3 places where there are 2 uses, because the `.cpp`
+        // definition's own name was counted as a use.
+        use cpp_code_analysis::file::coordinates::ReadingOffset;
+        let at = header.find("grow").expect("the declaration");
+        let uses = crate::handlers::references::name_level_offsets(
+            &session,
+            &header_view,
+            ReadingOffset::new(at),
+            false,
+        );
+        assert_eq!(uses.len(), 2, "two calls, and neither declaration");
+        let with_declarations = crate::handlers::references::name_level_offsets(
+            &session,
+            &header_view,
+            ReadingOffset::new(at),
+            true,
+        );
+        assert_eq!(
+            with_declarations.len(),
+            4,
+            "the header's declaration and the definition, plus the same two calls"
+        );
     }
 
     /// **The command is the one this client can run**, and a client with none gets a title and nothing else.

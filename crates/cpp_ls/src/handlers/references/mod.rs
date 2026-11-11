@@ -524,6 +524,28 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
         }
     }
 
+    // **A declaration is not a use.** `name_references` reports every occurrence whose *spelling* matches, and one of
+    // them is the same entity's own declaration — the `.cpp` definition beside the header's declaration — which a list
+    // of *uses* must not contain. Measured on a fixture: `grow` declared in a header, defined and called twice in a
+    // `.cpp`, answered 3 places where there are 2 uses — which is also why a count over the same name read one too
+    // many. The offsets come from the index's own facts, so no second parse is paid for.
+    if !include_declaration {
+        // A path is compared **as text, lowercased**, because the index's entries and the session's paths arrive
+        // spelled differently (measured on a real project: the `.cpp` candidates came back
+        // `c:/users/…/codestylechecker.cpp` while the fact said `C:\Users\…\CodeStyleChecker.cpp`).
+        fn key(file: &std::path::Path) -> String {
+            file.to_string_lossy().to_lowercase().replace('\\', "/")
+        }
+        let declared: std::collections::HashSet<(String, usize)> = session
+            .index()
+            .every_fact_named(&name)
+            .into_iter()
+            .filter(|(_, fact)| fact.name == name)
+            .map(|(file, fact)| (key(&file), fact.name_range.start_offset))
+            .collect();
+        found.retain(|(file, range)| !declared.contains(&(key(file), range.start_offset)));
+    }
+
     found
 }
 
