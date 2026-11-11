@@ -177,7 +177,7 @@ use std::path::{Path, PathBuf};
 /// unchanged, so an entry from before this bump decodes happily and keeps the answer — measured: the stale `C:\p\.cppls`
 /// of the `/p` fixtures made `a_function_with_no_written_return_type_states_one_in_its_body` fail for a fix that was in the
 /// binary, and pass on a cold cache.
-pub const FORMAT_VERSION: u32 = 16;
+pub const FORMAT_VERSION: u32 = 17;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

@@ -991,3 +991,47 @@ fn a_declaration_two_includes_away_is_visible() {
         "the declaration one hop past the direct include is visible too: {found:?}"
     );
 }
+
+/// **An out-of-line definition declares one name, not two** — the member, and *not* its class.
+///
+/// `int Pair::Mine() { return 0; }` writes its name against the parameter list, and `declared_name` refuses a
+/// `::`-qualified name on purpose (it belongs to the class, not to this file's scope). The fallback that reads a name
+/// out of the specifier sequence — added for `explicit A(int x) : x_(x) {}`, whose declarator is only `(int x)` — saw
+/// "no declarator names anything" and bound `get_name()`, which for this shape is the **qualifier**: a constructor
+/// `Pair` at file scope, declared nowhere.
+///
+/// Measured on the report's `Mark.cpp`: the phantom fact put a `0 references` code lens over every out-of-line
+/// definition (`CompleteMarker::CompleteMarker`, `Marker::Complete`), and a summary of a `.cpp` of nothing but
+/// definitions declared a function named after the class once per member.
+#[test]
+fn an_out_of_line_definition_declares_its_member_and_not_its_class() {
+    let session = session_with(&[(
+        "/p/pair.cpp",
+        "struct Pair {\n    Pair(int a, int b);\n    int Mine() const;\n};\nint Pair::Mine() const { return 0; }\n",
+    )]);
+    let summary = session
+        .index()
+        .summary(std::path::Path::new("/p/pair.cpp"))
+        .expect("the file is indexed");
+
+    let functions: Vec<(String, Option<String>)> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Function)
+        .map(|fact| (fact.name.clone(), fact.scope.clone()))
+        .collect();
+
+    assert!(
+        !functions.iter().any(|(name, scope)| name == "Pair" && scope.is_none()),
+        "the qualifier of `int Pair::Mine()` is not a function declared at file scope: {functions:?}"
+    );
+    assert_eq!(
+        functions,
+        vec![
+            ("Pair".to_string(), Some("Pair".to_string())),
+            ("Mine".to_string(), Some("Pair".to_string())),
+            ("Mine".to_string(), Some("Pair".to_string())),
+        ],
+        "the constructor declared in the class, and the member's declaration and definition"
+    );
+}

@@ -1532,9 +1532,19 @@ impl ScopeWalker<'_> {
         //
         // Guarded by "no declarator names anything", which is what keeps every ordinary function away from this: its
         // declarator holds the name, so the loop already bound it.
-        if declarators(node)
-            .iter()
-            .all(|declarator| declared_name(declarator).is_none())
+        //
+        // **And guarded by "the declaration has no qualifier"**, which is what keeps every *qualified definition*
+        // away from it. `declared_name` refuses a `::`-qualified name on purpose (line 3038), so `void Pair::Go() { }`
+        // satisfied "no declarator names anything", `get_name` read the qualifier `Pair`, and the declaration bound a
+        // **constructor `Pair` at file scope** — a phantom fact with no declaration behind it. Measured on a fixture
+        // of three out-of-line definitions: every one of them produced one, so a file of nothing but
+        // `int Type::member()` declared a function named `Type` for each member, and the code lens drew a
+        // `0 references` over a line that declares nothing. The name of a qualified definition belongs to the scope
+        // its qualifier names, and the loop above is where that happens.
+        if qualified_name.is_none()
+            && declarators(node)
+                .iter()
+                .all(|declarator| declared_name(declarator).is_none())
             && let Some(declaration) = cpp_parser::CppDeclaration::cast(node.clone())
             && declaration.get_param_list().is_some()
             && let Some(token) = declaration.get_name()
