@@ -83,6 +83,7 @@ fn type_of_a_name_kind(kind: NameKind) -> Option<TypeKind> {
         NameKind::EnumMember => TypeKind::EnumMember,
         NameKind::Function => TypeKind::Function,
         NameKind::Method => TypeKind::Method,
+        NameKind::Property => TypeKind::Property,
         NameKind::Variable => TypeKind::Variable,
         // **A custom type**, and the one place this server sends one — see [`TypeKind::VariableTemplate`]. A client
         // that cannot draw it is answered with `variable` by [`push_names`], which is what it showed before.
@@ -746,6 +747,38 @@ impl RegisterCapabilities for SemanticTokenCapabilities {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A name in a mem-initialiser is the field it initialises**, not a function.
+    ///
+    /// `LuaCodeFormat::LuaCodeFormat() : _support(false) { }` drew `_support` with `entity.name.function`: the initialiser
+    /// list has the shape of a call, and the name was classified as one. What it names is the class's field.
+    #[test]
+    fn a_mem_initialiser_names_a_field() {
+        let text = "\
+class LuaCodeFormat {
+public:
+    LuaCodeFormat();
+private:
+    bool _support;
+};
+LuaCodeFormat::LuaCodeFormat()
+    : _support(false) {
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let initialiser = text.find(": _support").expect("the initialiser") + ": ".len();
+        assert_eq!(
+            at_type.get(&initialiser),
+            Some(&index_of(TypeKind::Property)),
+            "the mem-initialiser names the class's field"
+        );
+    }
     use super::*;
     use cpp_code_analysis::{
         CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,

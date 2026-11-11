@@ -252,6 +252,77 @@ impl RegisterCapabilities for ReferencesCapabilities {
 #[cfg(test)]
 mod tests {
 
+    /// **The same rule across files** — two headers and a `.cpp`, which is the shape the editor reported.
+    ///
+    /// `format.cpp` calls `builder.SpellCheck(...)` inside `Format::NameStyleCheck`, and `builder` is a `Builder`. A list
+    /// of uses of `Format::SpellCheck` must not contain it. The single-file fixture above passes; this one exists because
+    /// the report was cross-file, where the candidate set is the declaring header plus its includers and the occurrence
+    /// is written in a *third* file's include closure.
+    #[test]
+    fn a_member_use_on_another_class_is_not_this_members_use_across_files() {
+        const BUILDER_H: &str = "struct Builder { int SpellCheck(int t) { return t; } };\n";
+        const FORMAT_H: &str = "\
+#include \"builder.h\"
+struct Format {
+    int NameStyleCheck(Builder &builder, int style);
+    int SpellCheck(int t);
+};
+";
+        const FORMAT_CPP: &str = "\
+#include \"format.h\"
+int Format::NameStyleCheck(Builder &builder, int style) { return builder.SpellCheck(style); }
+int Format::SpellCheck(int t) { return t; }
+";
+        let files = MemoryFiles::new()
+            .with_file("/p/builder.h", BUILDER_H)
+            .with_file("/p/format.h", FORMAT_H)
+            .with_file("/p/format.cpp", FORMAT_CPP);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            PathBuf::from("/p/builder.h"),
+            PathBuf::from("/p/format.h"),
+            PathBuf::from("/p/format.cpp"),
+        ]);
+        for file in ["/p/format.h", "/p/format.cpp"] {
+            session.load(file);
+            session.want_cooked_reading(std::path::Path::new(file));
+        }
+        session.index_everything();
+
+        // **The header's own text, parsed** — the fact's offset is a file offset and this is the tree of the file.
+        let held = session
+            .files()
+            .held("/p/format.h")
+            .expect("the header is held");
+        let view =
+            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let declaration = FORMAT_H
+            .rfind("int SpellCheck(int t);")
+            .expect("Format's own member")
+            + "int ".len();
+        let places = super::name_level_offsets(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(declaration),
+            false,
+        );
+        let spelled: Vec<String> = places
+            .iter()
+            .map(|(_, range)| range.start_offset)
+            .map(|offset| format!("{offset}"))
+            .collect();
+        assert_eq!(
+            places.len(),
+            0,
+            "nobody calls Format::SpellCheck; the call in format.cpp is on a Builder — got {spelled:?}"
+        );
+    }
     /// **A member is attributed by its declaration, not by the class the cursor is in.**
     ///
     /// Two classes with a same-named member, and a call on an instance of the *other* class written inside the first:

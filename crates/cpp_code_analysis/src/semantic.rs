@@ -117,6 +117,11 @@ pub enum NameKind {
     /// A function declared in a class — a member function, a constructor, a destructor, an operator.
     Method,
     Variable,
+    /// **A field of a class** — a variable whose binding lives in a class scope. The protocol has a token type of its
+    /// own for it because a client draws it differently from a local, and the index's scoped variable is the same
+    /// answer one file further out (a namespace variable is coloured the same way, which is the price already paid for
+    /// std::to_string being a method).
+    Property,
     /// **A variable template** — `template <class T> constexpr bool is_trivially_assignable_v = …`.
     ///
     /// A kind of its own because a reader sees one: the bare name is not a value (`is_trivially_assignable_v<A, B>`
@@ -653,6 +658,8 @@ fn member_kinds(index: &ProjectIndex, view: &FileView) -> HashMap<usize, NameKin
         let kind = match found.fact.kind {
             DeclKind::Function if found.fact.scope.is_some() => NameKind::Method,
             DeclKind::Function => NameKind::Function,
+            // **A variable with a scope is a field**, by the same reading as a function with a scope being a method.
+            DeclKind::Variable if found.fact.scope.is_some() => NameKind::Property,
             DeclKind::Variable => NameKind::Variable,
             DeclKind::Type => NameKind::Type,
             DeclKind::Namespace => NameKind::Namespace,
@@ -894,8 +901,17 @@ fn kind_of_binding(
             }
         }
         BindingKind::Variable => {
+            // **A variable bound in a class scope is a field**, which a client draws differently from a local. The
+            // question is the binding's **own** scope, not the chain: a parameter of a member function has a class
+            // further out and is still a parameter — measured, asking the chain turned every parameter into a property.
             if is_a_parameter {
                 NameKind::Parameter
+            } else if view
+                .scopes
+                .scope(binding.scope)
+                .is_some_and(|scope| scope.kind == crate::ScopeKind::Class)
+            {
+                NameKind::Property
             } else if !crate::sema::declarations::declared_template_parameters_of(
                 &view.root, binding,
             )
@@ -953,6 +969,8 @@ pub(crate) fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
         DeclKind::Function if found.constructor => NameKind::Type,
         DeclKind::Function if found.scope.is_some() => NameKind::Method,
         DeclKind::Function => NameKind::Function,
+        // **A variable with a scope is a field**, by the same reading as a function with a scope being a method.
+        DeclKind::Variable if found.scope.is_some() => NameKind::Property,
         // **An enumerator is not a variable to a reader.** The index has one kind for both — and says which is
         // which on [`IndexedKind::enumerator`] — while a theme draws an enumerator with its enumeration. Drawn as a
         // plain variable, `Color::Red` read as a global constant that happened to live inside a type.
