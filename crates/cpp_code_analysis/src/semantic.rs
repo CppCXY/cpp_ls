@@ -96,6 +96,7 @@ use crate::index::project::IndexedKind;
 use crate::preprocess::directive::Directive;
 use crate::sema::resolve::definition_at;
 use crate::sema::symbol::{Binding, BindingKind, Known, ScopeId, ScopeKind, ScopeTree};
+use cpp_parser::CppAstNode;
 
 use crate::{DeclKind, FileView, ProjectIndex};
 
@@ -261,6 +262,32 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     let shapes: std::cell::OnceCell<crate::sema::declarations::DeclarationShapes> =
         std::cell::OnceCell::new();
 
+    // **The identifiers a qualified name is spelled with, from the *tree*.** `X::Y` is a node —
+    // `CppNameExpr { X, ::, Y }` — so which tokens are nested-name-specifiers is a question about its children, not
+    // about the text after a token. Built once per file, the same way the other tables in this function are: one walk,
+    // then a hash lookup per token. (The first version of this peeked two bytes ahead for `::`, which is the same
+    // answer only while the tree and the text agree — and this pass runs on renderings, where they need not.)
+    let qualified_heads: std::collections::HashSet<usize> = view
+        .root
+        .descendants()
+        .filter_map(cpp_parser::CppNameExpr::cast)
+        .flat_map(|name| {
+            let tokens: Vec<_> = name
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .collect();
+            let mut heads = Vec::new();
+            for pair in tokens.windows(2) {
+                if pair[0].kind() == cpp_parser::CppTokenKind::Identifier.into()
+                    && pair[1].text() == "::"
+                {
+                    heads.push(usize::from(pair[0].text_range().start()));
+                }
+            }
+            heads
+        })
+        .collect();
     for token in view.tree.get_tokens() {
         if token.kind != CppTokenKind::Identifier {
             continue;
@@ -397,9 +424,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         // `LuaCodeFormat` was drawn as a function, restored to a type only when the index happened to hold the class
         // first. In `X::Y`, `X` names a class or a namespace and never a function ([basic.lookup.qual]), so the
         // question for that token is `X` alone.
-        let opens_a_qualified_name = view
-            .get_token_text(cpp_parser::SourceRange::new(range.end_offset(), 2))
-            .is_some_and(|next| next.trim_start() == "::");
+        let opens_a_qualified_name = qualified_heads.contains(&at);
         let written = if opens_a_qualified_name {
             text.to_string()
         } else {
