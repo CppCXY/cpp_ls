@@ -221,10 +221,30 @@ pub(crate) fn origin_of(
             let callee_name = call
                 .get_callee()
                 .and_then(|callee| the_last_name_of(callee.syntax()));
-            // **`x.c_str()` and `x.data()` hand out a pointer into `x`.** Any other member call returns a value that borrows
-            // its object the same way: `v.front()` is a reference into `v`, which is reported through `v`'s origin.
+            // **A member call is not its receiver, unless the callee is known to hand out a view of it.**
+            //
+            // This used to be every member call: "any other member call returns a value that borrows its object the
+            // same way". That is true of a handful of standard members and false of an ordinary method, and the false
+            // case is the one that reaches a reader — measured on `EmmyLuaCodeStyle`:
+            //
+            // ```cpp
+            // LuaStyle &LuaCodeFormat::GetStyle(...) {
+            //     std::shared_ptr<LuaEditorConfig> editorConfig = nullptr;
+            //     return editorConfig->Generate(fileUri);   // reported as "`editorConfig` is a local, and this
+            // }                                             //  function returns a reference to it"
+            // ```
+            //
+            // `Generate` returns a reference to an object the local *points at*, not to the local; whether that object
+            // outlives the call is a question about `Generate`'s body and its owner, which this layer cannot answer. The
+            // list below is the standard members whose contract **is** "a view of me" — each is documented to return a
+            // reference or a pointer into its own object — so the lifetime question really is its receiver's.
+            const BORROWING_MEMBERS: &[&str] =
+                &["c_str", "data", "front", "back", "at", "operator[]"];
             if let Some(callee) = call.get_callee()
                 && let Some(receiver) = a_member_access_object(&callee)
+                && callee_name
+                    .as_deref()
+                    .is_some_and(|name| BORROWING_MEMBERS.contains(&name))
             {
                 let mut borrowed = origin_of(context, receiver.syntax(), function_body)?;
                 borrowed.through = match callee_name.as_deref() {

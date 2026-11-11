@@ -173,3 +173,42 @@ fn a_return_inside_a_lambda_is_not_this_rules_business() {
         "the enclosing function stops at the lambda, so this is not its return",
     );
 }
+
+/// **A call result is not the local it was called on.**
+///
+/// Measured on `EmmyLuaCodeStyle`: a function returning `LuaStyle &` was reported for
+///
+/// ```cpp
+/// std::shared_ptr<LuaEditorConfig> editorConfig = nullptr;
+/// return editorConfig->Generate(fileUri);
+/// ```
+///
+/// as "`editorConfig` is a local, and this function returns a reference to it". `Generate` returns a reference to the
+/// object the pointer points at; whether that object outlives the call is a question about `Generate`'s body and the
+/// object's owner, which this layer cannot answer — so the shape is silent. The members whose contract *is* "a view of
+/// me" (`c_str`, `data`, `front`, …) still carry their receiver's origin, and a local returned directly is still
+/// reported.
+#[test]
+fn a_member_call_on_a_local_is_not_the_local() {
+    let codes = codes_of(
+        "\
+struct Config { Style &Generate(int uri); };
+Style &f() {
+    Config *config = nullptr;
+    return config->Generate(1);
+}
+",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::DanglingReturn,
+        "a call returns its own value, whatever type its receiver has",
+    );
+
+    let direct = codes_of("Style &g() {\n    Style local;\n    return local;\n}\n");
+    assert_reported(
+        &direct,
+        DiagnosticCode::DanglingReturn,
+        "a local returned directly is still the finding this rule exists for",
+    );
+}
