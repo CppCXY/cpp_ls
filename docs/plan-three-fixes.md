@@ -101,3 +101,20 @@ step is to reproduce it from the editor's own file:line, not to change the filte
 - **Item 2 — both fixtures pass today** (single file and cross-file). Recorded above: the reported case has a shape
   neither fixture reproduces, so the next step is the editor's file:line, not a change to the filter.
 - **Item 5 — not started.** The plan is unchanged.
+### Round 3: the attribution is already by the declaration
+
+A third fixture asks from a **use** rather than from a declaration:
+
+```cpp
+struct Builder { int SpellCheck(int t) { return t; } };
+struct Format {
+    int SpellCheck(int t) { return t; }
+    int Run(Builder &b) { return b.SpellCheck(1) + this->SpellCheck(2); }
+};
+```
+
+Cursor on `b.SpellCheck`, and the answer is **1 place** — not `this->SpellCheck`, which belongs to `Format`. So the
+three shapes that can be built (single file, cross file, cursor on a use) all attribute a member by its declaration
+today: `definition_at` on a member access resolves through the index's member lookup, and the occurrence filter compares
+classes already. **Item 2 has no reproducible defect**; what it needs is the editor's `file:line` for the report that
+started it (a lens said 1, Find All References showed `DiagnosticBuilder::SpellCheck`), not another change.

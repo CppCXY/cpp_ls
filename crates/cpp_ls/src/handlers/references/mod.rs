@@ -252,6 +252,48 @@ impl RegisterCapabilities for ReferencesCapabilities {
 #[cfg(test)]
 mod tests {
 
+    /// **The class comes from the declaration, not from where the cursor is.**
+    ///
+    /// `b.SpellCheck(1)` is written inside `Format` and names `Builder`'s member. A cursor on that *use* resolves to
+    /// `Builder::SpellCheck`, so the owning class is `Builder` — while `the_class_the_cursor_is_in` says `Format` and
+    /// therefore also keeps `this->SpellCheck(2)`, a use of a different member. The declaration is the authority.
+    #[test]
+    fn the_owning_class_comes_from_the_declaration_not_from_the_cursor() {
+        const SOURCE: &str = "\
+struct Builder { int SpellCheck(int t) { return t; } };
+struct Format {
+    int SpellCheck(int t) { return t; }
+    int Run(Builder &b) { return b.SpellCheck(1) + this->SpellCheck(2); }
+};
+";
+        let files = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
+        session.load("/p/a.cpp");
+        session.index_everything();
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+
+        let at_the_use = SOURCE.find("b.SpellCheck").expect("the use on a Builder") + "b.".len();
+        let places = super::name_level_offsets(
+            &session,
+            &view,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(at_the_use),
+            false,
+        );
+        assert_eq!(
+            places.len(),
+            1,
+            "the use on the Builder, and neither Format's member nor its use"
+        );
+    }
     /// **The same rule across files** — two headers and a `.cpp`, which is the shape the editor reported.
     ///
     /// `format.cpp` calls `builder.SpellCheck(...)` inside `Format::NameStyleCheck`, and `builder` is a `Builder`. A list
