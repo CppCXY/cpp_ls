@@ -288,6 +288,28 @@ below.
 → `std::vector<int>`, `auto &bound` → `std::vector<int>&`. The subject it was written for — the outer argument
 substituted and the inner one kept — is asserted either way.
 
+## The field kind, and the clients that cannot draw it
+
+`1c00d3ad` ("a variable bound in a class scope is a property") made a class's field `NameKind::Property`, and updated
+the handler's own tests. It did not update `tests/semantic.rs`, and it did not change what a client is **sent** when
+its advertised `tokenTypes` have no `property` in them — so five tests were red from that day:
+
+```text
+cpp_code_analysis   tests/semantic.rs        4 failed   expected Variable, got Property
+cpp_ls              handshake.rs:3518        1 failed   the field `size`, over the wire
+```
+
+The first four are stale expectations: every one of them is about a class member (`Widget::size`) and `Property` is
+the answer the analysis now gives on purpose. They assert `Property` with the reason written beside them.
+
+The fifth was **not** stale — it is the end-to-end statement that a client receives a token it can draw. The client in
+that test advertises `namespace, type, typeParameter, enumMember, function, method, variable, parameter, macro` — no
+`property` — and `Builder::push_range` drops a kind the client cannot draw *before* claiming the span, so the field
+was sent as `property` and drawn as nothing. The fix is the fallback the file already documents for
+`variableTemplate` and for `typename`: a field a client cannot draw as a `property` is still a variable, and
+`property` is standard but not universal. A client that lists it still gets it.
+`a_field_a_client_cannot_draw_as_a_property_is_drawn_as_a_variable` pins both halves.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

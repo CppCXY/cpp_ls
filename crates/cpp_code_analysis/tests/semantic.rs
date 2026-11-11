@@ -107,7 +107,10 @@ int count(int total) {
         ("factor", Some(NameKind::Parameter)),
         ("total", Some(NameKind::Parameter)),
         ("local", Some(NameKind::Variable)),
-        ("size", Some(NameKind::Variable)),
+        // A **field** is not a local: the protocol draws a member differently, and `NameKind::Property` is that
+        // answer (see its own documentation). This case read `Variable` until `1c00d3ad` introduced the kind and
+        // updated only the handler's tests, which left this one red.
+        ("size", Some(NameKind::Property)),
         // A function declared inside a class is a method, and the same shape outside one is not.
         ("scaled", Some(NameKind::Method)),
         ("count", Some(NameKind::Function)),
@@ -260,8 +263,9 @@ int area(Widget& w) { return w.size; }
         size,
         vec![
             // The member's declaration, the free function's declaration, the parameter's declaration and its two
-            // uses — and then the **member access**, which is `w.size` and is a `Variable` because that is what
-            // `Widget::size` is.
+            // uses — and then the **member access**, which is `w.size` and is a `Property` because that is what a
+            // class's field is. (It read `Variable` until the field kind existed; the resolution this test is about
+            // is unchanged either way.)
             //
             // This last one used to be absent, and the note here said why: the member was looked up by its **bare
             // name**, the file declares a free `size` too, and a spelling that two declarations share was left
@@ -270,12 +274,12 @@ int area(Widget& w) { return w.size; }
             // which this file declares — and [`member_kinds`] is where it is now asked. Measured on a real file, the
             // old rule left every standard-library member uncoloured (`v.push_back`, `t.size`) because those
             // spellings are exactly the ones a whole project shares.
-            (NameKind::Variable, true),
+            (NameKind::Property, true),
             (NameKind::Function, true),
             (NameKind::Parameter, true),
             (NameKind::Parameter, false),
             (NameKind::Parameter, false),
-            (NameKind::Variable, false),
+            (NameKind::Property, false),
         ],
         "a parameter is not the file-scope function that shares its spelling, and a member is what its object's type says"
     );
@@ -305,11 +309,11 @@ int area(Widget& w) { return w.size; }
         size,
         vec![
             // The member's declaration, the free function's declaration, and the **member access** — which is a
-            // `Variable` because `Widget::size` is one. The free `size` is a different declaration entirely, and a
-            // reader looking at `w.size` is not looking at it.
-            (NameKind::Variable, true),
+            // `Property` because `Widget::size` is a class's field. The free `size` is a different declaration
+            // entirely, and a reader looking at `w.size` is not looking at it.
+            (NameKind::Property, true),
             (NameKind::Function, true),
-            (NameKind::Variable, false),
+            (NameKind::Property, false),
         ],
         "the two declarations are drawn, and the member access is drawn as the member it names"
     );
@@ -337,7 +341,7 @@ fn a_member_access_is_classified_from_the_class_it_is_a_member_of() {
         .collect();
 
     assert!(
-        names.contains(&("size".to_string(), NameKind::Variable, Provenance::Found)),
+        names.contains(&("size".to_string(), NameKind::Property, Provenance::Found)),
         "the member's declaration is what `w.size` names: {names:?}"
     );
 }

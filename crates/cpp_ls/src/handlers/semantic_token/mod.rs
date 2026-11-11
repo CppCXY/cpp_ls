@@ -131,15 +131,26 @@ fn push_names(builder: &mut Builder<'_>, names: &[Name]) {
             modifiers_of(name),
         );
 
-        // **A custom type the client cannot draw falls back to the standard one it can.** The legend this server
-        // advertises is its own, so a client only draws the names it lists in `tokenTypes` — and `variableTemplate`
-        // is not part of the protocol's standard set. A client that does not know it would otherwise get *no* token
-        // for the declaration, which is worse than the colour it had before: it would lose the grammar's own.
-        if !pushed && kind == TypeKind::VariableTemplate {
+        // **A kind the client cannot draw falls back to the standard one that says nearly the same thing.** The
+        // legend this server advertises is its own, so a client only draws the names it lists in `tokenTypes` —
+        // and `variableTemplate` is not part of the protocol's standard set at all. A client that does not know it
+        // would otherwise get *no* token for the declaration, which is worse than the colour it had before: it would
+        // lose the grammar's own.
+        //
+        // **`property` is standard and still not universal.** Measured over stdio: a client advertising
+        // `… "method", "variable", "parameter", "macro"` was sent the field `size` as `property` and drew nothing
+        // for it. A field is a variable that happens to be a member, so `variable` is what a client without the
+        // finer kind gets — the same rule, one row further down the table.
+        if !pushed
+            && let Some(fallback) = match kind {
+                TypeKind::VariableTemplate | TypeKind::Property => Some(TypeKind::Variable),
+                _ => None,
+            }
+        {
             builder.push_range(
                 name.range.start_offset,
                 name.range.end_offset(),
-                TypeKind::Variable,
+                fallback,
                 modifiers_of(name),
             );
         }
@@ -1508,6 +1519,46 @@ using ContainerOf = Container<int, int>;
             (2, 4),
             "the namespace's token is not a step: {tokens:?}"
         );
+    }
+
+    /// **A field a client cannot draw as a `property` is still a variable.**
+    ///
+    /// `property` is one of the protocol's standard token types and still not a universal one: measured over stdio
+    /// (`handshake.rs`'s `semantic_colours_are_the_kinds_the_declarations_have`), a client advertising
+    /// `… "method", "variable", "parameter", "macro"` was sent the field `size` as `property` and drew **nothing**
+    /// for it. A field is a variable that is a member, so a client without the finer kind gets `variable` — the same
+    /// rule `variableTemplate` already follows one row further down the table.
+    #[test]
+    fn a_field_a_client_cannot_draw_as_a_property_is_drawn_as_a_variable() {
+        let text = "struct Widget { int size; };\n";
+        let (session, path) = a_held_file(text);
+        let file = session.files().held(&path).expect("the file is held");
+
+        let start = text.find("size").expect("the fixture writes it");
+        let names = vec![name(start, "size".len(), NameKind::Property, true)];
+
+        // A client that lists `property` is sent it.
+        let full = Some(vec![
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::VARIABLE,
+        ]);
+        let tokens = encode(file, None, &names, &full, false, &[]);
+        assert_eq!(
+            tokens.len(),
+            1,
+            "the field is drawn as the finer kind: {tokens:?}"
+        );
+        assert_eq!(tokens[0].token_type, index_of(TypeKind::Property));
+
+        // One that does not is sent `variable`, which is the same field one step coarser.
+        let coarse = Some(vec![SemanticTokenType::VARIABLE]);
+        let tokens = encode(file, None, &names, &coarse, false, &[]);
+        assert_eq!(
+            tokens.len(),
+            1,
+            "the field is not dropped for a client that cannot draw `property`: {tokens:?}"
+        );
+        assert_eq!(tokens[0].token_type, index_of(TypeKind::Variable));
     }
 
     /// A token whose position the file cannot place is dropped rather than guessed — and the walk stays valid for
