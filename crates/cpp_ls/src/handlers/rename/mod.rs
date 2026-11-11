@@ -175,6 +175,24 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
+    // **A file-scope name is refused, and the reason is a measurement.** Renaming one answered **only its
+    // declaration** — the uses of it in other functions were not edited at all — which writes a stale use into the
+    // user's files. A half rename is the one outcome an editor must not produce, so this refuses with the macro path's
+    // own finality (`null`, which a client shows as "this cannot be renamed here") until the reference list answers for
+    // a file-scope name the way it does for a member and a local. `docs/open-questions.md` records the defect.
+    if let Known::Yes(defined) = session.definitions(view, offset)
+        && let Some(first) = defined.found.first()
+    {
+        let qualified =
+            cpp_code_analysis::SymbolToFind::of(&first.fact, first.file.clone()).qualified;
+        let a_member = qualified.contains("::");
+        if !first.fact.local && !a_member {
+            log::debug!(
+                "refusing to rename `{qualified}`: a file-scope name is not answered completely yet"
+            );
+            return None;
+        }
+    }
     // (1) A symbol, and a name to write.
     let (name, name_range) = symbol_at(session, view, offset)?;
     if !is_one_identifier(new_name) {
@@ -778,10 +796,18 @@ int two() { return size; }
             "a local's rename edits its declaration and its use, and nothing outside its function"
         );
 
-        // **A file-scope name is not this test's subject, and it does not work yet.** Measured while writing this:
-        // renaming the global answers **only its declaration** — `two`'s use is not edited at all, so a rename would
-        // leave a stale use behind. That is a defect in the name-level reference list for a file-scope name (a local's
-        // answer is exact above), recorded in `docs/open-questions.md` rather than asserted here: a test that called
-        // one edit the right answer would be a test that says the broken behaviour is correct.
+        // **A file-scope name, measured now that the reference list is one query.** It answered only its declaration
+        // once; the question is what it answers today.
+        let global_at = SOURCE.find("int size = 0").expect("the global") + "int ".len();
+        if let Some(global) = workspace_edit_of_renaming_a_symbol(
+            &session,
+            &view,
+            ReadingOffset::new(global_at),
+            "count",
+        ) {
+            eprintln!("[rename] the global answered lines {:?}", lines_of(&global));
+        } else {
+            eprintln!("[rename] the global was refused");
+        }
     }
 }

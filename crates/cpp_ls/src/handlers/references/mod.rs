@@ -422,8 +422,27 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     // respected — and the answer cannot leave the file, because nothing outside it can see the name. Renaming by
     // spelling instead would edit a *different* local of the same spelling in another function, which is exactly the
     // scope mistake this query exists to avoid.
-    let locals_here =
+    let mut locals_here =
         cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
+    // **Only what a function body owns is a local.** The table lists the file's bindings, and a file-scope variable is
+    // one of them; asking it alone made a rename of a global take the local path and answer **only its declaration** —
+    // measured: `int size = 0;` renamed nothing in the function that reads it, a half rename that breaks the build. The
+    // declaration's own scope chain decides.
+    locals_here.retain(|entry| {
+        let Some(id) = view.scopes.scope_at(entry.declared_at as usize) else {
+            return false;
+        };
+        view.scopes.scope_chain(id).into_iter().any(|id| {
+            view.scopes.scope(id).is_some_and(|scope| {
+                matches!(
+                    scope.kind,
+                    cpp_code_analysis::ScopeKind::Function
+                        | cpp_code_analysis::ScopeKind::Block
+                        | cpp_code_analysis::ScopeKind::Lambda
+                )
+            })
+        })
+    });
     // **The declaration's own entry in that table is the test.** A file-scope variable is not in it — the table is
     // about names a function body owns — so a global keeps the name path below, where the index decides.
     let target_is_a_local = aimed.iter().any(|definition| {
