@@ -908,6 +908,11 @@ fn kind_of_binding(
 pub(crate) fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
     Some(match found.kind {
         DeclKind::Type => NameKind::Type,
+        // **A constructor is its class's name**, and "no return type, name equal to the class's" is the language's own
+        // definition of one — see [`IndexedKind::constructor`]. Drawn as a method, an out-of-class `Foo::Foo()` read as
+        // a function named like its class, while the same name in the header was drawn as a type: one name, two
+        // colours, and the definition was the odd one out.
+        DeclKind::Function if found.constructor => NameKind::Type,
         DeclKind::Function if found.scope.is_some() => NameKind::Method,
         DeclKind::Function => NameKind::Function,
         // **An enumerator is not a variable to a reader.** The index has one kind for both — and says which is

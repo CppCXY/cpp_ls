@@ -7936,6 +7936,30 @@ fn auto_substituted(
     // `&&` collapses rather than refuting: `T&` stays `T&` and `T`/`T&&` become `T&&`. It used to be refused
     // outright — see the note on [`declared_type`] — which answered nothing for a declaration every C++ compiler
     // reads.
+    // **`auto` alone declares a new object, so its type is the initializer's value type** — the reference, and the
+    // top-level cv, are dropped. `auto x = std::move(y)` is `T` and not `T&&`: the initializer says where the value
+    // comes from, and `x` is a fresh object rather than another name for `y`. Only a declarator that *writes* a
+    // reference keeps one, and that is the branch below.
+    //
+    // Measured on a real project (`CodeFormat.cpp`): `auto diagnostic_results = std::move(_Arg.result.Data);`
+    // recorded `std::vector<LuaDiagnosticInfo>&&`, and everything downstream of it failed — a range-`for` over the
+    // variable could not type its element, so `diagnostic.Message` answered "the type of `diagnostic` is not known
+    // here". The deduced reference only reached this function when the declarator wrote one, which is why the two
+    // cases looked alike until a `std::move` initializer was written.
+    if !suffix.contains('&') {
+        while base.ends_with('&') {
+            base.pop();
+            base = base.trim_end().to_string();
+        }
+        // The declarator writes its own qualifiers through `prefix`, so a deduced one would spell `const const` —
+        // and it is not part of a new object's type in the first place.
+        for qualifier in ["const ", "volatile "] {
+            if let Some(rest) = base.strip_prefix(qualifier) {
+                base = rest.trim_start().to_string();
+            }
+        }
+    }
+
     let mut reference = "";
     if suffix.contains('&') {
         let deduced_had_one = base.ends_with("&&") || base.ends_with('&');
@@ -8783,6 +8807,24 @@ fn type_of_a_call(
         Vec::new()
     };
 
+    // **`std::move` and `std::forward` are the identity on the type a reader can see.**
+    //
+    // Their return type is `remove_reference_t<T>&&` — a reference to the argument's own class — and every question a
+    // reader asks next is about that class: `std::move(x).size()`, or `auto y = std::move(x); y.push_back(…)`. The
+    // standard library declares them as templates whose answer needs deduction from the argument, which is what the
+    // `argument_types` above already computed, so the useful answer is that type.
+    //
+    // Measured on a real project (`EmmyLuaCodeStyle`'s `CodeFormatCLib.cpp`): `auto diagnostic_results =
+    // std::move(result.Data);` answered `UnknownType("std::move")` — the *callee's spelling* as if it were a type —
+    // so a range-`for` over the variable could not type its element and `diagnostic.Message` reported "the type of
+    // `diagnostic` is not known here". The `&&` is not part of the answer for the same reason `auto` drops it: it
+    // carries nothing this layer can query, and a class name is what the next question needs.
+    if names_the_identity_function(&callee)
+        && let Some(type_of) = argument_types.first()
+    {
+        return Known::Yes((type_of.clone(), path.to_path_buf()));
+    }
+
     // **A call through a function pointer** — `int (*fp)(int) = negate; fp(3)`. The callee is a variable whose type is a
     // *pointer to a function*, so what the call has is that function's return type. Measured: `auto through_pointer = fp(3)`
     // answered *"the type of `fp(3)` is not known here"*.
@@ -8966,6 +9008,25 @@ fn the_factory_the_call_names(callee: &cpp_parser::CppSyntaxNode) -> Option<&'st
         "make_unique" | "make_unique_for_overwrite" => Some("unique_ptr"),
         _ => None,
     }
+}
+
+/// **Is the callee `std::move` or `std::forward`?** — the two standard calls that hand back their argument's type.
+///
+/// Asked of the **qualified** spelling only. An unqualified `move(x)` may be a project's own function with a meaning of
+/// its own, and treating it as the standard's would be a guess about a name this layer can see declared elsewhere; the
+/// standard's spelling is `std::move`, and that is what a file writes unless it has said `using std::move;` first.
+fn names_the_identity_function(callee: &cpp_parser::CppSyntaxNode) -> bool {
+    let spelled = callee.text().to_string();
+    let spelled = spelled.trim();
+    // The template arguments are not part of the name, and `std::move<int>` is not a spelling anyone writes.
+    let bare = match spelled.find('<') {
+        Some(at) => spelled[..at].trim(),
+        None => spelled,
+    };
+    matches!(
+        bare,
+        "std::move" | "std::forward" | "::std::move" | "::std::forward"
+    )
 }
 
 /// **The callee's spelling when it names a class** — the temporary a call of a type constructs.
@@ -17027,6 +17088,18 @@ pub struct IndexedKind {
     /// with a `template <…>` in front of it and names a *family* of values rather than one. A highlighter draws that
     /// apart from a plain variable — see `TypeKind::VariableTemplate` in the server.
     pub template: bool,
+    /// **Is this a constructor?** — a function named exactly like the class it is declared in, with no return type.
+    ///
+    /// The index has no constructor kind: a constructor is a `Function` fact, exactly as a member function is, and a
+    /// summary records no "this is a ctor" flag. What it does record is enough to tell them apart — a constructor's
+    /// **name is its class's** and it has **no written return type** — and those two are the language's own definition
+    /// ([class.ctor]: a constructor has no name of its own, and no return type).
+    ///
+    /// Measured from an editor: `EditorconfigPattern::EditorconfigPattern() { … }` in a `.cpp` file — an
+    /// out-of-class definition, so the answer comes from the index — was drawn as `function`, while the same name in
+    /// the header was `type`. The binding path already knew (a `BindingKind::Constructor` maps to `NameKind::Type`);
+    /// this is the other half of the same rule.
+    pub constructor: bool,
 }
 
 impl IndexedKind {
@@ -17039,6 +17112,12 @@ impl IndexedKind {
                 && found.type_of.is_none()
                 && found.scope.is_some(),
             template: !found.parameters.is_empty(),
+            constructor: found.kind == DeclKind::Function
+                && found.returns.is_none()
+                && found
+                    .scope
+                    .as_deref()
+                    .is_some_and(|scope| scope.rsplit("::").next() == Some(found.name.as_str())),
         }
     }
 }

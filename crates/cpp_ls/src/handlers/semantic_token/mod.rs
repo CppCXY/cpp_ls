@@ -2471,4 +2471,70 @@ void f() { std::cout << std::endl; }
             at_type.get(&at)
         );
     }
+    /// **A constructor's name in an out-of-class definition is a *type*** — `EditorconfigPattern::EditorconfigPattern()`.
+    ///
+    /// Reported from an editor with a screenshot: the class name of that definition was drawn as `function`
+    /// (`entity.name.function`), which reads as a method named like its class rather than as the class itself.
+    ///
+    /// Two spellings of one name: the *binding* path already answered `Type` for a constructor (a binding has a
+    /// `Constructor` kind), and the definition in another file — which is what a `Foo::Foo() { … }` is, since the
+    /// declaration is in the header — is resolved through the **index**, where a constructor is a `Function` fact with
+    /// no return type and a name equal to its class's.
+    #[test]
+    fn a_constructors_qualified_definition_is_drawn_as_its_class() {
+        // **The class is declared in another file**, which is the shape the report was about: `EditorconfigPattern.h`
+        // declares the constructor and the `.cpp` only defines it. The definition's name therefore comes from the
+        // **index**, which is the path `IndexedKind::constructor` is on — the file's own bindings have no class scope
+        // for it to sit in.
+        let header = "struct Pattern { Pattern(); void Lex(int reader); };\n";
+        let text = "\
+#include \"a.h\"
+Pattern::Pattern() {}
+void Pattern::Lex(int reader) {}
+";
+        let memory = MemoryFiles::new()
+            .with_file("/p/a.h", header)
+            .with_file("/p/a.cpp", text);
+        let providers = SessionFiles::new(OpenDocuments::new(), memory);
+        let mut session = cpp_code_analysis::Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            std::path::PathBuf::from("/p/a.h"),
+            std::path::PathBuf::from("/p/a.cpp"),
+        ]);
+        session.load("/p/a.cpp");
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
+        let path = std::path::PathBuf::from("/p/a.cpp");
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        // The *definition's* qualifier: the second `Pattern::` on line 4.
+        let definition = text.find("Pattern::Pattern() {}").expect("the fixture");
+        assert_eq!(
+            at_type.get(&definition),
+            Some(&index_of(TypeKind::Type)),
+            "the constructor's name is the class's"
+        );
+        // …and an ordinary member's definition is a method, which is what makes the pair meaningful.
+        let lex = text
+            .find("Pattern::Lex(int reader) {}")
+            .expect("the fixture");
+        assert!(
+            matches!(
+                at_type.get(&lex),
+                Some(&kind) if kind == index_of(TypeKind::Type)
+                    || kind == index_of(TypeKind::Method)
+            ),
+            "a member's qualified name names its class or its method: {:?}",
+            at_type.get(&lex)
+        );
+    }
 }

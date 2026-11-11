@@ -35,7 +35,7 @@ fn an_else_after_a_returning_branch_is_reported() {
 /// **A branch *containing* a return is enough** — the rule asks `descendants`, not "ends in", which is the refinement
 /// its module says can land later without changing the finding's shape.
 #[test]
-fn a_return_that_is_not_the_branchs_last_statement_is_still_a_return() {
+fn a_return_that_is_not_the_branches_last_statement_is_still_a_return() {
     let codes = codes_of(
         "void g();\n\
          void h();\n\

@@ -620,7 +620,7 @@ int Parser::Parse() { return _token.kind; }
 /// looks in first. Measured on `LuaParser.cpp`: `type_at("_tokens")` answered `Unknown(Ambiguous)`, so
 /// `_tokens.size()` could not resolve `size` at all.
 #[test]
-fn a_member_name_several_classes_declare_is_the_enclosing_classs() {
+fn a_member_name_several_classes_declare_is_the_enclosing_class() {
     let header = "\
 struct Token { int kind; };
 struct Lexer {
@@ -830,7 +830,7 @@ int f() {
 }
 int g() {
     std::string s;
-    auto back = s.back();
+    auto& back = s.back();
     return back;
 }
 ";
@@ -844,7 +844,9 @@ int g() {
     assert_eq!(
         type_of_use_in(&session, "/p/a.cpp", source, "back").as_deref(),
         Some("char&"),
-        "and the same for a member that is *called*: `auto` takes what the call gives"
+        // The declarator writes the reference, so the substitution's `&` survives it — `auto back = …` would deduce
+        // the *value* `char`, which is the language's rule and not this test's question.
+        "and the same for a member that is *called*, when the declarator asks for a reference"
     );
 }
 
@@ -1251,18 +1253,18 @@ using string = basic_string<char>;
 }
 void f() {
     std::string x;
-    auto y = x.back();
+    auto& y = x.back();
 }
 ";
     assert_eq!(
         type_of_use(source, "y").as_deref(),
         Some("char&"),
-        "`back()` on a `basic_string<char>` returns `char&`"
+        "`back()` on a `basic_string<char>` returns `char&`, and the declarator asked for a reference"
     );
 }
 
 /// The same substitution, with the class used **directly as a template-id** rather than through an alias:
-/// `std::vector<int> v; auto z = v.front();` is `int&`.
+/// `std::vector<int> v; auto& z = v.front();` is `int&`.
 #[test]
 fn a_member_return_type_is_substituted_through_a_template_id_use() {
     let source = "\
@@ -1275,7 +1277,7 @@ public:
 }
 void f() {
     std::vector<int> v;
-    auto z = v.front();
+    auto& z = v.front();
 }
 ";
     assert_eq!(type_of_use(source, "z").as_deref(), Some("int&"));
@@ -2911,4 +2913,34 @@ int f() {
             other => panic!("`{name}` is typed: {other:?}"),
         }
     }
+}
+
+/// **`auto x = std::move(y)` is a value, not an rvalue reference.**
+///
+/// Reported from an editor with a screenshot: `auto diagnostic_results = std::move(_Arg.result.Data);` drew its inlay
+/// type as `std::vector<LuaDiagnosticInfo>&&`, and every later query on it fell apart — a range-`for` over it could
+/// not type its element, so `diagnostic.Message` answered "the type of `diagnostic` is not known".
+///
+/// The language rule is the one this pins: **`auto` alone declares a new object**, so the deduced type is the
+/// initializer's type with its reference (and top-level cv) removed — `std::move` returning `T&&` deduces `T`. Only a
+/// declarator that *writes* a reference keeps one, and that case has its own test
+/// (`auto_reference_on_a_reference_returns_one_reference`).
+#[test]
+fn a_value_auto_drops_the_reference_its_initializer_had() {
+    let source = "\
+namespace std {
+    template <class T> T&& move(T& value) noexcept;
+}
+struct Item { int size; };
+int f() {
+    Item item;
+    auto moved = std::move(item);
+    return moved.size;
+}
+";
+    assert_eq!(
+        type_of_use(source, "moved").as_deref(),
+        Some("Item"),
+        "`auto` alone is a new object, so the reference is not part of its type"
+    );
 }
