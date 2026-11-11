@@ -2639,4 +2639,42 @@ LuaCodeFormat::LuaCodeFormat()
             );
         }
     }
+    /// **The qualifier of a member definition is its class**, not the function it qualifies.
+    ///
+    /// `void LuaCodeFormat::NameStyleCheck(...)` is one declarator whose index answer is a *function*: asking for the
+    /// whole spelling colours `LuaCodeFormat` with `entity.name.function` — the report was a name that was a type
+    /// sometimes and a function at other times, because which answer arrived depended on the index. In `X::Y`, `X` names
+    /// a class or a namespace and never a function, so it is asked on its own.
+    #[test]
+    fn the_qualifier_of_a_member_definition_is_the_class() {
+        let text = "\
+class LuaCodeFormat {
+public:
+    void NameStyleCheck(int style);
+};
+void LuaCodeFormat::NameStyleCheck(int style) {
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let definition = text
+            .find("void LuaCodeFormat::NameStyleCheck")
+            .expect("the definition")
+            + "void ".len();
+        assert_eq!(
+            at_type.get(&definition),
+            Some(&index_of(TypeKind::Type)),
+            "the qualifier names the class"
+        );
+        assert_eq!(
+            at_type.get(&(definition + "LuaCodeFormat::".len())),
+            Some(&index_of(TypeKind::Method)),
+            "and the name after it is the member function"
+        );
+    }
 }

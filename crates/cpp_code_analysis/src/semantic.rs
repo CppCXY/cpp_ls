@@ -391,10 +391,23 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         }
 
         // 4. The index, asked once per spelling — with the name as written, so a qualified one stays qualified.
-        let written = qualified
-            .get(&at)
-            .cloned()
-            .unwrap_or_else(|| text.to_string());
+        //
+        // **A name followed by `::` is a nested-name-specifier, and it is asked on its own.** `LuaCodeFormat::NameStyleCheck`
+        // is one qualified spelling, and asking the index for it answers that *function* — so the token for
+        // `LuaCodeFormat` was drawn as a function, restored to a type only when the index happened to hold the class
+        // first. In `X::Y`, `X` names a class or a namespace and never a function ([basic.lookup.qual]), so the
+        // question for that token is `X` alone.
+        let opens_a_qualified_name = view
+            .get_token_text(cpp_parser::SourceRange::new(range.end_offset(), 2))
+            .is_some_and(|next| next.trim_start() == "::");
+        let written = if opens_a_qualified_name {
+            text.to_string()
+        } else {
+            qualified
+                .get(&at)
+                .cloned()
+                .unwrap_or_else(|| text.to_string())
+        };
         let answer = asked.entry(written.clone()).or_insert_with(|| {
             index
                 .kind_of(&written, &view.path)
