@@ -2944,3 +2944,34 @@ int f() {
         "`auto` alone is a new object, so the reference is not part of its type"
     );
 }
+
+/// **A class template's member alias is substituted with the instantiation's arguments.**
+///
+/// `std::vector<T>::emplace_back()` returns `reference`, which the class itself defines as `value_type&`. The declaration
+/// names the element type, so the answer for `auto &result = v.emplace_back()` is `int&` — and a project class that
+/// writes `using reference = T&;` must answer the same way, which is why this is a substitution along the class's own
+/// aliases rather than a table of container members.
+#[test]
+fn a_container_members_alias_is_substituted_with_its_element_type() {
+    let source = "\
+namespace std {
+    template <class T> class vector {
+    public:
+        using value_type = T;
+        using reference = value_type&;
+        reference emplace_back();
+    };
+}
+int f() {
+    std::vector<int> values;
+    auto &result = values.emplace_back();
+    result = 3;
+    return result;
+}
+";
+    assert_eq!(
+        type_of_use(source, "result").as_deref(),
+        Some("int&"),
+        "`reference` is `value_type&`, and `value_type` is the argument the declaration wrote"
+    );
+}

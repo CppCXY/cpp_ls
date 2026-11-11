@@ -118,3 +118,36 @@ three shapes that can be built (single file, cross file, cursor on a use) all at
 today: `definition_at` on a member access resolves through the index's member lookup, and the occurrence filter compares
 classes already. **Item 2 has no reproducible defect**; what it needs is the editor's `file:line` for the report that
 started it (a lens said 1, Find All References showed `DiagnosticBuilder::SpellCheck`), not another change.
+### Round 4: the simple alias chain already works
+
+The fixture `a_container_members_alias_is_substituted_with_its_element_type` passes today: with
+
+```cpp
+template <class T> class vector {
+public:
+    using value_type = T;
+    using reference = value_type&;
+    reference emplace_back();
+};
+std::vector<int> values;
+auto &result = values.emplace_back();   // int&
+```
+
+the answer is `int&`, so the substitution walks the chain (`reference` → `value_type&` → `T&`) and is not limited to one
+step. What the reported case has that this fixture does not is the **standard library's own chain**: MSVC's `vector`
+declares `using reference = _Alty&;`, and `_Alty` is itself an alias of a traits class's `value_type`. The next fixture
+therefore writes a chain with a **traits class**:
+
+```cpp
+template <class T> struct allocator_traits { using value_type = T; };
+template <class T> class vector {
+public:
+    using value_type = T;
+    using reference = allocator_traits<value_type>::value_type&;   // a dependent member of a class template
+    reference emplace_back();
+};
+```
+
+If that passes too, the remaining difference is the macros in the real headers, and the next step is a real project
+measurement (`inspect type --project … --file CodeFormatCore/src/.../LuaCodeFormat.cpp --needle result`), not another
+simplified fixture.
