@@ -200,3 +200,27 @@ the type of `std::vector<LuaDiagnostic>&` is not known here
 That sentence is produced by one condition in this crate. `grep -rn "is not known here" crates/` names it, and the
 condition it guards is the thing to measure on that file (`inspect type` on the declaration of `results`, then on
 `emplace_back`). Only then is there a change to make.
+### Round 7: `std::vector` is known and has 993 declarations — and offers no members
+
+Three measurements on `CodeFormatLib/src/LuaCodeFormat.cpp:304`:
+
+```text
+$ inspect hover … --needle "auto &result = results.emplace_back" --shift 7
+`result` — the type of `std::vector<LuaDiagnostic>&` is not known here
+
+$ inspect complete … --needle "results.emplace_back" --shift 8
+complete at 304:32: scope `std::vector`, prefix ``, 0 item(s)
+
+$ inspect summary --file …/MSVC/…/include/vector
+summary of …/include/vector: 993 declaration(s), 20 macro fact(s), 6 include(s) (6 resolved)
+```
+
+So the third line rules out "the system header is not indexed": it **is**, with 993 declarations. The second line is the
+actual failing step — the scope is recognised (`std::vector`) and **no members are offered**, so the instantiated class
+is resolved as a name but its members are not found. That points at the member query for an **instantiated class
+template** (`std::vector<LuaDiagnostic>` → the facts whose scope is `std::vector`), not at the alias substitution, not at
+the index's coverage, and not at the rendering.
+
+The next step is one query: what does `inspect members` answer for `std::vector` **without** the argument list, and with
+it. If the bare name answers 993-derived members and the instantiated one answers none, the fix is in the member lookup's
+template-argument handling — a real defect, not a boundary.
