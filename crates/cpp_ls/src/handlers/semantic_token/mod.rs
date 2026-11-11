@@ -2603,4 +2603,40 @@ public:
             "and an ordinary member is still a method"
         );
     }
+    /// **A constructor *defined* with a mem-initialiser is still its class's name.**
+    ///
+    /// Reported from an editor as a colour that came and went: `LuaCodeFormat::LuaCodeFormat() : _x(false) {}` drew the
+    /// qualifier as `function`, and an edit restored it to the type. The shape differs from the pinned cases only in the
+    /// initialiser list, so that is what this asks.
+    #[test]
+    fn a_constructor_with_a_mem_initializer_is_drawn_as_its_class() {
+        let text = "\
+class LuaCodeFormat {
+public:
+    LuaCodeFormat();
+private:
+    bool _support;
+};
+LuaCodeFormat::LuaCodeFormat()
+    : _support(false) {
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let definition = text
+            .find("LuaCodeFormat::LuaCodeFormat()")
+            .expect("the definition");
+        for offset in [definition, definition + "LuaCodeFormat::".len()] {
+            assert_eq!(
+                at_type.get(&offset),
+                Some(&index_of(TypeKind::Type)),
+                "both halves of `Foo::Foo` are the class's name ({offset})"
+            );
+        }
+    }
 }
