@@ -144,3 +144,44 @@ fn a_type_declared_in_a_source_file_is_not_offered() {
         "a `.cc` is a translation unit, not a header to include",
     );
 }
+
+/// **A template-id inside a template is a dependent name, not a missing include.**
+///
+/// Measured on `EmmyLuaCodeStyle`: after the first sweep this was the last finding —
+/// `associated_executor.hpp`'s `constraint<is_convertible<ExecutionContext&, execution_context&>::value>` was told to
+/// include an unrelated header that happens to declare an `is_convertible`. Inside a template the name may be a
+/// dependent base's, an ADL-only name, or one the instantiation supplies; the rule reads declaration *spellings* and
+/// has no scopes for the use, so silence is the only honest answer.
+///
+/// The negative half is what keeps the rule useful: a plain type in a template's parameter list is **not** this shape.
+#[test]
+fn a_template_id_inside_a_template_is_silent() {
+    let dependent = codes_in(
+        &[
+            ("/p/convertible.h", "class is_convertible {};\n"),
+            (
+                "/p/use.h",
+                "template <typename T>\nvoid f(typename constraint<is_convertible<T&, int&>::value>::type = 0);\n",
+            ),
+        ],
+        "/p/use.h",
+    );
+    assert_silent_about(
+        &dependent,
+        DiagnosticCode::MissingInclude,
+        "a dependent template-id is not a name a header can be named for",
+    );
+
+    let ordinary = codes_in(
+        &[
+            ("/p/widget.h", "class Widget {};\n"),
+            ("/p/uses.h", "template <class T>\nvoid g(Widget w) {}\n"),
+        ],
+        "/p/uses.h",
+    );
+    assert_reported(
+        &ordinary,
+        DiagnosticCode::MissingInclude,
+        "a plain type in a template's parameter list is still this rule's question",
+    );
+}

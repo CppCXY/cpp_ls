@@ -115,6 +115,15 @@ impl Check for MissingInclude {
                         || own.contains(&name)
                         || bound.contains(name.as_str())
                         || is_a_qualified_spelling(&name)
+                        // **A template-id inside a template is the shape a dependent name has.** In
+                        // `template <typename T> void get(typename constraint<is_convertible<T&, X&>::value>::type = 0)`
+                        // the `is_convertible` may be a member of a dependent base, an ADL-only name, or a name the
+                        // instantiation supplies — this rule works from declaration *spellings* and has no scopes for
+                        // the use, so the only honest answer is silence. Measured on `EmmyLuaCodeStyle`: the remaining
+                        // finding after the first sweep was exactly this (`is_convertible` "declared" in an unrelated
+                        // header). A plain type in a template's parameter list — `template <class T> void f(Widget w)`
+                        // — is not this shape and is still reported.
+                        || (!fact.parameters.is_empty() && is_used_with_template_arguments(&spelling, &name))
                         || !reported.insert(name.clone())
                     {
                         continue;
@@ -277,6 +286,19 @@ fn type_names_in(spelling: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// **Is `name` written with template arguments here?** — `is_convertible<A, B>`, and not `Widget`.
+///
+/// The question is only asked of a *template*'s declaration, where a name used this way may be dependent; see the
+/// skip that calls it. Whitespace between the name and its `<` is allowed, because a replacement-list macro often
+/// puts it there (`completion_handler_for <T>`).
+fn is_used_with_template_arguments(spelling: &str, name: &str) -> bool {
+    spelling.match_indices(name).any(|(at, _)| {
+        spelling[at + name.len()..]
+            .trim_start()
+            .starts_with('<')
+    })
 }
 
 /// The language's own words, which are not types a header declares.
