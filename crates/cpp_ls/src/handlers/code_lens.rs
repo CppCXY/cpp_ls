@@ -38,7 +38,7 @@ use lsp_types::{
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
-use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
+use crate::context::{ClientId, RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{path_to_uri, position_in_file, uri_to_file_path};
 
 pub async fn on_code_lens(
@@ -47,6 +47,7 @@ pub async fn on_code_lens(
     cancel_token: CancellationToken,
 ) -> RequestOutcome<Vec<CodeLens>> {
     let uri = params.text_document.uri;
+    let client = context.lsp_features().client_id();
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
@@ -56,7 +57,7 @@ pub async fn on_code_lens(
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
-        Some(lenses_of(session, &view, &uri))
+        Some(lenses_of(session, &view, &uri, client))
     })
     .await
 }
@@ -69,6 +70,7 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
     uri: &Uri,
+    client: ClientId,
 ) -> Vec<CodeLens> {
     let Some(held) = session.files().held(&view.path) else {
         return Vec::new();
@@ -106,23 +108,52 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
 
         lenses.push(CodeLens {
             range: Range::new(start, end),
-            command: Some(Command {
-                title: match uses {
-                    1 => "1 reference".to_string(),
-                    other => format!("{other} references"),
-                },
-                command: "editor.action.showReferences".to_string(),
-                arguments: Some(vec![
-                    serde_json::Value::String(uri.to_string()),
-                    serde_json::to_value(Position::new(start.line, start.character))
-                        .unwrap_or_default(),
-                    serde_json::to_value(&places).unwrap_or_default(),
-                ]),
-            }),
+            command: the_command(client, uri, start, places, uses),
             data: None,
         });
     }
     lenses
+}
+
+/// **The command a client can actually run**, or a title-only lens when it has none for this.
+///
+/// `editor.action.showReferences` is the editor's own "show me them", and **VS Code does not accept it from a language
+/// server**: it is an internal command, and a server that names it gets "command not found" when the lens is clicked.
+/// The extension registers `cppls.showReferences` and forwards to the built-in, so that is what this client is sent.
+/// IntelliJ's LSP client does accept the editor command. Every other client is sent **no command at all** — several
+/// draw a lens with no command as nothing, and the count is the answer they can use; a command nobody implements would
+/// only be an error message on click.
+fn the_command(
+    client: ClientId,
+    uri: &Uri,
+    at: Position,
+    places: Vec<Location>,
+    uses: usize,
+) -> Option<Command> {
+    let title = match uses {
+        1 => "1 reference".to_string(),
+        other => format!("{other} references"),
+    };
+    let command = if client.is_vscode() {
+        "cppls.showReferences"
+    } else if client.is_intellij() {
+        "editor.action.showReferences"
+    } else {
+        return Some(Command {
+            title,
+            command: String::new(),
+            arguments: None,
+        });
+    };
+    Some(Command {
+        title,
+        command: command.to_string(),
+        arguments: Some(vec![
+            serde_json::Value::String(uri.to_string()),
+            serde_json::to_value(at).unwrap_or_default(),
+            serde_json::to_value(&places).unwrap_or_default(),
+        ]),
+    })
 }
 
 /// The places the count was made of, as the editor's own "show references" takes them.
@@ -214,7 +245,7 @@ int f() { return grow(1) + grow(2); }
         let view = session
             .view_of_the_file(std::path::Path::new("/p/a.cpp"))
             .expect("a view");
-        let titles: Vec<String> = lenses_of(&session, &view, &uri)
+        let titles: Vec<String> = lenses_of(&session, &view, &uri, ClientId::VSCode)
             .into_iter()
             .filter_map(|lens| lens.command.map(|command| command.title))
             .collect();
@@ -230,7 +261,7 @@ int f() { return grow(1) + grow(2); }
         let header_view = session
             .view_of_the_file(std::path::Path::new("/p/a.h"))
             .expect("a view");
-        let titles: Vec<String> = lenses_of(&session, &header_view, &header_uri)
+        let titles: Vec<String> = lenses_of(&session, &header_view, &header_uri, ClientId::VSCode)
             .into_iter()
             .filter_map(|lens| lens.command.map(|command| command.title))
             .collect();
@@ -239,5 +270,36 @@ int f() { return grow(1) + grow(2); }
             vec!["2 references".to_string()],
             "the header's declaration counts the same uses"
         );
+    }
+
+    /// **The command is the one this client can run**, and a client with none gets a title and nothing else.
+    ///
+    /// `editor.action.showReferences` is the editor's own, and VS Code refuses it from a language server — the
+    /// extension registers `cppls.showReferences` and forwards. IntelliJ accepts the editor command; anything else is
+    /// sent no command, because a command nobody implements is an error message on click.
+    #[test]
+    fn the_command_is_the_one_this_client_can_run() {
+        let uri: Uri = "file:///p/a.cpp".parse().expect("a uri");
+        let at = Position::new(3, 4);
+        for (client, expected) in [
+            (ClientId::VSCode, "cppls.showReferences"),
+            (ClientId::Intellij, "editor.action.showReferences"),
+        ] {
+            let command = the_command(client, &uri, at, Vec::new(), 2).expect("a command");
+            assert_eq!(command.command, expected, "{client:?}");
+            assert_eq!(command.title, "2 references");
+            assert!(
+                command.arguments.is_some(),
+                "{client:?} needs the places the count was made of"
+            );
+        }
+
+        let other = the_command(ClientId::Other, &uri, at, Vec::new(), 1).expect("a lens");
+        assert_eq!(other.title, "1 reference");
+        assert_eq!(
+            other.command, "",
+            "a client with no command for this shows the count alone"
+        );
+        assert!(other.arguments.is_none());
     }
 }
