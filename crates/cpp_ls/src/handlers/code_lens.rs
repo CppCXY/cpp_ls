@@ -70,6 +70,14 @@ pub async fn on_code_lens(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+        // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference
+        // about the editor rather than about the analysis — so it is answered here, at the edge, before any query is
+        // made: the point of the switch is not to pay for a count nobody will read. The capability is still
+        // advertised, because a client asks for it once at `initialize` and cannot be told later that the provider
+        // went away; an empty list is what "no lenses" looks like on the wire.
+        if session.project_config().config.code_lens.enable == Some(false) {
+            return Some(Vec::new());
+        }
         // **Answer from what is known, and let the refresh correct it.** Withholding the list while the index catches up
         // made every keystroke *clear* the lenses and redraw them seconds later — a redraw is worse than a number that
         // grows: the editor is told the answer changed, not that it is unknown. `workspace/codeLens/refresh` (sent when

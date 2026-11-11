@@ -623,6 +623,86 @@ fn a_project_configuration_reaches_the_servers_behaviour() {
     assert!(server.wait_for_exit());
 }
 
+/// **`[code_lens] enable = false` reaches the wire** — the lens is a preference a project can turn off, and the answer
+/// is an empty list rather than no provider.
+///
+/// The capability cannot be withdrawn after `initialize`, so the switch is honoured where the lenses are made. The
+/// same file is asked twice: once in a project without the setting (a lens for `f`), and once with it (nothing).
+#[test]
+fn a_project_can_turn_the_code_lens_off() {
+    let source = "\
+int grow(int by) { return by + 1; }
+int f() { return grow(1) + grow(2); }
+";
+    for (name, config) in [
+        ("code-lens-on", None),
+        ("code-lens-off", Some("[code_lens]\nenable = false\n")),
+    ] {
+        let project = Project::new(name);
+        project.write("main.cpp", source);
+        if let Some(config) = config {
+            project.write(".cppls.toml", config);
+        }
+
+        let mut server = Server::start(project.root());
+        let main_uri = uri_of(&project.root().join("main.cpp"));
+        let initialized = server.request(
+            1,
+            "initialize",
+            json!({
+                "processId": std::process::id(),
+                "rootUri": uri_of(project.root()),
+                "capabilities": { "textDocument": { "codeLens": { "dynamicRegistration": false } } },
+            }),
+        );
+        assert!(
+            initialized["result"]["capabilities"]["codeLensProvider"].is_object(),
+            "the provider is advertised either way — a client asks once: {initialized}"
+        );
+        server.notify("initialized", json!({}));
+        server.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": source }
+            }),
+        );
+        server.pull_diagnostics(2, &main_uri);
+
+        let lenses = server.request(
+            3,
+            "textDocument/codeLens",
+            json!({ "textDocument": { "uri": main_uri } }),
+        );
+        let items = lenses["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: the answer is a list: {lenses}"));
+
+        match config {
+            None => {
+                let titles: Vec<String> = items
+                    .iter()
+                    .filter_map(|lens| lens["command"]["title"].as_str())
+                    .map(str::to_string)
+                    .collect();
+                assert_eq!(
+                    titles,
+                    vec!["2 references".to_string(), "0 references".to_string()],
+                    "`grow` is called twice and `f` by nothing: {lenses}"
+                );
+            }
+            Some(_) => assert!(
+                items.is_empty(),
+                "the project turned the lens off, so there is nothing to draw: {lenses}"
+            ),
+        }
+
+        let shutdown = server.request(900, "shutdown", Value::Null);
+        assert_eq!(shutdown["result"], Value::Null);
+        server.notify("exit", Value::Null);
+        assert!(server.wait_for_exit());
+    }
+}
+
 /// A project directory removed when the test ends, including when it fails.
 struct Project {
     root: PathBuf,

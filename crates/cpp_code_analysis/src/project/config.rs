@@ -134,6 +134,8 @@ pub struct ProjectConfig {
     pub index: IndexSection,
     pub diagnostics: DiagnosticsSection,
     pub hover: HoverSection,
+    /// **`[code_lens]`** — is the reference count drawn over each function? See [`CodeLensSection`].
+    pub code_lens: CodeLensSection,
     pub format: FormatSection,
     /// **`[completion]`** — how many items one completion may carry.
     ///
@@ -680,6 +682,26 @@ pub struct HoverSection {
     pub enable: Option<bool>,
 }
 
+/// `[code_lens]` — read by the language server.
+///
+/// ```toml
+/// [code_lens]
+/// enable = false        # no lens at all: no query, and no request answered
+/// ```
+///
+/// A lens is an **annotation a reader may not want**, and the cost of one is a reference query per function in the
+/// file — measured at 5 ms a lens on a real project, so a file of forty functions is 200 ms of work when it is opened
+/// or saved. That is a preference about the editor rather than about the analysis, which is why it is a switch here
+/// and not a change of behaviour in the engine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLensSection {
+    /// `Some(false)` turns the lens off: the provider still advertises itself (a capability cannot be withdrawn
+    /// after `initialize`), and every request then answers an empty list **without a query**.
+    #[serde(default)]
+    pub enable: Option<bool>,
+}
+
 /// `[completion]` — how many items one completion may carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -958,6 +980,10 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 Ok(decoded) => report.config.hover = decoded,
                 Err(problem) => report.problems.push(problem),
             },
+            "code_lens" => match decode::<CodeLensSection>(section, name) {
+                Ok(decoded) => report.config.code_lens = decoded,
+                Err(problem) => report.problems.push(problem),
+            },
             "format" => match decode::<FormatSection>(section, name) {
                 Ok(decoded) => report.config.format = decoded,
                 Err(problem) => report.problems.push(problem),
@@ -1001,7 +1027,8 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             },
             unknown => report.problems.push(ConfigProblem::error(format!(
                 "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover, \
-                 format), and `locale` is the one key that stands alone, so nothing under it is in effect"
+                 code_lens, completion, format), and `locale` is the one key that stands alone, so nothing under it \
+                 is in effect"
             ))),
         }
     }
@@ -1364,6 +1391,9 @@ mod tests {
 
             [hover]
             enable = false
+
+            [code_lens]
+            enable = false
             "#,
         );
 
@@ -1390,6 +1420,33 @@ mod tests {
         assert_eq!(config.index.max_files, Some(20000));
         assert_eq!(config.diagnostics.on_change_ms, Some(250));
         assert_eq!(config.hover.enable, Some(false));
+        assert_eq!(
+            config.code_lens.enable,
+            Some(false),
+            "`[code_lens] enable = false` is a section this server reads"
+        );
+    }
+
+    /// **[code_lens]** — absent means on, and a misspelled key is reported rather than silently enabled.
+    #[test]
+    fn a_code_lens_is_on_until_a_project_turns_it_off() {
+        let on = parse("[workspace]\nexclude = []\n");
+        assert_eq!(
+            on.config.code_lens.enable, None,
+            "a project that says nothing gets the lens: absent is not a value"
+        );
+
+        let off = parse("[code_lens]\nenable = false\n");
+        assert!(off.problems.is_empty(), "{:?}", problems(&off));
+        assert_eq!(off.config.code_lens.enable, Some(false));
+
+        // A typo inside the section is a *problem*, not a silently different answer — the same rule every section has.
+        let misspelled = parse("[code_lens]\nenable_lens = false\n");
+        assert_eq!(
+            misspelled.config.code_lens.enable, None,
+            "an unknown key does not turn the lens off"
+        );
+        assert_eq!(misspelled.problems.len(), 1, "{:?}", problems(&misspelled));
     }
 
     #[test]
