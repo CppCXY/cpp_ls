@@ -294,11 +294,9 @@ fn type_names_in(spelling: &str) -> Vec<String> {
 /// skip that calls it. Whitespace between the name and its `<` is allowed, because a replacement-list macro often
 /// puts it there (`completion_handler_for <T>`).
 fn is_used_with_template_arguments(spelling: &str, name: &str) -> bool {
-    spelling.match_indices(name).any(|(at, _)| {
-        spelling[at + name.len()..]
-            .trim_start()
-            .starts_with('<')
-    })
+    spelling
+        .match_indices(name)
+        .any(|(at, _)| spelling[at + name.len()..].trim_start().starts_with('<'))
 }
 
 /// The language's own words, which are not types a header declares.

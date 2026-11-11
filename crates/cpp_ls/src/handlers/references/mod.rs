@@ -417,6 +417,50 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
     let defined = narrowed_to_the_cursors_class(view, offset.get(), defined);
     let aimed: Vec<&cpp_code_analysis::ProjectDefinition> = defined.found.iter().collect();
 
+    // **A local's rename stays inside its own function.** A local, a parameter and a range-`for` variable are names
+    // whose identity only the file's own scopes can answer — `local_references_of` is C++'s lookup, shadowing
+    // respected — and the answer cannot leave the file, because nothing outside it can see the name. Renaming by
+    // spelling instead would edit a *different* local of the same spelling in another function, which is exactly the
+    // scope mistake this query exists to avoid.
+    let locals_here =
+        cpp_code_analysis::sema::declarations::local_references_of(&view.scopes, &view.root);
+    // **The declaration's own entry in that table is the test.** A file-scope variable is not in it — the table is
+    // about names a function body owns — so a global keeps the name path below, where the index decides.
+    let target_is_a_local = aimed.iter().any(|definition| {
+        definition.file == view.path
+            && locals_here
+                .iter()
+                .any(|entry| entry.declared_at as usize == definition.fact.name_range.start_offset)
+    });
+    if target_is_a_local {
+        let length = aimed
+            .first()
+            .map(|definition| definition.fact.name_range.length)
+            .unwrap_or(0);
+        let mut found: Vec<(std::path::PathBuf, cpp_parser::SourceRange)> = Vec::new();
+        if include_declaration {
+            for definition in &aimed {
+                found.push((definition.file.clone(), definition.fact.name_range));
+            }
+        }
+        for entry in locals_here {
+            if !aimed.iter().any(|definition| {
+                definition.fact.name_range.start_offset == entry.declared_at as usize
+            }) {
+                continue;
+            }
+            for use_at in entry.uses {
+                found.push((
+                    view.path.clone(),
+                    cpp_parser::SourceRange::new(use_at as usize, length),
+                ));
+            }
+        }
+        found.sort_by_key(|(file, range)| (file.clone(), range.start_offset));
+        found.dedup();
+        return found;
+    }
+
     let mut declaring: Vec<std::path::PathBuf> = aimed
         .iter()
         .map(|definition| definition.file.clone())

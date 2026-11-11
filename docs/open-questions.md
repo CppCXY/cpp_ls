@@ -191,3 +191,25 @@ declaration the index offers for that spelling is a different entity in a header
 works from declaration *spellings* and cannot resolve a name, so the honest next step is to skip a spelling that
 appears **inside a template argument list of a template declaration** — a dependent name resolved at instantiation —
 rather than to add a word list.
+## Rename: a local is exact, a file-scope name is not
+
+`textDocument/rename` is scope-aware for a **class member** (the cursor's class narrows which member is meant) and, as
+of this round, for a **local**: renaming a local, a parameter or a range-`for` variable edits its declaration and the
+uses C++'s own lookup attributes to it (`local_references_of`), and nothing outside that function — the file's scopes
+are the only place the identity exists, so the answer cannot leave the file. Pinned by
+`rename::a_symbol::a_rename_stays_inside_the_scope_of_what_it_names`.
+
+**A file-scope name is still renamed by spelling**, and it is worse than that: measured while writing the test above,
+renaming a **global** answers **only its declaration** — a use of it in another function is not edited at all, so a
+rename would leave a stale use behind. That is a defect in the name-level reference list, not in the rename handler:
+
+```cpp
+int size = 0;                                  renamed
+int one() { int size = 1; return size; }       the local: must not be edited (it is not, once the local path is exact)
+int two() { return size; }                     a use of the global: NOT edited today
+```
+
+The next step is to make that list distinguish three targets rather than two — a local (exact, done), a member
+(class-narrowed, done), and a file-scope name (needs `definition_at` per candidate occurrence, which is one parse per
+candidate file and the same machinery the class filter already pays for). Until then a rename of a global is **not**
+safe, and the handler should refuse it rather than write half of it — the rule the macro path already states.

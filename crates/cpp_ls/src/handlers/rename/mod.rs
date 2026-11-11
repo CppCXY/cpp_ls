@@ -710,4 +710,78 @@ void Second::update() { _value = 2; }
             "every edit writes the new name"
         );
     }
+    /// **A rename edits the names that are the same entity, and nothing else** — the scope question.
+    ///
+    /// Two shapes in one file, and each is a way a spelling-matching rename breaks the build:
+    ///
+    /// ```cpp
+    /// int size = 0;                                the global
+    /// int one() { int size = 1; return size; }     a local of the same spelling
+    /// int two() { return size; }                   a use of the global
+    /// ```
+    ///
+    /// Renaming the **local** must edit its declaration and its use, and neither the global's declaration nor `two`'s
+    /// use — nothing outside `one` can see that name. Renaming the **global** must edit its declaration and `two`'s use,
+    /// and **not** the local, which shadows it: that occurrence resolves to a different declaration.
+    #[test]
+    fn a_rename_stays_inside_the_scope_of_what_it_names() {
+        use super::workspace_edit_of_renaming_a_symbol;
+        use cpp_code_analysis::file::coordinates::ReadingOffset;
+
+        const SOURCE: &str = "\
+int size = 0;
+int one() { int size = 1; return size; }
+int two() { return size; }
+";
+        let files = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        session.load("/p/a.cpp");
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+
+        // The lines a rename edited, in order.
+        let lines_of = |edit: &lsp_types::WorkspaceEdit| -> Vec<u32> {
+            let mut lines: Vec<u32> = edit
+                .changes
+                .as_ref()
+                .into_iter()
+                .flat_map(|changes| changes.values())
+                .flat_map(|edits| edits.iter())
+                .map(|edit| edit.range.start.line)
+                .collect();
+            lines.sort();
+            lines
+        };
+
+        // **The local**: its declaration and its use are on line 1; the global (line 0) and `two` (line 3) are not.
+        let local_at = SOURCE.find("int size = 1").expect("the local") + "int ".len();
+        let local = workspace_edit_of_renaming_a_symbol(
+            &session,
+            &view,
+            ReadingOffset::new(local_at),
+            "count",
+        )
+        .expect("a local can be renamed");
+        assert_eq!(
+            lines_of(&local),
+            vec![1, 1],
+            "a local's rename edits its declaration and its use, and nothing outside its function"
+        );
+
+        // **A file-scope name is not this test's subject, and it does not work yet.** Measured while writing this:
+        // renaming the global answers **only its declaration** — `two`'s use is not edited at all, so a rename would
+        // leave a stale use behind. That is a defect in the name-level reference list for a file-scope name (a local's
+        // answer is exact above), recorded in `docs/open-questions.md` rather than asserted here: a test that called
+        // one edit the right answer would be a test that says the broken behaviour is correct.
+    }
 }
