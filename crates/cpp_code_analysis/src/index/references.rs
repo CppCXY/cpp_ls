@@ -1511,17 +1511,13 @@ pub fn name_references(
             found.not_looked_at.push(path);
             continue;
         };
-        // **A file that declares the spelling as a local is not searched.** Its uses may mean its own local.
-        let declares_a_local = index.summary(&path).is_some_and(|summary| {
-            summary
-                .declarations
-                .iter()
-                .any(|fact| fact.local && fact.name == name)
-        });
-        if declares_a_local {
-            found.not_looked_at.push(path);
-            continue;
-        }
+        // **A file that declares the spelling as a local is still searched.** The guard here used to skip the whole
+        // file — "its uses may mean its own local" — and that made a file-scope name impossible to rename: measured on a
+        // fixture, `int size = 0;` beside a function that declares its own `size` answered **0 files**, because the one
+        // candidate was skipped for a local it also contains, and the use of the *global* in another function went with
+        // it. A file-level answer could not be right for a question that is per-occurrence: the caller
+        // (`name_level_offsets`) attributes each occurrence by the file's own scopes and drops the ones that land on a
+        // local, which is the same question asked where it has an answer.
         if !text.contains(name) {
             found.looked_at += 1;
             continue;

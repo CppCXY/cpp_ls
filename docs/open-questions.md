@@ -191,53 +191,24 @@ declaration the index offers for that spelling is a different entity in a header
 works from declaration *spellings* and cannot resolve a name, so the honest next step is to skip a spelling that
 appears **inside a template argument list of a template declaration** — a dependent name resolved at instantiation —
 rather than to add a word list.
-## Rename: a local is exact, a file-scope name is not
+## Rename: a local is exact, and a file-scope name is too
 
-`textDocument/rename` is scope-aware for a **class member** (the cursor's class narrows which member is meant) and, as
-of this round, for a **local**: renaming a local, a parameter or a range-`for` variable edits its declaration and the
-uses C++'s own lookup attributes to it (`local_references_of`), and nothing outside that function — the file's scopes
-are the only place the identity exists, so the answer cannot leave the file. Pinned by
-`rename::a_symbol::a_rename_stays_inside_the_scope_of_what_it_names`.
-
-**A file-scope name is still renamed by spelling**, and it is worse than that: measured while writing the test above,
-renaming a **global** answers **only its declaration** — a use of it in another function is not edited at all, so a
-rename would leave a stale use behind. That is a defect in the name-level reference list, not in the rename handler:
-
-```cpp
-int size = 0;                                  renamed
-int one() { int size = 1; return size; }       the local: must not be edited (it is not, once the local path is exact)
-int two() { return size; }                     a use of the global: NOT edited today
-```
-
-The next step is to make that list distinguish three targets rather than two — a local (exact, done), a member
-(class-narrowed, done), and a file-scope name (needs `definition_at` per candidate occurrence, which is one parse per
-candidate file and the same machinery the class filter already pays for). Until then a rename of a global is **not**
-safe, and the handler should refuse it rather than write half of it — the rule the macro path already states.
-## Rename of a file-scope name: the exact line it dies on
-
-Measured, in order, on a fixture (`int size = 0;` plus a function that declares its own `size` and a function that
-reads the global):
-
-```text
-definitions at the global's declaration   1 fact: ("size", local=false, Variable)   the target is found
-name_references(index, …, "size", [a.cpp]) 0 files                                  the scan refuses
-name_level_offsets(…, include_declaration=false) 0 places                           so rename has nothing to write
-```
-
-**The cause is one guard** in `crates/cpp_code_analysis/src/index/references.rs`:
+The failure was one guard in `name_references`:
 
 ```rust
-// **A file that declares the spelling as a local is not searched.** Its uses may mean its own local.
+// **A file that declares the spelling as a local is not searched.**
 let declares_a_local = …any(|fact| fact.local && fact.name == name);
 if declares_a_local { found.not_looked_at.push(path); continue; }
 ```
 
-`a.cpp` declares a local `size`, so the whole file is skipped — including the use of the *global* `size` in the other
-function. The guard is right for a list a reader reads (do not offer a maybe-use) and wrong for a rename, which needs
-every use or none.
+`a.cpp` declares a local `size`, so the whole file was skipped — including the use of the *global* `size` in another
+function — and a rename of `int size = 0;` answered 0 places. Measured in that order: `definitions` found the fact,
+`name_references` answered 0 files, `name_level_offsets` answered 0 places. A file-level answer cannot be right for a
+per-occurrence question.
 
-**The fix** is per-occurrence attribution, and both pieces already exist in this tree: do not skip the file, and drop the
-occurrences that resolve to a local — the handler parses each candidate already (the class filter) and
-`definition_at` answers "which declaration is this occurrence" for a file's own bindings. What it does not answer is a
-*member* name; that is the class filter's job, and the two together are the identity rule
-`name_level_offsets` is missing. Until then a rename of a file-scope name is refused, which is the safe half.
+**The fix** asks it per occurrence, where it has an answer: the scan no longer skips the file, and `name_level_offsets`
+drops an occurrence when the file's own scopes resolve it to a binding a function body owns
+(`resolves_to_a_function_local`: `definition_at` plus the scope chain). Measured on the fixture, the global answers
+**lines 0 and 2** — its declaration and the use in `two`, and **not** the shadowing local on line 1 — and
+`a_rename_stays_inside_the_scope_of_what_it_names` pins both that and the local's own exact answer. On
+`EmmyLuaCodeStyle`, `GetState` still answers 6 uses.

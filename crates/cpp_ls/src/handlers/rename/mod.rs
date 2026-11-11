@@ -175,24 +175,10 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
-    // **A file-scope name is refused, and the reason is a measurement.** Renaming one answered **only its
-    // declaration** — the uses of it in other functions were not edited at all — which writes a stale use into the
-    // user's files. A half rename is the one outcome an editor must not produce, so this refuses with the macro path's
-    // own finality (`null`, which a client shows as "this cannot be renamed here") until the reference list answers for
-    // a file-scope name the way it does for a member and a local. `docs/open-questions.md` records the defect.
-    if let Known::Yes(defined) = session.definitions(view, offset)
-        && let Some(first) = defined.found.first()
-    {
-        let qualified =
-            cpp_code_analysis::SymbolToFind::of(&first.fact, first.file.clone()).qualified;
-        let a_member = qualified.contains("::");
-        if !first.fact.local && !a_member {
-            log::debug!(
-                "refusing to rename `{qualified}`: a file-scope name is not answered completely yet"
-            );
-            return None;
-        }
-    }
+    // **A file-scope name is answered now, so nothing is refused here.** It used to be: the reference list skipped any
+    // file that declared a local of the same spelling, so a global's uses came back empty and the rename would have
+    // written its declaration alone. The list attributes an occurrence by the file's own scopes now
+    // (`resolves_to_a_function_local`), which is the per-occurrence question the file-level guard could not ask.
     // (1) A symbol, and a name to write.
     let (name, name_range) = symbol_at(session, view, offset)?;
     if !is_one_identifier(new_name) {
@@ -796,20 +782,22 @@ int two() { return size; }
             "a local's rename edits its declaration and its use, and nothing outside its function"
         );
 
-        // **A file-scope name is refused, and the measurement behind the refusal is the reference list itself**: asked
-        // for the global's uses it answers **0 places**, while the same call for the local beside it answers 1. So the
-        // name path finds nothing for a file-scope variable — the failure is upstream of rename, in what the list
-        // resolves a declaration to — and a handler that wrote an edit from it would write only the declaration.
+        // **A file-scope name is answered now.** `int size = 0;` beside a function that declares its own `size`: the
+        // rename edits the global's declaration (line 0) and the use of it in `two` (line 3) — and **not** the local on
+        // line 1, which resolves to a binding of its own. That drop is per occurrence (`resolves_to_a_function_local`),
+        // which is what the scan's old whole-file guard could not do.
         let global_at = SOURCE.find("int size = 0").expect("the global") + "int ".len();
-        assert!(
-            workspace_edit_of_renaming_a_symbol(
-                &session,
-                &view,
-                ReadingOffset::new(global_at),
-                "count"
-            )
-            .is_none(),
-            "a file-scope name is refused while its uses are not answered"
+        let global = workspace_edit_of_renaming_a_symbol(
+            &session,
+            &view,
+            ReadingOffset::new(global_at),
+            "count",
+        )
+        .expect("a file-scope name is answered");
+        assert_eq!(
+            lines_of(&global),
+            vec![0, 2],
+            "the declaration and the use in `two`, and not the shadowing local"
         );
     }
 }

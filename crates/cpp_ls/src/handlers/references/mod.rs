@@ -543,6 +543,38 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
         }
     }
 
+    // **A use that lands on a local is not this name's use.** A candidate file may declare its own `size`, and every
+    // occurrence of the spelling inside that function is *that* local's — the file-level guard in the scan used to skip
+    // the whole file for it, which lost the use of a file-scope name in another function of the same file (measured: a
+    // rename of `int size = 0;` answered 0 places). The question is per occurrence, and the file's own scopes answer it:
+    // the occurrence is dropped when it resolves to a binding a function body owns.
+    let mut kept: Vec<(std::path::PathBuf, cpp_parser::SourceRange)> = Vec::new();
+    let mut parsed: std::collections::HashMap<
+        std::path::PathBuf,
+        Option<cpp_code_analysis::FileView>,
+    > = std::collections::HashMap::new();
+    for (file, range) in found {
+        let view = parsed.entry(file.clone()).or_insert_with(|| {
+            session.files().held(&file).map(|held| {
+                cpp_code_analysis::FileView::parse_with(
+                    held,
+                    &cpp_parser::MacroEnvironment::default(),
+                )
+            })
+        });
+        let Some(view) = view else {
+            // A file this session cannot hold keeps its places: the answer is a name, and dropping them silently would
+            // be the partial list this whole function exists to avoid.
+            kept.push((file, range));
+            continue;
+        };
+        if resolves_to_a_function_local(view, range.start_offset) {
+            continue;
+        }
+        kept.push((file, range));
+    }
+    let mut found = kept;
+
     // **A declaration is not a use.** `name_references` reports every occurrence whose *spelling* matches, and one of
     // them is the same entity's own declaration — the `.cpp` definition beside the header's declaration — which a list
     // of *uses* must not contain. Measured on a fixture: `grow` declared in a header, defined and called twice in a
@@ -1092,4 +1124,30 @@ void Second::update() {
             "the bare use in `First::update` and the receiver-qualified one — not `Second`'s own"
         );
     }
+}
+
+/// **Does this occurrence resolve to a binding a function body owns?** — a local, a parameter, a loop variable.
+///
+/// The file's own scopes answer it (`definition_at`), and the declaration's scope chain says whether the binding lives
+/// inside a function. That is the per-occurrence question the scan cannot ask and the reason a file-level "declares a
+/// local" guard was wrong: the same file can hold a local `size` *and* a use of a file-scope `size`.
+fn resolves_to_a_function_local(view: &cpp_code_analysis::FileView, offset: usize) -> bool {
+    let Known::Yes(binding) =
+        cpp_code_analysis::sema::resolve::definition_at(&view.scopes, &view.root, offset)
+    else {
+        return false;
+    };
+    view.scopes
+        .scope_chain(binding.scope)
+        .into_iter()
+        .any(|id| {
+            view.scopes.scope(id).is_some_and(|scope| {
+                matches!(
+                    scope.kind,
+                    cpp_code_analysis::ScopeKind::Function
+                        | cpp_code_analysis::ScopeKind::Block
+                        | cpp_code_analysis::ScopeKind::Lambda
+                )
+            })
+        })
 }
