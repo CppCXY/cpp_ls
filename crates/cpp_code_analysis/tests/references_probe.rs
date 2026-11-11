@@ -69,6 +69,22 @@ fn what_one_reference_query_actually_looked_at() {
                 .cloned()
         })
         .expect("the declaration");
+    let symbol = cpp_code_analysis::SymbolToFind::of(&fact, header.clone());
+    eprintln!(
+        "[probe] fact.name={:?} symbol.name={:?} qualified={:?} last_segment={:?} declared_in={:?}",
+        fact.name, symbol.name, symbol.qualified, symbol.last_segment, symbol.declared_in
+    );
+    if let Some(summary) = session.index().summary(&header) {
+        eprintln!(
+            "[probe] the header's own filter says {:?} for {:?} (filter {} bytes)",
+            cpp_code_analysis::summary::use_filter_might_contain(
+                &summary.use_filter,
+                &symbol.last_segment
+            ),
+            symbol.last_segment,
+            summary.use_filter.len()
+        );
+    }
     let started = std::time::Instant::now();
     let found = session.symbol_references_of(&fact, header.clone(), ReferenceBudget::default());
     let elapsed = started.elapsed();

@@ -465,24 +465,18 @@ pub fn symbol_references<F: FileProvider>(
     let declared_at = declarations_of_the_spelling(index, symbol);
 
     for path in symbol_candidates(index, symbol, budget, &mut answer) {
-        // **The filter first, and it is what the read was for.** A candidate is every file that can *see* the
-        // declaration — the declaring file and everything that transitively includes it — and the loop below reads
-        // each one whole before it can ask whether the name is even written there. The summary already carries a
-        // Bloom filter over the identifiers the file mentions ([`crate::FileSummary::use_filter`]), so a file that
-        // cannot contain the name is skipped without a read.
+        // **The Bloom filter is not trusted, and the measurement is why.** It was here as the read-avoidance step: a
+        // candidate that "cannot contain the name" was skipped without a read, on the stated guarantee that a `false`
+        // is certain. Measured on `EmmyLuaCodeStyle`, that guarantee does not hold — the declaring header's own filter
+        // (65 bytes) answered `false` for `GetState`, a name that file spells in its own class body, and the whole query
+        // then answered `0 references`: `looked_at 0, without_the_name 16, unreadable 0`. Every candidate, including the
+        // file the fact came from, was rejected before anything was read.
         //
-        // **A `false` here is certain**: the filter was built from every identifier token in the file, so a name it
-        // does not contain is a name not written there. A `true` is "read it and see" — a false positive costs
-        // exactly the read this used to cost unconditionally, and there is no false negative to be wrong about.
+        // A false negative here is not a slower answer, it is a *wrong* one — the one kind of error a reference list
+        // must not make — so the exact test (`text.contains`, one read) is the filter, and the Bloom filter has to be
+        // rebuilt soundly (and versioned) before it can come back. The counters below still say how the work went.
         //
-        // A summary with no filter (an entry written before the field existed, a file the index has not read) says
-        // `true`, which is the safe direction and the reason this can be added without invalidating anything.
-        if let Some(summary) = index.summary(&path)
-            && !crate::summary::use_filter_might_contain(&summary.use_filter, &symbol.last_segment)
-        {
-            answer.without_the_name += 1;
-            continue;
-        }
+        // A file whose text is not readable is still reported rather than skipped silently; see `unreadable`.
 
         let Some(text) = files.read(&path) else {
             answer.unreadable.push(path);
