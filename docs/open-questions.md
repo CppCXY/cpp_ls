@@ -3,20 +3,6 @@
 Things a report from an editor pointed at, that are **not** fixed — with the measurement that says where they
 stand, so the next run starts from evidence rather than from the report again.
 
-## A constructor defined in the same file as its class is still drawn as a method
-
-`EditorconfigPattern::EditorconfigPattern() { … }` in a `.cpp` was drawn as `function` — reported from an editor, and
-fixed for the shape that matters: the class is declared in a **header**, so the definition's name is resolved through
-the index (`IndexedKind::constructor`, pinned by
-`semantic_token::a_constructors_qualified_definition_is_drawn_as_its_class`).
-
-What is left is the other resolution path. When the class is declared in the **same file** as the definition, the name
-is answered by that file's own *bindings*, and `BindingKind` records an out-of-class definition as `Function` rather
-than `Constructor` — so `kind_of_binding`'s constructor arm never sees it. `BindingKind::Constructor | Destructor =>
-NameKind::Type` is already there and already right; the missing half is `sema::scopes` binding an out-of-class
-`Foo::Foo` with the constructor's kind. Measured: the one-file fixture answers `Some(Method)` where the two-file
-fixture answers `Some(Type)`.
-
 ## `std::endl` drawn as a variable, i.e. with no semantic token at all
 
 **Not reproduced.** Both halves of the question are now tests, and they answer the opposite of the report.

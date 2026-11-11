@@ -2537,4 +2537,33 @@ void Pattern::Lex(int reader) {}
             at_type.get(&lex)
         );
     }
+    /// **The same constructor, with its class in the same file.**
+    ///
+    /// The path is different — the name is answered by this file's own *bindings* rather than by the index — and it
+    /// was the one still wrong: `sema::scopes` bound the out-of-class `Pattern::Pattern` as `Function`, so the name
+    /// was drawn as a method while the class body's own constructor was already `Constructor`.
+    #[test]
+    fn a_constructor_defined_beside_its_class_is_drawn_as_its_class() {
+        let text = "\
+struct Pattern {
+    Pattern();
+    void Lex(int reader);
+};
+Pattern::Pattern() {}
+void Pattern::Lex(int reader) {}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let definition = text.find("Pattern::Pattern() {}").expect("the fixture");
+        assert_eq!(
+            at_type.get(&definition),
+            Some(&index_of(TypeKind::Type)),
+            "the constructor's name is the class's, whichever file answers"
+        );
+    }
 }

@@ -101,22 +101,17 @@ impl Check for MissingReturn {
             // Asked of the **tokens**, not of the statement kinds: `co_yield` is parsed as a throw statement and `co_return`
             // as a return statement, so the tree cannot tell a coroutine from an ordinary function without this spelling
             // test — and `co_await` alone is enough to know the body is one.
-            let is_a_coroutine = body.syntax().descendants_with_tokens().any(|element| {
-                element.into_token().is_some_and(|token| {
-                    matches!(
-                        cpp_parser::CppTokenKind::from(token.kind()),
-                        cpp_parser::CppTokenKind::CoAwaitKeyword
-                            | cpp_parser::CppTokenKind::CoYieldKeyword
-                            | cpp_parser::CppTokenKind::CoReturnKeyword
-                    )
-                })
-            });
+            //
+            // **One token walk answers both token questions** — this one and `goto`, which the flow walk below needs to
+            // know whether an endless loop can be left. It used to be asked per endless loop, over that loop's whole
+            // subtree; one pass over the body is the same answer at a fixed price.
+            let (is_a_coroutine, has_a_goto) = token_facts(&body);
             if is_a_coroutine {
                 continue;
             }
 
-            // **The control-flow question**, and the whole of the rule now: does any path reach the closing brace?
-            if !reaches_the_end(&body) {
+            // **The control-flow question**, and the whole of the rule now: can any path reach the closing brace?
+            if !the_body_falls_off_its_end(&body, has_a_goto) {
                 continue;
             }
 
@@ -147,162 +142,231 @@ impl Check for MissingReturn {
     }
 }
 
-/// **Can any path reach the end of this body?**
+/// **What one statement says about the two things the rule asks of it**, read in a **single traversal**.
 ///
-/// A path reaches the end when it neither returns, throws, nor is trapped in a loop that cannot exit — and the answer is
-/// `true` unless **every** path is one of those.
-fn reaches_the_end(body: &cpp_parser::CppCompoundStat) -> bool {
-    statements_reach_the_end(body.get_stats())
+/// The rule has exactly one question — *can control reach the point after this statement?* — and one piece of
+/// context an enclosing statement needs from its parts: *does any path leave it through a `break` that belongs to me?*
+/// Every statement answers both, and the composite kinds combine them. That is the whole algorithm: one recursive
+/// walk over the statement tree, each node visited once.
+///
+/// # Why this shape, and not the one it replaced
+///
+/// The rule used to be a set of predicates that each walked a subtree to answer their own question: `can_be_left`
+/// descended into every block and `if` of a loop to look for a `break`, and `a_goto_could_leave` scanned a loop's
+/// **whole subtree's tokens** — so a statement nested under a loop was visited once per enclosing loop, and a deeply
+/// nested body was quadratic in its own size. The answer was right; the shape made the price depend on nesting rather
+/// than on size.
+///
+/// Two facts stay **per body** rather than per statement, because they are the same everywhere in it: whether the body
+/// writes a coroutine keyword (then the whole rule does not apply) and whether it writes a `goto` anywhere (which can
+/// leave any loop, so an endless loop containing one cannot be called endless). Both are read in one token pass — see
+/// [`token_facts`].
+#[derive(Clone, Copy)]
+struct Flow {
+    /// Can control reach the point right after this statement?
+    reaches: bool,
+    /// Does some path leave through a `break` that belongs to the loop or `switch` **around** this statement?
+    ///
+    /// A `break` inside a loop or a `switch` belongs to *that* statement and stops there: it never reaches the
+    /// enclosing one, which is why a loop's own flow reports `breaks: false`.
+    breaks: bool,
 }
 
-fn statements_reach_the_end(statements: impl IntoIterator<Item = CppStat>) -> bool {
-    for statement in statements {
-        if !completes(&statement) {
-            // Nothing after a statement that cannot complete is reachable, so this sequence cannot either.
-            return false;
+impl Flow {
+    /// A statement control runs straight past: every expression statement, declaration and label.
+    const FALLS_THROUGH: Flow = Flow {
+        reaches: true,
+        breaks: false,
+    };
+
+    /// A statement that cannot be run past — `return`, `throw`, `break`, `continue`.
+    const STOPS: Flow = Flow {
+        reaches: false,
+        breaks: false,
+    };
+}
+
+/// **The two token facts the flow walk needs**, read in one pass over the body.
+///
+/// * a **coroutine keyword** (`co_await`, `co_yield`, `co_return`) — parsed as ordinary statements, so the tree cannot
+///   tell a coroutine from a function, and a coroutine's value contract is its promise's rather than a `return`'s;
+/// * a **`goto`** — the one exit a statement tree cannot model, so an endless loop that contains one may be left.
+///
+/// Asked of the whole body rather than of a loop, because both are properties of the body: a `goto` anywhere in it can
+/// leave any loop in it, and a coroutine keyword anywhere in it makes the whole body a coroutine.
+fn token_facts(body: &cpp_parser::CppCompoundStat) -> (bool, bool) {
+    let mut is_a_coroutine = false;
+    let mut has_a_goto = false;
+    for element in body.syntax().descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        match cpp_parser::CppTokenKind::from(token.kind()) {
+            cpp_parser::CppTokenKind::CoAwaitKeyword
+            | cpp_parser::CppTokenKind::CoYieldKeyword
+            | cpp_parser::CppTokenKind::CoReturnKeyword => is_a_coroutine = true,
+            cpp_parser::CppTokenKind::GotoKeyword => has_a_goto = true,
+            _ => {}
+        }
+        if is_a_coroutine && has_a_goto {
+            break;
         }
     }
-    true
+    (is_a_coroutine, has_a_goto)
 }
 
-/// Can this statement run to its end, so that the statement after it runs?
-fn completes(statement: &CppStat) -> bool {
+/// **Can any path reach the end of this body?** — the rule's whole control-flow question, asked once.
+fn the_body_falls_off_its_end(body: &cpp_parser::CppCompoundStat, has_a_goto: bool) -> bool {
+    sequence(body.get_stats(), has_a_goto).reaches
+}
+
+/// One statement's flow.
+fn flow_of(statement: &CppStat, has_a_goto: bool) -> Flow {
     match statement {
-        // A block is its statements.
-        CppStat::CompoundStat(block) => statements_reach_the_end(block.get_stats()),
-        // The two statements after which control does not continue in this function. (`co_return` parses as a `return`,
-        // and a coroutine body never gets here — see the check above.)
-        CppStat::ReturnStat(_) | CppStat::ThrowStat(_) => false,
-        // **An `if` completes unless both of its branches are exhaustive.** A literal condition decides which branch
-        // exists, and `if constexpr` with one is the same question one language level up.
+        // A block is its statements, and a `break` inside it is the enclosing statement's.
+        CppStat::CompoundStat(block) => sequence(block.get_stats(), has_a_goto),
+        // Control does not continue past these. `co_return` parses as a `return`; a coroutine body never gets here.
+        CppStat::ReturnStat(_) | CppStat::ThrowStat(_) | CppStat::ContinueStat(_) => Flow::STOPS,
+        CppStat::BreakStat(_) => Flow {
+            reaches: false,
+            breaks: true,
+        },
+        // **An `if` completes unless both of its branches do not.** A literal condition decides which branch exists,
+        // and `if constexpr` with one is the same question one language level up.
         CppStat::IfStat(branch) => {
-            let condition = condition_is_true(branch.get_condition());
-            if let Some(taken) = condition {
-                return if taken {
-                    branch
-                        .get_then_branch()
-                        .is_none_or(|branch| completes(&branch))
-                } else {
-                    branch.get_else_branch().is_none_or(|other| {
-                        other.get_stat().is_none_or(|branch| completes(&branch))
-                    })
-                };
-            }
-            let then_completes = branch
+            let then = branch
                 .get_then_branch()
-                .is_none_or(|branch| completes(&branch));
-            let else_completes = branch
+                .map_or(Flow::FALLS_THROUGH, |branch| flow_of(&branch, has_a_goto));
+            let other = branch
                 .get_else_branch()
-                .is_none_or(|other| other.get_stat().is_none_or(|branch| completes(&branch)));
-            then_completes || else_completes
-        }
-        // **A loop completes when it can be left.** An infinite loop with no `break` (and no `goto` that could leave it) is
-        // the third way a body ends without executing its last statement.
-        CppStat::WhileStat(loop_) => {
-            let endless = condition_is_true(loop_.get_condition()) == Some(true);
-            if !endless {
-                return true;
+                .and_then(|other| other.get_stat())
+                .map_or(Flow::FALLS_THROUGH, |branch| flow_of(&branch, has_a_goto));
+            match condition_is_true(branch.get_condition()) {
+                Some(true) => then,
+                Some(false) => other,
+                None => Flow {
+                    reaches: then.reaches || other.reaches,
+                    // **Any path that breaks out makes the enclosing loop leavable**, whichever branch it is on.
+                    breaks: then.breaks || other.breaks,
+                },
             }
-            loop_
+        }
+        // **A loop with a condition can be left through it.** An endless one is left only by a `break` of its own
+        // (which its body reports) or by a `goto` anywhere in the body.
+        CppStat::WhileStat(loop_) => {
+            let body = loop_
                 .get_body()
-                .is_none_or(|body| can_be_left(&body) || a_goto_could_leave(body.syntax()))
+                .map_or(Flow::FALLS_THROUGH, |body| flow_of(&body, has_a_goto));
+            let endless = condition_is_true(loop_.get_condition()) == Some(true);
+            endless_loop(body, endless, has_a_goto)
         }
         CppStat::DoWhileStat(loop_) => {
-            let body = loop_.get_body();
-            if body.as_ref().is_some_and(|body| !completes(body)) {
-                return false;
+            let body = loop_
+                .get_body()
+                .map_or(Flow::FALLS_THROUGH, |body| flow_of(&body, has_a_goto));
+            // The condition is tested **after** the body: a body that never finishes never reaches the test, and the
+            // loop is left from inside it or not at all.
+            if !body.reaches {
+                return Flow {
+                    reaches: body.breaks || has_a_goto,
+                    breaks: false,
+                };
             }
             let endless = condition_is_true(loop_.get_condition()) == Some(true);
-            !endless
-                || body.is_some_and(|body| can_be_left(&body) || a_goto_could_leave(body.syntax()))
+            endless_loop(body, endless, has_a_goto)
         }
-        // **`for (;;)` is an endless loop; a `for` with a condition can exit.** The head is asked as a node question, because
-        // the two spellings differ by what is written between the `;` and not by a word.
         CppStat::ForStat(loop_) => {
-            if loop_.has_a_condition() {
-                return true;
-            }
-            loop_
+            let body = loop_
                 .get_body()
-                .is_none_or(|body| can_be_left(&body) || a_goto_could_leave(body.syntax()))
+                .map_or(Flow::FALLS_THROUGH, |body| flow_of(&body, has_a_goto));
+            let endless = !loop_.has_a_condition();
+            endless_loop(body, endless, has_a_goto)
         }
-        // **A `switch` completes when it can be left through its end**, which is provable for the shape a reader
-        // writes most: a `default` and not one `break`, so fallthrough carries every path down to the last statement.
-        // `try` stays assumed, because an exception may be caught below and that is not readable here.
-        CppStat::SwitchStat(switch) => switch_completes(switch),
-        CppStat::TryStat(_) => true,
-        _ => true,
+        CppStat::SwitchStat(switch) => switch_flow(switch, has_a_goto),
+        // **`try` is assumed to complete**: the handler may be entered from any call in the block, so the only
+        // readable answer is the conservative one — no finding about a body this walk cannot follow.
+        CppStat::TryStat(_) => Flow::FALLS_THROUGH,
+        // An expression, a declaration, a label: control runs past it.
+        _ => Flow::FALLS_THROUGH,
     }
 }
 
-/// **Can a `switch` run to its end?** — the question `LuaParser::BlockFollow` needs, where every label returns.
+/// A loop's flow, given its body's and whether the loop has an exit condition.
+///
+/// **The loop's own breaks stop here**: `while (true) { while (true) { break; } }` leaves the inner loop only, so the
+/// outer one still cannot be left. That is the one place a `break` is consumed rather than reported.
+fn endless_loop(body: Flow, endless: bool, has_a_goto: bool) -> Flow {
+    Flow {
+        reaches: !endless || body.breaks || has_a_goto,
+        breaks: false,
+    }
+}
+
+/// A `switch`'s flow: **can it be left through its end?**
 ///
 /// The rule proves only the completion that cannot be doubted:
 ///
 /// ```text
-///   no `default:`            a value that matches no label skips the whole body — it may complete
-///   a `break` anywhere       the break lands after the switch, which is exactly the completion being asked about
-///   a `goto` anywhere        the one exit the statement tree does not model
+///   no `default:`        a value that matches no label skips the whole body — it may complete
+///   a `break` anywhere   the break lands after the switch, which is exactly the completion being asked about
+///   a `goto` anywhere    the one exit the statement tree does not model
 ///   last statement completes with none of those, every path that enters a label runs on (fallthrough) to the last
 ///                            statement, so its end is the switch's end
 /// ```
 ///
-/// Measured on `EmmyLuaCodeStyle`'s `LuaParser::BlockFollow`: four `return`s, a `default`, and the rule called the
-/// body one that "has no `return`".
-fn switch_completes(switch: &cpp_parser::CppSwitchStat) -> bool {
+/// Measured on `EmmyLuaCodeStyle`'s `LuaParser::BlockFollow`: four `return`s, a `default`, and the rule called the body
+/// one that "has no `return`".
+fn switch_flow(switch: &cpp_parser::CppSwitchStat, has_a_goto: bool) -> Flow {
     // **The switch's own children are its body**: the condition, then the labels and statements interleaved
     // (`ParenExpr, CaseStat, ReturnStat, CaseStat, ReturnStat, DefaultStat, ReturnStat`) — this grammar does not put
     // them in a compound block, and looking for one made the whole analysis unreachable.
-    let children: Vec<CppStat> = switch
+    let statements: Vec<Flow> = switch
         .syntax()
         .children()
         .filter_map(CppStat::cast)
-        .collect();
-    // A `default` is what makes "every value takes some label" true.
-    let has_default = children
-        .iter()
-        .any(|statement| matches!(statement, CppStat::DefaultStat(_)));
-    if !has_default {
-        return true;
-    }
-    let statements: Vec<&CppStat> = children
-        .iter()
         .filter(|statement| !matches!(statement, CppStat::CaseStat(_) | CppStat::DefaultStat(_)))
+        .map(|statement| flow_of(&statement, has_a_goto))
         .collect();
-    // A `break` at any depth of the switch's own body leaves it at its end; a nested loop's or switch's does not.
-    if statements.iter().any(|statement| can_be_left(statement)) {
-        return true;
+    let has_default = switch
+        .syntax()
+        .children()
+        .filter_map(CppStat::cast)
+        .any(|statement| matches!(statement, CppStat::DefaultStat(_)));
+
+    // **Three ways to complete, and one way not to.** No `default` — some value skips the body. A `break` or a
+    // `goto` — there is an exit that lands after the switch. Otherwise the last statement decides: with no `break`,
+    // every entered label falls through to it, so its end is the switch's end.
+    let reaches = !has_default
+        || statements.iter().any(|each| each.breaks)
+        || has_a_goto
+        || statements.last().is_none_or(|last| last.reaches);
+
+    Flow {
+        reaches,
+        // A `break` in this switch belongs to it, so it does not leave anything around it.
+        breaks: false,
     }
-    if a_goto_could_leave(switch.syntax()) {
-        return true;
-    }
-    // The last statement decides: with no `break`, every entered label falls through to it.
-    let Some(last) = statements.last() else {
-        return true;
-    };
-    completes(last)
 }
 
-/// **Can this loop body be left from inside it?** — a `break`, through any block or `if` of the loop's own, but not through
-/// a nested loop's or a nested `switch`'s, whose breaks belong to them.
-fn can_be_left(statement: &CppStat) -> bool {
-    match statement {
-        CppStat::BreakStat(_) => true,
-        CppStat::CompoundStat(block) => {
-            block.get_stats().into_iter().any(|stat| can_be_left(&stat))
+/// A sequence of statements: does control reach the point after the last of them?
+///
+/// **Only reachable statements are followed.** A `break` after a `return` is not a `break` the loop can take, and
+/// treating it as one is exactly the wrong direction — it would turn `while (true) { return 1; break; }` into a loop
+/// that "can be left", which is a finding about correct code.
+fn sequence(statements: impl IntoIterator<Item = CppStat>, has_a_goto: bool) -> Flow {
+    let mut flow = Flow::FALLS_THROUGH;
+    for statement in statements {
+        if !flow.reaches {
+            // Unreachable, so it says nothing about control — it is not even walked.
+            break;
         }
-        CppStat::IfStat(branch) => {
-            branch
-                .get_then_branch()
-                .is_some_and(|branch| can_be_left(&branch))
-                || branch
-                    .get_else_branch()
-                    .and_then(|other| other.get_stat())
-                    .is_some_and(|branch| can_be_left(&branch))
-        }
-        CppStat::ElseStat(other) => other.get_stat().is_some_and(|branch| can_be_left(&branch)),
-        _ => false,
+        let each = flow_of(&statement, has_a_goto);
+        flow = Flow {
+            reaches: each.reaches,
+            breaks: each.breaks,
+        };
     }
+    flow
 }
 
 /// **Is the condition a literal whose truth is known?** — `true`/`false`, and the integer spellings C writes them with. `None`
@@ -318,14 +382,4 @@ fn condition_is_true(condition: Option<cpp_parser::CppParenExpr>) -> Option<bool
         "false" | "0" => Some(false),
         _ => None,
     }
-}
-
-/// **Could a `goto` leave this loop?** — the one exit the statement tree does not model. Asked of the tokens, because a label
-/// is not a construct any statement owns.
-fn a_goto_could_leave(body: &cpp_parser::CppSyntaxNode) -> bool {
-    body.descendants_with_tokens().any(|element| {
-        element.into_token().is_some_and(|token| {
-            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::GotoKeyword
-        })
-    })
 }

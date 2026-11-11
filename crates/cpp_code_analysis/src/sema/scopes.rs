@@ -2115,7 +2115,20 @@ impl ScopeWalker<'_> {
             return None;
         }
 
-        let kind = function_binding_kind(&name);
+        // **A function whose name is its own class's is a constructor**, wherever the definition is written.
+        //
+        // `Pattern::Pattern() { … }` at file scope repeats the class's name, and the class is not in hand at this
+        // point — but its *spelling* is: a qualified declarator whose last two segments are equal is the language's
+        // own definition of a constructor ([class.ctor]: a constructor has no name of its own). The class-body
+        // conversion below reaches the same answer for the declaration, and this is the other half.
+        //
+        // Measured: the out-of-class definition was bound as `Function`, so a highlighter drew the class's name as a
+        // *method* while the constructor declared in the class body was already `Constructor` — one name, two colours.
+        let kind = if is_a_constructor_declarator(declarator) {
+            BindingKind::Constructor
+        } else {
+            function_binding_kind(&name)
+        };
         // **A friend declaration declares no member** — see the note on the `declared_name` fallback above; the
         // scope below is still opened, because a friend *definition* owns its parameters and its body.
         if !is_friend {
@@ -2538,6 +2551,31 @@ fn parameter_lists(declarator: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     let mut lists = Vec::new();
     collect(declarator, &mut lists);
     lists
+}
+
+/// **Does this declarator spell `Class::Class`?** — a constructor's out-of-class definition.
+///
+/// A destructor (`Class::~Class`) already has its own kind from the name. This is the spelling that differs from an
+/// ordinary member definition (`Class::Member`) only in that the last two segments are equal, which is exactly the
+/// language's rule: a constructor is a function with no name of its own, written with its class's.
+///
+/// The class segment may carry template arguments (`Box<int>::Box`), which are not part of the name being compared.
+fn is_a_constructor_declarator(declarator: &CppSyntaxNode) -> bool {
+    let Some(named) = declarator
+        .descendants()
+        .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
+    else {
+        return false;
+    };
+    let spelled = named.text().to_string();
+    let spelled = spelled.trim();
+    let Some((qualifier, last)) = spelled.rsplit_once("::") else {
+        return false;
+    };
+    let class = qualifier.rsplit("::").next().unwrap_or(qualifier);
+    let class = class.split('<').next().unwrap_or(class).trim();
+    let last = last.trim();
+    !last.is_empty() && !class.is_empty() && last == class
 }
 
 /// The binding kind for a function, from what its name says it is.
