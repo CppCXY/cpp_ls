@@ -224,3 +224,30 @@ the index's coverage, and not at the rendering.
 The next step is one query: what does `inspect members` answer for `std::vector` **without** the argument list, and with
 it. If the bare name answers 993-derived members and the instantiated one answers none, the fix is in the member lookup's
 template-argument handling — a real defect, not a boundary.
+### Round 8: the `members` probe cannot answer — it says `NotDeclaredHere` for a project class too
+
+```text
+$ inspect members --class "std::vector" … --cook
+members of `std::vector`: unknown — NotDeclaredHere("vector")
+
+$ inspect members --class "LuaDiagnostic" … --cook     (a class of the project itself)
+members of `LuaDiagnostic`: unknown — NotDeclaredHere("LuaDiagnostic")
+```
+
+Both unknown, including a class the file uses — so this subcommand is **not** a probe of member lookup: it resolves the
+class name by a path that answers "not declared here" (`NotDeclaredHere`) regardless. It cannot be used to decide whether
+`vector`'s members are reachable, and nothing should be concluded from it.
+
+What *is* established, from the completion that answered a **resolved** scope:
+
+```text
+complete at 304:32: scope `std::vector`, prefix ``, 0 item(s)
+```
+
+The member query for `std::vector<LuaDiagnostic>` recognises the class and offers nothing. The next instrument is not
+another `inspect` subcommand but a **unit fixture** that reproduces "instantiated class template in another header, whose
+members are looked up by the bare class name" — the same shape, without the standard library — and the first thing to
+check in it is whether the class's members are found at all when the class is a **template** rather than a plain struct.
+
+If plain `struct` answers and `template <class T> class` answers nothing, the defect is in the member query's handling of
+a class template's members, which is the fix item 5 wanted in the first place — pointed at the right place.
