@@ -296,3 +296,29 @@ the position does not already contain. This is a gap in the tool, and every rema
 rendering's nodes) that prints the nodes whose text matches, with their kind and range. With it, the question is one
 command: does the cooked tree of that file contain a `ClassDecl` named `vector`, and what children does it have? Only then
 is there a defect in the analysis to name — everything above it has been measured and is right.
+### Round 11: `inspect grep` exists — and it shows the cooked tree has **no inlined includes**
+
+`inspect` gained a whole-tree search (commit "inspect: a whole-tree search"), because `tree` is a position query:
+
+```text
+$ inspect grep --project EmmyLuaCodeStyle --file CodeFormatLib/src/LuaCodeFormat.cpp --at 0 --cook "class vector"
+nodes whose text contains "class vector":
+  nothing
+
+$ inspect grep … "emplace_back"
+  Syntax(TranslationUnit) 0..10086 #include "LuaCodeFormat.h"
+  Syntax(Declaration) 440..885 void LuaCodeFormat::UpdateCodeStyle(…)
+  Syntax(Declaration) 747..812 auto &config = _configs.emplace_back(
+```
+
+The translation unit is **10 086 bytes — the file's own size**, and the summary of the same file said `cooked reading no`.
+So `inspect`'s "cooked" reading for this file is **not** the compiler's translation unit here: the includes are not
+inlined, which is the documented artifact ("`inspect` is not the server", `docs/open-questions.md`).
+
+**That invalidates the `0 items` measurement as evidence about the server.** The member query was run against a tree
+without `std::vector` in it — so it found no members, exactly as it should. The types fixtures pass because a
+`Session` *pumps* its closure (`want_cooked_reading` + `index_everything`); `inspect` does not.
+
+Item 5 therefore has **no reproduction outside the editor** yet, and the next step is a server-path fixture: a `cpp_ls`
+handshake or session test over a two-file project where the member comes from an included header, asserting the type
+through the same call the server makes. That is the only path that can falsify or confirm the user's report.

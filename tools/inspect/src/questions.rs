@@ -702,3 +702,47 @@ pub fn the_stats(opened: &Opened) -> String {
         units.walked,
     )
 }
+
+/// **The nodes of the tree whose text contains `pattern`** — the whole tree, which `the_tree` cannot search.
+///
+/// A node's own text is what a reader means by "the declaration of `vector`", and a class node also contains its
+/// members, so the matches nest; the list is printed in document order with each node's kind and range, and the head of
+/// its text so that a class body does not fill the terminal.
+pub fn the_grep(opened: &Opened, pattern: &str, limit: usize) -> Result<Answer, String> {
+    let mut text = format!("nodes whose text contains {pattern:?}:\n");
+    let mut nodes: Vec<Value> = Vec::new();
+    for node in opened.view.root.descendants() {
+        if nodes.len() >= limit {
+            text.push_str(&format!("  … stopped at {limit} node(s)\n"));
+            break;
+        }
+        let spelled = node.text().to_string();
+        if !spelled.contains(pattern) {
+            continue;
+        }
+        let head: String = spelled
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(140)
+            .collect();
+        text.push_str(&format!(
+            "  {:?} {:?} {head}\n",
+            node.kind(),
+            node.text_range()
+        ));
+        nodes.push(json!({
+            "kind": format!("{:?}", node.kind()),
+            "range": [usize::from(node.text_range().start()), usize::from(node.text_range().end())],
+            "head": head,
+        }));
+    }
+    if nodes.is_empty() {
+        text.push_str("  nothing\n");
+    }
+    Ok(Answer::new(
+        text,
+        json!({ "pattern": pattern, "nodes": nodes }),
+    ))
+}

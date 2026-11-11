@@ -97,6 +97,17 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// The nodes of the syntax tree whose text contains this pattern — the whole tree, not a position.
+    ///
+    /// `tree` answers "what is around here", which cannot find a node the position does not contain: the question that
+    /// needed this was whether a cooked translation unit's rendering holds a class declared in a header it includes.
+    Grep {
+        /// What the node's text must contain.
+        pattern: String,
+        /// How many nodes to print.
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+    },
     /// The reading format the index on disk uses.
     Format,
     /// The session's own counters after the setup.
@@ -179,6 +190,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Diagnostics => questions::the_diagnostics(&opened)?,
         Command::Summary => questions::the_summary(&opened)?,
         Command::Tree { limit } => questions::the_tree(&opened, &cli.place, *limit)?,
+        Command::Grep { pattern, limit } => questions::the_grep(&opened, pattern, *limit)?,
         Command::Format | Command::Stats => unreachable!("handled above"),
     };
     print(&answer, cli.json);
