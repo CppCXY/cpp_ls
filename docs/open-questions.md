@@ -242,10 +242,51 @@ drops an occurrence when the file's own scopes resolve it to a binding a functio
    current best and refresh.
 
 5. **`std::vector<T>::emplace_back()`'s result is unknown**, so `auto &result = results.emplace_back()` has no type and
-   `result.Start` is unresolvable. The vector's element type is known at the declaration; the missing piece is
-   substituting it into the member function's return type (`reference`) — a template-instantiation question, not a search
-   one. `docs/open-questions.md` already records the layer's boundary: it substitutes a *function template*'s
-   parameters, not a *class template*'s member types.
+   `result.Start` is unresolvable. **Corrected by measurement** (see the two sections below): the substitution the
+   paragraph above guesses at is *not* what failed. In a fixture the same call answers `Item&` in all five spellings
+   tried — alias, alias of alias, written-out `_Ty&`, template member, plain member. What actually answered line 304
+   was a **range-for leak**, and what answers it now is the *other* question, `std::vector` not being resolvable.
+
+## Line 304 was a range-for leak, and it is fixed
+
+`LuaCodeFormat.cpp:304` — `auto &result = results.emplace_back();` — is the **first statement of
+`for (auto &diagnostic: diagnostics)`**. `range_for_element_type` decided "is this declaration the loop's variable?"
+by asking whether a `RangeForStat` is among its ancestors, which is true of *every* declaration in the body, and it
+answered **before** the ordinary deduction ran. So `result` was typed as the loop's **range**, and the initializer was
+never looked at. The type trace is one line long and says so:
+
+```text
+[type_of] depth  0  "result"
+[type_of] depth  2  "diagnostics"     ← the range-for's range, not `results.emplace_back()`
+```
+
+The proof, in `tests/emplace_probe.rs` (`an_auto_declaration_inside_a_range_for`):
+
+```text
+inside a range-for, `result`        -> UnknownType("std::vector<Other>&")   ← before
+beside a range-for, `result`        -> Item&
+```
+
+Two fixes, both with a regression test in `tests/types.rs`:
+
+* `range_for_element_type` now answers only when the declaration is in the loop's **head** — before its `:`
+  (`is_in_the_head_of`). A body declaration falls through to `deduction_inputs`, which is its own initializer.
+  `an_auto_declaration_in_a_range_for_body_is_deduced_from_its_own_initializer` asserts `Item&`.
+* `range_element_of` now unwraps `Type::Reference` and `Type::Qualified` first. `for (auto &x : parameter)` over a
+  `const std::vector<T>&` — the ordinary spelling — typed the loop variable as the container.
+  `a_range_written_as_a_reference_still_binds_its_element` asserts `int`.
+
+After both, the same line in the real project answers `NotDeclaredHere("std::vector::emplace_back")` instead of a
+wrong type: the leak is gone, and what is left is the honest "this class is not in the index", which is the section
+below.
+
+**One stale test was red in the tree, and the fix is the rule rather than the code.**
+`generics.rs::a_nested_instantiation_has_its_members_and_its_argument` asserted that `auto row = grid.front();` is a
+`std::vector<int>&`. It was written on `2026-10-18` (`4ee66578`), and `read_the_way_auto_does` — the rule that
+`auto x = f();` strips the top-level reference and `const`, which is what the language does — landed on `2026-11-01`
+(`bb407dd3`), so the test was red from then on and nothing had run it since. It now asserts both spellings: `auto row`
+→ `std::vector<int>`, `auto &bound` → `std::vector<int>&`. The subject it was written for — the outer argument
+substituted and the inner one kept — is asserted either way.
 
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 

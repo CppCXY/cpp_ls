@@ -244,12 +244,16 @@ fn what_the_session_says_about_the_reported_line() {
             .filter(|f| f.name == "emplace_back")
             .collect();
         eprintln!(
-            "[probe]   `emplace_back` facts: {}; scopes: {:?}",
+            "[probe]   `emplace_back` facts: {}; scopes: {:?}; returns: {:?}",
             emplace.len(),
             emplace
                 .iter()
                 .map(|f| f.scope.as_deref())
                 .take(4)
+                .collect::<Vec<_>>(),
+            emplace
+                .iter()
+                .map(|f| f.returns.clone())
                 .collect::<Vec<_>>()
         );
         // **The evidence the design says is stored for exactly this file**: a scope opened by a body written
@@ -382,6 +386,38 @@ fn what_the_session_says_about_the_reported_line() {
                 eprintln!("[probe] {label} at {cursor} ({written:?}): unknown — {reason:?}")
             }
             Known::No => eprintln!("[probe] {label} at {cursor} ({written:?}): no"),
+        }
+    }
+
+    // **What the index stored for `result` itself**, because the answer the query gave is `spelling + &`, which is
+    // what a *written* return type produces. If `result`'s own fact says `std::vector<LuaDiagnostic>`, the deduction
+    // never ran and the wrong spelling came from the indexing pass.
+    for fact in session.index().every_fact_named("result") {
+        let (path, fact) = fact;
+        if path.ends_with("LuaCodeFormat.cpp") && fact.name_range.start_offset < 9100 {
+            eprintln!(
+                "[probe] fact `result` in {}: kind {:?}, scope {:?}, local {}, type_of {:?}, returns {:?}, at {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                fact.kind,
+                fact.scope,
+                fact.local,
+                fact.type_of,
+                fact.returns,
+                fact.name_range.start_offset
+            );
+        }
+    }
+    for name in ["GetDiagnosticResults", "MakeDiagnosticInfo"] {
+        for (path, fact) in session.index().every_fact_named(name) {
+            if path.ends_with("LuaCodeFormat.cpp") || path.ends_with("DiagnosticBuilder.h") {
+                eprintln!(
+                    "[probe] fact `{name}` in {}: kind {:?}, returns {:?}, at {}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    fact.kind,
+                    fact.returns,
+                    fact.name_range.start_offset
+                );
+            }
         }
     }
 

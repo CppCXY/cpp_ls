@@ -7252,6 +7252,19 @@ fn range_for_element_type(
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RangeForStat
         })?;
 
+    // **The loop's own variable, and not a declaration that merely sits inside the body.**
+    //
+    // Reaching a `RangeForStat` by ancestry is not the question: every declaration in the body has one, and this
+    // function answers *before* the ordinary deduction is tried, so a body declaration was answered as if it were the
+    // loop variable. Measured on `EmmyLuaCodeStyle`'s `LuaCodeFormat.cpp:304` — `auto &result = results.emplace_back();`
+    // is the first statement of `for (auto &diagnostic: diagnostics)` — the reported answer was
+    // `Unknown(UnknownType("std::vector<LuaDiagnostic>&"))`, the **range's** type, and the initializer was never looked
+    // at. The head is everything before the `:`; a declaration after it is a different declaration with an initializer
+    // of its own, which is what `deduction_inputs` answers.
+    if !is_in_the_head_of(&loop_node, declared_at) {
+        return None;
+    }
+
     let range = range_expression_of_the_pattern(&loop_node)?;
 
     // **A range built out of adaptors has its element computed from the expression**, because the view it makes has no
@@ -7285,7 +7298,7 @@ fn range_for_element_type(
         ))));
     };
 
-    Some(match range_element_of(&container) {
+    Some(match range_element_of(as_a_range(&container)) {
         Some(element) => Known::Yes(crate::sema::types::parse_type_spelling(&element)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
@@ -7351,7 +7364,7 @@ fn element_of_a_range_expression(
             expression,
             depth + 1,
         )
-        && let Some(element) = range_element_of(&container)
+        && let Some(element) = range_element_of(as_a_range(&container))
     {
         return Some(Known::Yes((
             crate::sema::types::parse_type_spelling(&element),
@@ -7549,7 +7562,7 @@ fn element_of_an_iterator_expression(
             ) else {
                 return None;
             };
-            let element = range_element_of(&container)?;
+            let element = range_element_of(as_a_range(&container))?;
             return Some(Known::Yes((
                 crate::sema::types::parse_type_spelling(&element),
                 file,
@@ -7581,6 +7594,21 @@ fn a_call_to_a_function(
         return None;
     }
     expression.children().next()
+}
+
+/// **The type a range expression *is*, with the reference and the qualifiers peeled off.**
+///
+/// `for (auto &x : values)` where `values` is a parameter — `const std::vector<T>&` — is the ordinary spelling in
+/// every C++ code base, and a range written as a reference yields exactly what the range itself yields. Peeling it
+/// here rather than inside [`range_element_of`] is deliberate: that function also answers "what element does this
+/// *object* hold" for `front()` and friends, where the reference is part of the answer — `grid.front()` is a
+/// `std::vector<int>&` and must stay one.
+fn as_a_range(type_of: &Type) -> &Type {
+    match type_of {
+        Type::Reference { to, .. } => as_a_range(to),
+        Type::Qualified { of } => as_a_range(of),
+        other => other,
+    }
 }
 
 /// **The element a range yields** — the whole element, where [`element_of`] answers one *component* of it.
@@ -8167,6 +8195,31 @@ fn structured_binding_type(
         Some(element) => Known::Yes((crate::sema::types::parse_type_spelling(&element), file)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
+}
+
+/// **Is this offset in the head of a range-based `for`?** — everything before its `:`.
+///
+/// The two halves of `for ( declaration : range )` are on either side of one token, which is why the question is asked
+/// of the token rather than of the tree shape: the declaration may be a child of the loop or nested inside a
+/// `Declaration`, and the body is simply everything after the colon.
+fn is_in_the_head_of(loop_node: &cpp_parser::CppSyntaxNode, offset: usize) -> bool {
+    use cpp_parser::{CppSyntaxElement, CppTokenKind};
+
+    let mut colon = None;
+    for child in loop_node.children_with_tokens() {
+        let CppSyntaxElement::Token(token) = child else {
+            continue;
+        };
+        if CppTokenKind::from(token.kind()) == CppTokenKind::Colon {
+            colon = Some(usize::from(token.text_range().start()));
+            break;
+        }
+    }
+
+    // **A loop whose `:` this cannot find is not answered here.** `None` sends the caller to the ordinary deduction,
+    // which has the initializer; treating "I could not read this" as "it is the variable" would be the same mistake in
+    // the other direction, and one that a body declaration would pay for.
+    colon.is_some_and(|colon| offset < colon)
 }
 
 /// The expression after the `:` of the range-based `for` this pattern is a binding of.

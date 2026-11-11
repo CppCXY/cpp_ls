@@ -118,16 +118,27 @@ void f() {
 }
 
 /// **A nested instantiation** keeps both its members and its argument: `std::vector<std::vector<int>>` is a vector, and
-/// its `front()` is a `std::vector<int>&`.
+/// its `front()` returns `std::vector<int>&`.
+///
+/// **`auto` without a `&` drops that reference, and that is the language, not a loss.** `auto row = grid.front();`
+/// is a `std::vector<int>` — `auto x = f();` always strips the top-level reference and `const` (`read_the_way_auto_does`
+/// is that rule). This test asserted `std::vector<int>&` from `2026-10-18` until the rule landed on `2026-11-01`, and
+/// was red from then on; the two spellings below are the same member read the two ways, so what the test is about —
+/// **the outer argument substituted and the inner one kept** — is asserted without depending on which rule is in force.
 #[test]
 fn a_nested_instantiation_has_its_members_and_its_argument() {
     let source = format!(
-        "{VECTOR}void f() {{\n    std::vector<std::vector<int>> grid;\n    auto row = grid.front();\n}}\n"
+        "{VECTOR}void f() {{\n    std::vector<std::vector<int>> grid;\n    auto row = grid.front();\n    auto &bound = grid.front();\n}}\n"
     );
     assert_eq!(
         type_of_use(&source, "row").as_deref(),
+        Some("std::vector<int>"),
+        "`auto row = grid.front();` is the element the outer argument substituted"
+    );
+    assert_eq!(
+        type_of_use(&source, "bound").as_deref(),
         Some("std::vector<int>&"),
-        "the member's type has the outer argument substituted, and keeps the inner one"
+        "and `auto &bound = …` keeps the reference the member returns"
     );
 }
 

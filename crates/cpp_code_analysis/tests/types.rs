@@ -3228,3 +3228,85 @@ int f() {
         "two includes away, through a guard, is still `int&`, got {found:?}"
     );
 }
+
+/// **The range of a range-based `for` written as a reference is still the range.**
+///
+/// `for (auto &x : someContainer)` where `someContainer` is a parameter is the ordinary spelling in every C++ code
+/// base, and a parameter is almost always `const std::vector<T>&`. [`crate::index`]'s `range_element_of` matched only
+/// `Type::Named`, so a one-token difference — the `&` the reader never thinks about — left the loop variable with no
+/// type at all. Measured through the fixture in `tests/emplace_probe.rs`: `void f(const std::vector<Other>
+/// &diagnostics) { for (auto &d : diagnostics) }` typed `d` as `std::vector<Other>&`, the container.
+#[test]
+fn a_range_written_as_a_reference_still_binds_its_element() {
+    let source = "\
+#include <vector>
+int f(const std::vector<int> &values) {
+    for (auto x : values) {
+        int k = x;
+        (void)k;
+    }
+    return 0;
+}
+";
+    let session = session_with(&[
+        (
+            "/p/vector",
+            "namespace std { template <class T> struct vector { }; }\n",
+        ),
+        ("/p/a.cpp", source),
+    ]);
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    // The last `k` is the use in `(void)k;`, whose type is the declaration's.
+    let offset = last_word(source, "k");
+    let found = session.type_at(&view, as_reading(&view, offset));
+    assert!(
+        matches!(&found, cpp_code_analysis::Known::Yes(known) if known.type_of == "int"),
+        "the element of a `const std::vector<int>&` is `int`, got {found:?}"
+    );
+}
+
+/// **An `auto` declaration inside a range-for body is deduced from *its own* initializer, not from the loop's range.**
+///
+/// Reported from an editor: `LuaCodeFormat.cpp:304`, `auto &result = results.emplace_back();`, the first statement of
+/// `for (auto &diagnostic: diagnostics)`, answered `std::vector<LuaDiagnostic>&` — the **parameter's** type, which that
+/// line never mentions. `range_for_element_type` reached the enclosing `RangeForStat` by ancestry and answered before
+/// the ordinary deduction ran, so every `auto` in every loop body was typed as the loop variable.
+#[test]
+fn an_auto_declaration_in_a_range_for_body_is_deduced_from_its_own_initializer() {
+    let source = "\
+namespace std { template <class T> struct vector { T &emplace_back(); }; }
+struct Item { int size; };
+struct Other { int size; };
+void f(const std::vector<Other> &diagnostics) {
+    std::vector<Item> results;
+    for (auto &diagnostic : diagnostics) {
+        auto &result = results.emplace_back();
+        int k = result.size;
+        (void)k;
+    }
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let type_of = |offset: usize| match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(known) => known.type_of,
+        other => panic!("a type is expected at {offset}: {other:?}"),
+    };
+
+    // The loop variable is the element of the range, reference and all.
+    let loop_variable = last_word(source, "diagnostic ");
+    assert_eq!(
+        type_of(loop_variable),
+        "Other",
+        "the loop variable is the range's element"
+    );
+
+    // And the declaration in the body is *its* initializer's type, which is `Item&`.
+    assert_eq!(
+        type_of(last_word(source, "result")),
+        "Item&",
+        "the declaration inside the body is not the loop variable"
+    );
+}
