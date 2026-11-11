@@ -2566,4 +2566,41 @@ void Pattern::Lex(int reader) {}
             "the constructor's name is the class's, whichever file answers"
         );
     }
+    /// **A constructor *declared* in its class body is its class's name too.**
+    ///
+    /// Reported from an editor with a screenshot: `class CodeStyleChecker { public: CodeStyleChecker(); };` drew the
+    /// in-class declaration as `function`. The definition in the `.cpp` answers `type` (that is pinned above); this is
+    /// the other spelling of the same constructor, and it is the one a header reader sees first.
+    #[test]
+    fn a_constructor_declared_in_its_class_body_is_drawn_as_its_class() {
+        let text = "\
+class CodeStyleChecker {
+public:
+    CodeStyleChecker();
+    void Analyze(int t);
+};
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let declared = text
+            .find("    CodeStyleChecker();")
+            .expect("the declaration")
+            + 4;
+        assert_eq!(
+            at_type.get(&declared),
+            Some(&index_of(TypeKind::Type)),
+            "a constructor's name is its class's, declaration or definition"
+        );
+        let member = text.find("Analyze").expect("the member");
+        assert_eq!(
+            at_type.get(&member),
+            Some(&index_of(TypeKind::Method)),
+            "and an ordinary member is still a method"
+        );
+    }
 }
