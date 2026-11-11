@@ -10307,9 +10307,30 @@ fn a_members_answer_as_a_type(
 
 /// **How many aliases one spelling may be followed through** — see [`a_spelling_through_the_aliases`].
 ///
-/// Six is past anything the standard library writes (`reference` → `_Alloc_traits::reference` →
-/// `allocator_traits<_Alloc>::reference` → `_Tp&` is three), and it is what stops a cyclic `typedef` from looping.
-const MAX_ALIAS_HOPS: usize = 6;
+/// Every step of the walk costs one hop, and a *syntactic* step (resolving the qualifier of a qualified name) costs
+/// one as well, so the budget is spent much faster than the number of aliases suggests. Six was the first number and
+/// it is past anything a fixture writes — but not past what libstdc++ writes for a container's element type:
+///
+/// ```text
+/// vector::reference             _Alloc_traits::reference
+///   _Alloc_traits               __gnu_cxx::__alloc_traits<_Tp_alloc_type>      a qualifier
+///   __alloc_traits::reference   value_type&
+///     value_type                _Base_type::value_type
+///       _Base_type              std::allocator_traits<_Tp_alloc_type>           a qualifier
+///         value_type            _Alloc::value_type
+///           _Alloc              _Tp_alloc_type
+///             _Tp_alloc_type    _Base::_Tp_alloc_type
+///               _Base           _Vector_base<_Tp, _Alloc>                     a qualifier
+///                 _Tp_alloc_type  __alloc_traits<_Alloc>::template rebind<_Tp>::other
+///                   rebind<_Tp>   a nested class                                 a qualifier
+///                     other       _Base_type::template rebind_alloc<_Tp>
+/// ```
+///
+/// — thirteen before `allocator<_Tp1>` is even named. Measured on the allocator fixture with the old budget: the walk
+/// stopped with half the chain unsubstituted (`Alloc>::template rebind<Tp>::other`), which reads like a substitution
+/// bug and is a budget one. Twenty-four is twice what the standard library needs and still a number that stops a
+/// cyclic `typedef` from looping.
+const MAX_ALIAS_HOPS: usize = 24;
 
 /// **A spelling with the aliases a class declares followed through** — `pointer` → `_Val*`, and
 /// `_Alloc_traits::reference` → `std::size_t&`.
@@ -10554,21 +10575,50 @@ fn a_spelling_through_the_aliases(
     };
     let inner_parameters = index.template_parameters_for(&inner_class, path, &inner_arguments);
     let inner_defaults = index.template_parameter_defaults_for(&inner_class, path, &inner_arguments);
+    // **The member's own name, and the arguments written on *it*** — `A::template rebind<U>::other` names `other`, and
+    // the class whose scope it lives in is `A`'s nested `rebind<U>`. The arguments belong to the member and not to the
+    // class the spelling qualified with, which is the whole reason `the_member_name` alone was not enough.
+    let (member_name, member_arguments) = the_name_and_its_arguments(&last);
     // **The class as the use wrote it** — with its arguments — because that is what selects a
     // partial specialization and what lets the qualifier's own aliases (`_Mybase =
     // _Tree_val<_Traits>`) be substituted.
-    let found = a_member_the_class_declares(index, scopes, root, path, &inner, &last);
+    let found = a_member_the_class_declares(index, scopes, root, path, &inner, member_name);
     if crate::probes::inference() {
         eprintln!(
-            "[inference] qualified: {written:?} -> qualifier {qualifier:?} resolved {inner:?}, member {last:?}, fact {:?}",
+            "[inference] qualified: {written:?} -> qualifier {qualifier:?} resolved {inner:?}, member {member_name:?} \
+             ({member_arguments:?}), fact {:?}",
             found
                 .as_ref()
-                .map(|fact| (fact.type_of.clone(), fact.pattern.clone()))
+                .map(|fact| (fact.type_of.clone(), fact.pattern.clone(), fact.kind))
         );
     }
     let Some(fact) = found else {
         return written.to_string();
     };
+
+    // **A class is not an alias.** `A::rebind<U>::other` asks for a member of `rebind<U>`, and `rebind` is a **class**
+    // of `A` whose own parameters pair with the `<U>` written here. The answer for this level is therefore the nested
+    // class's spelling *with its arguments* — which is the scope the next level (`other`) is resolved in, and what
+    // `direct_member` reads its arguments from when that next level is asked.
+    //
+    // The test is `type_of`, the one the whole module uses to tell the two apart: a class declares no type of its own,
+    // and an **alias template** (`using rebind_alloc = typename Alloc::template rebind<Up>::other;`) does — it is a
+    // name for a type, and its `<U>` pairs with its own parameter. Reading it as a nested class is what made the walk
+    // ask for `value_type` inside `allocator_traits::rebind_alloc<int>`, a class that does not exist.
+    //
+    // Measured on `Mark.cpp`: without this, the walk stopped at `__gnu_cxx::__alloc_traits<…>::template
+    // rebind<MarkEvent>::other` — the spelling the report calls "极其夸张" — because `rebind<MarkEvent>` was never a
+    // name any lookup was asked about.
+    if fact.kind == crate::DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty() {
+        let nested = format!(
+            "{}::{}<{}>",
+            a_class_name_without_spaces(&inner_class),
+            member_name,
+            member_arguments.join(", ")
+        );
+        return format!("{leading}{nested}{trailing}");
+    }
+
     let Some(target) = fact.type_of.as_deref() else {
         return written.to_string();
     };
@@ -10579,12 +10629,28 @@ fn a_spelling_through_the_aliases(
         .map(|pattern| the_pairing_its_pattern_implies(pattern, &inner_arguments))
         .filter(|(parameters, _)| !parameters.is_empty())
         .unwrap_or_else(|| (inner_parameters.clone(), inner_arguments.clone()));
+    // **The class's pairing first, then the member's own.** A member that is itself a template — an alias template's
+    // `using rebind_alloc = typename Alloc::template rebind<Up>::other;` — mentions **both** its class's parameter
+    // (`Alloc`) and its own (`Up`), and the two are paired with different arguments: the class's with what the use
+    // wrote on the class, the member's with what it wrote on the member (`rebind_alloc<MarkEvent>`). Substituting one
+    // and not the other leaves a spelling with a name nothing can resolve — measured on the allocator fixture, the
+    // chain ended at `Alloc>::template rebind<Tp>::other`.
     let target = crate::sema::types::substituted_spelling_with_defaults(
         target,
         &pattern_parameters,
         &inner_defaults,
         &pattern_arguments,
     );
+    let target = if member_arguments.is_empty() {
+        target
+    } else {
+        crate::sema::types::substituted_spelling_with_defaults(
+            &target,
+            &fact.parameters,
+            &fact.parameter_defaults,
+            &member_arguments,
+        )
+    };
     // **The walk descends into the qualifier's class**, so the class it is leaving joins the visited list — that is
     // what lets `_Tp_alloc_type`, written three classes back, still be found by the class that wrote it.
     let mut deeper = visited.to_vec();
@@ -10773,6 +10839,25 @@ fn the_parameters_of_a_class(
     let parameters = index.template_parameters_for(name, path, &arguments);
     let defaults = index.template_parameter_defaults_for(name, path, &arguments);
     (parameters, defaults, arguments)
+}
+
+/// **A member's name and the template arguments written on it** — `rebind<MarkEvent>` → (`rebind`, `[MarkEvent]`).
+///
+/// A name in a qualified spelling can be a *class* or an alias **template** applied to arguments, and both are
+/// different questions from the class the qualifier named: `__alloc_traits<A>::rebind<T>::other` names `other` in
+/// `__alloc_traits<A>`'s nested `rebind<T>`, and `allocator_traits<A>::rebind_alloc<T>` is an alias template whose own
+/// parameter pairs with `T`. `the_member_name` strips the keywords; this is what is left once the arguments are off.
+///
+/// The arguments are split by [`crate::sema::builtins::split_arguments`], the same rule the pattern comparison and
+/// the member lookups use, so `pair<int, int>` is one argument here as it is there.
+fn the_name_and_its_arguments(spelling: &str) -> (&str, Vec<String>) {
+    let name = the_member_name(spelling);
+    let Some((head, rest)) = name.split_once('<') else {
+        return (name, Vec::new());
+    };
+    let inside = rest.trim_end().strip_suffix('>').unwrap_or(rest);
+    let arguments = crate::sema::builtins::split_arguments(inside);
+    (head.trim(), arguments)
 }
 
 /// `const reference&` → (`const `, `reference`, `&`). The middle is what a name lookup is asked about.
