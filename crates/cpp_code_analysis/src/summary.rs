@@ -227,6 +227,24 @@ pub struct DeclFact {
     /// `None` for a return type the file does not state — `auto make() { … }` is deduced, and `auto` is not a
     /// class anything can be looked up in.
     pub returns: Option<String>,
+    /// **The return spelling [`DeclFact::returns`] refused, for a reader that has the class in hand.**
+    ///
+    /// An operator's return type is often the class's *own* name for something — libstdc++ writes
+    /// `reference operator[](size_type __n)`, and `reference` is `std::vector`'s typedef for `T&`. A fact is read by
+    /// consumers that have the declaration and **not** the class's scope, and handing them `reference` typed
+    /// `tokens[i]` as a class called that: 60 false positives over four files of a real project. So
+    /// [`DeclFact::returns`] is `None` for that declaration — see `an_operator_return_is_usable`.
+    ///
+    /// That decision is right for a *fact-only* reader and wrong for one holding the class, which is exactly the
+    /// reader that asks "what does this object's `operator[]` give me". Without the spelling it answered
+    /// `Unknown(UnknownType("events[Pos]"))` for `auto &events = p.GetEvents(); events[Pos]` on a
+    /// `std::vector<MarkEvent>` — reported, and the cause of the union member behind it being unknown too.
+    ///
+    /// So the spelling is kept here and read **only** by a consumer that resolves it inside the class
+    /// ([`crate::index::project::operator_returns_of`], which has the class's file). `None` whenever `returns` is
+    /// `Some` (nothing was refused), for every non-operator, and for every ordinary declaration: this is not a
+    /// second copy of `returns`, it is the residue of the one rule that drops a value.
+    pub returns_in_the_class: Option<String>,
     /// **Does the file's own text state this declaration's type across a directive?**
     ///
     /// `bits/stl_bvector.h` writes `emplace_back`'s return type as `#if __cplusplus > 201402L … reference … #else

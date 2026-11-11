@@ -2193,6 +2193,8 @@ mod tests {
             modifiers: crate::DeclModifiers::VIRTUAL,
             type_of: None,
             returns: returns.map(str::to_string),
+            // The residue of the operator gate, and this fixture declares a plain function: nothing was refused.
+            returns_in_the_class: None,
             bases: Vec::new(),
             parameters: Vec::new(),
             constraints: Vec::new(),

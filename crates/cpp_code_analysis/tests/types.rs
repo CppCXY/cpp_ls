@@ -1338,6 +1338,53 @@ void f() {
     );
 }
 
+/// **A subscript whose operator returns the class's own `reference`** — the shape every container writes, and the one
+/// the fact used to refuse.
+///
+/// `reference operator[](size_type)` is how `std::string`, `std::span` and every hand-written container declare it, and
+/// `reference` is a typedef of the class. A fact is read by consumers that have no class, so
+/// [`cpp_code_analysis::DeclFact::returns`] is `None` for that declaration — 60 false positives of `undefined-field`
+/// taught that rule. The subscript is the one consumer that *does* have the class, so the spelling is kept beside it
+/// ([`cpp_code_analysis::DeclFact::returns_in_the_class`]) and resolved there: `reference` is `_CharT&`.
+///
+/// Measured before: `s[0]` answered `Unknown(UnknownType("s[0]"))`.
+#[test]
+fn a_subscript_whose_operator_returns_the_classs_own_reference() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    let source = "\
+template <class _CharT>
+class basic_string {
+public:
+    typedef _CharT& reference;
+    reference operator[](unsigned long index);
+};
+void f() {
+    basic_string<char> s;
+    char c = s[0];
+    (void)c;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is cooked");
+    let at = source.find("s[0]").expect("the fixture subscripts") + 1;
+    let reading = view
+        .reading_offset_of(FileOffset::new(at))
+        .expect("the offset is in the file");
+
+    let answer = match session.type_at(&view, reading) {
+        cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+        other => {
+            println!("`s[0]` at file {at} → {other:?}");
+            None
+        }
+    };
+    assert_eq!(
+        answer.as_deref(),
+        Some("char&"),
+        "`reference` is the class's own alias for `_CharT&`, and `_CharT` is `char`"
+    );
+}
+
 /// **从 `std::map` 的范围里解构出来的名字,类型是 `pair` 的元素** —— 报告是 hover 显示 `int() value;`。
 ///
 /// `for (auto [key, value] : map)` 里的名字没有写出来的类型,所以"声明的类型"这一层没有答案:元素的类型由

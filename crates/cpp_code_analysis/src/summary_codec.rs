@@ -250,7 +250,15 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// entry says the member has no type, which stops every access through it: measured on `EmmyLuaCodeStyle`,
 /// `e.U.Start.Kind` answered "the type of `e.U` is not known here". The field is the same one, so the layout is
 /// unchanged and only a re-read fills it — which is precisely what a version bump costs and what it is for.
-pub const CODEC_VERSION: u32 = 37;
+///
+/// # Version 38
+///
+/// A declaration fact gained `returns_in_the_class` — the operator return spelling `returns` refuses when the class
+/// body declares that name (`reference operator[]`). See [`crate::DeclFact::returns_in_the_class`]: without it, a
+/// subscript on a `std::vector` answers `Unknown`, because the only reader that can resolve `reference` is the one
+/// holding the class, and it needs the spelling to do it. An entry written before this holds `None` for every
+/// declaration, which is the answer that stops the subscript — a wrong answer rather than an old one.
+pub const CODEC_VERSION: u32 = 38;
 
 /// Write a summary as bytes.
 ///
@@ -1188,6 +1196,7 @@ mod tests {
                     type_of: None,
                     // A class returns nothing either, so `None` — and the second fact below covers the other value.
                     returns: None,
+                    returns_in_the_class: None,
                     // A base list, so that branch of the format is covered too: two bases, one of them qualified.
                     bases: vec!["Base".to_string(), "ns::Other".to_string()],
                     // And a parameter list, which is the other list-shaped field: a class template's parameter
@@ -1233,6 +1242,9 @@ mod tests {
                     // has. Both halves of that distinction are in this fixture on purpose.
                     type_of: None,
                     returns: Some("ns::Container<int>".to_string()),
+                    // The residue is empty exactly when `returns` is not: the two are one answer, and a fixture with
+                    // both would be a fact no builder can produce.
+                    returns_in_the_class: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
@@ -1266,6 +1278,7 @@ mod tests {
                     modifiers: crate::DeclModifiers::default(),
                     type_of: None,
                     returns: None,
+                    returns_in_the_class: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     constraints: Vec::new(),
@@ -1530,6 +1543,9 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
     put_u8(out, decl_kind_code(fact.kind));
     put_opt_str(out, fact.type_of.as_deref());
     put_opt_str(out, fact.returns.as_deref());
+    // **The spelling `returns` refused** — see [`DeclFact::returns_in_the_class`]. Written beside it because the two
+    // are one answer with two audiences, and a reader that wants the class-aware half must not have to guess.
+    put_opt_str(out, fact.returns_in_the_class.as_deref());
     put_u32(out, fact.bases.len() as u32);
     for base in &fact.bases {
         put_str(out, base);
@@ -1609,6 +1625,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
         kind: decl_kind_from(reader.u8()?)?,
         type_of: reader.optional_string()?,
         returns: reader.optional_string()?,
+        returns_in_the_class: reader.optional_string()?,
         bases: {
             let mut bases = Vec::new();
             for _ in 0..reader.count()? {
@@ -1775,6 +1792,7 @@ fn a_cooked_reading_round_trips() {
                 kind: DeclKind::Type,
                 type_of: None,
                 returns: None,
+                returns_in_the_class: None,
                 bases: vec!["Base".to_string()],
                 parameters: vec!["T".to_string()],
                 constraints: Vec::new(),
@@ -1806,6 +1824,7 @@ fn a_cooked_reading_round_trips() {
                 kind: DeclKind::Function,
                 type_of: Some("int".to_string()),
                 returns: Some("void".to_string()),
+                returns_in_the_class: None,
                 bases: Vec::new(),
                 parameters: Vec::new(),
                 constraints: vec!["Copyable<T>".to_string()],

@@ -1834,6 +1834,28 @@ fn member_access_class(written: &Type) -> Option<String> {
     written.pointee()?.class_name().map(str::to_string)
 }
 
+/// **A type as the spelling a class question is asked with** — its arguments kept, and nothing else.
+///
+/// A member query takes a **class spelling**: `members_of("std::vector<int>")` finds the class and substitutes its
+/// member types. A type that came from a binding may carry what the *binding* said — `&` from `auto &v = …`, `const`
+/// from `const Widget &w` — and those are not part of the class's name: asking for `std::vector<MarkEvent>&` answers
+/// "nothing declares a class with that name", which is true and useless.
+///
+/// Measured on `EmmyLuaCodeStyle`'s `Mark.cpp`: `auto &events = p.GetEvents();` typed `events` as
+/// `std::vector<MarkEvent>&`, so `events[Pos]` — a subscript on a class, which is `operator[]` — answered
+/// `Unknown(UnknownType("events[Pos]"))` and everything read through it was unknown, including the union member the
+/// report was about.
+///
+/// The recursion is the whole rule: a reference and a qualifier are transparent (C++ says so — a member of a
+/// `const Widget&` is a member of `Widget`), and anything else is its own spelling.
+fn the_class_spelling(type_of: &Type) -> String {
+    match type_of {
+        Type::Reference { to, .. } => the_class_spelling(to),
+        Type::Qualified { of } => the_class_spelling(of),
+        other => other.to_string(),
+    }
+}
+
 /// **The class a member access is asked of, and the arguments that finish its members' types.**
 ///
 /// The two halves come from one place because they come from one *step*, and there are two callers — the member
@@ -5992,17 +6014,33 @@ pub(crate) fn operator_returns_of(
             "[inference] operator_returns_of({class}, {operator}): parameters {parameters:?}, arguments {written_arguments:?}"
         );
     }
+    // **The class as a spelling a member query can be asked with** — a reference or a qualifier is the *binding's*
+    // business, not the class's, and asking `members_of` about `std::vector<MarkEvent>&` finds no class of that name.
+    // Measured on `EmmyLuaCodeStyle`'s `Mark.cpp`: `auto &events = p.GetEvents(); events[Pos]` answered
+    // `Unknown(UnknownType("events[Pos]"))` for a `std::vector<MarkEvent>`, because the object's type carries the `&`
+    // that `auto &` bound and both queries below were spelled with it.
+    let class_spelling = the_class_spelling(class_type);
     for spelling in [wanted.as_str(), symbol] {
-        if let Known::Yes((fact, _)) = member_fact(
-            index,
-            scopes,
-            root,
-            path,
-            &class_type.to_string(),
-            spelling,
-            None,
-        ) {
-            let returns = fact.returns?;
+        if let Known::Yes((fact, _)) =
+            member_fact(index, scopes, root, path, &class_spelling, spelling, None)
+        {
+            // **The spelling the fact refused, when the class is here to resolve it.** `reference operator[]` on a
+            // `std::vector` has `returns: None`, because a fact's readers cannot resolve `reference` — but this
+            // reader holds the class, and `a_members_answer_as_a_type` below is exactly the alias step that turns it
+            // into `T&`. See [`crate::DeclFact::returns_in_the_class`].
+            //
+            // # What still does not resolve
+            //
+            // `std::vector<T>`'s `reference` is `_Alloc_traits::reference` → `__alloc_traits<_Tp_alloc_type>::reference`
+            // → `value_type&`, and `_Tp_alloc_type` is an alias **of the class the walk started in** — not one of its
+            // template parameters, so the substitution that pairs `_Tp` with `MarkEvent` leaves it standing, and the
+            // walk has by then moved into another class. Following it needs two things this layer does not have: a
+            // chain of the classes the walk visited (so a name that is not a member of the current one is looked up
+            // where it was written) and `X::template rebind<T>::other` (a nested class template whose `other` is an
+            // alias template's application). Measured on `EmmyLuaCodeStyle`'s `Mark.cpp`: `events[Pos]` answers
+            // `_Tp_alloc_type&` — a spelling no reader can use — where `std::string`'s own `reference`, which is
+            // written `_CharT&`, resolves to `char&` and works.
+            let returns = fact.returns.clone().or(fact.returns_in_the_class.clone())?;
             return Some(crate::sema::types::substituted_spelling(
                 &returns,
                 parameter_names,
@@ -6022,7 +6060,7 @@ pub(crate) fn operator_returns_of(
         class_scopes,
         class_root,
         class_path,
-        &class_type.to_string(),
+        &class_spelling,
     ) else {
         return None;
     };
@@ -6040,7 +6078,11 @@ pub(crate) fn operator_returns_of(
             .collect();
         name == wanted || name == symbol
     })?;
-    let returns = found.fact.returns.clone()?;
+    let returns = found
+        .fact
+        .returns
+        .clone()
+        .or(found.fact.returns_in_the_class.clone())?;
 
     // **An operator inherited from a base answers in the base's spelling.** `template <class T> struct Base { T*
     // operator->(); }; template <class T> struct Ptr : Base<T> {};` — `Ptr<S>`'s arrow is `Base<S>::operator->`,
@@ -10231,7 +10273,7 @@ fn a_members_answer_as_a_type(
         scopes,
         root,
         path,
-        &class_type.to_string(),
+        &the_class_spelling(class_type),
         &core,
         None,
     ) else {
@@ -12123,6 +12165,17 @@ fn fact_from_binding_with(
         // `facts` and "a function" from the hover.
         returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
             .or_else(|| crate::sema::declarations::declared_returns_of(root, binding)),
+        // **The same residue the index records**, because a member query is exactly the reader that has the class:
+        // `parameters` and the class's file are both in hand here. See [`crate::DeclFact::returns_in_the_class`].
+        returns_in_the_class: {
+            let returns = crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
+                .or_else(|| crate::sema::declarations::declared_returns_of(root, binding));
+            if returns.is_some() {
+                None
+            } else {
+                crate::sema::declarations::the_returns_the_class_has_to_resolve(shapes, root, binding)
+            }
+        },
         split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
         bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
         // **The same three fields the index fills**, because a fact must say the same thing whichever path produced it.
@@ -17358,6 +17411,7 @@ impl ProjectDefinition {
                 // not this answer.
                 type_of: None,
                 returns: None,
+                returns_in_the_class: None,
                 split_by_a_directive: false,
                 bases: Vec::new(),
                 parameters: Vec::new(),

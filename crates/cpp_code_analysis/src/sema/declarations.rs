@@ -2714,6 +2714,23 @@ pub(crate) fn declared_returns_of_in(
     deduced_returns_of(root, binding)
 }
 
+/// **The return spelling [`an_operator_return_is_usable`] refused** — [`crate::DeclFact::returns_in_the_class`].
+///
+/// Exists for the second writer of a fact ([`crate::index::project`]'s `fact_from_binding_with`), which asks the same
+/// gate and needs the same residue. One function rather than the condition written twice, because the two paths that
+/// build a fact must answer the same thing.
+pub(crate) fn the_returns_the_class_has_to_resolve(
+    shapes: &DeclarationShapes,
+    root: &CppSyntaxNode,
+    binding: &Binding,
+) -> Option<String> {
+    if binding.kind != BindingKind::OperatorFunction {
+        return None;
+    }
+    declared_returns_of_with(shapes, binding)
+        .filter(|spelling| !an_operator_return_is_usable(root, binding, spelling))
+}
+
 /// **May an operator's return spelling be stored in a fact?**
 ///
 /// A fact is read by code that has the declaration and *not* the class's scope, so an unqualified name in it may mean
@@ -3557,6 +3574,16 @@ fn fact_for(
                 .or_else(|| deduced_returns_of(root, binding))
         }
     };
+    // **The spelling that filter threw away**, for the one reader that can resolve it — see
+    // [`DeclFact::returns_in_the_class`]. `None` when nothing was refused, which is every ordinary declaration.
+    let returns_in_the_class = if split_by_a_directive || returns.is_some() {
+        None
+    } else {
+        declared_returns_of_with(shapes, binding).filter(|spelling| {
+            binding.kind == BindingKind::OperatorFunction
+                && !an_operator_return_is_usable(root, binding, spelling)
+        })
+    };
     let bases = { declared_bases_of_with(shapes, binding) };
     // The class template's parameter names, for the members whose types are written with them. Answered from the
     // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
@@ -3664,6 +3691,7 @@ fn fact_for(
         in_namespace,
         type_of,
         returns,
+        returns_in_the_class,
         split_by_a_directive,
         bases,
         parameters,
