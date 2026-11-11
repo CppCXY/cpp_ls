@@ -3061,3 +3061,109 @@ int f() {
         _ => panic!("the rendering holds `std::vector`, so `result` has a type"),
     }
 }
+
+/// **A member is found through a class template's instantiation, or it is not found at all.**
+///
+/// The plain `struct` and the class template declare the same member. If the first answers and the second does not, the
+/// defect is in the member query's handling of a class template — not in the alias substitution, not in the index's
+/// coverage, and not in the rendering. Written because `inspect complete` on `results.` in `EmmyLuaCodeStyle` printed
+/// `scope std::vector, 0 item(s)` while the MSVC header is summarized with 993 declarations.
+#[test]
+fn a_member_is_found_through_a_plain_class_and_through_a_template() {
+    const LIB_H: &str = "\
+struct Plain { int emplace_back(); };
+template <class T> class Temp { public: int emplace_back(); };
+";
+    let source = "\
+#include \"lib.h\"
+int f() {
+    Plain plain;
+    auto a = plain.emplace_back();
+    Temp<int> temp;
+    auto b = temp.emplace_back();
+    return a + b;
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/lib.h", LIB_H)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/lib.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    for (spelling, expected) in [("a", "int"), ("b", "int")] {
+        let offset = last_word(source, spelling);
+        let found = session.type_at(&view, as_reading(&view, offset));
+        assert!(
+            matches!(&found, cpp_code_analysis::Known::Yes(known) if known.type_of == expected),
+            "`{spelling}` should be `{expected}`, got {found:?}"
+        );
+    }
+}
+/// **The standard library's own idiom**: a class template inside macro-opened namespaces, with macro-guarded members.
+///
+/// Every simplified fixture answers correctly, so the one thing the real header has that they do not is this shape:
+/// MSVC writes `_STD_BEGIN template <class _Ty…> class vector { … _CONSTEXPR20 reference emplace_back() … } _STD_END`.
+/// If this fails, the defect is the macro-region handling around a class template, not the member query and not the
+/// alias substitution.
+#[test]
+fn a_class_template_in_macro_opened_namespaces_is_the_standard_library_idiom() {
+    const LIB_H: &str = "\
+#define _STD_BEGIN namespace std {
+#define _STD_END }
+#define _CONSTEXPR20
+#define _NODISCARD [[nodiscard]]
+_STD_BEGIN
+template <class _Ty> class vector {
+public:
+    using value_type = _Ty;
+    using reference = value_type&;
+    _NODISCARD _CONSTEXPR20 reference emplace_back();
+};
+_STD_END
+";
+    let source = "\
+#include \"lib.h\"
+int f() {
+    std::vector<int> values;
+    auto &result = values.emplace_back();
+    result = 3;
+    return result;
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/lib.h", LIB_H)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/lib.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "result");
+    let found = session.type_at(&view, as_reading(&view, offset));
+    assert!(
+        matches!(&found, cpp_code_analysis::Known::Yes(known) if known.type_of == "int&"),
+        "the standard library's idiom should answer `int&`, got {found:?}"
+    );
+}

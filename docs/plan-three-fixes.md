@@ -251,3 +251,20 @@ check in it is whether the class's members are found at all when the class is a 
 
 If plain `struct` answers and `template <class T> class` answers nothing, the defect is in the member query's handling of
 a class template's members, which is the fix item 5 wanted in the first place — pointed at the right place.
+### Round 9: every idiom the standard library uses, reproduced — all answer correctly
+
+Two more fixtures, both passing:
+
+- `a_member_is_found_through_a_plain_class_and_through_a_template` — the same member through a `struct` and through
+  `template <class T> class`, both typed (`int`), so a class template's instantiation is not the gap;
+- `a_class_template_in_macro_opened_namespaces_is_the_standard_library_idiom` — the class template inside
+  `_STD_BEGIN … _STD_END`, with `_NODISCARD`/`_CONSTEXPR20` on the member and `using reference = value_type&;`, answering
+  `int&`. That is MSVC's own idiom for `vector`, reproduced without the standard library.
+
+So the mechanism covers: plain class, class template, dependent alias chain, a header outside the index, and macro-opened
+namespaces with macro-guarded members. What remains is specific to the **real** header's text, and the instrument that can
+see it is the cooked tree of that file (`inspect tree --file LuaCodeFormat.cpp --cook`, looking for the `std::vector` class
+node and its member declarations) — the next round starts there rather than with another simplified fixture.
+
+Item 5 is therefore **not** a missing capability in the design; it is a defect in how one real header is read, and it will
+not be claimed fixed until that header's own tree says why.
