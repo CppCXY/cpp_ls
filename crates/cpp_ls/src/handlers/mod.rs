@@ -22,6 +22,7 @@
 
 pub mod call_hierarchy;
 mod code_action;
+mod code_lens;
 mod completion;
 mod configuration;
 mod definition;
@@ -177,6 +178,7 @@ capabilities!(modules: {
     hover => HoverCapabilities,
     call_hierarchy => CallHierarchyCapabilities,
     code_action => CodeActionCapabilities,
+    code_lens => CodeLensCapabilities,
     completion => CompletionCapabilities,
     document_highlight => DocumentHighlightCapabilities,
     document_link => DocumentLinkCapabilities,

@@ -74,6 +74,7 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 **Editing and checking**
 
 - **Inlay hints** — the deduced type of `auto` and structured bindings, parameter names at a call.
+- **CodeLens** — a function's reference count, on its declaration in a header and on its definition in a `.cpp`, counting the places that use it and not the declaration itself. One `find references` per function, **0.7–0.9 ms** warm and 9.7 ms for the first on a 1 086-file project (`tests/reference_cost_probe.rs` measures it).
 - **Semantic tokens** — names, types, keywords, documentation commands and symbol references, and format strings
   (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`).
 - **Code actions** — quick fixes from the same diagnostics.

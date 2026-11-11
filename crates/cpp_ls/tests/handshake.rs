@@ -6854,3 +6854,58 @@ fn a_doc_links_completion_carries_the_edit_for_the_word() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// **A function's reference count is a lens the client can draw** — over the wire.
+///
+/// The count is the number of places that *use* the function: not its definition, not the declaration in the header.
+/// Answered as `textDocument/codeLens`, so a client that asks gets one lens per function in the file.
+#[test]
+fn a_functions_reference_count_is_a_lens_over_the_wire() {
+    const HEADER: &str = "int grow(int by);\n";
+    const SOURCE: &str = "\
+#include \"a.h\"
+int grow(int by) { return by + 1; }
+int f() { return grow(1) + grow(2); }
+";
+    let project = Project::new("code-lens");
+    project.write("a.h", HEADER);
+    project.write("a.cpp", SOURCE);
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let lenses = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": uri } },
+        })
+    });
+    let result = lenses["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a lens list was expected, got {lenses}"));
+    let titles: Vec<&str> = result
+        .iter()
+        .filter_map(|lens| lens["command"]["title"].as_str())
+        .collect();
+    assert!(
+        titles.contains(&"2 references"),
+        "`grow` has two calls and neither its definition nor the header's declaration is counted: {titles:?}"
+    );
+}

@@ -105,6 +105,13 @@ pub struct Reference {
 pub enum ReferenceKind {
     /// The `#define` itself. Renaming edits it.
     Definition,
+    /// **Another declaration of the same entity** — the `void grow(int);` in a header whose definition is in a `.cpp`.
+    ///
+    /// A reference *list* shows it: a rename edits every declaration, and a reader looking for "where else is this
+    /// said" wants the promise as much as the body. A reference **count** does not — a lens that reads "3 references"
+    /// beside a function is about the places that *use* it, and counting the header's own declaration would say a
+    /// function nobody calls has one caller, on the line that introduces it.
+    Declaration,
     /// An `#undef`: the name's history, and part of what a rename has to keep in step.
     Undefinition,
     /// An identifier the preprocessor replaces. `resolved_to` is the file whose `#define` is in force **at that
@@ -516,18 +523,25 @@ pub fn symbol_references<F: FileProvider>(
                     None => true,
                 }
             })
-            .map(|range| Reference {
-                kind: if normalize_path(&path, cfg!(windows))
-                    == normalize_path(&symbol.declared_in, cfg!(windows))
-                    && range.start_offset == symbol.name_at
-                {
+            .map(|range| {
+                let is_this_file = normalize_path(&path, cfg!(windows))
+                    == normalize_path(&symbol.declared_in, cfg!(windows));
+                // **Three kinds, and the middle one is why a count is not a length.** The symbol's own name is the
+                // definition; another declaration of the same qualified name is a *promise* (`Foo();` in the header
+                // whose body is in the `.cpp`); everything else is a use. A reference list wants all three, a
+                // reference **count** only the last — see [`ReferenceKind::Declaration`].
+                let kind = if is_this_file && range.start_offset == symbol.name_at {
                     ReferenceKind::Definition
+                } else if names_declared_here.is_some_and(|declared| {
+                    declared.get(&range.start_offset) == Some(&symbol.qualified)
+                }) {
+                    ReferenceKind::Declaration
                 } else {
                     ReferenceKind::Use {
                         resolved_to: symbol.declared_in.clone(),
                     }
-                },
-                range,
+                };
+                Reference { range, kind }
             })
             .collect();
 
@@ -741,6 +755,9 @@ mod tests {
                     file.references.iter().map(move |reference| {
                         let kind = match &reference.kind {
                             ReferenceKind::Definition => "define".to_string(),
+                            // A `use` of a macro's name, which the macro path never distinguishes from a symbol's
+                            // redeclaration — that is the symbol path's answer, and this helper is about macros.
+                            ReferenceKind::Declaration => "declare".to_string(),
                             ReferenceKind::Undefinition => "undef".to_string(),
                             ReferenceKind::Use { .. } => "use".to_string(),
                             ReferenceKind::Uncertain(_) => "maybe".to_string(),

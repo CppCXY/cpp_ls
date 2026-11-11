@@ -35,12 +35,12 @@ use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
-    CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
-    DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition,
-    GotoImplementation, GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest,
-    RangeFormatting, References, Rename, Request as LspRequest, ResolveCompletionItem,
-    SelectionRangeRequest, SemanticTokensFullRequest, SignatureHelpRequest, WillSaveWaitUntil,
-    WorkspaceSymbolRequest,
+    CodeActionRequest, CodeLensRequest, Completion, DocumentDiagnosticRequest,
+    DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    Formatting, GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest,
+    InlayHintRequest, PrepareRenameRequest, RangeFormatting, References, Rename,
+    Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
+    SignatureHelpRequest, WillSaveWaitUntil, WorkspaceSymbolRequest,
 };
 
 use crate::context::ServerContext;
@@ -48,6 +48,7 @@ use crate::context::ServerContext;
 use super::{
     call_hierarchy::{on_incoming_calls, on_outgoing_calls, on_prepare_call_hierarchy},
     code_action::on_code_action,
+    code_lens::on_code_lens,
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
@@ -159,6 +160,7 @@ pub async fn on_request_handler(
     CallHierarchyIncomingCalls => on_incoming_calls,
     CallHierarchyOutgoingCalls => on_outgoing_calls,
     CodeActionRequest => on_code_action,
+    CodeLensRequest => on_code_lens,
     Completion => on_completion,
     ResolveCompletionItem => on_completion_resolve,
     DocumentHighlightRequest => on_document_highlight,
