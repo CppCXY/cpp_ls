@@ -3006,3 +3006,58 @@ int f() {
         "`allocator_traits<value_type>::value_type` is `int` for `vector<int>`"
     );
 }
+
+/// **A class the index does not hold is answered from the rendering** — the shape of every system header.
+///
+/// The index summarizes the project's files; `<vector>` is not one of them, so `std::vector` has no entry and its members
+/// cannot be looked up — measured on `EmmyLuaCodeStyle`: "the type of `std::vector<LuaDiagnostic>&` is not known here".
+/// But the **rendering** has the class's body inlined, because that is what cooking means, and this crate parses it for
+/// every cooked file. The fixture makes that shape without the standard library: `lib.h` is *included* and deliberately
+/// **not** a project file.
+#[test]
+fn a_class_the_index_does_not_hold_is_answered_from_the_rendering() {
+    const LIB_H: &str = "\
+namespace std {
+    template <class T> struct allocator_traits { using value_type = T; };
+    template <class T> class vector {
+    public:
+        using value_type = T;
+        using reference = allocator_traits<value_type>::value_type&;
+        reference emplace_back();
+    };
+}
+";
+    let source = "\
+#include \"lib.h\"
+int f() {
+    std::vector<int> values;
+    auto &result = values.emplace_back();
+    return result;
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/lib.h", LIB_H)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    // **Only the translation unit is a project file.** `lib.h` is read because it is included, which is exactly what a
+    // system header is to this index.
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "result");
+    match session.type_at(&view, as_reading(&view, offset)) {
+        cpp_code_analysis::Known::Yes(found) => assert_eq!(
+            found.type_of, "int&",
+            "the class's member alias is in the rendering, even though the index has no `vector`"
+        ),
+        _ => panic!("the rendering holds `std::vector`, so `result` has a type"),
+    }
+}

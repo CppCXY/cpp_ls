@@ -184,3 +184,19 @@ Design, before writing it:
 3. Fixture: a **header that is not indexed** (a second project directory the session never adds to its file list) whose
    class the cooking inlines; the member's alias must still answer. That is the shape a system header has, without the
    standard library in the test.
+### Round 6: the rendering path already answers an unindexed header
+
+`a_class_the_index_does_not_hold_is_answered_from_the_rendering` passes: with `lib.h` **included but not a project
+file** — the shape of a system header — `auto &result = values.emplace_back()` still answers `int&`. So the "answer it from
+the rendering" design written above is **already what happens**, and the real project's failure is specific to the
+standard library's own text, not to where the class is looked up.
+
+The next step is therefore a trace of one sentence, not a design: the hover said
+
+```text
+the type of `std::vector<LuaDiagnostic>&` is not known here
+```
+
+That sentence is produced by one condition in this crate. `grep -rn "is not known here" crates/` names it, and the
+condition it guards is the thing to measure on that file (`inspect type` on the declaration of `results`, then on
+`emplace_back`). Only then is there a change to make.
