@@ -343,3 +343,32 @@ this list into ten rounds of measurements in the first place.
 The instrument added along the way stays: `inspect grep` answers "is this node in the tree" for the whole rendering, and
 the two failing `inspect` measurements are recorded with why they are artifacts (its cooked reading for a project file
 does not inline includes — `docs/open-questions.md`).
+## Reproduced through the session, not through `inspect` (round 13)
+
+`crates/cpp_code_analysis/tests/real_project_probe.rs` opens `EmmyLuaCodeStyle` the way the server does — every project
+file, the closure pumped — and asks the two questions the editor reports:
+
+```text
+[probe] the rendering is 7993 byte(s); `class vector` absent; `emplace_back` present
+[probe] std::vector: unknown — NotDeclaredHere("std::vector")
+[probe] result: unknown — UnknownType("std::vector<LuaDiagnostic>&")
+[probe] the qualifier `LuaCodeFormat` at 8613 is classified Type (declaration: false)
+```
+
+Three facts, and the first two are the defect:
+
+1. **The rendering is 7 993 bytes — the file's own text**, with no header inlined. So the cook does **not** inline
+   includes; declarations from other files can only come from the index.
+2. **The index answers `NotDeclaredHere("std::vector")`** from that file. A system header is read while resolving an
+   `#include`, and is **not** part of the index this session built — `add_project_files` names the project's files, and a
+   header outside them is never summarized. Measured separately: the MSVC `vector` header *does* summarize 993
+   declarations when it is asked for directly, so the reader is fine and the **membership** is what is missing.
+3. `result`'s type therefore fails at the first step: `std::vector` is not a type this file can see.
+
+So the fix is **not** in alias substitution, member lookup or the class template: it is that a translation unit's include
+closure must be part of what the analysis knows — either summarized into the index as it is read, or inlined into the
+rendering. That is the next change, and the probe is the instrument that will say whether it worked (the same three lines
+become `class vector present` and `definitions: 1+ declaration(s)`).
+
+The qualifier of the definition is a **Type** in this same run, so the semantic-token report is a stale binary or a
+client-side cache: the analysis answers `Type`.
