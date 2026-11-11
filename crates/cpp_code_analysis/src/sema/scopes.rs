@@ -2561,25 +2561,23 @@ fn parameter_lists(declarator: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 ///
 /// The class segment may carry template arguments (`Box<int>::Box`), which are not part of the name being compared.
 fn is_a_constructor_declarator(declarator: &CppSyntaxNode) -> bool {
-    let Some(named) = declarator
-        .descendants()
-        .find(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
+    // **The two segments, as the tree reads them.** The declarator's name is a `CppNameExpr` whose segments are its
+    // children, and `qualified_declarator_name` / `qualified_specifier_name` already return the qualifier and the
+    // introduced name separately — so the last segment is a `Name`, not a slice of the declarator's whole spelling. The
+    // previous version searched for a name node and re-split its text, which also matched a `::` inside a template
+    // argument, and depended on `trim` for a `::` written after a newline.
+    let Some((qualifier, (name, _))) =
+        qualified_declarator_name(declarator).or_else(|| qualified_specifier_name(declarator))
     else {
         return false;
     };
-    let spelled = named.text().to_string();
-    let spelled = spelled.trim();
-    let Some((qualifier, last)) = spelled.rsplit_once("::") else {
+    let Some(last) = name.identifier_text() else {
         return false;
     };
-    let class = qualifier.rsplit("::").next().unwrap_or(qualifier);
+    let class = qualifier.rsplit("::").next().unwrap_or(qualifier.as_str());
     let class = class.split('<').next().unwrap_or(class).trim();
-    let last = last.trim();
-    !last.is_empty() && !class.is_empty() && last == class
+    !class.is_empty() && last == class
 }
-
-/// The binding kind for a function, from what its name says it is.
-///
 /// The name is what decides: a constructor and an ordinary function are spelled the same way and differ only in
 /// that a constructor's name is its class's, which this layer cannot know — a class is being built at the same
 /// time. What *is* readable from the name alone is the three special forms, and those are worth separating
