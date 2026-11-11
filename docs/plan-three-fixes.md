@@ -92,3 +92,12 @@ format.cpp  #include "format.h"  int Format::NameStyleCheck(Builder &builder, in
 Ask for the uses of `Format::SpellCheck` (declared in `format.h`) and assert that `format.cpp`'s `builder.SpellCheck` is
 **not** one of them. If the cross-file fixture also passes, the report is about a shape neither fixture has — and the next
 step is to reproduce it from the editor's own file:line, not to change the filter.
+## Progress
+
+- **Item 1 — done, two commits.** `NameKind::Property` exists and a variable whose binding's *own* scope is a class is a
+  property (asking the scope chain turned every parameter into one — measured), on both the binding and the index paths;
+  the fixture is `a_mem_initialiser_names_a_field` (`: _support(false)`). `is_a_constructor_declarator` no longer reads
+  the declarator's text: it takes the two segments from `qualified_declarator_name`.
+- **Item 2 — both fixtures pass today** (single file and cross-file). Recorded above: the reported case has a shape
+  neither fixture reproduces, so the next step is the editor's file:line, not a change to the filter.
+- **Item 5 — not started.** The plan is unchanged.
