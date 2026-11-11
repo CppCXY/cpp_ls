@@ -11,17 +11,32 @@
 //!   not counted  the definition itself, and a declaration of it (the `void grow(int);` in the header)
 //! ```
 //!
-//! The distinction is [`ReferenceKind::Declaration`], which the reference query now keeps: a list a reader renames
-//! from wants the promise as well as the body, while a count is about the places that *call* it. Without it a
-//! function nobody calls would read `1 reference` on the line that introduces it.
+//! The distinction is [`ReferenceKind::Declaration`] and [`ReferenceKind::Definition`], which the reference query
+//! keeps apart: a list a reader renames from wants the promise as well as the body, while a count is about the places
+//! that *call* it. Without it a function nobody calls would read `1 reference` on the line that introduces it.
+//!
+//! **The count is [`super::references::places_of`]'s list, and the command carries that same list** — see the module
+//! of `handlers::references`, which is where the one rule lives. Two queries used to answer "where is this used": Find
+//! References asked the index, and this file asked the *rename* rule; measured on `EmmyLuaCodeStyle`, the lens read
+//! `0 references` over `LuaParseError`'s constructor while Find References at the same byte listed eight uses, and `7`
+//! over `CompleteMarker`'s where Find References listed sixteen.
+//!
+//! **A constructor's count is its class's uses.** The language gives a constructor no name of its own — nothing can
+//! write `Pair::Pair(...)` in a call — so the places that name the class are the places that reach it, and that is
+//! exactly what Find References answers at that byte. It is more than the construction sites, and it is what the click
+//! shows, which is the property a number needs to have.
 //!
 //! # What it costs
 //!
 //! One reference query per function, and the query is the index's: the candidates are the declaring file and
-//! everything that can see it, each filtered by the summary's identifier Bloom filter before it is read and lexed.
-//! Measured on `EmmyLuaCodeStyle` (1 086 files): **0.7–0.9 ms** per query once warm and **9.7 ms** for the first, so a
-//! file of forty functions costs tens of milliseconds — and a lens is requested when a file is opened or saved, not on
-//! every keystroke. The measurement is `tests/reference_cost_probe.rs`, so it can be run again on another project.
+//! everything that can see it, each filtered by the summary's summary-level `use_filter` before it is read and lexed.
+//! A function that is a class member also pays **one parse per file that has an occurrence**, because attributing an
+//! occurrence to a class needs that file's scopes — the same price, and the same shape, as the rename rule.
+//!
+//! Measured on `EmmyLuaCodeStyle` with `tests/code_lens_probe.rs` (this file's own `Mark.cpp`, seven lenses, index
+//! warm): **35 ms for the file, 5 ms a lens** — against **60 ms / 8.6 ms** for the rename rule it replaced, so the
+//! unification was also 40% cheaper (the parse the rename rule needed for *its* own answer is gone). A lens is
+//! requested when a file is opened or saved, not on every keystroke.
 //!
 //! # What the client is told
 //!

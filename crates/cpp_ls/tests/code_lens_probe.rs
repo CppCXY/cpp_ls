@@ -1,5 +1,8 @@
-//! **What a code lens counts and what Find References counts, for the same declaration** — measured on the report's
-//! own file.
+//! **What the code lens counts, what Find References counts, and what the rename rule counted** — measured on the
+//! report's own files.
+//!
+//! The lens asks `references::places_of` and nothing else (see `handlers/code_lens.rs`), so its number is that
+//! function's length; `name_level_offsets` is the rule it used to ask, kept here to show the two apart.
 //!
 //! ```text
 //! $env:CPPLS_CODESTYLE_PROJECT = "E:\EmmyLuaCodeStyle"
@@ -8,10 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{
-    DiskFiles, Known, OpenDocuments, ReferenceBudget, ReferenceKind, Session, SessionFiles,
-    WatchFilter,
+    DiskFiles, Known, OpenDocuments, ReferenceBudget, ReferenceKind, Session, SessionFiles, WatchFilter,
 };
 
 fn project() -> Option<PathBuf> {
@@ -41,7 +42,7 @@ fn open(root: &Path, file: &Path, text: &str) -> Session<DiskFiles> {
     session
 }
 
-fn counted(found: &Known<cpp_code_analysis::SymbolReferences>) -> String {
+fn counted(found: &Known<cpp_code_analysis::SymbolReferences>) -> (usize, usize, usize) {
     match found {
         Known::Yes(found) => {
             let mut uses = 0usize;
@@ -57,34 +58,13 @@ fn counted(found: &Known<cpp_code_analysis::SymbolReferences>) -> String {
                     }
                 }
             }
-            format!("{uses} use, {declarations} decl, {definitions} def")
+            (uses, declarations, definitions)
         }
-        Known::No => "no".to_string(),
-        Known::Unknown(reason) => format!("unknown({reason:?})"),
+        _ => (0, 0, 0),
     }
 }
 
-fn described(defined: &Known<cpp_code_analysis::ProjectDefinitions>) -> String {
-    match defined {
-        Known::Yes(found) => found
-            .found
-            .iter()
-            .map(|definition| {
-                format!(
-                    "{}@{}({})",
-                    definition.fact.name,
-                    definition.fact.name_range.start_offset,
-                    definition.fact.scope.as_deref().unwrap_or("-")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        Known::No => "no".to_string(),
-        Known::Unknown(reason) => format!("unknown({reason:?})"),
-    }
-}
-
-fn compare(root: &Path, relative: &str, needles: &[(&str, usize)]) {
+fn compare(root: &Path, relative: &str) {
     let file = root.join(relative);
     let Ok(text) = std::fs::read_to_string(&file) else {
         eprintln!("[probe] no {relative}");
@@ -98,50 +78,74 @@ fn compare(root: &Path, relative: &str, needles: &[(&str, usize)]) {
 
     eprintln!("[probe] ==== {relative} ====");
     let summary = session.index().summary(&file).expect("a summary");
-    for fact in &summary.declarations {
-        if fact.kind != cpp_code_analysis::DeclKind::Function || fact.local {
-            continue;
-        }
-        let at = fact.name_range.start_offset;
-        let lens = cpp_ls::handlers::references::name_level_offsets(
+    let functions: Vec<&cpp_code_analysis::DeclFact> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Function && !fact.local)
+        .collect();
+
+    // **A warm-up pass first**, so what is timed is a query over an index that has already answered once: the first
+    // call of each reads files a project has not touched yet, and that is a startup cost rather than a per-file one.
+    for fact in &functions {
+        let _ = cpp_ls::handlers::references::places_of(&session, fact, file.clone(), false);
+        let _ = cpp_ls::handlers::references::name_level_offsets(
             &session,
             &plain,
-            ReadingOffset::new(at),
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                fact.name_range.start_offset,
+            ),
             false,
-        )
-        .len();
-        let defined = session.definitions(&plain, ReadingOffset::new(at));
-        let by_symbol = session.symbol_references_of(fact, file.clone(), ReferenceBudget::default());
-        let line = text[..at].matches('\n').count() + 1;
-        eprintln!(
-            "[probe] line {line:>4} name={:<22} lens={lens:<4} find=[{}] definitions={}",
-            fact.name,
-            counted(&by_symbol),
-            described(&defined)
         );
     }
 
-    for (needle, skip) in needles {
-        let Some(at) = text.find(needle).map(|at| at + skip) else {
-            continue;
+    let mut lenses = 0usize;
+    let mut both = std::time::Duration::ZERO;
+    let mut by_the_rename_rule = std::time::Duration::ZERO;
+    for fact in &functions {
+        let line = text[..fact.name_range.start_offset].matches('\n').count() + 1;
+
+        // **The lens's own number**: `places_of` with the rule the lens passes.
+        let started = std::time::Instant::now();
+        let lens = match cpp_ls::handlers::references::places_of(&session, fact, file.clone(), false) {
+            Known::Yes(places) => places.len(),
+            Known::No | Known::Unknown(_) => {
+                eprintln!(
+                    "[probe] line {line:>4} name={:<24} lens says nothing (the query cannot name it)",
+                    fact.name
+                );
+                continue;
+            }
         };
-        let defined = session.definitions(&plain, ReadingOffset::new(at));
-        let by_symbol =
-            session.symbol_references(&plain, ReadingOffset::new(at), ReferenceBudget::default());
-        let lens = cpp_ls::handlers::references::name_level_offsets(
+        both += started.elapsed();
+        lenses += 1;
+
+        let (uses, declarations, definitions) = counted(&session.symbol_references_of(
+            fact,
+            file.clone(),
+            ReferenceBudget::default(),
+        ));
+        // **The rename rule**, which is what the lens asked before: same declaration, same view, same rule as
+        // `textDocument/references`' macro path.
+        let started = std::time::Instant::now();
+        let rename = cpp_ls::handlers::references::name_level_offsets(
             &session,
             &plain,
-            ReadingOffset::new(at),
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                fact.name_range.start_offset,
+            ),
             false,
         )
         .len();
-        let line = text[..at].matches('\n').count() + 1;
+        by_the_rename_rule += started.elapsed();
         eprintln!(
-            "[probe] needle {needle:?} line {line}: definitions={} find=[{}] lens-term={lens}",
-            described(&defined),
-            counted(&by_symbol)
+            "[probe] line {line:>4} name={:<24} lens={lens:<4} find=[{uses} use, {declarations} decl, \
+             {definitions} def]  rename-rule={rename}",
+            fact.name
         );
     }
+    eprintln!(
+        "[probe] {lenses} lens(es) for the file: places_of {both:.2?}, the rename rule {by_the_rename_rule:.2?}"
+    );
 }
 
 #[test]
@@ -151,18 +155,10 @@ fn what_the_lens_counts_against_what_find_references_counts() {
         eprintln!("[probe] the project is not here");
         return;
     };
+    compare(&root, "LuaParser/include/LuaParser/Parse/LuaParseError.h");
+    compare(&root, "LuaParser/src/Parse/Mark.cpp");
     compare(
         &root,
-        "LuaParser/include/LuaParser/Parse/LuaParseError.h",
-        &[("class LuaParseError", "class ".len())],
-    );
-    compare(
-        &root,
-        "LuaParser/src/Parse/Mark.cpp",
-        &[
-            ("CompleteMarker::Marker(std", 0),
-            ("CompleteMarker::CompleteMarker(std", "CompleteMarker::".len()),
-            ("events[Pos].U", 0),
-        ],
+        "CodeFormatLib/include/CodeFormatLib/Diagnostic/DiagnosticBuilder.h",
     );
 }
