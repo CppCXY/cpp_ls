@@ -830,6 +830,13 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 if context.lsp_features().supports_refresh_semantic_tokens() {
                     context.client().refresh_semantic_tokens();
                 }
+                // **…and the lenses, whose number is a count of files read.** A lens published before this file's
+                // closure was ready says fewer references than there are, and a client keeps that number until its
+                // document changes. The handler withholds the number until the closure is ready; this is what asks
+                // again once it is.
+                if context.lsp_features().supports_refresh_code_lens() {
+                    context.client().refresh_code_lenses();
+                }
             }
             let revision = context
                 .analysis()

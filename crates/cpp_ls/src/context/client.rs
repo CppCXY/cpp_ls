@@ -210,4 +210,13 @@ impl ClientProxy {
     pub fn refresh_semantic_tokens(&self) {
         self.send_request_no_response("workspace/semanticTokens/refresh", ());
     }
+    /// Ask the client to ask again for the **code lenses** it is showing.
+    ///
+    /// A lens is a *count*, and the count is read from the files that can see the function: one the index has not read
+    /// yet contributes nothing, so a request answered during indexing says **fewer** references than there are and the
+    /// client keeps that number until its document changes. The lens handler withholds the number until the file's
+    /// closure is ready; this is the message that turns "nothing" into a number.
+    pub fn refresh_code_lenses(&self) {
+        self.send_request_no_response("workspace/codeLens/refresh", ());
+    }
 }

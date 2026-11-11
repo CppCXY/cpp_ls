@@ -140,6 +140,20 @@ impl LspFeatures {
             .unwrap_or_default()
     }
 
+    /// Can the client be told to ask again for its **code lenses**? See [`crate::ClientProxy::refresh_code_lenses`].
+    ///
+    /// A lens is a count of the files that use a function, so the same window that colours a name wrongly draws a
+    /// number that is too small — and the client keeps it until its document changes. Measured: one function's count
+    /// came back 0, then 2, then 6 as the index drained, which is the "the number keeps changing" report.
+    pub fn supports_refresh_code_lens(&self) -> bool {
+        self.client_capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.code_lens.as_ref())
+            .and_then(|lens| lens.refresh_support)
+            .unwrap_or_default()
+    }
+
     pub fn supports_dynamic_watched_files_registration(&self) -> bool {
         self.client_capabilities
             .workspace

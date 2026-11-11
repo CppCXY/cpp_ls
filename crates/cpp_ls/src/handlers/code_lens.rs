@@ -55,6 +55,14 @@ pub async fn on_code_lens(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+        // **No number until the file's closure is read.** A count is the files that can see the function, so a lens
+        // published while the index still has work says *fewer* references than exist — and a client keeps that number
+        // until the document changes. Measured: the count of one function came back 0, then 2, then 6 as the index
+        // drained, which is the "the number keeps changing" report. Empty is the honest answer, and
+        // `workspace/codeLens/refresh` (sent when indexing drains) is what makes the client ask again.
+        if !session.is_closure_ready(&path) {
+            return Some(Vec::new());
+        }
         let view = session.view_of_the_file(&path)?;
         Some(lenses_of(session, &view, &uri, client))
     })
