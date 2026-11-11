@@ -29,7 +29,6 @@
 //! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
 //! still draws the title.
 
-use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DeclKind, Known, ReferenceBudget, ReferenceKind};
 use lsp_types::{
     ClientCapabilities, CodeLens, CodeLensParams, Command, Location, Position, Range,
@@ -91,11 +90,14 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
             continue;
         };
 
-        let Known::Yes(found) = session.symbol_references(
-            view,
-            ReadingOffset::new(fact.name_range.start_offset),
-            ReferenceBudget::default(),
-        ) else {
+        // **The fact, not an offset.** `symbol_references(view, offset)` finds the declaration by looking a *rendering*
+        // offset up in the scope tree — and the summary's `name_range` is a **file** offset. The two coincide only in a
+        // file whose rendering equals its text, so a header with includes behind it counted nothing: measured on
+        // `EmmyLuaCodeStyle`, `GetState` in `DiagnosticBuilder.h` answered `0 references` while the `.cpp` files call
+        // it. The declaration is already here, so the symbol is asked for directly and no coordinate is converted.
+        let Known::Yes(found) =
+            session.symbol_references_of(fact, view.path.clone(), ReferenceBudget::default())
+        else {
             continue;
         };
         let uses = found

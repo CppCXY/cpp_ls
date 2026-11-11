@@ -8842,6 +8842,28 @@ impl<F: FileProvider + Clone> Session<F> {
         )
     }
 
+    /// **The references of a declaration the caller already holds** — no offset, and so no coordinate to convert.
+    ///
+    /// [`Session::symbol_references`] finds the declaration by looking an offset up in the *rendering's* scope tree; a
+    /// caller holding a summary fact has a **file** offset, and in a file whose rendering differs from its text (any
+    /// header with includes behind it) the two name different positions. Measured on `EmmyLuaCodeStyle`: the CodeLens
+    /// over `GetState` in `DiagnosticBuilder.h` said `0 references`, because the fact's file offset was read as a
+    /// rendering offset.
+    pub fn symbol_references_of(
+        &self,
+        fact: &crate::DeclFact,
+        file: std::path::PathBuf,
+        budget: crate::ReferenceBudget,
+    ) -> Known<crate::SymbolReferences> {
+        let symbol = crate::SymbolToFind::of(fact, file);
+        crate::index::references::symbol_references(
+            self.store.index(),
+            &self.files,
+            &symbol,
+            budget,
+        )
+    }
+
     /// Which `#define` or `#undef` settles the macro name at `offset`.
     /// **The macro a use names, asked in the file's own coordinates.**
     ///
