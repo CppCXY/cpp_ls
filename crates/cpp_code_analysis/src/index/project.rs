@@ -6881,6 +6881,7 @@ fn finish_a_nested_name(
                 root,
                 path,
                 &crate::sema::types::parse_type_spelling(class),
+                &[],
                 &spelling,
                 MAX_ALIAS_HOPS,
             );
@@ -10297,6 +10298,7 @@ fn a_members_answer_as_a_type(
         root,
         path,
         class_type,
+        &[],
         &target,
         MAX_ALIAS_HOPS,
     );
@@ -10334,12 +10336,26 @@ const MAX_ALIAS_HOPS: usize = 6;
 ///
 /// `depth` counts the hops, and a hop that would answer the spelling it was given is refused — the honest way to stop
 /// on a `typedef` that names itself.
+///
+/// # `visited`: the classes the walk came through, and the one thing a name can be resolved by
+///
+/// A library declares the same alias name in many classes — libstdc++ has `_Tp_alloc_type` in `vector`,
+/// `_Vector_base`, `_Bvector_base` and `_Deque_base` — and an unqualified name that the current class does not declare
+/// has no business being looked up by bare name project-wide. The class that **wrote** it is the answer, and it is the
+/// class the walk has just left: `__alloc_traits<_Tp_alloc_type>::reference` is `value_type&`, whose `value_type` goes
+/// to `allocator_traits<_Tp_alloc_type>::value_type`, whose `_Alloc::value_type` leaves `_Tp_alloc_type` standing —
+/// written by `vector`, three classes back. Measured on `Mark.cpp` before this: the bare-name lookup took
+/// `_Deque_base`'s alias, so `events[Pos]` answered `_Tp_alloc_type&` and everything read through it was unknown.
+///
+/// `visited` is `[outermost, …, innermost]`; the current `class` is the innermost of all and is asked first, so a
+/// member of the current class always wins over a same-named alias three classes back.
 fn a_spelling_through_the_aliases(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &Type,
+    visited: &[Type],
     written: &str,
     depth: usize,
 ) -> String {
@@ -10373,14 +10389,38 @@ fn a_spelling_through_the_aliases(
         );
     }
 
-    // **An unqualified name is a member of this class.**
+    // **An unqualified name is a member of this class — or of a class the walk came through.**
+    //
+    // The order is the rule: the current class first (a member of this class always wins), then the classes the walk
+    // has left, innermost first, and only then a bare-name lookup in the whole index — which is the guess that took
+    // `_Deque_base`'s `_Tp_alloc_type` for `vector`'s.
     let Some((qualifier, last)) = split_at_the_last_scope(&core) else {
-        // **The lookup without the arrow fallback** — see [`a_member_the_class_declares`]: this
-        // walk is *called from* the arrow path, so asking `member_fact` here asks about an arrow,
-        // which comes back here. **An alias template declared elsewhere, before the class is
-        // asked.** Following it produces a *qualified* spelling, which the branch below resolves:
-        // the class selects the specialization its arguments name, and the member is read there.
-        if let Some((named, member)) = the_alias_behind(index, path, &core) {
+        let mut found = None;
+        for candidate in std::iter::once(class).chain(visited.iter().rev()) {
+            if let Some(fact) = a_member_the_class_declares(
+                index,
+                scopes,
+                root,
+                path,
+                &candidate.to_string(),
+                &core,
+            )
+            // **A declaration with no type is not an answer here.** A re-exposed alias declares none of its own
+            // (`using typename _Base::value_type;`), and stopping at it would answer nothing where the class it
+            // came from had the type: measured, `vector`'s own `tp_alloc_type` is `typename base::tp_alloc_type`
+            // with no type recorded, and taking it ended the chain at `Alloc>::template rebind<Tp>::other`.
+            && fact.type_of.is_some()
+            {
+                found = Some((candidate.clone(), fact));
+                break;
+            }
+        }
+        // **An alias template declared elsewhere**, which the classes above do not declare. Following it produces a
+        // *qualified* spelling, which the branch below resolves: the class selects the specialization its arguments
+        // name, and the member is read there.
+        if found.is_none()
+            && let Some((named, member)) = the_alias_behind(index, path, &core)
+        {
             let qualified = format!("{named}::{member}");
             if qualified != core {
                 let followed = a_spelling_through_the_aliases(
@@ -10389,6 +10429,7 @@ fn a_spelling_through_the_aliases(
                     root,
                     path,
                     class,
+                    visited,
                     &qualified,
                     depth.saturating_sub(1),
                 );
@@ -10398,14 +10439,17 @@ fn a_spelling_through_the_aliases(
             }
         }
 
-        let Some(fact) =
-            a_member_the_class_declares(index, scopes, root, path, &class.to_string(), &core)
-        else {
+        let Some((declared_in, fact)) = found else {
             return written.to_string();
         };
         let Some(target) = fact.type_of.as_deref() else {
             return written.to_string();
         };
+        // **The substitution is the declaring class's**, which is what makes a name three classes back meaningful:
+        // `vector`'s `_Tp_alloc_type` is `_Base::_Tp_alloc_type`, and `_Base` is *its* parameter, so the pair
+        // (`_Tp`, `MarkEvent`) of the class that wrote it is the environment the target has to be read in.
+        let (parameters, defaults, arguments) =
+            the_parameters_of_a_class(index, path, &declared_in);
         let target = crate::sema::types::substituted_spelling_with_defaults(
             target,
             &parameters,
@@ -10415,9 +10459,27 @@ fn a_spelling_through_the_aliases(
         if target == core {
             return written.to_string();
         }
-        let followed =
-            a_spelling_through_the_aliases(index, scopes, root, path, class, &target, depth - 1);
-        return format!("{leading}{followed}{trailing}");
+        // **The walk continues in the class that declared the name**, not in the one it came from: the target's own
+        // names are written in *that* class's scope. The class it came from stays on the visited list, so a name that
+        // the declaring class does not have can still be found three classes back.
+        let mut deeper = visited.to_vec();
+        if declared_in.to_string() != class.to_string() {
+            deeper.push(class.clone());
+        }
+        let followed = a_spelling_through_the_aliases(
+            index,
+            scopes,
+            root,
+            path,
+            &declared_in,
+            &deeper,
+            &target,
+            depth - 1,
+        );
+        if followed != core {
+            return format!("{leading}{followed}{trailing}");
+        }
+        return written.to_string();
     };
 
     // **A qualified name is a member of whatever the qualifier names** — and the qualifier is itself resolved here,
@@ -10440,8 +10502,16 @@ fn a_spelling_through_the_aliases(
             substituted
         }
     };
-    let inner =
-        a_spelling_through_the_aliases(index, scopes, root, path, class, &qualifier, depth - 1);
+    let inner = a_spelling_through_the_aliases(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        visited,
+        &qualifier,
+        depth - 1,
+    );
     // **A qualifier that did not resolve is where this stops.** Carrying on with the spelling as if it were a class
     // asks the index for a *bare* name, and the library declares `_Alloc_traits` in a dozen classes: measured, the
     // chain silently continued in `std::basic_string` and answered a type from another class. Stopping answers the
@@ -10467,8 +10537,23 @@ fn a_spelling_through_the_aliases(
             .map(|(_, rest)| rest.trim_end().strip_suffix('>').unwrap_or(rest))
             .unwrap_or_default(),
     );
-    let inner_parameters = index.template_parameters_for(inner_name, path, &inner_arguments);
-    let inner_defaults = index.template_parameter_defaults_for(inner_name, path, &inner_arguments);
+    // **The class's parameters are filed under its qualified name.**
+    //
+    // A spelling written where the class is in scope is usually the short form — `base<A>` inside `mygnu`, never
+    // `mygnu::base<A>` — while the index keys a class's parameter list by the qualified one, so the lookup is made
+    // with the name resolved. Measured on the allocator fixture, `base::tp_alloc_type` answered
+    // `typename alloc_traits<Alloc>::template rebind<Tp>::other` — a spelling no reader can use, three levels into
+    // the chain — and a class whose parameters cannot be found is a class whose members cannot be substituted.
+    let inner_class = {
+        let qualified = resolve_aliases(index, scopes, root, path, inner_name);
+        if qualified.is_empty() || qualified == inner_name {
+            inner_name.to_string()
+        } else {
+            qualified
+        }
+    };
+    let inner_parameters = index.template_parameters_for(&inner_class, path, &inner_arguments);
+    let inner_defaults = index.template_parameter_defaults_for(&inner_class, path, &inner_arguments);
     // **The class as the use wrote it** — with its arguments — because that is what selects a
     // partial specialization and what lets the qualifier's own aliases (`_Mybase =
     // _Tree_val<_Traits>`) be substituted.
@@ -10500,8 +10585,22 @@ fn a_spelling_through_the_aliases(
         &inner_defaults,
         &pattern_arguments,
     );
-    let followed =
-        a_spelling_through_the_aliases(index, scopes, root, path, &inner_type, &target, depth - 1);
+    // **The walk descends into the qualifier's class**, so the class it is leaving joins the visited list — that is
+    // what lets `_Tp_alloc_type`, written three classes back, still be found by the class that wrote it.
+    let mut deeper = visited.to_vec();
+    if inner != class.to_string() {
+        deeper.push(class.clone());
+    }
+    let followed = a_spelling_through_the_aliases(
+        index,
+        scopes,
+        root,
+        path,
+        &inner_type,
+        &deeper,
+        &target,
+        depth - 1,
+    );
     format!("{leading}{followed}{trailing}")
 }
 
@@ -10526,6 +10625,7 @@ fn a_member_the_class_declares(
     // which substitutes the class's parameters. A re-exposed alias declares no type of its own, so the declaration
     // answered is the one that *has* one.
     let listed = members_of(index, scopes, root, path, class);
+    let name = the_member_name(name);
     if crate::probes::inference() {
         match &listed {
             Known::Yes(members) => eprintln!(
@@ -10536,11 +10636,26 @@ fn a_member_the_class_declares(
             other => eprintln!("[inference] member of {class:?}: {other:?}"),
         }
     }
+    // **A member of a specialization that does not match this use is not a member of this use.**
+    //
+    // `std::allocator_traits<allocator<T>>::value_type` had two answers in the index: the primary template's
+    // (`typename _Alloc::value_type`) and the `pmr::polymorphic_allocator` specialization's (`_Tp`), and this loop
+    // took the first one with a type — measured on `Mark.cpp`, that substituted `_Tp` with `_Tp_alloc_type` and the
+    // whole alias chain ended at `_Tp_alloc_type&`. The pattern is what says which specialization declared a member,
+    // so it is asked here the way `direct_member` asks it.
+    let arguments: Vec<String> = class
+        .split_once('<')
+        .map(|(_, rest)| {
+            crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+        })
+        .unwrap_or_default();
+    let parameters = index.template_parameters_for(class, path, &arguments);
     if let Some(found) = listed.value().and_then(|members| {
         members
             .members
             .iter()
             .filter(|member| member.fact.name == name)
+            .filter(|member| a_pattern_matches(member.fact.pattern.as_deref(), &parameters, Some(&arguments)))
             .map(|member| member.fact.clone())
             .find(|fact| fact.type_of.is_some())
     }) {
@@ -10608,6 +10723,56 @@ fn split_at_the_last_scope(spelling: &str) -> Option<(String, String)> {
     let qualifier = spelling[..boundary].trim().to_string();
     let last = spelling[boundary + 2..].trim().to_string();
     (!qualifier.is_empty() && !last.is_empty()).then_some((qualifier, last))
+}
+
+/// **A member's name with the keywords that may precede it removed** — `template rebind<int>` → `rebind<int>`.
+///
+/// `A::template rebind<U>::other` writes `template` before a **name**, not before a type: in a dependent context it
+/// tells the parser that `rebind<U>` is a template, and it is not part of the member's spelling. A lookup asked for a
+/// member literally called `template rebind<U>` finds nothing — measured on `std::vector`'s `reference`, the walk
+/// stopped there and answered `__gnu_cxx::__alloc_traits<…>::template rebind<…>::other&`, which is the spelling the
+/// report calls "极其夸张". `typename` reaches the same position through a member chain
+/// (`typename A::template B<C>::type`), so the two are stripped together.
+fn the_member_name(spelling: &str) -> &str {
+    let mut rest = spelling.trim();
+    loop {
+        let Some((keyword, after)) = ["template", "typename", "class", "struct", "enum"]
+            .iter()
+            .find_map(|keyword| rest.strip_prefix(keyword).map(|after| (*keyword, after)))
+        else {
+            return rest;
+        };
+        // A keyword, not a name that merely starts with one: `template<class T>` has no whitespace, and a member
+        // called `classy` must keep its spelling.
+        if !after.starts_with(char::is_whitespace) && !after.starts_with('<') {
+            return rest;
+        }
+        let _ = keyword;
+        rest = after.trim_start();
+    }
+}
+
+/// **What a class's parameters default to, and what this use wrote for them** — the pairing every substitution needs.
+///
+/// One function rather than three calls at each site, because a substitution made with one class's parameters and
+/// another's arguments is the defect this whole walk keeps producing: `_Tp` of `rebind` paired with `MarkEvent` of
+/// `vector` is a type nothing declares.
+fn the_parameters_of_a_class(
+    index: &ProjectIndex,
+    path: &Path,
+    class: &Type,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let Some(name) = class.class_name() else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let arguments: Vec<String> = class
+        .arguments()
+        .iter()
+        .map(|one| one.to_string())
+        .collect();
+    let parameters = index.template_parameters_for(name, path, &arguments);
+    let defaults = index.template_parameter_defaults_for(name, path, &arguments);
+    (parameters, defaults, arguments)
 }
 
 /// `const reference&` → (`const `, `reference`, `&`). The middle is what a name lookup is asked about.
@@ -10731,6 +10896,7 @@ fn the_class_an_arrow_points_at(
         root,
         path,
         &class_type,
+        &[],
         &returns,
         MAX_ALIAS_HOPS,
     );
