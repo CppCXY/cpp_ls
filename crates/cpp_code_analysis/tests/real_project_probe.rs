@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
-use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    DeclFact, DeclKind, DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 fn project() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_PROJECT")
@@ -62,6 +64,78 @@ fn sources_under(root: &std::path::Path) -> Vec<PathBuf> {
     }
     found.sort();
     found
+}
+
+#[test]
+#[ignore = "a probe: needs the real standard library"]
+fn does_refining_the_header_itself_scope_it() {
+    // **The mechanism under test, on its own.** `<vector>` is the file whose scopes come out of `yvals_core.h`'s
+    // `_STD_BEGIN`. Nothing in the session ever re-read it, so the question this answers is: if the normal pump *did*
+    // take it as a file being indexed — the ask served, the drain's `files` list naming it — would its summary come
+    // out with `std` scopes? A no would mean the pass is broken for this input; a yes would mean the pass is right
+    // and never reached.
+    let msvc = PathBuf::from(
+        r"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\vector",
+    );
+    if !msvc.is_file() {
+        eprintln!("[header-probe] the standard library is not here");
+        return;
+    }
+    let root = msvc.parent().expect("the include directory").to_path_buf();
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([msvc.clone()]);
+    session.want_refinement(&msvc);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&msvc);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    match session.index().summary(&msvc) {
+        Some(summary) => {
+            let in_std = summary
+                .declarations
+                .iter()
+                .filter(|fact| {
+                    fact.scope
+                        .as_deref()
+                        .is_some_and(|scope| scope == "std" || scope.starts_with("std::"))
+                })
+                .count();
+            eprintln!(
+                "[header-probe] {} fact(s), {in_std} with a `std` scope, {} macro reading(s)",
+                summary.declarations.len(),
+                summary.macro_readings.len()
+            );
+        }
+        None => eprintln!("[header-probe] no summary"),
+    }
+    match session.index().definitions("std::vector", &msvc) {
+        Known::Yes(found) => {
+            for definition in &found.found {
+                eprintln!(
+                    "[header-probe] std::vector -> {} (kind {:?}, scope {:?}, definition {})",
+                    definition.file.display(),
+                    definition.fact.kind,
+                    definition.fact.scope,
+                    definition.fact.definition
+                );
+            }
+            eprintln!(
+                "[header-probe] `std::vector`: {} declaration(s)",
+                found.found.len()
+            );
+        }
+        Known::Unknown(reason) => eprintln!("[header-probe] `std::vector`: unknown — {reason:?}"),
+        Known::No => eprintln!("[header-probe] `std::vector`: no"),
+    }
 }
 
 #[test]
@@ -135,6 +209,82 @@ fn what_the_session_says_about_the_reported_line() {
             "absent"
         }
     );
+    // **What the summary actually holds**, without any visibility or qualified-name logic in the way: the
+    // question is whether `_STD_BEGIN` opened `std` when this header was read, and a `scope` of `Some("std")` on
+    // any one fact is the only evidence that would settle it.
+    if let Some(summary) = session.index().summary(&msvc) {
+        let total = summary.declarations.len();
+        let in_std = summary
+            .declarations
+            .iter()
+            .filter(|fact| {
+                fact.scope
+                    .as_deref()
+                    .is_some_and(|scope| scope == "std" || scope.starts_with("std::"))
+            })
+            .count();
+        let namespaces: Vec<&str> = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.kind == DeclKind::Namespace)
+            .map(|fact| fact.name.as_str())
+            .collect();
+        eprintln!(
+            "[probe] MSVC vector: {total} fact(s), {in_std} with a `std` scope, namespace fact(s): {namespaces:?}"
+        );
+        for fact in summary.declarations.iter().filter(|f| f.name == "vector") {
+            eprintln!(
+                "[probe]   fact `vector`: kind {:?}, scope {:?}, local {}, definition {}",
+                fact.kind, fact.scope, fact.local, fact.definition
+            );
+        }
+        let emplace: Vec<&DeclFact> = summary
+            .declarations
+            .iter()
+            .filter(|f| f.name == "emplace_back")
+            .collect();
+        eprintln!(
+            "[probe]   `emplace_back` facts: {}; scopes: {:?}",
+            emplace.len(),
+            emplace
+                .iter()
+                .map(|f| f.scope.as_deref())
+                .take(4)
+                .collect::<Vec<_>>()
+        );
+        // **The evidence the design says is stored for exactly this file**: a scope opened by a body written
+        // somewhere else. If this is empty, the summary never read the invocation *as a macro at all*; if it is not,
+        // the reading is recorded and a consumer only has to honour it.
+        eprintln!(
+            "[probe]   macro_readings: {}; {:?}",
+            summary.macro_readings.len(),
+            summary
+                .macro_readings
+                .iter()
+                .map(|reading| (reading.name.as_str(), reading.opens.clone()))
+                .take(4)
+                .collect::<Vec<_>>()
+        );
+        // And whether the file that writes the body holds it.
+        let yvals_core = msvc.with_file_name("yvals_core.h");
+        if let Some(core) = session.index().summary(&yvals_core) {
+            let defines: Vec<_> = core
+                .macros
+                .iter()
+                .filter(|fact| fact.name == "_STD_BEGIN")
+                .map(|fact| (fact.name.as_str(), fact.body_range.is_some()))
+                .collect();
+            eprintln!(
+                "[probe]   yvals_core.h: {} fact(s), `_STD_BEGIN` define(s): {:?}",
+                core.declarations.len(),
+                defines
+            );
+        } else {
+            eprintln!("[probe]   yvals_core.h: no summary");
+        }
+    } else {
+        eprintln!("[probe] MSVC vector: no summary at all");
+    }
     let style = root.join("CodeFormatCore/include/CodeFormatCore/Config/LuaStyle.h");
     eprintln!(
         "[probe] LuaStyle.h summary: {}",
@@ -185,6 +335,54 @@ fn what_the_session_says_about_the_reported_line() {
         Known::Yes(found) => eprintln!("[probe] result: `{}`", found.type_of),
         Known::Unknown(reason) => eprintln!("[probe] result: unknown — {reason:?}"),
         Known::No => eprintln!("[probe] result: no"),
+    }
+
+    // **The type of every name on that line**, because the reported answer named `LuaDiagnostic` — the *parameter's*
+    // element type — for a variable declared from `results`, whose element type is `LuaDiagnosticInfo`. Either the
+    // arrow is right and the line is misread, or the probe's cursor is somewhere else; both are worth knowing before
+    // any conclusion is drawn about `std::vector`.
+    for (needle, skip, inside, label) in [
+        (
+            "std::vector<LuaDiagnosticInfo> results",
+            "std::vector<LuaDiagnosticInfo> ".len(),
+            2,
+            "`results` (declaration)",
+        ),
+        ("results.emplace_back", 1, 1, "`results` (use)"),
+        (
+            "for (auto &diagnostic: diagnostics)",
+            "for (auto &diagnostic: ".len(),
+            2,
+            "`diagnostics` (use)",
+        ),
+        (
+            "auto &result = results.emplace_back",
+            "auto &".len(),
+            2,
+            "`result`",
+        ),
+    ] {
+        let Some(at) = text.find(needle) else {
+            eprintln!("[probe] {label}: the text is not there");
+            continue;
+        };
+        let cursor = at + skip + inside;
+        let reading = view
+            .reading_offset_of(FileOffset::new(cursor))
+            .unwrap_or(ReadingOffset::new(cursor));
+        let written = &text[cursor..(cursor + 20).min(text.len())];
+        match session.type_at(&view, reading) {
+            Known::Yes(found) => {
+                eprintln!(
+                    "[probe] {label} at {cursor} ({written:?}): `{}`",
+                    found.type_of
+                )
+            }
+            Known::Unknown(reason) => {
+                eprintln!("[probe] {label} at {cursor} ({written:?}): unknown — {reason:?}")
+            }
+            Known::No => eprintln!("[probe] {label} at {cursor} ({written:?}): no"),
+        }
     }
 
     // **The qualifier of `std::vector<...> LuaCodeFormat::MakeDiagnosticInfo(…)`, line 300.**

@@ -246,3 +246,71 @@ drops an occurrence when the file's own scopes resolve it to a binding a functio
    substituting it into the member function's return type (`reference`) — a template-instantiation question, not a search
    one. `docs/open-questions.md` already records the layer's boundary: it substitutes a *function template*'s
    parameters, not a *class template*'s member types.
+
+## Why `std::vector` itself is missing, and the wrong lever I pulled at it
+
+This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without
+their closure's macros, so the refinement has to be taught to build them"). That conclusion was **wrong about the
+lever**, and the measurements below are what showed it.
+
+### What is reproducible, and by which path
+
+| asked by | answer about `LuaCodeFormat.cpp:304` |
+| --- | --- |
+| `Session` directly (`real_project_probe.rs`) | `result`: `Unknown(UnknownType("std::vector<LuaDiagnostic>&"))` |
+| the **real binary** over stdio (`real_project_hover_probe.rs`, LSP `textDocument/hover`) | the same string, as a hover card |
+| the same, on a copy of the project with **no `.cppls`** (546 summaries built cold) | the same |
+
+So the earlier finding was not an artefact of `inspect` (which cannot see includes), nor of the disk cache.
+
+### Where the `std` scope actually is lost — measured, in three steps
+
+1. **The summary of `<vector>` has no scope at all.** `993 fact(s), 0 with a std scope, namespace fact(s): []`, and
+   each `vector` fact is `scope: None`. `macro_readings: 0` — the plain reading never saw `_STD_BEGIN` as a macro.
+2. **That is by design, and the scoped reading lives elsewhere.** A summary is the shape-only reading
+   (`docs/indexing-design.md` §2.1); the reading with bodies in force is the **cooked** one, built by the second pass.
+3. **The second pass is demand-driven, and nobody demands `<vector>`.** `Session::advance`'s `finish_a_slice` takes
+   `take_the_files_wanted_for_refinement(RE_READ_SLICE)` — files somebody called `want_refinement` for — and
+   `catch_up(path)` asks for *the file a request is about*, never for the header that declares what it names. Traced:
+   `re-read: eager false, 216 source(s), 175 word(s) mentioned, 2 candidate file(s), uncovered true, nothing bodied`
+   — one pass, for the `.cpp`, and `<vector>` is not in it.
+
+### The proof that the machinery is fine and only the ask is missing
+
+`real_project_probe.rs::does_refining_the_header_itself_scope_it` indexes `<vector>` **as a root**, which is the one
+thing that makes somebody ask for it:
+
+```text
+re-read: … 1153 word(s) mentioned, 12 candidate file(s), 12 bodied name(s) — 329 ms
+re-read: …\include\vector through a walk of its own
+[header-probe] std::vector -> …\include\vector (kind Type, scope Some("std"), definition true)
+[header-probe] std::vector -> …\include\vector (kind Type, scope Some("std"), definition false)
+[header-probe] std::vector -> …\include\vector (kind Type, scope Some("std"), definition true)
+```
+
+The class resolves, at `scope: "std"`, with its definition — after one refinement pass that was *asked for*. The
+summary stays shape-only (`0 with a std scope`); the scope is in the cooked layer, which is what a lookup prefers.
+
+### So the fix is on the ask, not on the summary builder
+
+`Session::want_refinement` is `&self` and cheap (a set insert behind its own lock), and `take_the_files_wanted_for_
+refinement` serves it in the next idle round. What is missing is a caller: when a lookup answers `NotDeclaredHere`
+for a **qualified** name, the files that declare its **last segment** are exactly the files worth asking about, and
+`ProjectIndex::every_fact_named` already answers which they are. Two constraints on that change:
+
+* it must **not** parse the type spelling of the refusal (`UnknownType("std::vector<…>")`) to find the name — the name
+  is known where the lookup happens, and a rule that reads a type back out of a message is the string-matching shape
+  this crate removed once already;
+* the first answer after the ask is still the shape-only one. A request that arrives before the refinement round has
+  run answers `Unknown` and the *next* one answers; that is the same contract `is_owed_a_re_read` already states for
+  a check, and it is why `handshake.rs` re-asks.
+
+### The reproducer that already existed
+
+`crates/cpp_code_analysis/src/session/tests.rs:3777`,
+`a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session`, is `#[ignore]`d for this exact shape
+(`_STD_BEGIN` defined in `open.h`, used in `widget.h`). Its reason cites `docs/buglist.md §33` and
+`docs/indexing-review.md §6` — **both files were deleted** (`3d954caf "clean doc"`, `de501b6f "clean docs"`), and the
+recovered `buglist.md` has no §33; the closest record is §4, "the macro environment a written view wants is never
+built by the pump". A citation to a deleted document is not a record, and the ignore reason should either be
+re-pointed at a live document or the test un-ignored once the ask exists.
