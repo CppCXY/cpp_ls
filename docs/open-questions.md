@@ -212,3 +212,37 @@ drops an occurrence when the file's own scopes resolve it to a binding a functio
 **lines 0 and 2** — its declaration and the use in `two`, and **not** the shadowing local on line 1 — and
 `a_rename_stays_inside_the_scope_of_what_it_names` pins both that and the local's own exact answer. On
 `EmmyLuaCodeStyle`, `GetState` still answers 6 uses.
+
+## Four reports from one session, with what each one points at
+
+1. **A member in a mem-initialiser is drawn as a function.** `LuaCodeFormat::LuaCodeFormat() : _supportNonStandardSymbol(false)`
+   colours `_supportNonStandardSymbol` with `entity.name.function`. It is a *member*, and the initialiser is not a call:
+   the declaration's name in `: name(args)` has to be classified as a field even though the shape is call-like.
+   Where to look: `semantic_token`'s classification of a name inside a mem-initialiser list, and `sema/scopes`' binding
+   for it — the same node a constructor's `Foo::Foo` is.
+
+2. **Find References for `SpellCheck` lists `DiagnosticBuilder::SpellCheck`.** The class narrowing is the only attribution
+   a member name has, and it is skipped when `the_class_the_cursor_is_in` returns `None` — which is the case for a
+   definition written as `LuaCodeFormat::SpellCheck(...)` if the declarator's class is not read from the text. The
+   CodeLens for the same name answers 1 (correct), because it asks the *fact's* qualified name. The narrowing has to stop
+   being "the class the cursor is in" and become "the class the declaration belongs to", which the fact already says.
+
+3. **`LuaCodeFormat` sometimes drawn as a function, and an edit restores the type.** Not reproducible by file content:
+   it is the *state* of the index. The name is both a class and the constructor `LuaCodeFormat::LuaCodeFormat`, and
+   whether the type or the constructor fact answers depends on which fact `kind_of` finds first — `kind_of` requires the
+   candidates to agree, so a disagreement must be falling back to one of them. The instrument is to print, at that
+   offset, the candidate facts (`every_fact_named("LuaCodeFormat")`) with their `kind`, `scope`, `returns`, and what
+   `kind_of_index` answers; the fix is probably in the *fact* for a qualified constructor, if the parser records its
+   return type as `LuaCodeFormat` — then it is not a constructor by the "no return type" rule.
+
+4. **Inlay hints and CodeLens disappear on every keystroke and come back seconds later.** Answering *nothing* while the
+   index catches up is worse than answering a number that grows: the client is told the answer changed, so it erases what
+   it drew. The CodeLens now answers from what is known and lets `workspace/codeLens/refresh` (sent when indexing drains)
+   correct it; inlay hints should get the same treatment — never answer "empty because not ready", always answer the
+   current best and refresh.
+
+5. **`std::vector<T>::emplace_back()`'s result is unknown**, so `auto &result = results.emplace_back()` has no type and
+   `result.Start` is unresolvable. The vector's element type is known at the declaration; the missing piece is
+   substituting it into the member function's return type (`reference`) — a template-instantiation question, not a search
+   one. `docs/open-questions.md` already records the layer's boundary: it substitutes a *function template*'s
+   parameters, not a *class template*'s member types.
