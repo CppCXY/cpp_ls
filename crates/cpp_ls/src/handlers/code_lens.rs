@@ -29,7 +29,7 @@
 //! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
 //! still draws the title.
 
-use cpp_code_analysis::{DeclKind, Known, ReferenceBudget, ReferenceKind};
+use cpp_code_analysis::DeclKind;
 use lsp_types::{
     ClientCapabilities, CodeLens, CodeLensParams, Command, Location, Position, Range,
     ServerCapabilities, Uri,
@@ -86,6 +86,11 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         return Vec::new();
     };
 
+    // **A plain view of this file** — the tree of the text as written, which is the coordinate system the summary's
+    // ranges are in. Built once: every lens in the file shares it.
+    let plain =
+        cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
         if fact.kind != DeclKind::Function || fact.local {
@@ -98,33 +103,63 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
             continue;
         };
 
-        // **The fact, not an offset.** `symbol_references(view, offset)` finds the declaration by looking a *rendering*
-        // offset up in the scope tree — and the summary's `name_range` is a **file** offset. The two coincide only in a
-        // file whose rendering equals its text, so a header with includes behind it counted nothing: measured on
-        // `EmmyLuaCodeStyle`, `GetState` in `DiagnosticBuilder.h` answered `0 references` while the `.cpp` files call
-        // it. The declaration is already here, so the symbol is asked for directly and no coordinate is converted.
-        let Known::Yes(found) =
-            session.symbol_references_of(fact, view.path.clone(), ReferenceBudget::default())
-        else {
-            continue;
-        };
-        let uses = found
-            .files
-            .iter()
-            .flat_map(|file| &file.references)
-            .filter(|reference| matches!(reference.kind, ReferenceKind::Use { .. }))
-            .count();
-        let places = places_of(session, &found);
+        // **Find References' own list, for the same declaration.** One query, not two: `name_level_offsets` is what the
+        // editor shows when a reader asks "where is this used", and it is asked here with the same arguments — so the
+        // count cannot disagree with the peek, because there is nothing left to disagree with. `include_declaration =
+        // false` is the user's rule: the definition and the header's declaration are the places the name is
+        // *introduced*, not places it is used.
+        //
+        // The view is the **plain** one: the summary's `name_range` is a *file* offset, and a rendering with includes
+        // inlined does not share them — that mismatch is why a header counted 0 while five `.cpp` files called the
+        // function. A plain tree is the file's own text, so the fact's offset is the tree's offset and nothing has to be
+        // converted.
+        let places = super::references::name_level_offsets(
+            session,
+            &plain,
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
+            false,
+        );
+        let locations = locations_of(session, &places);
+        let uses = places.len();
 
         lenses.push(CodeLens {
             range: Range::new(start, end),
-            command: the_command(client, uri, start, places, uses),
+            command: the_command(client, uri, start, locations, uses),
             data: None,
         });
     }
     lenses
 }
 
+/// The places, as protocol locations — for the files this session holds.
+///
+/// A file the session cannot hold is skipped rather than guessed at: the count still says how many there are, and a
+/// missing entry in a list is better than a location nobody can show.
+fn locations_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    places: &[(std::path::PathBuf, cpp_parser::SourceRange)],
+) -> Vec<Location> {
+    let mut locations = Vec::new();
+    for (file, range) in places {
+        let Some(held) = session.files().held(file) else {
+            continue;
+        };
+        let Some(uri) = path_to_uri(file) else {
+            continue;
+        };
+        let (Some(start), Some(end)) = (
+            position_in_file(held, range.start_offset),
+            position_in_file(held, range.end_offset()),
+        ) else {
+            continue;
+        };
+        locations.push(Location {
+            uri,
+            range: Range::new(start, end),
+        });
+    }
+    locations
+}
 /// **The command a client can actually run**, or a title-only lens when it has none for this.
 ///
 /// `editor.action.showReferences` is the editor's own "show me them", and **VS Code does not accept it from a language
@@ -164,41 +199,6 @@ fn the_command(
             serde_json::to_value(&places).unwrap_or_default(),
         ]),
     })
-}
-
-/// The places the count was made of, as the editor's own "show references" takes them.
-///
-/// A file this session cannot hold is skipped rather than guessed at: the count still says how many there are, and a
-/// missing entry in a list is better than a location nobody can show.
-fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
-    found: &cpp_code_analysis::SymbolReferences,
-) -> Vec<Location> {
-    let mut places = Vec::new();
-    for file in &found.files {
-        let Some(held) = session.files().held(&file.file) else {
-            continue;
-        };
-        let Some(uri) = path_to_uri(&file.file) else {
-            continue;
-        };
-        for reference in &file.references {
-            if !matches!(reference.kind, ReferenceKind::Use { .. }) {
-                continue;
-            }
-            let (Some(start), Some(end)) = (
-                position_in_file(held, reference.range.start_offset),
-                position_in_file(held, reference.range.end_offset()),
-            ) else {
-                continue;
-            };
-            places.push(Location {
-                uri: uri.clone(),
-                range: Range::new(start, end),
-            });
-        }
-    }
-    places
 }
 
 pub struct CodeLensCapabilities;
