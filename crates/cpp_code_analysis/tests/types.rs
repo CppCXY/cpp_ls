@@ -1385,6 +1385,80 @@ void f() {
     );
 }
 
+/// **A member of an unnamed union, and of an unnamed struct inside it** — the shape `MarkEvent` is written in, and the
+/// report behind it ("我们依然无法正确的推断出 Union 的后续").
+///
+/// ```cpp
+/// struct MarkEvent {
+///     union {
+///         struct { std::size_t Parent; LuaSyntaxNodeKind Kind; } Start;
+///         …
+///     } U;
+/// };
+/// event.U.Start.Kind = …;
+/// ```
+///
+/// The chain is three questions and every one of them is answerable: `U`'s type is the unnamed union — named by
+/// [`cpp_code_analysis::sema::declarations::an_unnamed_class_body_named`] after the scope it is written in
+/// (`MarkEvent::U`) — `Start`'s type is the unnamed struct inside it (`MarkEvent::U::Start`), and its members are
+/// `Parent` and `Kind`. Measured: all four answers are right, so **what fails on the report is not this layer**: there
+/// the object is `events[Pos]` on a `std::vector<MarkEvent>`, and that is the subscript (`operator_returns_of`), whose
+/// note records the alias chain a `std::vector` still needs.
+#[test]
+fn a_member_of_an_unnamed_union_and_of_an_unnamed_struct_inside_it() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    const SOURCE: &str = "\
+enum class Kind { None, Start };
+struct MarkEvent {
+    int Type;
+    union {
+        struct { unsigned long Parent; Kind KindOf; } Start;
+        struct { unsigned long Index; Kind Token; } Token;
+    } U;
+};
+void f(MarkEvent &event) {
+    event.U.Start.KindOf = Kind::None;
+    unsigned long p = event.U.Start.Parent;
+}
+";
+    let session = session_with(&[("/p/a.cpp", SOURCE)]);
+    let view = session.view("/p/a.cpp").expect("cooked");
+    let answered = |needle: &str| {
+        let at = SOURCE.find(needle).expect("the fixture writes it") + needle.len() - 1;
+        let reading = view
+            .reading_offset_of(FileOffset::new(at))
+            .expect("the offset is in the file");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+            cpp_code_analysis::Known::No => None,
+            cpp_code_analysis::Known::Unknown(reason) => {
+                println!("`{needle}` → unknown({reason:?})");
+                None
+            }
+        }
+    };
+
+    assert_eq!(
+        answered("event.U").as_deref(),
+        Some("MarkEvent::U"),
+        "the union is named after the scope it is written in"
+    );
+    assert_eq!(
+        answered("event.U.Start").as_deref(),
+        Some("MarkEvent::U::Start"),
+        "and so is the unnamed struct inside it"
+    );
+    assert_eq!(
+        answered("event.U.Start.KindOf").as_deref(),
+        Some("Kind"),
+        "a member of the unnamed struct is a member like any other"
+    );
+    assert_eq!(
+        answered("event.U.Start.Parent").as_deref(),
+        Some("unsigned long")
+    );
+}
+
 /// **从 `std::map` 的范围里解构出来的名字,类型是 `pair` 的元素** —— 报告是 hover 显示 `int() value;`。
 ///
 /// `for (auto [key, value] : map)` 里的名字没有写出来的类型,所以"声明的类型"这一层没有答案:元素的类型由
