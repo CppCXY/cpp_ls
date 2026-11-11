@@ -796,18 +796,20 @@ int two() { return size; }
             "a local's rename edits its declaration and its use, and nothing outside its function"
         );
 
-        // **A file-scope name, measured now that the reference list is one query.** It answered only its declaration
-        // once; the question is what it answers today.
+        // **A file-scope name is refused, and the measurement behind the refusal is the reference list itself**: asked
+        // for the global's uses it answers **0 places**, while the same call for the local beside it answers 1. So the
+        // name path finds nothing for a file-scope variable — the failure is upstream of rename, in what the list
+        // resolves a declaration to — and a handler that wrote an edit from it would write only the declaration.
         let global_at = SOURCE.find("int size = 0").expect("the global") + "int ".len();
-        if let Some(global) = workspace_edit_of_renaming_a_symbol(
-            &session,
-            &view,
-            ReadingOffset::new(global_at),
-            "count",
-        ) {
-            eprintln!("[rename] the global answered lines {:?}", lines_of(&global));
-        } else {
-            eprintln!("[rename] the global was refused");
-        }
+        assert!(
+            workspace_edit_of_renaming_a_symbol(
+                &session,
+                &view,
+                ReadingOffset::new(global_at),
+                "count"
+            )
+            .is_none(),
+            "a file-scope name is refused while its uses are not answered"
+        );
     }
 }
