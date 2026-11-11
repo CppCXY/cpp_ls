@@ -29,7 +29,7 @@
 //! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
 //! still draws the title.
 
-use cpp_code_analysis::DeclKind;
+use cpp_code_analysis::{DeclKind, Known};
 use lsp_types::{
     ClientCapabilities, CodeLens, CodeLensParams, Command, Location, Position, Range,
     ServerCapabilities, Uri,
@@ -83,11 +83,6 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         return Vec::new();
     };
 
-    // **A plain view of this file** — the tree of the text as written, which is the coordinate system the summary's
-    // ranges are in. Built once: every lens in the file shares it.
-    let plain =
-        cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
-
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
         if fact.kind != DeclKind::Function || fact.local {
@@ -100,22 +95,27 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
             continue;
         };
 
-        // **Find References' own list, for the same declaration.** One query, not two: `name_level_offsets` is what the
-        // editor shows when a reader asks "where is this used", and it is asked here with the same arguments — so the
-        // count cannot disagree with the peek, because there is nothing left to disagree with. `include_declaration =
-        // false` is the user's rule: the definition and the header's declaration are the places the name is
-        // *introduced*, not places it is used.
+        // **Find References' own query, for the same declaration.** The lens used to ask a *different* query —
+        // `references::name_level_offsets`, which is the **rename** rule — and the two disagree wherever a spelling
+        // and an entity differ. Measured on `EmmyLuaCodeStyle`: the lens read `0 references` over `LuaParseError`'s
+        // constructor while Find References at the same byte listed eight uses of its class, and `7` over
+        // `CompleteMarker`'s constructor where Find References listed nineteen. A reader who clicks the number and
+        // gets another number has been told two things; `references::places_of` is the one answer both now ask, so
+        // the count and the peek are the same list by construction.
         //
-        // The view is the **plain** one: the summary's `name_range` is a *file* offset, and a rendering with includes
-        // inlined does not share them — that mismatch is why a header counted 0 while five `.cpp` files called the
-        // function. A plain tree is the file's own text, so the fact's offset is the tree's offset and nothing has to be
-        // converted.
-        let places = super::references::name_level_offsets(
-            session,
-            &plain,
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
-            false,
-        );
+        // `include_declaration = false` is the user's rule: the definition and the header's declaration are the
+        // places the name is *introduced*, not places it is used, and a function nobody calls must not read
+        // `1 reference` on the line that introduces it.
+        //
+        // **No view, no parse for the answer.** The reference query takes the declaration itself
+        // (`symbol_references_of`), whose offsets are the summary's own file offsets — the coordinate system that
+        // made a header count `0` while five `.cpp` files called the function.
+        let Known::Yes(places) = super::references::places_of(session, fact, view.path.clone(), false) else {
+            // A declaration no query can name — a template parameter, a name from a header nothing read. `Unknown`
+            // is not "no uses": the lens then says nothing about a number rather than `0 references`, which would be
+            // the same false claim the whole-file report was about.
+            continue;
+        };
         let locations = locations_of(session, &places);
         let uses = places.len();
 
@@ -278,30 +278,190 @@ int f() { return grow(1) + grow(2); }
             "the header's declaration counts the same uses"
         );
 
-        // **Find References' own list says the same two places**, and `include_declaration` adds the two places the name
-        // is *introduced* — the header's declaration and the `.cpp` definition. That distinction is what a count needs:
-        // measured before it existed, the same query answered 3 places where there are 2 uses, because the `.cpp`
-        // definition's own name was counted as a use.
-        use cpp_code_analysis::file::coordinates::ReadingOffset;
-        let at = header.find("grow").expect("the declaration");
-        let uses = crate::handlers::references::name_level_offsets(
+        // **The shared query says the same two places** — `places_of` is what the lens and
+        // `textDocument/references` both ask, so this is the list a click reveals. The declarations are the name
+        // being *introduced* — the header's `int grow(int by);` and the `.cpp` definition — and a count that
+        // included them would read `4 references` where two sites call the function.
+        let summary = session
+            .index()
+            .summary(std::path::Path::new("/p/a.h"))
+            .expect("a summary");
+        let fact = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "grow")
+            .expect("the header's declaration")
+            .clone();
+        let places = crate::handlers::references::places_of(
             &session,
-            &header_view,
-            ReadingOffset::new(at),
+            &fact,
+            std::path::PathBuf::from("/p/a.h"),
             false,
         );
-        assert_eq!(uses.len(), 2, "two calls, and neither declaration");
-        let with_declarations = crate::handlers::references::name_level_offsets(
-            &session,
-            &header_view,
-            ReadingOffset::new(at),
-            true,
-        );
+        let Known::Yes(places) = places else {
+            panic!("the declaration is in the index");
+        };
         assert_eq!(
-            with_declarations.len(),
-            4,
-            "the header's declaration and the definition, plus the same two calls"
+            places.len(),
+            2,
+            "two calls, and neither declaration: {places:?}"
         );
+    }
+
+    /// **A constructor's count is what Find References answers for it** — the class's uses, because a constructor has
+    /// no name of its own to write.
+    ///
+    /// Measured on `EmmyLuaCodeStyle`: the lens over `LuaParseError`'s constructor read `0 references` — no line in
+    /// the project writes `LuaParseError::LuaParseError` — while Find References at the same byte listed eight uses of
+    /// the class. The answer is the class's: here two constructions, the return type of `make`, and the qualifier of
+    /// `Pair::Mine`. That is more than the two constructions, and it is what the click shows — which is the property
+    /// that matters, because a count a reader cannot open and verify is a number with no evidence behind it.
+    #[test]
+    fn a_constructors_count_is_what_find_references_answers() {
+        let source = "\
+struct Pair {
+    Pair(int a, int b);
+    int Mine() const;
+};
+int Pair::Mine() const { return 0; }
+Pair make() { return Pair(1, 2); }
+int use() { Pair p(3, 4); return p.Mine(); }
+";
+        let session = session_of(&[("/p/pair.cpp", source)]);
+        let uri = "file:///p/pair.cpp".parse::<Uri>().expect("a uri");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/pair.cpp"))
+            .expect("a view");
+        let titles: Vec<(String, String)> = lenses_of(&session, &view, &uri, ClientId::VSCode)
+            .into_iter()
+            .filter_map(|lens| {
+                let name = lens_name(&view, &lens);
+                let command = lens.command?;
+                Some((command.title, name))
+            })
+            .collect();
+
+        assert_eq!(
+            titles,
+            vec![
+                ("4 references".to_string(), "Pair".to_string()),
+                ("1 reference".to_string(), "Mine".to_string()),
+                ("1 reference".to_string(), "Mine".to_string()),
+                ("0 references".to_string(), "make".to_string()),
+                ("0 references".to_string(), "use".to_string()),
+            ],
+            "the constructor's count is the class's uses; `Pair::Mine` is called once and says so on both its lines; \
+             `make` and `use` are called by nothing"
+        );
+    }
+
+    /// **The number and the list are one answer** — the command carries exactly the places the title counts.
+    ///
+    /// A reader clicks `2 references` and the editor shows the command's third argument; a count made of one list and
+    /// a peek made of another is a number that cannot be verified. Both come from the same `places` here, and this
+    /// test is what keeps it so.
+    #[test]
+    fn the_count_and_the_places_it_hands_the_editor_are_one_list() {
+        let source = "\
+int grow(int by) { return by + 1; }
+int f() { return grow(1) + grow(2); }
+";
+        let session = session_of(&[("/p/a.cpp", source)]);
+        let uri = "file:///p/a.cpp".parse::<Uri>().expect("a uri");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+
+        let lens = lenses_of(&session, &view, &uri, ClientId::VSCode)
+            .into_iter()
+            .next()
+            .expect("`grow` has a lens");
+        let command = lens.command.expect("a command");
+        assert_eq!(command.title, "2 references");
+        let places = command.arguments.expect("the places")[2].clone();
+        let places = places.as_array().expect("an array of locations");
+        assert_eq!(
+            places.len(),
+            2,
+            "two calls, and the peek is those two: {places:?}"
+        );
+    }
+
+    /// **A member of one class is not a member of another** — the case the rename rule had and the reference query
+    /// must keep.
+    ///
+    /// `Format::SpellCheck` is called by nobody, and `Format::NameStyleCheck` calls `Builder::SpellCheck`: a lens on
+    /// `Format::SpellCheck` that says `1 reference` is counting another class's member. Measured on a real project as
+    /// "a lens said 1 reference while Find All References showed the other class's function".
+    #[test]
+    fn a_member_of_another_class_is_not_counted() {
+        let source = "\
+struct Builder { int SpellCheck(int t) { return t; } };
+struct Format {
+    int NameStyleCheck(Builder &builder, int style) { return builder.SpellCheck(style); }
+    int SpellCheck(int t) { return t; }
+};
+int use(Format &f, Builder &b) { return f.NameStyleCheck(b, 1); }
+";
+        let session = session_of(&[("/p/a.cpp", source)]);
+        let uri = "file:///p/a.cpp".parse::<Uri>().expect("a uri");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+        let titles: Vec<(String, String)> = lenses_of(&session, &view, &uri, ClientId::VSCode)
+            .into_iter()
+            .filter_map(|lens| {
+                let name = lens_name(&view, &lens);
+                let command = lens.command?;
+                Some((command.title, name))
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                ("1 reference".to_string(), "SpellCheck".to_string()),
+                ("1 reference".to_string(), "NameStyleCheck".to_string()),
+                ("0 references".to_string(), "SpellCheck".to_string()),
+                ("0 references".to_string(), "use".to_string()),
+            ],
+            "the call in `NameStyleCheck` is `Builder`'s member, so `Format::SpellCheck` has none — while \
+             `NameStyleCheck` itself is called once"
+        );
+    }
+
+    /// The name under a lens, from the file's own text — the fixture's text is what the lens ranges are in.
+    fn lens_name(view: &cpp_code_analysis::FileView, lens: &CodeLens) -> String {
+        let Some(offset) = crate::util::offset_at_position(view, lens.range.start) else {
+            return String::new();
+        };
+        let text = &view.source[offset.get().min(view.source.len())..];
+        text.chars()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect()
+    }
+
+    /// A session over a fixture of `(path, text)` pairs, every file indexed.
+    fn session_of(files: &[(&str, &str)]) -> Session<MemoryFiles> {
+        let mut memory = MemoryFiles::new();
+        let mut paths = Vec::new();
+        for (path, text) in files {
+            memory = memory.with_file(*path, *text);
+            paths.push(std::path::PathBuf::from(path));
+        }
+        let providers = SessionFiles::new(OpenDocuments::new(), memory);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files(paths.clone());
+        for path in &paths {
+            session.load(path);
+            session.want_cooked_reading(path);
+        }
+        session.index_everything();
+        session
     }
 
     /// **The command is the one this client can run**, and a client with none gets a title and nothing else.

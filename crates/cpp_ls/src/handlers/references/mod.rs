@@ -90,29 +90,35 @@ pub async fn on_references(
         //
         // The cursor is resolved from the **file's own text** — the same reading the macro check above used, and the
         // only one that can place a position inside a comment or a directive — and the search is across files, which
-        // is why this handler waited for the analysis first.
-        match session.symbol_references(
-            &written,
-            in_the_file,
-            cpp_code_analysis::ReferenceBudget::default(),
-        ) {
-            Known::Yes(found) => Some(
-                found
-                    .all()
-                    .filter(|(_, reference)| {
-                        include_declaration || !matches!(reference.kind, ReferenceKind::Definition)
-                    })
-                    .filter_map(|(file, reference)| {
-                        let held = session.files().held(file)?;
-                        let start = position_in_file(held, reference.range.start_offset)?;
-                        let end = position_in_file(held, reference.range.end_offset())?;
-                        Some(Location {
-                            uri: path_to_uri(file)?,
-                            range: lsp_types::Range::new(start, end),
+        // is why this handler waited for the analysis first. **The list itself is [`places_of`]**, which the code lens
+        // asks too: one implementation, so the number a lens shows and the places a click reveals cannot disagree.
+        match session.definitions(&written, in_the_file) {
+            Known::Yes(defined) => {
+                let first = defined.found.first()?;
+                let places = places_of(
+                    session,
+                    &first.fact,
+                    first.file.clone(),
+                    include_declaration,
+                );
+                let Known::Yes(places) = places else {
+                    return None;
+                };
+                Some(
+                    places
+                        .into_iter()
+                        .filter_map(|(file, range)| {
+                            let held = session.files().held(&file)?;
+                            let start = position_in_file(held, range.start_offset)?;
+                            let end = position_in_file(held, range.end_offset())?;
+                            Some(Location {
+                                uri: path_to_uri(&file)?,
+                                range: lsp_types::Range::new(start, end),
+                            })
                         })
-                    })
-                    .collect(),
-            ),
+                        .collect(),
+                )
+            }
             // The analysis cannot say *which* symbol the cursor is on, or a candidate file could not be listed.
             // `None` is the protocol's "I cannot answer that" — the same refusal `rename` gives, and the honest one:
             // a list assembled from a guessed symbol is a list of the wrong things.
@@ -530,6 +536,99 @@ struct Format {
 /// silently enforced. A project this server measures is a thousand files and a closure of a few hundred, so the
 /// default is past anything measured.
 const NAME_REFERENCE_BUDGET: usize = 2000;
+
+/// **Every place a declaration is used — the one answer Find References and the code lens give.**
+///
+/// # Why this exists beside [`name_level_offsets`]
+///
+/// Two queries were answering "where is this used": `textDocument/references` asked
+/// [`cpp_code_analysis::Session::symbol_references`], and the code lens asked [`name_level_offsets`], which is the
+/// **rename** rule. Measured on `EmmyLuaCodeStyle`: the lens read `0 references` over `LuaParseError`'s constructor
+/// while Find References at the same byte listed eight uses, and `7` over `CompleteMarker`'s constructor where Find
+/// References listed nineteen — a number a reader clicks and a different number they then see. So this is the
+/// single implementation, and both ask it.
+///
+/// # What it answers, in one sentence per rule
+///
+/// ```text
+/// the declarations, uses and definition  `symbol_references_of`, which resolves the declaration off the index —
+///                                        no spelling search, no second parse for the answer itself
+/// `include_declaration = false`          only the places it is *used*: the header's declaration and the definition
+///                                        are where the name is introduced, and a function nobody calls must not read
+///                                        `1 reference` on the line that introduces it
+/// a member of a class                    occurrences that are **provably another class's** are dropped — see
+///                                        [`an_occurrence_of_another_class`] for the two shapes and why the
+///                                        conservative direction is "keep"
+/// a constructor or a destructor          **not** filtered by class: its name *is* its class's, so `const Widget &w`
+///                                        inside another class's body is a use of it, not another class's member
+/// ```
+///
+/// # The cost
+///
+/// One reference query, and one parse per file that has an occurrence **when the declaration is a class member** (the
+/// scopes are what say which class an occurrence sits in). The parse is cached per file for the one call, and a file
+/// with no occurrence is never parsed — the same shape, and the same price, as [`name_level_offsets`].
+pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    fact: &cpp_code_analysis::DeclFact,
+    file: std::path::PathBuf,
+    include_declaration: bool,
+) -> Known<Vec<(std::path::PathBuf, cpp_parser::SourceRange)>> {
+    let Known::Yes(found) =
+        session.symbol_references_of(fact, file, cpp_code_analysis::ReferenceBudget::default())
+    else {
+        return Known::Unknown(cpp_code_analysis::UnknownReason::NotDeclaredHere(Box::from(
+            fact.name.clone(),
+        )));
+    };
+
+    // **The class whose member this is** — `None` for a free function, and for a constructor, whose name is the
+    // class's own. A constructor's uses are therefore every place the class name is written, which is exactly what
+    // Find References answers at that byte: the language gives a constructor no name to write on its own.
+    let owner = match (fact.scope.as_deref(), fact.kind) {
+        (Some(scope), _) if scope != fact.name => Some(scope.to_string()),
+        _ => None,
+    };
+
+    let mut parsed: std::collections::HashMap<std::path::PathBuf, Option<cpp_code_analysis::FileView>> =
+        std::collections::HashMap::new();
+    let mut places = Vec::new();
+    for reference_group in &found.files {
+        for reference in &reference_group.references {
+            if !include_declaration
+                && matches!(
+                    reference.kind,
+                    ReferenceKind::Declaration | ReferenceKind::Definition
+                )
+            {
+                continue;
+            }
+            if let Some(owner) = &owner {
+                let view = parsed.entry(reference_group.file.clone()).or_insert_with(|| {
+                    session.files().held(&reference_group.file).map(|held| {
+                        cpp_code_analysis::FileView::parse_with(
+                            held,
+                            &cpp_parser::MacroEnvironment::default(),
+                        )
+                    })
+                });
+                if let Some(view) = view.as_ref()
+                    && an_occurrence_of_another_class(
+                        session,
+                        view,
+                        reference.range.start_offset,
+                        owner,
+                    )
+                {
+                    continue;
+                }
+            }
+            places.push((reference_group.file.clone(), reference.range));
+        }
+    }
+
+    Known::Yes(places)
+}
 
 /// The locations of a **name** — a function, a class, a variable — as opposed to a macro's.
 ///
