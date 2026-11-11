@@ -91,6 +91,9 @@ fn what_the_session_says_about_the_reported_line() {
     for _ in 0..40 {
         session.index_everything();
         session.catch_up(&file);
+        // **The refinement pass is the one that reads a file with its closure's macros in force** — the initial pass
+        // builds a plain summary, so `_STD_BEGIN` is undefined there and the declarations land at global scope.
+        session.want_refinement(&file);
         if session.pending_work() == 0 {
             break;
         }

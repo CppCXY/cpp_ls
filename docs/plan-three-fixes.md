@@ -404,3 +404,36 @@ plain summaries and re-trying a qualified name through its bare form) is a worka
 [probe] class vector present              (or the rendering inlines it)
 [probe] result: `LuaDiagnosticInfo&`
 ```
+## The pipeline, and where the environment is lost (round 15)
+
+Read in this order:
+
+* `index/store.rs:2446-2459` — the **plain** arm builds a summary with
+  `FileIndexer::new(...).with_seed(...)` and, when `walk_its_own` is false, `with_macro_bodies(&environment)` from
+  `closure_environment(path, …)`. That is the reading whose facts carry scope from `_STD_BEGIN`.
+* `index/store.rs:2466+` — the **walk** arm: a rendering through the file's own timeline, where
+  `crate::preprocess::cooked::FileMacros::new(view, definitions, seed, true)` is the macro environment.
+* `SummaryStore`'s refinement pass (`re-read candidate`) is the pass that reaches either arm — and it only runs for a file
+  that is `mentioned`, has `dead_macros`, or is `guarded` (`store.rs:2415-2421`).
+
+Measured on the real project, with a session that pumps `index_everything` + `catch_up`, and then with
+`want_refinement(&file)` in the same loop:
+
+```text
+[probe] summaries: 1761; the MSVC `vector` summary: present
+[probe] `vector`: 14 declaration(s)      (bare name)
+[probe] `std::vector`: NotDeclaredHere   (qualified)
+```
+
+So the summary of the MSVC header is built by a pass **without** the closure's macro bodies: `_STD_BEGIN` cannot expand,
+`std` never opens, and all 993 declarations are recorded at global scope. `want_refinement` on the *translation unit* did
+not change it — the header is not one of the refinement's candidates.
+
+**The fix**, and it is one of two wiring choices in `store.rs`:
+
+1. make the **initial** pass build the summary with the file's closure environment (the plain arm already knows how), or
+2. make a qualified-name lookup **request refinement of the declaring file** it is about to consult (the header), which
+   is the "refine what is asked about" rule the module already applies to a translation unit.
+
+Option 2 is the smaller change and matches the existing design (`want_refinement`); option 1 is the one that makes every
+answer right the first time. Both are measured by the same three probe lines.
