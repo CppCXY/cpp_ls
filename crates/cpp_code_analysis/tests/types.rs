@@ -3167,3 +3167,64 @@ int f() {
         "the standard library's idiom should answer `int&`, got {found:?}"
     );
 }
+
+/// **Two levels of include, with guards** — the shape a standard header arrives through.
+///
+/// Every fixture so far had the class one include away from the file. A real translation unit reaches `<vector>` through
+/// a chain (`std::string` → `xstring` → …), and each header is guarded. This is that shape with the types this crate
+/// can see: `base.h` (guarded) declares the class, `mid.h` includes it, the `.cpp` includes only `mid.h`.
+#[test]
+fn a_member_is_found_two_includes_away_through_guards() {
+    const BASE_H: &str = "\
+#ifndef BASE_H
+#define BASE_H
+namespace std {
+    template <class T> class vector {
+    public:
+        using value_type = T;
+        using reference = value_type&;
+        reference emplace_back();
+    };
+}
+#endif
+";
+    const MID_H: &str = "\
+#pragma once
+#include \"base.h\"
+";
+    let source = "\
+#include \"mid.h\"
+int f() {
+    std::vector<int> values;
+    auto &result = values.emplace_back();
+    result = 3;
+    return result;
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/base.h", BASE_H)
+        .with_file("/p/mid.h", MID_H)
+        .with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/base.h"),
+        std::path::PathBuf::from("/p/mid.h"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "result");
+    let found = session.type_at(&view, as_reading(&view, offset));
+    assert!(
+        matches!(&found, cpp_code_analysis::Known::Yes(known) if known.type_of == "int&"),
+        "two includes away, through a guard, is still `int&`, got {found:?}"
+    );
+}

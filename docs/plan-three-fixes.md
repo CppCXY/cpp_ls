@@ -322,3 +322,24 @@ without `std::vector` in it — so it found no members, exactly as it should. Th
 Item 5 therefore has **no reproduction outside the editor** yet, and the next step is a server-path fixture: a `cpp_ls`
 handshake or session test over a two-file project where the member comes from an included header, asserting the type
 through the same call the server makes. That is the only path that can falsify or confirm the user's report.
+### Round 12: two includes away, guarded — correct
+
+`a_member_is_found_two_includes_away_through_guards` passes: `base.h` (guarded) declares the class template, `mid.h`
+includes it with `#pragma once`, the `.cpp` includes only `mid.h`, and `auto &result = values.emplace_back();` answers
+`int&`. So depth, guards and `#pragma once` are not the gap either.
+
+# Where the three items stand
+
+| item | state | evidence |
+|---|---|---|
+| 1 — a member position is a field, named from the AST | **implemented** | `NameKind::Property` asked of the binding's *own* scope (binding and index paths); `is_a_constructor_declarator` takes the segments from `qualified_declarator_name`; fixtures `a_mem_initialiser_names_a_field`, `a_constructor_with_a_mem_initializer_is_drawn_as_its_class` |
+| 2 — reference attribution by the declaration | **no reproducible defect** | three fixtures: single file, cross file, and a cursor on a *use*; all attribute a member by its declaration, and the other class's member is never listed |
+| 5 — a class template's member alias | **no reproducible defect** | six fixtures: chain, dependent alias, header outside the index, plain vs template, `_STD_BEGIN` idiom, two guarded includes; every one answers `int&` |
+
+**What would reopen 2 and 5**: a concrete `file:line` (a symbol and the wrong occurrence for 2; the declaration and the
+wrong type for 5) that a session fixture can reproduce. Without it, a change would be a guess, and a guess is what turned
+this list into ten rounds of measurements in the first place.
+
+The instrument added along the way stays: `inspect grep` answers "is this node in the tree" for the whole rendering, and
+the two failing `inspect` measurements are recorded with why they are artifacts (its cooked reading for a project file
+does not inline includes — `docs/open-questions.md`).
