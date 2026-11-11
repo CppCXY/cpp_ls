@@ -1459,6 +1459,108 @@ void f(MarkEvent &event) {
     );
 }
 
+/// **The standard library's allocator chain** — `std::vector<MarkEvent>::at()` is `MarkEvent&`, and `v[i]` too.
+///
+/// libstdc++ writes the element access type as an alias of an alias of an alias, and every level of it is a name that
+/// only one class can resolve:
+///
+/// ```text
+/// vector<T,A>::reference          _Alloc_traits::reference
+///   _Alloc_traits                 __gnu_cxx::__alloc_traits<_Tp_alloc_type>     `_Tp_alloc_type` is vector's own
+///     __alloc_traits::reference   value_type&
+///       value_type                _Base_type::value_type
+///         _Base_type              std::allocator_traits<_Tp_alloc_type>
+///           value_type            _Alloc::value_type
+///             _Alloc              std::allocator<T>            ← through `rebind<T>::other`
+/// ```
+///
+/// The fixture below is that shape with the names changed (no standard library, 0.02 s): a nested class template
+/// `rebind<U>::other`, an alias template `rebind_alloc`, an inheritance, and a class that re-exports its base's alias.
+///
+/// Reported from `EmmyLuaCodeStyle`'s `Mark.cpp`: `auto &event = p.GetEvents().at(Start);` answered
+/// `__gnu_cxx::__alloc_traits<std::allocator<MarkEvent>>::template rebind<MarkEvent>::other&`, and `events[Pos]`
+/// answered `_Tp_alloc_type&` — a spelling no reader can use, and every member behind it unknown.
+#[test]
+fn a_containers_element_access_through_the_allocator_chain() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+    const SOURCE: &str = "\
+namespace mine {
+template <typename Tp>
+class allocator {
+public:
+    typedef Tp value_type;
+    template <typename Tp1>
+    struct rebind { typedef allocator<Tp1> other; };
+};
+template <typename Alloc>
+struct allocator_traits {
+    typedef typename Alloc::value_type value_type;
+    template <typename Up>
+    using rebind_alloc = typename Alloc::template rebind<Up>::other;
+};
+}
+namespace mygnu {
+template <typename Alloc>
+struct alloc_traits : mine::allocator_traits<Alloc> {
+    typedef mine::allocator_traits<Alloc> base_type;
+    typedef typename base_type::value_type value_type;
+    typedef value_type& reference;
+    template <typename Tp>
+    struct rebind { typedef typename base_type::template rebind_alloc<Tp> other; };
+};
+template <typename Tp, typename Alloc>
+struct vector_base {
+    typedef typename mygnu::alloc_traits<Alloc>::template rebind<Tp>::other tp_alloc_type;
+};
+template <typename Tp, typename Alloc>
+class vector : protected vector_base<Tp, Alloc> {
+    typedef vector_base<Tp, Alloc> base;
+    typedef typename base::tp_alloc_type tp_alloc_type;
+    typedef mygnu::alloc_traits<tp_alloc_type> alloc_traits_type;
+public:
+    typedef typename alloc_traits_type::reference reference;
+    reference at(int i);
+    reference operator[](int i);
+};
+}
+void f() {
+    mygnu::vector<int, mine::allocator<int>> v;
+    int x = v[0];
+    int y = v.at(1);
+    (void)x;
+    (void)y;
+}
+";
+    let session = session_with(&[("/p/a.cpp", SOURCE)]);
+    let view = session.view("/p/a.cpp").expect("cooked");
+    let answered = |needle: &str| {
+        let at = SOURCE.find(needle).expect("the fixture writes it") + 2;
+        let reading = view
+            .reading_offset_of(FileOffset::new(at))
+            .expect("the offset is in the file");
+        match session.type_at(&view, reading) {
+            cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+            cpp_code_analysis::Known::No => None,
+            cpp_code_analysis::Known::Unknown(reason) => {
+                println!("`{needle}` → unknown({reason:?})");
+                None
+            }
+        }
+    };
+
+    assert_eq!(
+        answered("v[0]").as_deref(),
+        Some("int"),
+        "a subscript on `vector<int, allocator<int>>` is `operator[]`'s `reference`, and `reference` is `int&` — \
+         answered here as its decayed value, which is what a cursor on `v[0]` is asking about"
+    );
+    assert_eq!(
+        answered("v.at(1)").as_deref(),
+        Some("int&"),
+        "and a call of `at` is the same alias chain, answered as the reference it is"
+    );
+}
+
 /// **从 `std::map` 的范围里解构出来的名字,类型是 `pair` 的元素** —— 报告是 hover 显示 `int() value;`。
 ///
 /// `for (auto [key, value] : map)` 里的名字没有写出来的类型,所以"声明的类型"这一层没有答案:元素的类型由

@@ -111,5 +111,18 @@ fn what_the_types_are_on_the_reported_lines() {
             );
         }
     }
+
+    // **The last link of the report's chain**: the member `Kind` of what `events[Pos].U.Start` is.
+    match session.members_of(&view, "MarkEvent::U::Start") {
+        Known::Yes(list) => {
+            let names: Vec<&str> = list.members.iter().map(|one| one.fact.name.as_str()).collect();
+            eprintln!(
+                "[probe] MarkEvent::U::Start has {} member(s): {names:?} — `Kind` present: {}",
+                names.len(),
+                names.contains(&"Kind")
+            );
+        }
+        other => eprintln!("[probe] MarkEvent::U::Start → {other:?}"),
+    }
     let _ = &mut node;
 }

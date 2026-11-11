@@ -10380,10 +10380,54 @@ fn a_spelling_through_the_aliases(
     written: &str,
     depth: usize,
 ) -> String {
+    a_spelling_through_the_aliases_in(index, scopes, root, path, class, visited, &[], written, depth)
+}
+
+/// **A spelling substituted with every pairing in scope** — the environment (the classes the walk came through,
+/// outermost first), then this class's own.
+///
+/// One substitution is not enough, and that is the whole difficulty: a type written in a nested class names **both**
+/// its own parameters (`rebind<_Tp>::other` mentions `_Tp`) and the enclosing class's (`typename _Base_type::template
+/// rebind_alloc<_Tp>` mentions `_Base_type`, which is `alloc_traits`'s alias). Substituting only one of the two leaves
+/// a name nothing can resolve — measured on the allocator fixture, the answer was
+/// `Alloc>::template rebind<Tp>::other`, which reads like a substitution bug and is a *scope* bug.
+fn substituted_through(
+    spelling: &str,
+    parameters: &[String],
+    defaults: &[String],
+    arguments: &[String],
+    environment: &[(String, String)],
+) -> String {
+    let mut result = spelling.to_string();
+    for (name, value) in environment {
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        result = crate::sema::types::substituted_spelling(
+            &result,
+            std::slice::from_ref(name),
+            std::slice::from_ref(value),
+        );
+    }
+    crate::sema::types::substituted_spelling_with_defaults(&result, parameters, defaults, arguments)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn a_spelling_through_the_aliases_in(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &Type,
+    visited: &[Type],
+    environment: &[(String, String)],
+    written: &str,
+    depth: usize,
+) -> String {
+
     if depth == 0 {
         return written.to_string();
     }
-
     let (leading, core, trailing) = split_the_operators_of(written);
     let a_name = !core.is_empty()
         && core.chars().all(|character| {
@@ -10392,7 +10436,6 @@ fn a_spelling_through_the_aliases(
     if !a_name {
         return written.to_string();
     }
-
     let Some(class_name) = class.class_name() else {
         return written.to_string();
     };
@@ -10403,6 +10446,14 @@ fn a_spelling_through_the_aliases(
         .collect();
     let parameters = index.template_parameters_for(class_name, path, &arguments);
     let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
+    // **Every pairing in scope from here on** — the classes the walk came through, and this one. Every substitution
+    // below reads it, and every descent passes it on: see [`substituted_through`].
+    let mut here = environment.to_vec();
+    for (name, value) in parameters.iter().zip(arguments.iter()) {
+        if !name.is_empty() && !value.is_empty() {
+            here.push((name.clone(), value.clone()));
+        }
+    }
     if crate::probes::inference() {
         eprintln!(
             "[inference] alias step: {written:?} in {class:?} (class {class_name:?}, parameters {parameters:?}, \
@@ -10466,17 +10517,10 @@ fn a_spelling_through_the_aliases(
         let Some(target) = fact.type_of.as_deref() else {
             return written.to_string();
         };
-        // **The substitution is the declaring class's**, which is what makes a name three classes back meaningful:
-        // `vector`'s `_Tp_alloc_type` is `_Base::_Tp_alloc_type`, and `_Base` is *its* parameter, so the pair
-        // (`_Tp`, `MarkEvent`) of the class that wrote it is the environment the target has to be read in.
-        let (parameters, defaults, arguments) =
-            the_parameters_of_a_class(index, path, &declared_in);
-        let target = crate::sema::types::substituted_spelling_with_defaults(
-            target,
-            &parameters,
-            &defaults,
-            &arguments,
-        );
+        // **The substitution is everything in scope**, which is what makes a name three classes back meaningful:
+        // `vector`'s `_Tp_alloc_type` is `_Base::_Tp_alloc_type`, and `_Base` is its parameter — while the `Alloc` a
+        // nested class writes was paired two levels up. See [`substituted_through`].
+        let target = substituted_through(target, &parameters, &defaults, &arguments, environment);
         if target == core {
             return written.to_string();
         }
@@ -10487,13 +10531,14 @@ fn a_spelling_through_the_aliases(
         if declared_in.to_string() != class.to_string() {
             deeper.push(class.clone());
         }
-        let followed = a_spelling_through_the_aliases(
+        let followed = a_spelling_through_the_aliases_in(
             index,
             scopes,
             root,
             path,
             &declared_in,
             &deeper,
+            &here,
             &target,
             depth - 1,
         );
@@ -10511,25 +10556,21 @@ fn a_spelling_through_the_aliases(
     // this line the chain stops at `_Alloc::value_type&`, with it at `std::size_t&` — the difference between a
     // spelling no reader can use and the type they asked for.
     let qualifier = {
-        let substituted = crate::sema::types::substituted_spelling_with_defaults(
-            &qualifier,
-            &parameters,
-            &defaults,
-            &arguments,
-        );
+        let substituted = substituted_through(&qualifier, &parameters, &defaults, &arguments, environment);
         if substituted.trim().is_empty() {
             qualifier
         } else {
             substituted
         }
     };
-    let inner = a_spelling_through_the_aliases(
+    let inner = a_spelling_through_the_aliases_in(
         index,
         scopes,
         root,
         path,
         class,
         visited,
+        &here,
         &qualifier,
         depth - 1,
     );
@@ -10601,6 +10642,11 @@ fn a_spelling_through_the_aliases(
     // class's spelling *with its arguments* — which is the scope the next level (`other`) is resolved in, and what
     // `direct_member` reads its arguments from when that next level is asked.
     //
+    // The spelling names the **scope** of the nested class (`alloc_traits::rebind<int>`), not the enclosing class with
+    // its own arguments: a class spelling cannot carry two argument lists (`direct_member` reads the one at the end,
+    // and anything earlier it takes for part of the name). What the enclosing level's arguments mean is carried in the
+    // environment instead, which is the reason the walk has one — `other` mentions `Alloc`, which is two levels up.
+    //
     // The test is `type_of`, the one the whole module uses to tell the two apart: a class declares no type of its own,
     // and an **alias template** (`using rebind_alloc = typename Alloc::template rebind<Up>::other;`) does — it is a
     // name for a type, and its `<U>` pairs with its own parameter. Reading it as a nested class is what made the walk
@@ -10610,11 +10656,17 @@ fn a_spelling_through_the_aliases(
     // rebind<MarkEvent>::other` — the spelling the report calls "极其夸张" — because `rebind<MarkEvent>` was never a
     // name any lookup was asked about.
     if fact.kind == crate::DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty() {
+        let resolved_arguments: Vec<String> = member_arguments
+            .iter()
+            .map(|argument| {
+                substituted_through(argument, &parameters, &defaults, &arguments, environment)
+            })
+            .collect();
         let nested = format!(
             "{}::{}<{}>",
             a_class_name_without_spaces(&inner_class),
             member_name,
-            member_arguments.join(", ")
+            resolved_arguments.join(", ")
         );
         return format!("{leading}{nested}{trailing}");
     }
@@ -10634,12 +10686,14 @@ fn a_spelling_through_the_aliases(
     // (`Alloc`) and its own (`Up`), and the two are paired with different arguments: the class's with what the use
     // wrote on the class, the member's with what it wrote on the member (`rebind_alloc<MarkEvent>`). Substituting one
     // and not the other leaves a spelling with a name nothing can resolve — measured on the allocator fixture, the
-    // chain ended at `Alloc>::template rebind<Tp>::other`.
-    let target = crate::sema::types::substituted_spelling_with_defaults(
+    // chain ended at `Alloc>::template rebind<Tp>::other`. The environment covers a third: a name the *enclosing*
+    // class of a nested one wrote.
+    let target = substituted_through(
         target,
         &pattern_parameters,
         &inner_defaults,
         &pattern_arguments,
+        environment,
     );
     let target = if member_arguments.is_empty() {
         target
@@ -10657,13 +10711,14 @@ fn a_spelling_through_the_aliases(
     if inner != class.to_string() {
         deeper.push(class.clone());
     }
-    let followed = a_spelling_through_the_aliases(
+    let followed = a_spelling_through_the_aliases_in(
         index,
         scopes,
         root,
         path,
         &inner_type,
         &deeper,
+        &here,
         &target,
         depth - 1,
     );
@@ -10816,29 +10871,6 @@ fn the_member_name(spelling: &str) -> &str {
         let _ = keyword;
         rest = after.trim_start();
     }
-}
-
-/// **What a class's parameters default to, and what this use wrote for them** — the pairing every substitution needs.
-///
-/// One function rather than three calls at each site, because a substitution made with one class's parameters and
-/// another's arguments is the defect this whole walk keeps producing: `_Tp` of `rebind` paired with `MarkEvent` of
-/// `vector` is a type nothing declares.
-fn the_parameters_of_a_class(
-    index: &ProjectIndex,
-    path: &Path,
-    class: &Type,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let Some(name) = class.class_name() else {
-        return (Vec::new(), Vec::new(), Vec::new());
-    };
-    let arguments: Vec<String> = class
-        .arguments()
-        .iter()
-        .map(|one| one.to_string())
-        .collect();
-    let parameters = index.template_parameters_for(name, path, &arguments);
-    let defaults = index.template_parameter_defaults_for(name, path, &arguments);
-    (parameters, defaults, arguments)
 }
 
 /// **A member's name and the template arguments written on it** — `rebind<MarkEvent>` → (`rebind`, `[MarkEvent]`).

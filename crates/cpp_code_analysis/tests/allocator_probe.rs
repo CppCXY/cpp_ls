@@ -5,6 +5,10 @@
 //! `mygnu::alloc_traits` is `__gnu_cxx::__alloc_traits` (a base and a `value_type&` alias), and `mygnu::vector_base`
 //! / `mygnu::vector` are `_Vector_base` and `vector`.
 //!
+//! The regression itself is `tests/types.rs`'s `a_containers_element_access_through_the_allocator_chain`; this file is
+//! the instrument that made it findable — it runs in 0.02 s and prints the answer for each step, which is how the
+//! chain's five defects were separated. Measured today: **`v.at(1)` is `int&`** and `v[0]` is `int`.
+//!
 //! ```text
 //! cargo test --release -p cpp_code_analysis --test allocator_probe -- --nocapture
 //! ```
