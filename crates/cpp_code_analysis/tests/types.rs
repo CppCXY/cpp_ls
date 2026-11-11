@@ -2975,3 +2975,34 @@ int f() {
         "`reference` is `value_type&`, and `value_type` is the argument the declaration wrote"
     );
 }
+
+/// **A dependent alias of a class template is substituted too** — the chain the standard library actually writes.
+///
+/// `reference` is `allocator_traits<value_type>::value_type&`: an alias whose right-hand side is a **member of another
+/// class template**, instantiated with this class's own argument. MSVC's `vector` writes exactly this shape
+/// (`using reference = _Alty&;` with `_Alty` a traits alias), which is why the reported `emplace_back()` had no type.
+#[test]
+fn a_dependent_alias_of_a_class_template_is_substituted() {
+    let source = "\
+namespace std {
+    template <class T> struct allocator_traits { using value_type = T; };
+    template <class T> class vector {
+    public:
+        using value_type = T;
+        using reference = allocator_traits<value_type>::value_type&;
+        reference emplace_back();
+    };
+}
+int f() {
+    std::vector<int> values;
+    auto &result = values.emplace_back();
+    result = 3;
+    return result;
+}
+";
+    assert_eq!(
+        type_of_use(source, "result").as_deref(),
+        Some("int&"),
+        "`allocator_traits<value_type>::value_type` is `int` for `vector<int>`"
+    );
+}

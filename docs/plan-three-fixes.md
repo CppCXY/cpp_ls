@@ -151,3 +151,36 @@ public:
 If that passes too, the remaining difference is the macros in the real headers, and the next step is a real project
 measurement (`inspect type --project … --file CodeFormatCore/src/.../LuaCodeFormat.cpp --needle result`), not another
 simplified fixture.
+### Round 5: the mechanism is right — the class is not there
+
+The dependent-alias fixture passes (`reference = allocator_traits<value_type>::value_type&` → `int&`), so the
+substitution walks a chain that crosses into another class template. The real project then gave the answer, and it is a
+different question:
+
+```text
+$ inspect hover --project EmmyLuaCodeStyle --file CodeFormatLib/src/LuaCodeFormat.cpp \
+    --needle "auto &result = results.emplace_back" --shift 7 --cook
+`result` — a variable, declared in a function body
+The type is deduced from the initializer, and that could not be typed: the type of
+`std::vector<LuaDiagnostic>&` is not known here, so what its members are is not known either.
+```
+
+So `emplace_back` is not the problem: **`std::vector` itself has no entry**. The index summarizes the project's files, and
+a system header is read only as text while a file is cooked — no facts, so no class, so no member, so no alias to
+substitute. The fixture passed because its `vector` was a project declaration.
+
+**That changes item 5.** The honest fix is not "substitute the alias better" but "answer a member of a class the index
+does not hold from the **rendering**, which has the class's body inlined". The rendering is one translation unit with the
+standard library in it, and this crate already parses it for every cooked file; the missing piece is a lookup of a
+member's declaration **in that tree's class scopes**, with the class arguments substituted — the same substitution the
+fixtures above prove works, pointed at a tree instead of at facts.
+
+Design, before writing it:
+
+1. `FileView` gains one query: the class definition named `X` **in the rendering**, plus its argument list from the
+   instantiation the caller holds (`std::vector<LuaDiagnostic>`).
+2. `member_return_type` takes the class's `CppClassDecl` (from the tree) instead of the index fact when the index has
+   none, and substitutes the class arguments into the member's return text — the operation the fixtures already exercise.
+3. Fixture: a **header that is not indexed** (a second project directory the session never adds to its file list) whose
+   class the cooking inlines; the member's alias must still answer. That is the shape a system header has, without the
+   standard library in the test.
