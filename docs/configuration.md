@@ -203,6 +203,11 @@ disable = []             # never report these — wins over `enable`, and over t
 [hover]
 enable = true            # whether hover answers at all
 
+[code_lens]
+enable = true            # the `N references` a function gets, and its price: a reference query per function
+                         # (measured at 5 ms a lens), paid when a file is opened or saved. `false` answers no lens
+                         # at all, without running the query.
+
 [completion]
 max_items = 1000         # how many items one completion may carry; clamped to 1..20000
 suggest_unincluded = true  # offer names from a nearby header, with the `#include` that makes them usable
