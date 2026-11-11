@@ -372,3 +372,35 @@ become `class vector present` and `definitions: 1+ declaration(s)`).
 
 The qualifier of the definition is a **Type** in this same run, so the semantic-token report is a stale binary or a
 client-side cache: the analysis answers `Type`.
+## Root cause, measured (round 14)
+
+Through the session, with the closure read (`catch_up` in the pump loop):
+
+```text
+[probe] summaries: 1761; the MSVC `vector` summary: present
+[probe] LuaStyle.h summary: present
+[probe] `vector`:      14 declaration(s), first from …/include/__msvc_ranges_tuple_formatter.hpp
+[probe] `std::vector`: unknown — NotDeclaredHere("std::vector")
+[probe] result: unknown — UnknownType("std::vector<LuaDiagnostic>&")
+```
+
+**The header is indexed, and its facts have no `std` scope.** `vector` is found by its *bare* name (14 declarations) and
+`std::vector` is not found at all — so when the MSVC header was summarized, `_STD_BEGIN` (which expands to
+`namespace std {`) was **not** expanded, and every declaration in it was recorded at global scope. The same is true of any
+header whose namespace comes from a macro defined in another header — which is how the whole standard library is written.
+
+That is why the type of `result` is unknown: `std::vector<…>` is not a name the index can resolve, so no class, no
+members, no `reference` alias. Every fixture passed because a fixture's header defines its own macros: the file in which
+the macro is **written** and the file in which it is **used** are the same one.
+
+**The fix belongs in the summary pipeline**: a file's summary has to be built with the macro environment of its include
+closure — the same environment cooking already builds — instead of the file's own `#define`s alone. The alternative (keeping
+plain summaries and re-trying a qualified name through its bare form) is a workaround and is not what will be done.
+
+**Acceptance** is the same probe, three lines:
+
+```text
+[probe] `std::vector`: N declaration(s)   (N > 0, from the MSVC header)
+[probe] class vector present              (or the rendering inlines it)
+[probe] result: `LuaDiagnosticInfo&`
+```

@@ -13,15 +13,17 @@
 use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
-use cpp_code_analysis::{
-    DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
-};
+use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn project() -> Option<PathBuf> {
     let named = std::env::var_os("CPPLS_PROJECT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\zc\Desktop\github\EmmyLuaCodeStyle"));
-    named.join("CodeFormatLib").join("src").is_dir().then_some(named)
+    named
+        .join("CodeFormatLib")
+        .join("src")
+        .is_dir()
+        .then_some(named)
 }
 
 fn sources_under(root: &std::path::Path) -> Vec<PathBuf> {
@@ -33,7 +35,11 @@ fn sources_under(root: &std::path::Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if name == "out" || name == ".git" || name == ".cppls" || name == "3rd" {
                 continue;
             }
@@ -46,7 +52,10 @@ fn sources_under(root: &std::path::Path) -> Vec<PathBuf> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_ascii_lowercase();
-            if matches!(extension.as_str(), "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx") {
+            if matches!(
+                extension.as_str(),
+                "cpp" | "cc" | "cxx" | "h" | "hpp" | "hxx"
+            ) {
                 found.push(path);
             }
         }
@@ -76,8 +85,12 @@ fn what_the_session_says_about_the_reported_line() {
     let files = sources_under(&root);
     session.add_project_files(files.iter().cloned());
     session.want_cooked_reading(&file);
+    // **`catch_up`, not only `index_everything`.** The includes a file names are read by `catch_up` — that is the
+    // request the server makes when a file is opened — and without it a header that is merely *included* stays
+    // unread no matter how many times the queue is pumped.
     for _ in 0..40 {
         session.index_everything();
+        session.catch_up(&file);
         if session.pending_work() == 0 {
             break;
         }
@@ -94,9 +107,51 @@ fn what_the_session_says_about_the_reported_line() {
     eprintln!(
         "[probe] the rendering is {} byte(s); `class vector` {}; `emplace_back` {}",
         rendered.len(),
-        if rendered.contains("class vector") { "present" } else { "absent" },
-        if rendered.contains("emplace_back") { "present" } else { "absent" },
+        if rendered.contains("class vector") {
+            "present"
+        } else {
+            "absent"
+        },
+        if rendered.contains("emplace_back") {
+            "present"
+        } else {
+            "absent"
+        },
     );
+    // **Is the closure read at all?** The standard header's own summary is the question: if it is absent, the session
+    // never read the include; if it is present, the visibility answer is what fails.
+    let msvc = PathBuf::from(
+        r"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\vector",
+    );
+    eprintln!(
+        "[probe] summaries: {}; the MSVC `vector` summary: {}",
+        session.index().summaries().count(),
+        if session.index().summary(&msvc).is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    let style = root.join("CodeFormatCore/include/CodeFormatCore/Config/LuaStyle.h");
+    eprintln!(
+        "[probe] LuaStyle.h summary: {}",
+        if session.index().summary(&style).is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    for spelled in ["vector", "std::vector", "begin"] {
+        match session.index().definitions(spelled, &file) {
+            Known::Yes(found) => eprintln!(
+                "[probe] `{spelled}`: {} declaration(s), first from {}",
+                found.found.len(),
+                found.found[0].file.display()
+            ),
+            Known::Unknown(reason) => eprintln!("[probe] `{spelled}`: unknown — {reason:?}"),
+            Known::No => eprintln!("[probe] `{spelled}`: no"),
+        }
+    }
     // **Does the index know `std::vector` from this file?** A qualified name, asked of the same visibility the type
     // query uses.
     match session.index().definitions("std::vector", &file) {
