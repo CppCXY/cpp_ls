@@ -268,3 +268,31 @@ node and its member declarations) — the next round starts there rather than wi
 
 Item 5 is therefore **not** a missing capability in the design; it is a defect in how one real header is read, and it will
 not be claimed fixed until that header's own tree says why.
+### Round 10: `<vector>` **is** resolved and reachable — and the instrument to see the rendering does not exist
+
+The include chain was checked end to end:
+
+```text
+LuaCodeFormat.cpp  includes  LuaCodeFormat.h  (5 quoted includes, all resolved)
+LuaCodeFormat.h    includes  CodeFormatCore/Config/LuaStyle.h   (10 resolved)
+LuaStyle.h         includes  <vector>  ->  …/MSVC/…/include/vector     ← resolved
+```
+
+So the standard library's `vector` **is** in the include graph of that translation unit, its own header summarizes 993
+declarations, and cooking inlines the text. The remaining question is therefore about the **rendering's tree**: does the
+`std::vector` class node exist in the cooked tree, and does it carry its member declarations?
+
+**That question cannot be asked today.** `inspect tree` is a *position* query:
+
+```text
+$ inspect tree --file LuaCodeFormat.cpp --cook
+inspect: give one of `--at`, `--needle`, or `--line`/`--col` to say where the question is
+```
+
+and with a position it prints the tree at that node, not the whole tree — so there is no way to look for a class node that
+the position does not already contain. This is a gap in the tool, and every remaining question about item 5 needs it.
+
+**The next step is therefore a tool change, not an analysis change**: `inspect tree --whole` (or `--grep <pattern>` over the
+rendering's nodes) that prints the nodes whose text matches, with their kind and range. With it, the question is one
+command: does the cooked tree of that file contain a `ClassDecl` named `vector`, and what children does it have? Only then
+is there a defect in the analysis to name — everything above it has been measured and is right.
