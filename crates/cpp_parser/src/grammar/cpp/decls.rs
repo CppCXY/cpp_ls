@@ -1616,8 +1616,14 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // question is asked of the **whole shape** instead: operators, `(`, a declarator, `)`, and then a **parameter
     // list**. The last part is what keeps `a * (b);` an expression — a product has no `(` after its `)`.
     let at_a_functions_parenthesized_declarator = at_an_operator_led_parenthesized_declarator(p);
+    // …and the **variable** spelling of the same shape, which is the one a declaration's table is written with:
+    // `static char *(names[3]) = …`. Its group is followed by an initializer rather than by a parameter list, so
+    // the rule above does not see it, and the two readings that would otherwise take it — a type-id and an
+    // initializer — both lose the name.
+    let at_a_variables_parenthesized_declarator = at_a_parenthesised_declarator_of_a_variable(p);
 
     if at_a_functions_parenthesized_declarator
+        || at_a_variables_parenthesized_declarator
         || (p.current_token() == CppTokenKind::LeftParen && !p.has_declaration_type_name())
     {
         let checkpoint = p.checkpoint();
@@ -1625,7 +1631,18 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
         // The operators are the declarator's own, and they are read here so that what follows them is the `(` the
         // rest of this branch already knows how to read. When the specifier sequence took them into the type there
         // are none left to read, and the loop does nothing.
-        while at_a_pointer_operator(p.current_token()) {
+        //
+        // **The cv-qualifiers that decorate them go with them.** `S *const (lines[2])` is a const pointer, and the
+        // qualifier stands between the operator and the declarator it decorates — the same position
+        // `parse_abstract_declarator` reads it in. Without this the loop stopped on the `const`, the `p.bump()`
+        // below consumed it in place of the `(`, and the branch then found no declarator to hold and rewound: the
+        // declaration came out with `(lines[2])` as its *initializer*.
+        while at_a_pointer_operator(p.current_token())
+            || matches!(
+                p.current_token(),
+                CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+            )
+        {
             p.bump();
         }
         p.bump();
@@ -2347,6 +2364,130 @@ fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
     an_operator_leads || !decorated
 }
 
+/// Does a **variable's parenthesised declarator** stand at the cursor — `ptr-operator* ( declarator )`, in a
+/// declaration that already has a type?
+///
+/// ```c
+/// static char *(names[3]) = { "TMPDIR", … };        // src/nvim/option.c:210 — an array of `char *`
+/// static histentry_T *(history[HIST_COUNT]) = …;    // src/nvim/cmdhist.c:35
+/// ```
+///
+/// [`at_an_operator_led_parenthesized_declarator`] answers the **function** spelling of the shape and needs a `(`
+/// after the `)` — `const _Ty&(max)(const _Ty&)`. A variable's declarator has no parameter list, so that rule never
+/// fired for these eight declarations, and the group was left to two readings that are both wrong here: a
+/// **type-id** (the `(history[HIST_COUNT])` of `char *(void)`, a function type that names nothing) and an
+/// **initializer** (`T *p(x)`). Measured, the first left the `=` unowned — ``expected `;` `` on the line that
+/// declares the table — and the second read the parenthesised bound as an expression.
+///
+/// Three things license the reading, and each of the neighbours fails one of them:
+///
+/// ```text
+/// static char *(names[3]) = …    a type in front, an operator, a name in the group, an initializer after it
+/// char *(void);                  no name in the group — a type-id, and the declarator rule owns it
+/// a * (b);                       `a` is not a type, so `a_declaration_is_the_better_reading` is not answered
+/// T (x) = 1;                     no operator — the `(`-at-the-cursor branch already reads it
+/// ```
+fn at_a_parenthesised_declarator_of_a_variable(p: &CppParser) -> bool {
+    // **A type has to be in front.** The same question the initializer guard asks, and the reason this shape is a
+    // declarator rather than a product: `a * (b)` is multiplication unless `a` is a type, and the type table is
+    // what answers. At file scope a declaration is the only statement there is, and the answer is still asked the
+    // same way so that one rule covers both scopes.
+    if !the_declaration_has_a_type(p) {
+        return false;
+    }
+
+    let mut index = p.current_token_index();
+
+    // The operator may be at the cursor or already taken into the type: the specifier sequence absorbs `*` after
+    // a *name* (`S *const` — and the `const` with it), and leaves it after a keyword (`static char *`), which is a
+    // difference of the spelling rather than of the declaration — the same argument as in
+    // [`at_an_operator_led_parenthesized_declarator`].
+    let mut an_operator_leads = at_a_pointer_operator(p.token_kind_at(index));
+    if an_operator_leads {
+        // The operators, with the cv-qualifiers that decorate them: `static char *const (…)` is a const pointer,
+        // and the qualifier stands where `parse_abstract_declarator` reads it — between the operator and what it
+        // decorates.
+        while at_a_pointer_operator(p.token_kind_at(index))
+            || matches!(
+                p.token_kind_at(index),
+                CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+            )
+        {
+            index = next_significant_index(p, index);
+        }
+    } else {
+        // The type took them, so the walk goes back over what it absorbed. Walking one token only would miss the
+        // qualifier: in `S *const (` the token before the `(` is `const`, not the `*`.
+        let mut before = previous_significant_index(p, index);
+        while let Some(at) = before {
+            let kind = p.token_kind_at(at);
+            if at_a_pointer_operator(kind) {
+                an_operator_leads = true;
+            } else if !matches!(
+                kind,
+                CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+            ) {
+                break;
+            }
+            before = previous_significant_index(p, at);
+        }
+    }
+    if !an_operator_leads {
+        return false;
+    }
+    if p.token_kind_at(index) != CppTokenKind::LeftParen {
+        return false;
+    }
+    index = next_significant_index(p, index);
+    // The group holds the **declarator**: a name, behind whatever decorates it, and its own array bounds.
+    while at_a_pointer_operator(p.token_kind_at(index))
+        || matches!(
+            p.token_kind_at(index),
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        )
+    {
+        index = next_significant_index(p, index);
+    }
+    if p.token_kind_at(index) != CppTokenKind::Identifier {
+        return false;
+    }
+    index = next_significant_index(p, index);
+
+    while p.token_kind_at(index) == CppTokenKind::LeftBracket {
+        let mut depth = 0usize;
+        loop {
+            match p.token_kind_at(index) {
+                CppTokenKind::LeftBracket => depth += 1,
+                CppTokenKind::RightBracket => depth -= 1,
+                // A bound that never closes is not this rule's shape, and guessing would take the rest of the
+                // file: let the reading that reports the error own it.
+                CppTokenKind::Eof | CppTokenKind::None => return false,
+                _ => {}
+            }
+            index = next_significant_index(p, index);
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+
+    if p.token_kind_at(index) != CppTokenKind::RightParen {
+        return false;
+    }
+    index = next_significant_index(p, index);
+
+    // What may follow a declarator: an initializer, the end of this one, another declarator, an array suffix
+    // (`int (*p)[3]`), or the parameter list the parenthesised name is a function's.
+    matches!(
+        p.token_kind_at(index),
+        CppTokenKind::Assign
+            | CppTokenKind::Semicolon
+            | CppTokenKind::Comma
+            | CppTokenKind::LeftBracket
+            | CppTokenKind::LeftParen
+    )
+}
+
 /// The index of the last significant token before `index`.
 pub(super) fn previous_significant_index(p: &CppParser, index: usize) -> Option<usize> {
     let mut at = index;
@@ -2966,7 +3107,7 @@ fn a_name_was_parsed(p: &CppParser, declarator_from: usize) -> bool {
 fn an_initializer_needs_a_name(p: &CppParser, declarator_from: usize) -> bool {
     matches!(p.current_token(), CppTokenKind::Assign)
         && !a_name_was_parsed(p, declarator_from)
-        && !the_declaration_has_a_type(p, declarator_from)
+        && !the_declaration_has_a_type(p)
 }
 
 /// Does the declaration being parsed already have a type — by any of the names a type can be written with?
@@ -2992,8 +3133,7 @@ fn an_initializer_needs_a_name(p: &CppParser, declarator_from: usize) -> bool {
 /// remaining text is `y = 1`, whose first token is a plain name. Making the guard accept that would put A0-1
 /// back. Fixing it properly means making `decltype(auto)` parse as a type specifier in an expression-statement
 /// position, which is a rule of its own.
-fn the_declaration_has_a_type(p: &CppParser, declarator_from: usize) -> bool {
-    let _ = declarator_from;
+fn the_declaration_has_a_type(p: &CppParser) -> bool {
     if declarator_starts_with_a_type_keyword(p) || declarator_starts_with_a_known_type_name(p) {
         return true;
     }
@@ -3561,21 +3701,57 @@ fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
             continue;
         }
 
-        first = Some(kind);
+        first = Some(index);
     }
+
+    // **The declaration's specifiers stand in front of its type**, and asking the very first token answers "no"
+    // for every declaration that writes one: `static char *(names[3])` begins with `static`, whose kind is not a
+    // type. That is not a detail — measured on neovim, it is the whole difference between `static int *(…)`
+    // (the declaration ended at the `*` and the file reported ``expected `;` ``) and `int *(…)`, which was read.
+    //
+    // Only the specifiers that say **nothing** about the type are stepped over. A `const` is one of them (`const
+    // int` is an int), and so is every storage class; `auto` is not, and neither is `unsigned`, which *is* the
+    // type. The walk therefore stops at the first token that could be the type and answers about that one.
+    let Some(first) = first else {
+        return false;
+    };
+    let mut at = first;
+    while at < p.current_token_index() {
+        let kind = p.token_kind_at(at);
+        if is_declaration_trivia(kind) || a_specifier_that_states_no_type(kind) {
+            at += 1;
+            continue;
+        }
+        break;
+    }
+    let kind = p.token_kind_at(at);
 
     // `auto` and `decltype` are deliberately left out of the answer even though they are in
     // [`types::is_type_specifier_keyword`]: both can begin an expression, so `auto(1)` is as readable as
     // a call as it is as a declaration. Of the two readings, the expression is the one to prefer — reading a
     // call as a declaration loses its callee *and* its arguments, while reading a declaration as a call merely
     // leaves a variable unbound.
-    first.is_some_and(|kind| {
-        types::is_type_specifier_keyword(kind)
-            && !matches!(
-                kind,
-                CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
-            )
-    })
+    types::is_type_specifier_keyword(kind)
+        && !matches!(
+            kind,
+            CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
+        )
+}
+
+/// Is this a **specifier that says nothing about the type** — a storage class, a cv-qualifier, a function
+/// specifier?
+///
+/// The tokens a declaration may write before its type, and the reason a walk that asks the declaration's *first*
+/// token is wrong about every one of them. `storage_or_function_specifier` is the specifier loop's own table and
+/// is reused rather than restated, so the two cannot come to disagree about what a specifier is.
+fn a_specifier_that_states_no_type(kind: CppTokenKind) -> bool {
+    types::storage_or_function_specifier(kind).is_some()
+        || matches!(
+            kind,
+            CppTokenKind::TypedefKeyword
+                | CppTokenKind::ConstKeyword
+                | CppTokenKind::VolatileKeyword
+        )
 }
 
 /// Is a **type keyword** written immediately before the declarator's name — the `void` in `void f(T)`?

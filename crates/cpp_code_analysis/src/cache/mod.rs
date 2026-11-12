@@ -196,7 +196,14 @@ use std::path::{Path, PathBuf};
 /// and no declaration for a variable named `new` — measured on neovim: 28 files of 517 had a parse error before the
 /// gate and 17 after, and 13 lines stopped being unparsable. The key's parts are unchanged, so the old entries decode
 /// happily and keep the missing declarations, which is what this number is for.
-pub const FORMAT_VERSION: u32 = 19;
+/// # Why this moved to 20
+///
+/// **A parenthesised declarator is a declarator**, so `static char *(names[3]) = { … };` declares `names` and no
+/// longer an unnamed function with a parameter, and `int (catf) (int)` names the parameter it holds. A summary
+/// written before this holds no fact for the table (`neovim`'s `src/nvim/option.c:210` and seven more), or holds the
+/// parenthesised name as a *parameter* of a function that names nothing. The key's parts are unchanged, so the old
+/// entries decode happily and keep the wrong facts — which is what this number is for.
+pub const FORMAT_VERSION: u32 = 20;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

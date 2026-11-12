@@ -188,7 +188,14 @@ impl CppDeclaration {
             .and_then(|name| name.get_name_token());
         }
 
+        // **A class-like specifier names the declaration only when it is a definition.** `struct S { … };` declares
+        // `S`, and the name lives on the definition node. But the *elaborated* spelling — `struct S x;`,
+        // `struct S *(lines[2]) = …` — is a **type** written in the specifier sequence, not a declaration of `S`,
+        // and the name this declaration introduces is the declarator's. Without the body test the elaborated form
+        // won: `static struct S *(lines[2]) = { 0 };` reported `S`, so every consumer that asks a declaration for
+        // its name — scopes, the fact builder, a hover — was told the variable was a type it only mentions.
         if let Some(class) = self.get_class_def()
+            && class.get_body().is_some()
             && let Some(name) = class.get_name()
         {
             return Some(name);
@@ -723,11 +730,24 @@ impl CppDeclarator {
     ///
     /// Found among the child nodes rather than the direct tokens: a qualified or templated name
     /// (`ns::Foo<int>`) is itself a node, so the identifier is one level down.
+    ///
+    /// **A parenthesised declarator keeps it further down still** — `int (*f)(int)` is `Declarator > Declarator >
+    /// NameExpr`, and the parentheses exist precisely to bind the operators to that name rather than to the
+    /// function's. A walk that stopped at the first level answered `None` for every shape the language uses to
+    /// declare a function pointer: measured on `int (*f)(int);`, `int (&f)(void);` and neovim's
+    /// `static char *(names[3]) = …` — three declarations that plainly name something and that
+    /// `sema::scopes::is_unnamed_declaration` read as *"a call statement, not a declaration"*.
     pub fn get_name(&self) -> Option<CppNameToken> {
-        self.token().or_else(|| {
+        if let Some(name) = self.token().or_else(|| {
             self.child::<CppNameExpr>()
                 .and_then(|it| it.get_name_token())
-        })
+        }) {
+            return Some(name);
+        }
+
+        // A nested declarator names the same entity: the group holds the declarator, and the operators the grammar
+        // put in front of it decorate that one name.
+        self.child::<CppDeclarator>()?.get_name()
     }
 
     pub fn get_name_text(&self) -> Option<String> {

@@ -73,7 +73,7 @@ pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
 ///
 /// Kept as a lookup rather than an inline `match` so the guard and the node kind cannot drift apart:
 /// the specifier loop asks twice — once to decide, once to build the node.
-fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyntaxKind> {
+pub(super) fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyntaxKind> {
     Some(match kind {
         CppTokenKind::StaticKeyword => CppSyntaxKind::StaticSpec,
         // `register` — a storage-class specifier, removed in C++17 and still written by C headers (see
@@ -4782,6 +4782,31 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
                 | CppTokenKind::Caret,
             CppTokenKind::Identifier,
             CppTokenKind::RightParen
+        ]
+    ) {
+        return true;
+    }
+
+    // **A bare name whose group is followed by a parameter list** — the declarator spelling neovim's
+    // `src/lpeg/lptree.c:1308` writes, as a parameter of a callback-taking function:
+    //
+    // ```c
+    // static void createcat (lua_State *L, const char *catname, int (catf) (int))
+    // ```
+    //
+    // `(catf)` holds a declarator and no type, so it is neither a parameter list nor a type-id; the `(int)` after
+    // it is the parameter list the parenthesised name declares. Neither reading of the pair is reachable any
+    // other way — a parameter list is never followed by another `(` in the same parameter, and a type-id's
+    // parentheses cannot contain a *named* declarator — so claiming it takes nothing from the shapes around it.
+    //
+    // Measured: without this the group was left as `(catf)`'s tokens between two error nodes, the declaration's
+    // parentheses never closed, and the whole definition — body included — was read as one expression statement.
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::RightParen,
+            CppTokenKind::LeftParen
         ]
     ) {
         return true;
