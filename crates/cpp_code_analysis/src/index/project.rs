@@ -22646,7 +22646,7 @@ pub fn substituted_members(
     else {
         return Known::Yes(list);
     };
-    let mut names = declared.fact.parameters.clone();
+    let names = declared.fact.parameters.clone();
     if names.is_empty() {
         return Known::Yes(list);
     }
@@ -22660,7 +22660,6 @@ pub fn substituted_members(
     // Measured on the real `<vector>`: without the defaults, `push_back("123131")` on a `std::vector<int>` stayed
     // silent while the one-parameter fixture beside it reported — the arguments were cut to the shorter side and the
     // defaulted parameter was simply left standing.
-    let arguments = arguments;
     let defaults = index.template_parameter_defaults_for(&base, from, &arguments);
     if names.is_empty() {
         return Known::Yes(list);
