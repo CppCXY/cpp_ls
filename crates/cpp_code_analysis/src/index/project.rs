@@ -22652,14 +22652,16 @@ pub fn substituted_members(
     }
 
     // **A declaration with a defaulted parameter is written without it at the use.** `std::vector<int>` writes one
-    // argument for `template <class _Tp, class _Alloc = allocator<_Tp>>` — two names — and `substituted_spelling`
-    // refuses a positional substitution whose two sides do not line up (`names.len() != arguments.len()` returns the
-    // text unchanged). So both sides are cut to the shorter one: the arguments written are the first parameters, in
-    // order, which is what a positional substitution means. Measured on the real `<vector>`: without this,
-    // `push_back("123131")` on a `std::vector<int>` stayed silent while the one-parameter fixture beside it reported.
-    let mut arguments = arguments;
-    names.truncate(arguments.len());
-    arguments.truncate(names.len());
+    // argument for `template <class _Tp, class _Alloc = allocator<_Tp>>` — two names — and the default is part of the
+    // class's identity, not something to drop: `_Alloc` standing unsubstituted is what made
+    // `auto pos = events.size()` answer `allocator_traits<A>::size_type`. The substitution therefore uses the
+    // declaration's **defaults** for the parameters the use did not write
+    // ([`substituted_spelling_with_defaults`]), which is the same rule `variable_initializers` and the call path use.
+    // Measured on the real `<vector>`: without the defaults, `push_back("123131")` on a `std::vector<int>` stayed
+    // silent while the one-parameter fixture beside it reported — the arguments were cut to the shorter side and the
+    // defaulted parameter was simply left standing.
+    let arguments = arguments;
+    let defaults = index.template_parameter_defaults_for(&base, from, &arguments);
     if names.is_empty() {
         return Known::Yes(list);
     }
@@ -22734,7 +22736,9 @@ pub fn substituted_members(
         .into_iter()
         .flatten()
         {
-            *spelling = crate::sema::types::substituted_spelling(spelling, &names, &arguments);
+            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+                spelling, &names, &defaults, &arguments,
+            );
         }
     }
     Known::Yes(list)
