@@ -357,7 +357,37 @@ enumerator: true }`, and the use has **one classification, `EnumMember`**. `test
 `an_enumerator_from_a_header_is_an_enum_member_at_its_use` pins the unscoped and the `enum class` spelling, on the
 **plain** view — the one the colouring pass is given, where a cross-file answer is the index's.
 
-## `size()` of a vector answers `_Alty_traits::size_type` — open
+## `size()` of a vector answers `_Alty_traits::size_type` — **fixed**
+
+Reported with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` drawn as `_Alty_traits::size_type`.
+Fixed after five measured steps, each one a defect of its own:
+
+1. **a failed qualified name now asks for the file that would answer it** (`ProjectIndex::ask_for_refinement`,
+   drained by `Session::advance`) — `<xmemory>` was never refined, so `std::allocator_traits` did not exist;
+2. **a class template's base clause is the *definition's***, not its forward declaration's;
+3. **a member's defaulted template argument is substituted** (`allocator_traits<A>` → `allocator_traits<allocator<int>>`);
+4. **a specialization's slot matches a qualified argument** by head and recursively (`allocator<_Ty>` against
+   `std::allocator<MarkEvent>`), and a trait's bool is the base its matching specialization inherits, which lets
+   `conditional_t` pick one branch;
+5. **a class definition whose head writes a qualified name is a declaration again** — `qualified_specifier_name_node`
+   took `A<T>::From` *inside the argument list* of `struct B<A<T>, void_t<typename A<T>::From>>` for the declaration's
+   own name, so the whole partial specialization was read as an out-of-line definition of a foreign class: no binding,
+   no class scope, no members, **no fact**. That is what kept `_Is_default_allocator<allocator<_Ty>, …>` out of
+   `<xmemory>`. `FORMAT_VERSION` is now 18, because every cache built by the old reader holds the missing fact.
+
+Measured over stdio against the real binary, on `EmmyLuaCodeStyle`:
+
+```text
+[hover-probe] `pos` at 50:10     size_t pos                          (was `_Alty_traits::size_type`)
+[hover-probe] `formattedText`    std::string formattedText
+[hover-probe] inlay hints        ": std::string"
+```
+
+`tests/types.rs::a_partial_specialization_is_a_declaration_with_a_pattern` is the regression for (5), and
+`a_conditional_base_picks_the_branch_its_trait_selects` for (3) and (4) together. Both were ignored reproducers while
+the chain was open; both are ordinary passing tests now.
+
+## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 Reported after the above, with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` drawn as
 `_Alty_traits::size_type`. Reproduced over stdio with the same client (`real_project_hover_probe.rs`): the hover says

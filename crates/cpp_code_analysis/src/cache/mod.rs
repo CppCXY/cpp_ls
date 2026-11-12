@@ -177,7 +177,17 @@ use std::path::{Path, PathBuf};
 /// unchanged, so an entry from before this bump decodes happily and keeps the answer — measured: the stale `C:\p\.cppls`
 /// of the `/p` fixtures made `a_function_with_no_written_return_type_states_one_in_its_body` fail for a fix that was in the
 /// binary, and pass on a cold cache.
-pub const FORMAT_VERSION: u32 = 17;
+/// # Why this moved to 18
+///
+/// **A class definition whose head writes a qualified name is a declaration again.** `qualified_specifier_name_node`
+/// took `A<T>::From` — a dependent type *inside the argument list* of `struct B<A<T>, void_t<typename A<T>::From>>`
+/// — for the declaration's own name, so the whole partial specialization was read as an out-of-line definition of a
+/// class the file has not built: no binding, no class scope, no members, and **no fact**. That is what kept
+/// `_Is_default_allocator<allocator<_Ty>, …>` out of MSVC's `<xmemory>`, and with it the trait that decides
+/// `allocator_traits`'s `conditional_t` base. An entry from before this bump decodes happily and holds the missing
+/// fact, so every existing cache has to be dropped — measured on `EmmyLuaCodeStyle`, where `auto pos = events.size();`
+/// still answered `_Alty_traits::size_type` from a summary built by the old reader.
+pub const FORMAT_VERSION: u32 = 18;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
