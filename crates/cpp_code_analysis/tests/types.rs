@@ -3463,7 +3463,6 @@ int f() {
 /// This is asserted in the repository rather than through a fixture written by hand to a temporary file: that pipeline
 /// was measured to give two different answers for one shape between runs, so it is not evidence.
 #[test]
-#[ignore = "open: the fact exists but its pattern is not recorded (docs/open-questions.md, the size_type entry)"]
 fn a_partial_specialization_is_a_declaration_with_a_pattern() {
     let source = "\
 template <class T> struct A { };

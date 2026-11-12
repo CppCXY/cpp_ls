@@ -3512,6 +3512,25 @@ fn qualified_specifier_name_node(declaration: &CppSyntaxNode) -> Option<CppSynta
 
     let specifiers = first_child(declaration, CppSyntaxKind::DeclSpecifierSeq)?;
 
+    // **A class definition's name is the class's, and a `::` inside its head is not the declaration's.** A partial
+    // specialization writes a dependent type in its argument list — `struct B<A<T>, void_t<typename A<T>::From>>` —
+    // and this reader took `A<T>::From` for the declared name, so the whole declaration was read as an out-of-line
+    // definition of a class this file has not built: no binding, no class scope, no members, and no fact. Measured on
+    // `tests/types.rs::a_partial_specialization_is_a_declaration_with_a_pattern`, where `specifiers` was never called
+    // for the specialization at all.
+    if specifiers.children().any(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::ClassDef
+                | CppSyntaxKind::StructDef
+                | CppSyntaxKind::UnionDef
+                | CppSyntaxKind::EnumDef
+                | CppSyntaxKind::EnumClassDef
+        )
+    }) {
+        return None;
+    }
+
     // A **descendant**, not a child: the grammar writes a qualified name inside a wrapper — `DeclSpecifierSeq >
     // TemplateType > NameExpr` for `void Box<int>::grow` — so a search of the direct children finds nothing and
     // the declaration is read as one that declares nothing. That a qualified name is here at all is what
