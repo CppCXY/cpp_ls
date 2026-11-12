@@ -439,8 +439,22 @@ fn what_a_size_call_returns() {
                 fact.name, fact.pattern, fact.bases, fact.kind, fact.range.start_offset
             );
         }
+        // **Every fact near the two declarations**, not only the named ones: the specialization is written at line
+        // 486, right after the principal at 483, and the index holds no fact named after it. What is actually there
+        // says whether it was skipped or filed under another name.
+        let mut near: Vec<_> = summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.range.start_offset >= 16800 && fact.range.start_offset <= 17800)
+            .collect();
+        near.sort_by_key(|fact| fact.range.start_offset);
+        for fact in near {
+            eprintln!(
+                "[size-probe] near {}: {:?}, kind {:?}, scope {:?}, pattern {:?}, bases {:?}",
+                fact.range.start_offset, fact.name, fact.kind, fact.scope, fact.pattern, fact.bases
+            );
+        }
     }
-
     let vector_header_path = vector_header.clone();
     eprintln!(
         "[size-probe] `<vector>` refined: {}, `<xmemory>` refined: {}",
