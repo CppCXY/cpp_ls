@@ -12503,11 +12503,49 @@ fn a_pattern_matches(
     }
 
     slots.iter().zip(written).all(|(slot, argument)| {
-        let slot = slot.trim();
         // A **slot** is one of the class's own parameters, and takes whatever the use put there; anything else has
-        // to be equal to it. `_Ty` against `int` matches; `shared_ptr<_Ty>` against `int` does not.
-        parameters.iter().any(|name| name == slot) || slot == folded_for_matching(argument).trim()
+        // to **match** it. `_Ty` against `int` matches; `shared_ptr<_Ty>` against `int` does not.
+        a_slot_matches(slot, argument, parameters)
     })
+}
+
+/// **Does one slot of a specialization's pattern match the argument the use wrote?**
+///
+/// Text equality is not enough, and that is what this exists for: `_Is_default_allocator<allocator<_Ty>>` is written
+/// in `namespace std`, so its slot is `allocator<_Ty>` while the use writes `std::allocator<MarkEvent>` — the same
+/// class, spelled with the qualification the use needed. Measured on the standard library's
+/// `allocator_traits<_Alloc> : conditional_t<_Is_default_allocator<_Alloc>::value, …>`: the textual comparison never
+/// matched, so the trait was never true and the `conditional` never picked a branch.
+///
+/// The rule for a template id is **the head by its last name segment, then the arguments slot by slot**, which is the
+/// same rule [`rank_of`] and the bare-name lookups elsewhere in this file use. A head that is not a template id is
+/// compared as text: a bare name in a pattern is a name written in the pattern's own scope, and there is no second
+/// spelling of it to reconcile.
+fn a_slot_matches(slot: &str, argument: &str, parameters: &[String]) -> bool {
+    let slot = slot.trim();
+    if parameters.iter().any(|name| name == slot) {
+        return true;
+    }
+    let argument = folded_for_matching(argument);
+    let argument = argument.trim();
+    if slot == argument {
+        return true;
+    }
+
+    let (Some((slot_head, slot_arguments)), Some((argument_head, argument_arguments))) = (
+        split_template_arguments(slot),
+        split_template_arguments(argument),
+    ) else {
+        return false;
+    };
+    if slot_head.rsplit("::").next() != argument_head.rsplit("::").next() {
+        return false;
+    }
+    slot_arguments.len() == argument_arguments.len()
+        && slot_arguments
+            .iter()
+            .zip(&argument_arguments)
+            .all(|(one, other)| a_slot_matches(one, other, parameters))
 }
 
 /// The arguments written between the outermost `<` and `>` of a spelling — `atomic<int>` gives `["int"]`, and a
