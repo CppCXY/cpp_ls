@@ -793,3 +793,46 @@ The true positives stay covered: `dangling_field::a_view_member_of_a_by_value_pa
 `…::a_pointer_member_of_a_parameters_buffer_is_reported`, and `missing_include::a_header_inside_its_includers_order_is_silent`'s
 second half, where the same fragment is included by a file that never reaches the enum and is still reported.
 `real_project_probe.rs::what_the_two_reported_checks_say_about_the_project` prints the count.
+
+## 5 GB of private bytes from opening nineteen files
+
+**Reported**: opening `C:\Users\zc\Desktop\test_cpp` made the server's memory grow without bound, especially when
+`basics.cpp` was opened; the process was seen at **5 037 MB**.
+
+**Measured, and the shape is per opened file.** Each opened file gets one *whole-program read*
+(`Session::the_program_to_read` → `Session::read_the_unit`): the whole include closure is rendered, parsed and swept
+for facts. On this project a closure is a handful of standard headers (~6 MB of source). Sampling the server's own
+process (`cpp_ls/tests/memory_probe.rs`, which opens every `.cpp`/`.h` and pulls a diagnostic per file):
+
+```text
+ 8 files opened    951 MB private
+19 files opened  5 037 MB private          (the report)
+19 files, after the budget below   713 MB private / 436 MB working set
+```
+
+The session's own tables during that growth, from `CPPLS_TRACE_MEMORY=1` (a pull prints `Session::memory_report`):
+
+```text
+summaries 663 (64.5 MB) | units 8 (32 MB) | cooked 136 (7.9 MB) | views 8 (2 MB)
+| index tables 12–23 MB | total ≈ 150 MB
+```
+
+So the tables are bounded and the growth is not in them. It is in the program read: cutting the reads from nineteen
+to one cuts the process from 5 037 MB to 713 MB — the budget experiment is the causal one.
+
+**Not the allocator.** The server runs **mimalloc** (`crates/cpp_ls/src/bin/cpp_ls.rs`), which does return freed
+pages, so "the heap kept the slack" is the wrong explanation, and the first version of this section said it. Whatever a
+read allocates is still *reachable* when it is measured — ~280 MB per read.
+
+**What is still open**: *what holds it*. The report's cooked readings grow by ~10 per pull, so `Readings::in_a_program`
+(one `CookedFile` per file per program, unbounded) is not the answer for these files; the candidates left are the
+`TranslationUnit` the read builds (32 MB accounted, `heap_bytes` may undercount), the `IndexedUnit` memo, and the
+server-side queues. The next measurement is the resident set sampled **at the `read_the_unit` boundary** with the table
+sizes printed either side, which names the holder in one run.
+
+**Fixed meanwhile**: `PROGRAM_READ_BUDGET_BYTES` (512 MB, estimated at 48 bytes per source byte, so about one
+standard-heavy program). Beyond it a file keeps the per-file reading — the reading every file nobody has opened
+has — instead of a second whole-program read. Two tests: the budget refuses (`a_session_stops_reading_programs_once_
+its_memory_budget_is_spent`) and a read is charged (`a_program_read_is_charged_to_the_budget`). The cost is real: the
+second and later standard-heavy files of one session lose the compiler's whole-program reading, which is where
+cross-file macro scoping is decided. Removing the budget is the goal once the holder is found.
