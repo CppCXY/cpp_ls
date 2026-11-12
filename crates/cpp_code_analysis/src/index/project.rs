@@ -2387,6 +2387,12 @@ fn members_of_inner(
     // The spelling as the caller wrote it, kept for the one question the resolved one cannot answer: whether this
     // answer came through an alias at all — see the end of this function.
     let original = base_type_name(class).to_string();
+    // **The spelling with its arguments**, kept for the base clauses. The normalization below is about the *class* —
+    // which name declares the members — and deliberately drops the arguments; a base clause is about the *type*:
+    // `vector<int>`'s base is written `_Vector_base<_Tp, _Alloc>` and substituting it needs to know `_Tp = int`.
+    // Measured on the conditional fixture: with the stripped spelling, `conditional_t<_Is_default_allocator<A>::value,
+    // …>` kept `A`, so the trait matched no specialization and the wrong branch was taken.
+    let with_arguments = class.to_string();
     // The spelling is normalized once, at the entry, for the same reason a base's is: a consumer feeding this from
     // `DeclFact.type_of` hands over what the file wrote — `const Widget&`, `::Widget`, `Base<int>` — and every one
     // of those parts is about the type's shape rather than about which class declares the members. Normalizing
@@ -2530,7 +2536,7 @@ fn members_of_inner(
                 // `_Normal_allocator_traits` where the right answer was `_Default_allocator_traits`'s.
                 .map(|written| {
                     (
-                        substitute_a_base_clause(index, path, &class, &written),
+                        substitute_a_base_clause(index, path, &with_arguments, &written),
                         class.to_string(),
                     )
                 })
@@ -2750,8 +2756,14 @@ fn substitute_a_base_clause(
     clause: &str,
 ) -> String {
     let Some((head, mut arguments)) = split_template_arguments(shown) else {
+        if crate::probes::inference() {
+            eprintln!("[clause] {shown:?} is not a template id; clause {clause:?}");
+        }
         return clause.to_string();
     };
+    if crate::probes::inference() {
+        eprintln!("[clause] {shown:?} -> head {head:?}, arguments {arguments:?}");
+    }
     // **The class is keyed by its bare name.** The spelling here is often qualified — `std::allocator_traits<…>` —
     // and `files_declaring` matches the name a fact records, which is the bare one. A qualified lookup therefore
     // found nothing and the clause came back with its parameters still standing: measured on the conditional
@@ -2774,9 +2786,19 @@ fn substitute_a_base_clause(
     names.truncate(arguments.len());
     arguments.truncate(names.len());
     if names.is_empty() {
+        if crate::probes::inference() {
+            eprintln!(
+                "[clause] {shown:?}: no parameters for {head:?} ({} candidate(s))",
+                candidates.len()
+            );
+        }
         return clause.to_string();
     }
-    crate::sema::types::substituted_spelling(clause, &names, &arguments)
+    let substituted = crate::sema::types::substituted_spelling(clause, &names, &arguments);
+    if crate::probes::inference() {
+        eprintln!("[clause] {shown:?}: {names:?} <- {arguments:?} gives {substituted:?}");
+    }
+    substituted
 }
 
 /// Every declaration written **directly in** the class or namespace `class` names.
