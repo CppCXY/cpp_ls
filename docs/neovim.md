@@ -11,42 +11,44 @@ cargo test --release -p cpp_code_analysis --test neovim_probe -- --ignored --noc
 tree is built** — nothing is estimated.
 
 ```text
-65 file(s) diagnosed (every eighth file), 2 with parse errors, 0 without a reading, 0 with unplaced errors, in 264 s
+65 file(s) diagnosed (every eighth file), 3 with parse errors, 0 without a reading, 0 with unplaced errors, in 277 s
 parse errors by message (top 3)
-      2  expected `;` after expression  e.g. src/nvim/grid.h:20
+      9  expected `;` after expression  e.g. src/nvim/grid.h:20
       2  expected primary expression    e.g. src/nvim/grid.h:20
       1  expected `;`                   e.g. src/coverity-model.c:140
 check findings by code
-     10  UndefinedName        6  AssignTypeCheck   4  ElseAfterReturn     4  MacroParentheses
-      4  Unused               3  BracesAroundStatements   2  IncludeNotFound   2  Redefinition
-names: 58 598 identifier(s), 53 505 classified (91.3%)
-definition: 1 826 asked, 1 340 resolved (73.4%), 7 ambiguous, 479 unknown
-type_at: 1 826 asked, 929 known (50.9%)
+      9  UndefinedName     6  AssignTypeCheck   5  MacroParentheses   4  ElseAfterReturn
+      3  BracesAroundStatements   3  Unused   2  IncludeNotFound   2  MissingInclude   2  Redefinition
+names: 58 598 identifier(s), 53 920 classified (92.0%)
+definition: 1 805 asked, 1 336 resolved (74.0%), 6 ambiguous, 463 unknown
+type_at: 1 805 asked, 921 known (51.0%)
+uv_* names: 15 asked, 14 resolved
 ```
 
 **Why a sample.** With the dependency tree built, a file's include closure is the real one, and a **cold** reading of
 one file costs ~30 s: every closure summary is keyed by the environment in force, and each root file has its own, so
 the summaries are shared by nothing. The whole checkout is therefore a two-hour run the first time and ~8 minutes on
 a warm cache. `CPPLS_NEOVIM_EVERY=8` asks every eighth file instead — 65 files, every directory of `src` — and
-`CPPLS_NEOVIM_LIMIT` still caps the count.
+`CPPLS_NEOVIM_LIMIT` still caps the count. The run above is with `CPPLS_NEOVIM_CLOSURE=1`: every file is read the way
+the editor reads one, including its direct includes.
 
 The number to compare against is the first census of the same checkout, taken on another machine before the
 dependency tree existed. It read all 517 files, so the rates — not the counts — are what line up:
 
 ```text
                                     first census (517 files)   this sample (65 files)
-files with a parse error                28   (5.4%)               2   (3.1%)
-parse errors                            59                        5
+files with a parse error                28   (5.4%)               3   (4.6%)
+parse errors                            59                       12
 `new` lines unparsed                    13                        0
 expected primary expression             18                        2
 include-not-found                      177                        2
-undefined-name                         258                       10
+undefined-name                         258                        9
+uv_* names resolved                     —                        14 of 15
 ```
 
-The two files that still fail are not grammar defects, and are described in §5 and §6. **A second run of the same
-binary reported three** — `src/nvim/highlight.h` joined them, and `grid.h` went from 5 parse errors to 12 — because
-which translation unit answers for a header is not stable yet (§6). The rate above is the better of the two, and
-the honest reading of the census is "2–3 of 65", not "2".
+The three files that still fail are not grammar defects, and are described in §5 and §6. The count moves between
+runs — 2 or 3 files, with `grid.h` alone accounting for 5 to 12 errors — because which translation unit answers for
+a header is not stable yet (§6); the resolution rates are what the fixes moved.
 
 ## 1. The build tree, built
 
@@ -284,18 +286,19 @@ inspect facts   ... /uv.h    uv__queue, next, prev, UV_ERRNO_MAP — and nothing
 ```
 
 `uv.h` declares about 150 functions as `UV_EXTERN int uv_run(uv_loop_t *, uv_run_mode);` — neovim's use of libuv
-is almost entirely those. The *cooked* reading of the same file expands `UV_EXTERN` (the dump shows
-`unsigned int uv_version(void);`), but the **summary** is parsed from the file's own text with its `#define`s left
-as directives, so the declaration reads `UV_EXTERN int uv_run(…)`: the type is a name the parser cannot place, the
-declaration is lost, and only the macros are recorded.
+is almost entirely those. The **summary** parses the file's own text with its `#define`s left as directives, so the
+declaration reads `UV_EXTERN int uv_run(…)`: the type is a name the parser cannot place, and only the macros are
+recorded.
 
-**The cooked reading is supposed to answer for that, and here it does not.** The census was given the editor's own
-closure cook (`CPPLS_NEOVIM_CLOSURE=1`, `Session::want_the_closure_cooked`) and the numbers did not move:
+**The cooked reading is supposed to answer for that — and it was rendering nothing.** The census first ran without
+the editor's closure cook (`CPPLS_NEOVIM_CLOSURE=1`, `Session::want_the_closure_cooked`) — one file at a time, so no
+header was ever cooked — and then with it, before the fix below and after it:
 
 ```text
-                         one file at a time   with the closure cook
-uv_* names asked/resolved      15 / 2                15 / 2
-definition resolved            73.0%                73.0%
+                                one file at a time   closure cook, before   closure cook, after
+uv_* names asked/resolved            15 / 2               15 / 2                 15 / 14
+definition resolved                  73.0%                73.0%                  74.0%
+type_at                              50.6%                50.6%                  51.0%
 ```
 
 Measured on one real file — `src/nvim/event/loop.c`, which includes `uv.h` and calls `uv_run`:
@@ -309,14 +312,29 @@ uv.h cooked reading       2168 declarations
 uv_* names                4 asked, 4 resolved    <- uv_run is there
 ```
 
-So the dependency's declarations *are* reachable — one explicit cook of the header found 2168 of them, and the four
-`uv_*` names of that file resolved. What is broken is that an **empty** cooked reading is filed for the header, and
-`want_the_closure_cooked` then treats the file as read (`already_read` is `cooked_declarations(path).is_some()`), so
-nothing cooks it again. A cook that finds *nothing* where the file's own text declares something is a failed cook,
-and it must be refused rather than stored — the same rule `cooking_refused` already applies to a render that
-declines.
+The trace under `CPPLS_TRACE_COOKING` named it in one line: `render_cook: uv.h text 73771 tokens 13263 rendered 0
+(composed)` — 74 KB of libuv's API in, **nothing** out. The **composed environment** (what a header is rendered with
+when no program has read it) was built from every unconditional macro fact in the closure, *the file itself
+included*, and a header's own guard is `#ifndef X / #define X` at the top, recorded as `Unconditional` on purpose
+(`deguard_the_files_own_guard` — the file is read once per translation unit). So `X` was in force before the first
+line, `#ifndef X` was false, and the guarded body was inactive. Every guarded header was affected: MinGW's
+`stdlib.h` and `math.h` came out empty too.
 
-**The same mechanism is behind `Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers:**
+**Fixed**: the file being rendered contributes nothing to its own starting environment — its `#define`s are what it
+says, and the renderer reads them itself, in order, from offset 0. The same contract `MacroView::environment_at`
+already states for a timeline. Measured after the fix, on the same file:
+
+```text
+uv.h cooked reading    1912 declarations
+uv_* names             4 asked, 4 resolved
+loop.c                 0 parse errors
+```
+
+Test: `session::tests::a_headers_own_guard_does_not_empty_its_rendering` — a two-line guarded header cooks to 0
+declarations on the previous rule, and to its `Widget` after it.
+
+**The remaining case: `Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers.** The guard fix does not change
+these, and what they show is narrower than an empty header:
 
 ```c
 static Map(cstr_t, int) highlight_unames = MAP_INIT;          // highlight_group.c:72   Map is a macro in map_defs.h
@@ -324,14 +342,12 @@ void modify_keymap(…, Dict(keymap) *opts, Error *err)          // mapping.c:27
 Boolean link = GET_BOOL_OR_TRUE(opts, get_highlight, link);    // highlight_group.c:1710 Boolean is a typedef in types_defs.h
 ```
 
-`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail for that reason: the declaration those
-macros expand to lives in a header whose cooked reading is missing or empty. A test pins the mechanism at the
-session level — `session::tests::a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked` reads the same
-two-file fixture twice: the `.c` alone answers `NotDeclaredHere`, and with the closure cooked (what the pump does
-for every open document) the jump lands in the header.
-
-The next step is therefore not a grammar rule: a cook that produces no declarations for a file whose summary has
-some must be refused, and the header re-cooked — one explicit cook is what turned 0/4 into 4/4 above.
+`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail, and the guard fix did not change them: the
+`Map(…)`/`Dict(…)` spellings are still text in those files' own renderings. What that says is narrower than it was
+— the header is no longer empty, and the macro is unconditional in it — so the remaining question is why a *root*
+file's rendering does not see the macros of the headers it includes. `highlight_group.c` includes
+`nvim/map_defs.h` at line 38 and uses `Map(cstr_t, int)` at line 72, and asking the analysis what is in force there
+answers `NotDeclaredHere("Map")`.
 
 `src/coverity-model.c:139` is `return __coverity_alloc_nosize__()` with no semicolon. Invalid C, not ours.
 
