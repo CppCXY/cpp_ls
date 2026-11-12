@@ -3811,7 +3811,6 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// for its members and the class *further out* is not.
 pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
-    let mut saw_a_class = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if matches!(
             shape.kind,
