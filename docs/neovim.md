@@ -43,7 +43,10 @@ include-not-found                      177                        2
 undefined-name                         258                       10
 ```
 
-The two files that still fail are not grammar defects, and are described in §5 and §6.
+The two files that still fail are not grammar defects, and are described in §5 and §6. **A second run of the same
+binary reported three** — `src/nvim/highlight.h` joined them, and `grid.h` went from 5 parse errors to 12 — because
+which translation unit answers for a header is not stable yet (§6). The rate above is the better of the two, and
+the honest reading of the census is "2–3 of 65", not "2".
 
 ## 1. The build tree, built
 
