@@ -323,6 +323,32 @@ fn what_a_size_call_returns() {
         }
     }
 
+    {
+        let Some(view) = session.view(&file) else {
+            eprintln!("[size-probe] no view");
+            return;
+        };
+        let reading = view
+            .reading_offset_of(FileOffset::new(cursor))
+            .unwrap_or(ReadingOffset::new(cursor));
+        match session.type_at(&view, reading) {
+            Known::Yes(found) => eprintln!("[size-probe] pos (first request): `{}`", found.type_of),
+            Known::Unknown(reason) => {
+                eprintln!("[size-probe] pos (first request): unknown — {reason:?}")
+            }
+            Known::No => eprintln!("[size-probe] pos (first request): no"),
+        }
+    }
+
+    // **The ask the query left behind is served by the next pump**, which is what a server does between two
+    // requests. This is the second request.
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
     let Some(view) = session.view(&file) else {
         eprintln!("[size-probe] no view");
         return;
@@ -331,10 +357,48 @@ fn what_a_size_call_returns() {
         .reading_offset_of(FileOffset::new(cursor))
         .unwrap_or(ReadingOffset::new(cursor));
     match session.type_at(&view, reading) {
-        Known::Yes(found) => eprintln!("[size-probe] pos: `{}`", found.type_of),
-        Known::Unknown(reason) => eprintln!("[size-probe] pos: unknown — {reason:?}"),
-        Known::No => eprintln!("[size-probe] pos: no"),
+        Known::Yes(found) => eprintln!("[size-probe] pos (second request): `{}`", found.type_of),
+        Known::Unknown(reason) => {
+            eprintln!("[size-probe] pos (second request): unknown — {reason:?}")
+        }
+        Known::No => eprintln!("[size-probe] pos (second request): no"),
     }
+
+    // **Which `allocator_traits` the member list would be made of**, and whether the qualified spelling exists at all.
+    // The walk's trace says the list came back "0 listed, 1 unlisted", so the question is which declaration that class
+    // resolved to — and whether refining one file would fix it.
+    for spelling in [
+        "allocator_traits",
+        "std::allocator_traits",
+        "_Alty",
+        "_Alty_traits",
+        "vector",
+        "std::vector",
+    ] {
+        match session.index().definitions(spelling, &file) {
+            Known::Yes(found) => {
+                eprintln!(
+                    "[size-probe] `{spelling}`: {} declaration(s)",
+                    found.found.len()
+                );
+                for one in found.found.iter().take(3) {
+                    eprintln!(
+                        "[size-probe]   {} kind {:?}, scope {:?}",
+                        one.file.file_name().unwrap_or_default().to_string_lossy(),
+                        one.fact.kind,
+                        one.fact.scope
+                    );
+                }
+            }
+            other => eprintln!("[size-probe] `{spelling}`: {other:?}"),
+        }
+    }
+    let vector_header_path = vector_header.clone();
+    eprintln!(
+        "[size-probe] `<vector>` refined: {}, `<xmemory>` refined: {}",
+        session.is_refined(&vector_header_path),
+        session.is_refined(&vector_header_path.with_file_name("xmemory"))
+    );
 }
 
 #[test]

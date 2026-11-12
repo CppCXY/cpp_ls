@@ -1065,6 +1065,14 @@ pub struct ProjectIndex {
     /// the whole map, because a new file can change how an `#include "x.h"` resolves for a closure that does not
     /// contain it. See [`ProjectIndex::insert_at`] and [`ProjectIndex::forget`].
     visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<CachedWalk>>>,
+    /// **Files a query found it could not answer from, and wants refined** — see
+    /// [`ProjectIndex::ask_for_refinement`].
+    ///
+    /// A query cannot refine: refining is a walk of the file's closure and belongs to the pump, which is the one
+    /// place that may spend it. What a query *can* say is which file would have answered — so it leaves the answer
+    /// here and the session drains it (see `Session::advance`), the same shape `refined_on_request` already has for
+    /// a file a request named.
+    refinement_asks: std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
     /// **The walks being built right now**, by root — the single-flight that keeps one cold closure from being walked
     /// twice.
     ///
@@ -16080,6 +16088,32 @@ impl ProjectIndex {
             && left.file != right.file
     }
 
+    /// **Ask for a file's reading to be refined**, because a query could not answer from it.
+    ///
+    /// The trigger is the one shape this index can *see*: a **qualified** name that found nothing while its bare name
+    /// exists **with no scope**. That is what a header looks like before it has been read through its macros — MSVC's
+    /// `<xmemory>` declares `allocator_traits` inside `_STD_BEGIN`, so the bare fact is filed at file scope and
+    /// `std::allocator_traits` does not exist until the file is re-read with the body in force.
+    ///
+    /// Measured on `EmmyLuaCodeStyle` with `<vector>` refined and `<xmemory>` not: `auto pos = _events.size();`
+    /// answered `_Alty_traits::size_type`, because `allocator_traits` had no members to look `size_type` up in.
+    ///
+    /// Idempotent and cheap — a set insert. The session decides when to serve it; see [`ProjectIndex::take_refinement_asks`].
+    pub fn ask_for_refinement(&self, path: impl Into<std::path::PathBuf>) {
+        if let Ok(mut asked) = self.refinement_asks.lock() {
+            asked.insert(path.into());
+        }
+    }
+
+    /// **Take the files a query asked for**, emptying the set — the session's half of
+    /// [`ProjectIndex::ask_for_refinement`].
+    pub fn take_refinement_asks(&self) -> Vec<std::path::PathBuf> {
+        self.refinement_asks
+            .lock()
+            .map(|mut asked| asked.drain().collect())
+            .unwrap_or_default()
+    }
+
     fn certain_declarations(
         &self,
         name: &str,
@@ -16104,6 +16138,24 @@ impl ProjectIndex {
             && let Some(rewritten) = self.through_an_alias(name, visible_from)
         {
             candidates = self.files_declaring(&rewritten, visible_from);
+        }
+
+        // **A qualified name that failed while its bare name exists with no scope is a header that has not been read
+        // through its macros.** `std::allocator_traits` finds nothing when `<xmemory>` was indexed plainly — the class
+        // is there, filed at file scope, because the header opens `std` with `_STD_BEGIN` and the plain reading has no
+        // body to expand. Refining that one file is what makes the name exist, and it is a walk only the pump may
+        // spend, so this asks for it and the answer stays `NotDeclaredHere` until the pump has run.
+        //
+        // Asked only for the *qualified* spelling: the bare name answering is the normal case for a header that has
+        // not been refined, and asking on every miss would turn each lookup of an unknown name into an ask.
+        if candidates.is_empty()
+            && let Some((_, bare)) = split_at_the_last_scope(name)
+        {
+            for found in self.files_declaring(&bare, visible_from) {
+                if found.fact.scope.is_none() {
+                    self.ask_for_refinement(found.file);
+                }
+            }
         }
 
         if candidates.is_empty() {

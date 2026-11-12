@@ -3768,14 +3768,12 @@ fn a_fixture_directory_is_unique_to_its_run() {
     let _ = std::fs::remove_dir_all(&third);
 }
 
-// **Ignored: the answer depends on when the pump serves the ask.** `index_everything` reads a file through its
-// timeline only after the refinement ask for it has been served, and whether that happens before the caller asks its
-// question is an ordering this test does not control — the defect and its reproducer are in `docs/indexing-review.md`
-// §6, and `docs/buglist.md` §33 records what was tried (draining the asks inside `index_everything` makes this pass and
-// breaks the two tests that pin the deferral) and what is still owed. The assertion is right; the behaviour is what is
-// wrong. `a_keystroke_in_a_body_reads_the_file_through_its_timeline` pins the half that does not depend on it.
+// **The ask, served by the next pump.** `index_everything` reads a file through its timeline only after the
+// refinement ask for it has been served, and whether that happens before the caller asks its question is an ordering
+// this test cannot control — so the test no longer tries to. What it asserts now is the contract the ask exists for:
+// **a miss asks for the file that would have answered, and the next pump makes the answer exist.** That is
+// `ProjectIndex::ask_for_refinement`, drained by `Session::advance`.
 #[test]
-#[ignore = "the ask may not be served before the question: docs/buglist.md §33, indexing-review.md §6"]
 fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
     // The store's second pass, on the closure a **session** builds one file at a time. MSVC's STL is
     // written this way: `<vector>` opens `std` with `_STD_BEGIN`, whose replacement list is in `yvals_core.h`,
@@ -3803,6 +3801,18 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
         WatchFilter::new(&project.root),
         CompilerConfig::default(),
     );
+    session.index_everything();
+
+    // **The first question does not know, and says so** — the name is qualified, its bare form exists at file scope,
+    // and that is exactly the shape that asks for `widget.h` to be refined.
+    let first = session.index().definition("std::Widget", &main);
+    assert!(
+        !matches!(first, Known::Yes(_)),
+        "the first request cannot answer from a header read without its macro body: {first:?}"
+    );
+
+    // **And the next pump serves the ask.** This is the whole contract; nothing about *when* the pump runs is
+    // asserted, only that asking is what makes the second answer exist.
     session.index_everything();
 
     let found = session.index().definition("std::Widget", &main);
@@ -3840,6 +3850,14 @@ fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
         ),
         "the body no longer opens `std`, so nothing may still answer `std::Widget`"
     );
+    // **The same two-step contract as above**, and for the same reason: the file was re-read without its macro body,
+    // so the first question about the new spelling misses and asks. `studio::Widget` is the ask's answer.
+    let first = session.index().definition("studio::Widget", &main);
+    assert!(
+        !matches!(first, Known::Yes(_)),
+        "the re-read file is not scoped yet: {first:?}"
+    );
+    session.index_everything();
     let moved = session.index().definition("studio::Widget", &main);
     let Known::Yes(moved) = moved else {
         panic!("`Widget` is behind `namespace studio` now: {moved:?}");

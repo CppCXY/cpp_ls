@@ -400,10 +400,18 @@ real      member of "allocator_traits<_Alty>": 0 listed, 1 unlisted, looking for
           → no member resolved, so the walk answered the spelling it had
 ```
 
-So the alias walk is not where this stops in the real project: **MSVC's `std::allocator_traits` answers with an empty
-member list from this session**. That is the same root cause as `std::vector` being unnameable — the header's scopes
-come from `_STD_BEGIN`, and a header nobody asks to refine has its summary at file scope. The two entries are one
-defect seen twice, and the work is the demand-driven refinement recorded below, not another step in the walk.
+The first reason was `<xmemory>` never being refined: `<vector>` was (`std::vector` has three declarations) while
+`std::allocator_traits` answered `NotDeclaredHere`. **That is now fixed** — `ProjectIndex::ask_for_refinement` is the
+ask a failing qualified lookup leaves, `Session::advance` drains it into the refinement queue, and after one pump:
+
+```text
+`std::allocator_traits`: 2 declaration(s)      (was NotDeclaredHere)
+`<xmemory>` refined: true                      (was false)
+```
+
+The remaining gap is one layer further in: `allocator_traits` now resolves but its member list is still
+`0 listed, 1 unlisted` — the **unlisted** entry is the base that declares `size_type`, so the walk has a base it
+cannot resolve rather than a class it cannot find. That is the next measurement: which base, and why.
 
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 

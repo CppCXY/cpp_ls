@@ -3214,6 +3214,16 @@ impl<F: FileProvider + Clone> Session<F> {
     /// not reach in this call (a file it discovers outranks it) is simply dropped and read again when its turn comes.
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
+
+        // **What the last round of queries asked to have refined** — see `ProjectIndex::ask_for_refinement`. A query
+        // cannot walk a closure, so it leaves the file here; the pump serves it in `finish_a_slice` when idle, the
+        // same way it serves a file a request named. Measured on `EmmyLuaCodeStyle`: `std::allocator_traits` answered
+        // `NotDeclaredHere` and `auto pos = _events.size();` stopped at `_Alty_traits::size_type`, because
+        // `<xmemory>` had never been asked for and its `_STD_BEGIN` scopes were therefore absent.
+        for asked in self.store.index().take_refinement_asks() {
+            self.want_refinement(&asked);
+        }
+
         // **What one batch costs**, under the unit trace. The modules fixture's module read is nine of these and
         // 48–59 s, and no number outside could say which of the nine — or which half of a batch, the wave's closure
         // preparation or the per-file steps — was the seconds.
