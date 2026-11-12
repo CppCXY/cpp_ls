@@ -2794,7 +2794,16 @@ fn the_classes_a_base_clause_names(index: &ProjectIndex, path: &Path, clause: &s
             };
             let bare = head.rsplit("::").next().unwrap_or(&head).trim();
             if bare == "conditional" && member.trim() == "type" && arguments.len() >= 3 {
-                return vec![arguments[1].clone(), arguments[2].clone()];
+                // **The condition decides the branch, when it can be read.** `_Is_default_allocator<_Alloc>` is a
+                // class template with a `true_type`/`false_type` base, and its `::value` is which one it inherits —
+                // decidable whenever the use's argument matches one of its specializations, which is what
+                // [`the_bool_a_trait_has`] asks. When it cannot be decided the two branches are both walked, and
+                // only the members they agree on survive (`mark_ambiguity`).
+                return match the_bool_a_trait_has(index, path, arguments[0].trim()) {
+                    Some(true) => vec![arguments[1].clone()],
+                    Some(false) => vec![arguments[2].clone()],
+                    None => vec![arguments[1].clone(), arguments[2].clone()],
+                };
             }
             let parameters = index
                 .files_declaring(&head, path)
@@ -2859,6 +2868,63 @@ fn the_classes_a_base_clause_names(index: &ProjectIndex, path: &Path, clause: &s
     }
 
     Vec::new()
+}
+
+/// **The `bool` a trait names** — `_Is_default_allocator<allocator<int>>::value` is `true`, and the answer is the
+/// base the matching specialization inherits.
+///
+/// The standard library decides `conditional_t` branches with traits like this one:
+///
+/// ```cpp
+/// template <class _Ty> struct _Is_default_allocator : false_type {};
+/// template <class _Ty> struct _Is_default_allocator<allocator<_Ty>> : true_type {};
+/// ```
+///
+/// Two facts answer it, and both come from the index: [`a_pattern_matches`] picks the declaration whose **pattern**
+/// fits the argument the use wrote (the specialization, when the allocator is `allocator<T>`), and the base that
+/// declaration inherits says the value. Facts only — this runs inside a base walk, and a member query from here is the
+/// cycle recorded in `docs/open-questions.md`.
+///
+/// `None` when the spelling is not a `::value` of a class template, when no declaration matches, or when the matched
+/// declaration does not inherit `true_type`/`false_type`: a trait the layer cannot read is not a `false`.
+fn the_bool_a_trait_has(index: &ProjectIndex, path: &Path, spelled: &str) -> Option<bool> {
+    let (class, member) = split_at_the_last_scope(spelled)?;
+    if member.trim() != "value" {
+        return None;
+    }
+    let (head, arguments) = split_template_arguments(&class)?;
+    let facts = index.files_declaring(&head, path);
+    let declarations: Vec<&VisibleDeclaration<'_>> = facts
+        .iter()
+        .filter(|declared| declared.fact.kind == crate::DeclKind::Type)
+        .collect();
+
+    let matches = |declared: &&&VisibleDeclaration<'_>| {
+        declared.fact.pattern.is_some()
+            && a_pattern_matches(
+                declared.fact.pattern.as_deref(),
+                &declared.fact.parameters,
+                Some(&arguments),
+            )
+    };
+    let chosen = declarations
+        .iter()
+        .find(matches)
+        .or_else(|| {
+            declarations
+                .iter()
+                .find(|declared| declared.fact.pattern.is_none())
+        })
+        .copied()?;
+
+    for base in &chosen.fact.bases {
+        match base.rsplit("::").next().unwrap_or(base).trim() {
+            "true_type" => return Some(true),
+            "false_type" => return Some(false),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn direct_members(
