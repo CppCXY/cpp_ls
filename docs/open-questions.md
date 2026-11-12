@@ -387,6 +387,19 @@ Measured over stdio against the real binary, on `EmmyLuaCodeStyle`:
 `a_conditional_base_picks_the_branch_its_trait_selects` for (3) and (4) together. Both were ignored reproducers while
 the chain was open; both are ordinary passing tests now.
 
+**The survey that says how far the fix reaches.** `real_project_probe.rs::how_many_deduced_types_are_internal_spellings`
+asks every `auto` declaration in the project's own sources for its deduced type and counts the answers that are still
+a library-internal spelling (`_Alty_traits::size_type`, `_Ty`, `_Mybase::iterator` — the signature of a chain that
+stopped one step short):
+
+```text
+[generics] 0 of 885 deduced type(s) are internal spellings
+```
+
+The one case that was internal before this work — `LuaParser.cpp:51`'s `pos`, which answered `_Alty_traits::size_type`
+— is what the five steps above fixed, so this number is the reach of the fix rather than a coincidence. It is the
+probe to re-run after any change to the alias walk, the shape table, or the cache version.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 Reported after the above, with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` drawn as

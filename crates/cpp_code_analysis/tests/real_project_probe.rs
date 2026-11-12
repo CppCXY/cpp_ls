@@ -270,6 +270,86 @@ fn the_alias_before_and_after_the_index_is_read() {
     ask_in(&fresh, "and after one pump");
 }
 
+/// **How many deduced types are still library-internal spellings** — the generics survey.
+///
+/// Every `auto` declaration in the project's own sources is asked for its type, and the answers are split into
+/// "a spelling a reader could write" and "an internal one" — `_Alty_traits::size_type`, `_Ty`, `_Mybase::iterator`.
+/// An internal answer is a chain that stopped one step short, which is the shape this whole line of work is about;
+/// the number is what says whether a fix helped beyond the one line it was measured on.
+///
+/// ```text
+/// cargo test --release -p cpp_code_analysis --test real_project_probe -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn how_many_deduced_types_are_internal_spellings() {
+    let Some(root) = project() else {
+        eprintln!("[generics] the project is not here");
+        return;
+    };
+    let mut files = sources_under(&root);
+    files.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cpp"))
+    });
+    files.sort();
+    let Some(first) = files.first().cloned() else {
+        eprintln!("[generics] no source files");
+        return;
+    };
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files(files.iter().cloned());
+    session.want_cooked_reading(&first);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&first);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let mut total = 0usize;
+    let mut internal = 0usize;
+    let mut examples: Vec<String> = Vec::new();
+    for path in files.iter().take(120) {
+        let Some(view) = session.view_of_the_file(path) else {
+            continue;
+        };
+        let len = view.source.len();
+        let hints = session.type_hints(&view, cpp_parser::SourceRange::new(0, len));
+        for hint in hints {
+            total += 1;
+            let label = hint.label.trim();
+            let is_internal = label.starts_with('_')
+                || label.contains("::_")
+                || label.contains("_Ty")
+                || label.contains("_Alloc")
+                || label.contains("_Mybase");
+            if !is_internal {
+                continue;
+            }
+            internal += 1;
+            if examples.len() < 12 {
+                examples.push(format!(
+                    "{}: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    label
+                ));
+            }
+        }
+    }
+    eprintln!("[generics] {internal} of {total} deduced type(s) are internal spellings");
+    for example in examples {
+        eprintln!("[generics]   {example}");
+    }
+}
+
 #[test]
 #[ignore = "a probe: needs the external project"]
 fn what_a_size_call_returns() {
