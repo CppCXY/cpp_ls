@@ -481,6 +481,19 @@ be). It answers `allocator_traits<A>::size_type` today, and the spelling names *
 3. **`conditional<true, A, B>::type` must select `A`** once the two above are decided — `conditional` has partial
    specializations for `true` and `false`, which is the same selection mechanism as (2).
 
+**Round 6 fixed (1)**: `substituted_members` cut the parameter list and the written arguments to the shorter side, so
+a defaulted parameter was left standing rather than filled in. It now substitutes with the declaration's
+**defaults**, and the trace shows `allocator_traits<A>` → `allocator_traits<allocator<int>>`.
+
+**Round 7 did (2)**: `a_slot_matches` matches a template-id slot by **head (last name segment) and then its
+arguments**, recursively — `allocator<_Ty>` against `std::allocator<MarkEvent>` is the same class written with the
+qualification the use needed, and text equality could never see it. The fixture still answers
+`allocator_traits<A>::size_type`, so (3) is now the only blocker: the walk reaches
+`allocator_traits<allocator<int>>` and asks it for `size_type`, whose two `conditional` branches declare it
+differently — the member list is honest about the ambiguity and the trait has to be **decided** before a branch is.
+That means evaluating `_Is_default_allocator<std::allocator<int>>::value`: match (2) selects the specialization, and
+the answer is the `true_type`/`false_type` base it inherits. That is the next round.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without
