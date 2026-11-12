@@ -287,6 +287,70 @@ fn what_the_real_server_answers_about_the_reported_line() {
         );
     }
 
+    // --- The **hover** on the same name, in the same session: the two handlers ask different views ---------
+    //
+    // `inlay_hint/mod.rs:105` asks `view_of_the_file` (the file's own tokens, because a hint's position must be in
+    // the file's coordinates) and the hover asks the cooked one. If they disagree about one name, that is the defect.
+    ask_until_stable(
+        &mut client,
+        5000,
+        "textDocument/hover",
+        &uri,
+        (130, 12),
+        "`formattedText`",
+    );
+
+    // --- `textDocument/inlayHint` over the reported line, as the editor asks for it ------------------
+    //
+    // The deduced type of `auto formattedText = f.GetFormatResult(t);` is what is drawn after the name, and the
+    // screenshot has it as `basic_string<char, char_traits<char>, allocater<char>>` — the alias expanded — where the
+    // header writes `std::string`. This is the request that produces it.
+    let started = Instant::now();
+    let mut id = 4000;
+    let mut last = String::new();
+    // **Long enough for the index to be read**, because the question is not "what does the first answer say" but
+    // "does the answer ever become the alias": a hint drawn from a half-read index and never refreshed is exactly
+    // the screenshot.
+    let deadline = started + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        let answer = client.request(
+            id,
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": { "line": 125, "character": 0 },
+                    "end": { "line": 136, "character": 0 },
+                },
+            }),
+        );
+        id += 1;
+        let hints = answer["result"].as_array().cloned().unwrap_or_default();
+        let described: Vec<String> = hints
+            .iter()
+            .map(|hint| {
+                format!(
+                    "{}:{} {:?}",
+                    hint["position"]["line"],
+                    hint["position"]["character"],
+                    hint["label"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| hint["label"].to_string())
+                )
+            })
+            .collect();
+        let printed = described.join(" | ");
+        if printed != last {
+            eprintln!(
+                "[hover-probe] inlay hints after {:?}: {printed}",
+                started.elapsed()
+            );
+            last = printed;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
     client.request(9000, "shutdown", Value::Null);
     client.notify("exit", Value::Null);
 }

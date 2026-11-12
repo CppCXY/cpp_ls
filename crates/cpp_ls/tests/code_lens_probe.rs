@@ -12,7 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::{
-    DiskFiles, Known, OpenDocuments, ReferenceBudget, ReferenceKind, Session, SessionFiles, WatchFilter,
+    DiskFiles, Known, OpenDocuments, ReferenceBudget, ReferenceKind, Session, SessionFiles,
+    WatchFilter,
 };
 
 fn project() -> Option<PathBuf> {
@@ -91,9 +92,7 @@ fn compare(root: &Path, relative: &str) {
         let _ = cpp_ls::handlers::references::name_level_offsets(
             &session,
             &plain,
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                fact.name_range.start_offset,
-            ),
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
             false,
         );
     }
@@ -106,7 +105,12 @@ fn compare(root: &Path, relative: &str) {
 
         // **The lens's own number**: `places_of` with the rule the lens passes.
         let started = std::time::Instant::now();
-        let lens = match cpp_ls::handlers::references::places_of(&session, fact, file.clone(), false) {
+        let lens = match cpp_ls::handlers::references::places_of(
+            &session,
+            fact,
+            file.clone(),
+            false,
+        ) {
             Known::Yes(places) => places.len(),
             Known::No | Known::Unknown(_) => {
                 eprintln!(
@@ -119,20 +123,15 @@ fn compare(root: &Path, relative: &str) {
         both += started.elapsed();
         lenses += 1;
 
-        let (uses, declarations, definitions) = counted(&session.symbol_references_of(
-            fact,
-            file.clone(),
-            ReferenceBudget::default(),
-        ));
+        let (uses, declarations, definitions) =
+            counted(&session.symbol_references_of(fact, file.clone(), ReferenceBudget::default()));
         // **The rename rule**, which is what the lens asked before: same declaration, same view, same rule as
         // `textDocument/references`' macro path.
         let started = std::time::Instant::now();
         let rename = cpp_ls::handlers::references::name_level_offsets(
             &session,
             &plain,
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                fact.name_range.start_offset,
-            ),
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
             false,
         )
         .len();

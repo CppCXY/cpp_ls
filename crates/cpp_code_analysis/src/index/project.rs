@@ -6055,13 +6055,8 @@ pub(crate) fn operator_returns_of(
         None => (scopes, root, path),
     };
 
-    let Known::Yes(list) = members_of(
-        index,
-        class_scopes,
-        class_root,
-        class_path,
-        &class_spelling,
-    ) else {
+    let Known::Yes(list) = members_of(index, class_scopes, class_root, class_path, &class_spelling)
+    else {
         return None;
     };
 
@@ -6909,6 +6904,20 @@ fn finish_a_nested_name(
         // The step is the same question [`the_pointee_of_a_handle`] asks, so it is the same `member_fact` call: the head
         // resolved in the enclosing scopes (a base name is not a member, so `resolve_aliases` is the reader that knows how
         // it is written) and the tail looked up in it, with the head's own arguments as the pairing.
+        // **A name qualified by a *namespace* is not a member of a class, and is left as it is written.**
+        //
+        // This walk replaces a member's spelling with the member's type: `pointer` becomes `_Val*`, which is the
+        // whole point. `std::string` is not that shape — `string` is a name in the namespace `std`, and the type it
+        // is declared to have is the alias it stands for, so replacing it turns the name a header wrote into
+        // `basic_string<char, char_traits<char>, allocator<char>>`. Measured over stdio on `EmmyLuaCodeStyle`'s
+        // `LuaCodeFormat.cpp:131`, where the inlay hint of `auto formattedText = f.GetFormatResult(t);` drew exactly
+        // that string, and in `tests/types.rs`' `a_deduced_type_keeps_the_alias_the_source_wrote`.
+        if let Some((head, _)) = the_head_and_the_member_of(&nested)
+            && names_a_namespace(index, path, head)
+        {
+            break;
+        }
+
         let found = match member_fact(index, scopes, root, path, class, &nested, None) {
             Known::Yes(found) => Known::Yes(found),
             miss => match the_head_and_the_member_of(&nested) {
@@ -6948,6 +6957,26 @@ fn finish_a_nested_name(
     }
 
     (current, current_file)
+}
+
+/// **Does this spelling name a namespace in the index?** — the rule that keeps a namespace-qualified type from being
+/// rewritten into what it stands for. See the two callers: [`a_spelling_through_the_aliases_in`] and
+/// [`finish_a_nested_name`].
+///
+/// Every candidate must be a namespace: `std` is one, and `std::string` is not (`definitions` answers the alias, whose
+/// kind is not `Namespace`). An empty or unknown answer is **not** a namespace — a name the index cannot place must not
+/// be rewritten, but it must not stop a walk either, and `false` is the answer that leaves the decision where it was.
+fn names_a_namespace(index: &ProjectIndex, path: &Path, spelling: &str) -> bool {
+    index
+        .definitions(spelling, path)
+        .value()
+        .is_some_and(|found| {
+            !found.found.is_empty()
+                && found
+                    .found
+                    .iter()
+                    .all(|one| one.fact.kind == DeclKind::Namespace)
+        })
 }
 
 /// **Split `A<B>::C` into its head and its last member** — `("A<B>", "C")` — at the last `::` outside angle brackets.
@@ -10380,7 +10409,17 @@ fn a_spelling_through_the_aliases(
     written: &str,
     depth: usize,
 ) -> String {
-    a_spelling_through_the_aliases_in(index, scopes, root, path, class, visited, &[], written, depth)
+    a_spelling_through_the_aliases_in(
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        visited,
+        &[],
+        written,
+        depth,
+    )
 }
 
 /// **A spelling substituted with every pairing in scope** — the environment (the classes the walk came through,
@@ -10424,7 +10463,6 @@ fn a_spelling_through_the_aliases_in(
     written: &str,
     depth: usize,
 ) -> String {
-
     if depth == 0 {
         return written.to_string();
     }
@@ -10556,7 +10594,8 @@ fn a_spelling_through_the_aliases_in(
     // this line the chain stops at `_Alloc::value_type&`, with it at `std::size_t&` — the difference between a
     // spelling no reader can use and the type they asked for.
     let qualifier = {
-        let substituted = substituted_through(&qualifier, &parameters, &defaults, &arguments, environment);
+        let substituted =
+            substituted_through(&qualifier, &parameters, &defaults, &arguments, environment);
         if substituted.trim().is_empty() {
             qualifier
         } else {
@@ -10587,6 +10626,16 @@ fn a_spelling_through_the_aliases_in(
     {
         return written.to_string();
     }
+    // **A name qualified by a *namespace* is not followed.** The walk exists to make a *member* usable: `pointer` in
+    // a class is `_Val*`, and `_Alloc_traits::reference` is `std::size_t&` — a spelling no reader wrote. A
+    // namespace-qualified name is the opposite case: `std::string` is already the name the source wrote, and
+    // replacing it with `basic_string<char, char_traits<char>, allocator<char>>` is what an editor drew as the type
+    // of `auto formattedText = f.GetFormatResult(t);` (reported from `EmmyLuaCodeStyle`'s `LuaCodeFormat.cpp:131`,
+    // and reproduced over stdio). The test is the index's own kind: a fact named `inner` that is a namespace names a
+    // *scope*, not a class in the walk.
+    if names_a_namespace(index, path, &inner) {
+        return written.to_string();
+    }
     let inner_type = crate::sema::types::parse_type_spelling(&inner);
     let Some(inner_name) = inner_type.class_name() else {
         return written.to_string();
@@ -10615,7 +10664,8 @@ fn a_spelling_through_the_aliases_in(
         }
     };
     let inner_parameters = index.template_parameters_for(&inner_class, path, &inner_arguments);
-    let inner_defaults = index.template_parameter_defaults_for(&inner_class, path, &inner_arguments);
+    let inner_defaults =
+        index.template_parameter_defaults_for(&inner_class, path, &inner_arguments);
     // **The member's own name, and the arguments written on *it*** — `A::template rebind<U>::other` names `other`, and
     // the class whose scope it lives in is `A`'s nested `rebind<U>`. The arguments belong to the member and not to the
     // class the spelling qualified with, which is the whole reason `the_member_name` alone was not enough.
@@ -10655,7 +10705,8 @@ fn a_spelling_through_the_aliases_in(
     // Measured on `Mark.cpp`: without this, the walk stopped at `__gnu_cxx::__alloc_traits<…>::template
     // rebind<MarkEvent>::other` — the spelling the report calls "极其夸张" — because `rebind<MarkEvent>` was never a
     // name any lookup was asked about.
-    if fact.kind == crate::DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty() {
+    if fact.kind == crate::DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty()
+    {
         let resolved_arguments: Vec<String> = member_arguments
             .iter()
             .map(|argument| {
@@ -10767,7 +10818,9 @@ fn a_member_the_class_declares(
     let arguments: Vec<String> = class
         .split_once('<')
         .map(|(_, rest)| {
-            crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+            crate::sema::builtins::split_arguments(
+                rest.trim_end().strip_suffix('>').unwrap_or(rest),
+            )
         })
         .unwrap_or_default();
     let parameters = index.template_parameters_for(class, path, &arguments);
@@ -10776,7 +10829,13 @@ fn a_member_the_class_declares(
             .members
             .iter()
             .filter(|member| member.fact.name == name)
-            .filter(|member| a_pattern_matches(member.fact.pattern.as_deref(), &parameters, Some(&arguments)))
+            .filter(|member| {
+                a_pattern_matches(
+                    member.fact.pattern.as_deref(),
+                    &parameters,
+                    Some(&arguments),
+                )
+            })
             .map(|member| member.fact.clone())
             .find(|fact| fact.type_of.is_some())
     }) {
@@ -12456,7 +12515,9 @@ fn fact_from_binding_with(
             if returns.is_some() {
                 None
             } else {
-                crate::sema::declarations::the_returns_the_class_has_to_resolve(shapes, root, binding)
+                crate::sema::declarations::the_returns_the_class_has_to_resolve(
+                    shapes, root, binding,
+                )
             }
         },
         split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),

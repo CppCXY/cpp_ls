@@ -3452,6 +3452,35 @@ int f() {
     );
 }
 
+/// **A deduced type keeps the alias the source wrote.** `auto text = b.get();` where `get` returns `std::string` is a
+/// `std::string` — not `basic_string<char, char_traits<char>, allocator<char>>`, which is what the alias *stands for*
+/// and what an editor drew in the inlay hint of `LuaCodeFormat.cpp:131`.
+///
+/// The alias walk (`a_spelling_through_the_aliases`) exists to turn a member's own spelling into a type the reader can
+/// use — `pointer` → `_Val*`, `_Alloc_traits::reference` → `std::size_t&` — and it was also following a name qualified
+/// by a **namespace**, where there is nothing to make usable: `std::string` is already a name.
+#[test]
+fn a_deduced_type_keeps_the_alias_the_source_wrote() {
+    let source = "\
+namespace std {
+template <class T> struct allocator { };
+template <class C> struct char_traits { };
+template <class C, class T, class A> struct basic_string { };
+using string = basic_string<char, char_traits<char>, allocator<char>>;
+}
+struct Builder { std::string get(); };
+void f(Builder b) {
+    auto text = b.get();
+    (void)text;
+}
+";
+    assert_eq!(
+        type_of_use(source, "text").as_deref(),
+        Some("std::string"),
+        "the spelling the header wrote, not what the alias stands for"
+    );
+}
+
 /// **The range of a range-based `for` written as a reference is still the range.**
 ///
 /// `for (auto &x : someContainer)` where `someContainer` is a parameter is the ordinary spelling in every C++ code

@@ -133,7 +133,9 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         // **No view, no parse for the answer.** The reference query takes the declaration itself
         // (`symbol_references_of`), whose offsets are the summary's own file offsets — the coordinate system that
         // made a header count `0` while five `.cpp` files called the function.
-        let Known::Yes(places) = super::references::places_of(session, fact, view.path.clone(), false) else {
+        let Known::Yes(places) =
+            super::references::places_of(session, fact, view.path.clone(), false)
+        else {
             // A declaration no query can name — a template parameter, a name from a header nothing read. `Unknown`
             // is not "no uses": the lens then says nothing about a number rather than `0 references`, which would be
             // the same false claim the whole-file report was about.

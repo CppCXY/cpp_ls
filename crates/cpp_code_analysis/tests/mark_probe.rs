@@ -97,9 +97,17 @@ fn what_the_types_are_on_the_reported_lines() {
     }
     eprintln!("[probe] {asked} member access(es)");
 
-    for needle in ["events[Pos]", "auto &event", "event.U.Start", "p.GetEvents().at(Start)"] {
+    for needle in [
+        "events[Pos]",
+        "auto &event",
+        "event.U.Start",
+        "p.GetEvents().at(Start)",
+    ] {
         if let Some(at) = text.find(needle) {
-            let type_of = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(at));
+            let type_of = session.type_at(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
+            );
             let line = text[..at].matches('\n').count() + 1;
             eprintln!(
                 "[probe] type_at line {line} `{needle}` → {}",
@@ -115,7 +123,11 @@ fn what_the_types_are_on_the_reported_lines() {
     // **The last link of the report's chain**: the member `Kind` of what `events[Pos].U.Start` is.
     match session.members_of(&view, "MarkEvent::U::Start") {
         Known::Yes(list) => {
-            let names: Vec<&str> = list.members.iter().map(|one| one.fact.name.as_str()).collect();
+            let names: Vec<&str> = list
+                .members
+                .iter()
+                .map(|one| one.fact.name.as_str())
+                .collect();
             eprintln!(
                 "[probe] MarkEvent::U::Start has {} member(s): {names:?} — `Kind` present: {}",
                 names.len(),

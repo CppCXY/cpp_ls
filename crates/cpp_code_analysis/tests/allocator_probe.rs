@@ -13,7 +13,9 @@
 //! cargo test --release -p cpp_code_analysis --test allocator_probe -- --nocapture
 //! ```
 
-use cpp_code_analysis::{CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 fn session(source: &str) -> Session<MemoryFiles> {
     let providers = SessionFiles::new(

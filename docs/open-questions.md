@@ -34,20 +34,33 @@ So what would produce the report in a project where the name resolves is either 
 set already holds (`_`-prefixed predefined macros, module declarations) or a region the cook dropped. Neither is
 reproducible here. **The file it happened in is needed**, with the line.
 
-## An inlay hint rendering a deduced type expanded instead of the alias the source wrote
+## An inlay hint rendering a deduced type expanded instead of the alias the source wrote — **fixed**
 
-Reported with a screenshot: `auto newText = …` drawn as `basic_string<char, char_traits<char>, allocator<char>>`
-rather than `std::string`. Five fixtures of the reported shape all print `std::string`:
+Reported with a screenshot, and five fixtures of the reported shape all printed `std::string`, so the entry ended
+with "a file and a line number are needed, not another guess". The line arrived: `LuaCodeFormat.cpp:131`,
+`auto formattedText = f.GetFormatResult(t);` where `RangeFormatBuilder::GetFormatResult` returns `std::string`.
 
-* `auto text = make(1);` with `std::string make(int);`
-* `auto text = h.name();` for a plain class's member
-* …and for a class template's member (`Holder<int>::name()`)
-* `auto text = r.get()->format(1);` through `Registry<Formatter>`
-* the 39-header fixture's `main.cpp`, which has no `auto` at all
+Reproduced over stdio (`cpp_ls/tests/real_project_hover_probe.rs`): **both** the hover and the inlay hint said
+`basic_string<char, char_traits<char>, allocator<char>>` — and kept saying it for ninety seconds. A session built by
+the crate's own probe answered `std::string` about the same offset, which is why five fixtures missed it.
 
-No `inspect inlay` answer in the real `clice` project prints `basic_string<` or `char_traits<` either. The expansion
-therefore depends on something the screenshot does not show — a project alias, a macro, or a reading that was not
-cooked. **A file and a line number are needed**, not another guess.
+The difference is the **state of the index**, and the step is `finish_a_nested_name`. It exists to make a *member's*
+spelling usable — `pointer` becomes `_Val*` — and it treated `std::string` as "the member `string` of the class `std`",
+looked that member up, and replaced the spelling with the member's *type*: the alias's target. It only does that once
+the index holds the `using string = basic_string<…>` declaration, which is why an early request answered correctly by
+accident and a warm one did not.
+
+The rule now: **a name qualified by a namespace is not a member of a class, and is left as written**
+(`names_a_namespace`, used by `finish_a_nested_name` and by `a_spelling_through_the_aliases_in`). Measured after the
+change, over the same stdio probe:
+
+```text
+hover  at 130:12   std::string formattedText
+inlay  at 130:22   ": std::string"
+```
+
+`tests/types.rs`' `a_deduced_type_keeps_the_alias_the_source_wrote` is the unit-level statement; it failed with the
+expanded spelling before the guard and passes after.
 
 ## What this run did learn about `inspect` itself
 
@@ -128,20 +141,33 @@ So what would produce the report in a project where the name resolves is either 
 set already holds (`_`-prefixed predefined macros, module declarations) or a region the cook dropped. Neither is
 reproducible here. **The file it happened in is needed**, with the line.
 
-## An inlay hint rendering a deduced type expanded instead of the alias the source wrote
+## An inlay hint rendering a deduced type expanded instead of the alias the source wrote — **fixed**
 
-Reported with a screenshot: `auto newText = …` drawn as `basic_string<char, char_traits<char>, allocator<char>>`
-rather than `std::string`. Five fixtures of the reported shape all print `std::string`:
+Reported with a screenshot, and five fixtures of the reported shape all printed `std::string`, so the entry ended
+with "a file and a line number are needed, not another guess". The line arrived: `LuaCodeFormat.cpp:131`,
+`auto formattedText = f.GetFormatResult(t);` where `RangeFormatBuilder::GetFormatResult` returns `std::string`.
 
-* `auto text = make(1);` with `std::string make(int);`
-* `auto text = h.name();` for a plain class's member
-* …and for a class template's member (`Holder<int>::name()`)
-* `auto text = r.get()->format(1);` through `Registry<Formatter>`
-* the 39-header fixture's `main.cpp`, which has no `auto` at all
+Reproduced over stdio (`cpp_ls/tests/real_project_hover_probe.rs`): **both** the hover and the inlay hint said
+`basic_string<char, char_traits<char>, allocator<char>>` — and kept saying it for ninety seconds. A session built by
+the crate's own probe answered `std::string` about the same offset, which is why five fixtures missed it.
 
-No `inspect inlay` answer in the real `clice` project prints `basic_string<` or `char_traits<` either. The expansion
-therefore depends on something the screenshot does not show — a project alias, a macro, or a reading that was not
-cooked. **A file and a line number are needed**, not another guess.
+The difference is the **state of the index**, and the step is `finish_a_nested_name`. It exists to make a *member's*
+spelling usable — `pointer` becomes `_Val*` — and it treated `std::string` as "the member `string` of the class `std`",
+looked that member up, and replaced the spelling with the member's *type*: the alias's target. It only does that once
+the index holds the `using string = basic_string<…>` declaration, which is why an early request answered correctly by
+accident and a warm one did not.
+
+The rule now: **a name qualified by a namespace is not a member of a class, and is left as written**
+(`names_a_namespace`, used by `finish_a_nested_name` and by `a_spelling_through_the_aliases_in`). Measured after the
+change, over the same stdio probe:
+
+```text
+hover  at 130:12   std::string formattedText
+inlay  at 130:22   ": std::string"
+```
+
+`tests/types.rs`' `a_deduced_type_keeps_the_alias_the_source_wrote` is the unit-level statement; it failed with the
+expanded spelling before the guard and passes after.
 
 ## What this run did learn about `inspect` itself
 

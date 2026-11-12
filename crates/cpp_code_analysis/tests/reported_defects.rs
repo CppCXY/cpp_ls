@@ -1022,7 +1022,9 @@ fn an_out_of_line_definition_declares_its_member_and_not_its_class() {
         .collect();
 
     assert!(
-        !functions.iter().any(|(name, scope)| name == "Pair" && scope.is_none()),
+        !functions
+            .iter()
+            .any(|(name, scope)| name == "Pair" && scope.is_none()),
         "the qualifier of `int Pair::Mine()` is not a function declared at file scope: {functions:?}"
     );
     assert_eq!(

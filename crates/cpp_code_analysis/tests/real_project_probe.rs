@@ -140,6 +140,138 @@ fn does_refining_the_header_itself_scope_it() {
 
 #[test]
 #[ignore = "a probe: needs the external project"]
+fn the_alias_before_and_after_the_index_is_read() {
+    // **The server's answer and this crate's answer differ about one name, and the difference is the state of the
+    // index.** Over stdio (`cpp_ls/tests/real_project_hover_probe.rs`), both the hover and the inlay hint at
+    // `LuaCodeFormat.cpp:131` say `basic_string<char, char_traits<char>, allocator<char>>` — the alias expanded —
+    // and they keep saying it for ninety seconds. In a session whose queue has drained, the same call says
+    // `std::string`. So the question is which step of the index turns one into the other.
+    let Some(root) = project() else {
+        eprintln!("[alias-probe] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatLib/src/LuaCodeFormat.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[alias-probe] no LuaCodeFormat.cpp");
+        return;
+    };
+    let Some(at) = text.find("auto formattedText") else {
+        eprintln!("[alias-probe] the line is not there");
+        return;
+    };
+    let cursor = FileOffset::new(at + "auto ".len());
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    session.want_cooked_reading(&file);
+
+    let ask = |session: &Session<DiskFiles>, label: &str| {
+        let Some(view) = session.view(&file) else {
+            eprintln!("[alias-probe] {label}: no view");
+            return;
+        };
+        let reading = view
+            .reading_offset_of(cursor)
+            .unwrap_or(ReadingOffset::new(cursor.get()));
+        match session.type_at(&view, reading) {
+            Known::Yes(found) => eprintln!("[alias-probe] {label}: `{}`", found.type_of),
+            Known::Unknown(reason) => eprintln!("[alias-probe] {label}: unknown — {reason:?}"),
+            Known::No => eprintln!("[alias-probe] {label}: no"),
+        }
+    };
+
+    // The state a request finds first: the file read and cooked, but **before** its includes are followed — which is
+    // what the server's first answer looks like.
+    session.index_everything();
+    ask(
+        &session,
+        &format!(
+            "the file alone ({} summaries)",
+            session.index().summaries().count()
+        ),
+    );
+
+    session.catch_up(&file);
+    ask(
+        &session,
+        &format!(
+            "after one catch_up ({} summaries)",
+            session.index().summaries().count()
+        ),
+    );
+
+    for round in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if round < 12 || session.pending_work() == 0 {
+            ask(
+                &session,
+                &format!(
+                    "round {round} ({} summaries, {} pending)",
+                    session.index().summaries().count(),
+                    session.pending_work()
+                ),
+            );
+        }
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+    ask(&session, "after the queue drains");
+    eprintln!(
+        "[alias-probe] {} summary(ies), pending {}",
+        session.index().summaries().count(),
+        session.pending_work()
+    );
+
+    // **The request a freshly opened file gets**, which is the state the server answers in: `didOpen`, the
+    // `catch_up` a handler does, then the question — with no pump in between.
+    let mut fresh = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    fresh.add_project_files([file.clone()]);
+    fresh.did_open(&file, &text);
+    fresh.catch_up(&file);
+    let ask_in = |session: &Session<DiskFiles>, label: &str| {
+        let Some(view) = session.view(&file) else {
+            eprintln!("[alias-probe] {label}: no cooked view");
+            if let Some(plain) = session.view_of_the_file(&file) {
+                let reading = plain
+                    .reading_offset_of(cursor)
+                    .unwrap_or(ReadingOffset::new(cursor.get()));
+                match session.type_at(&plain, reading) {
+                    Known::Yes(found) => {
+                        eprintln!("[alias-probe] {label}: plain view `{}`", found.type_of)
+                    }
+                    other => eprintln!("[alias-probe] {label}: plain view {other:?}"),
+                }
+            }
+            return;
+        };
+        let reading = view
+            .reading_offset_of(cursor)
+            .unwrap_or(ReadingOffset::new(cursor.get()));
+        match session.type_at(&view, reading) {
+            Known::Yes(found) => eprintln!("[alias-probe] {label}: `{}`", found.type_of),
+            Known::Unknown(reason) => eprintln!("[alias-probe] {label}: unknown — {reason:?}"),
+            Known::No => eprintln!("[alias-probe] {label}: no"),
+        }
+    };
+    ask_in(&fresh, "a fresh open + catch_up");
+    fresh.index_everything();
+    ask_in(&fresh, "and after one pump");
+}
+
+#[test]
+#[ignore = "a probe: needs the external project"]
 fn what_the_session_says_about_the_reported_line() {
     let Some(root) = project() else {
         eprintln!("[probe] the project is not here");
@@ -418,6 +550,65 @@ fn what_the_session_says_about_the_reported_line() {
                     fact.name_range.start_offset
                 );
             }
+        }
+    }
+
+    // **`auto formattedText = f.GetFormatResult(t);`** at line 131 — the reported inlay hint, whose deduced type was
+    // drawn as `basic_string<char, char_traits<char>, allocator<char>>` where the header writes `std::string`.
+    //
+    // **Two views, because the two callers use different ones**: the hover asks the *cooked* view, and the inlay
+    // handler asks `view_of_the_file` — the file's own tokens (`inlay_hint/mod.rs:105`, and it says why: hint
+    // positions must be in the file's coordinates). If the two answer differently, that is the defect.
+    if let Some(at) = text.find("auto formattedText") {
+        let cursor = at + "auto ".len();
+        let reading = view
+            .reading_offset_of(FileOffset::new(cursor))
+            .unwrap_or(ReadingOffset::new(cursor));
+        match session.type_at(&view, reading) {
+            Known::Yes(found) => {
+                eprintln!("[probe] formattedText (cooked view): `{}`", found.type_of)
+            }
+            Known::Unknown(reason) => {
+                eprintln!("[probe] formattedText (cooked view): unknown — {reason:?}")
+            }
+            Known::No => eprintln!("[probe] formattedText (cooked view): no"),
+        }
+        match session.view_of_the_file(&file) {
+            Some(plain) => {
+                let reading = plain
+                    .reading_offset_of(FileOffset::new(cursor))
+                    .unwrap_or(ReadingOffset::new(cursor));
+                match session.type_at(&plain, reading) {
+                    Known::Yes(found) => {
+                        eprintln!("[probe] formattedText (plain view): `{}`", found.type_of)
+                    }
+                    Known::Unknown(reason) => {
+                        eprintln!("[probe] formattedText (plain view): unknown — {reason:?}")
+                    }
+                    Known::No => eprintln!("[probe] formattedText (plain view): no"),
+                }
+                // And the inlay's own answer, through the same call the handler makes.
+                for hint in session.type_hints(&plain, cpp_parser::SourceRange::new(cursor, 1)) {
+                    eprintln!(
+                        "[probe] inlay hint at {}: `{}` ({:?})",
+                        hint.offset, hint.label, hint.kind
+                    );
+                }
+            }
+            None => eprintln!("[probe] no plain view"),
+        }
+    }
+
+    // **The facts behind it**: what `GetFormatResult` is declared to return, and what the index says about
+    // `std::string` itself.
+    for (path, fact) in session.index().every_fact_named("GetFormatResult") {
+        if path.ends_with("RangeFormatBuilder.h") || path.ends_with("FormatBuilder.h") {
+            eprintln!(
+                "[probe] GetFormatResult in {}: kind {:?}, returns {:?}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                fact.kind,
+                fact.returns
+            );
         }
     }
 

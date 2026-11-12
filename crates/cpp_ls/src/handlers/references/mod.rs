@@ -577,9 +577,9 @@ pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
     let Known::Yes(found) =
         session.symbol_references_of(fact, file, cpp_code_analysis::ReferenceBudget::default())
     else {
-        return Known::Unknown(cpp_code_analysis::UnknownReason::NotDeclaredHere(Box::from(
-            fact.name.clone(),
-        )));
+        return Known::Unknown(cpp_code_analysis::UnknownReason::NotDeclaredHere(
+            Box::from(fact.name.clone()),
+        ));
     };
 
     // **The class whose member this is** — `None` for a free function, and for a constructor, whose name is the
@@ -590,8 +590,10 @@ pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
         _ => None,
     };
 
-    let mut parsed: std::collections::HashMap<std::path::PathBuf, Option<cpp_code_analysis::FileView>> =
-        std::collections::HashMap::new();
+    let mut parsed: std::collections::HashMap<
+        std::path::PathBuf,
+        Option<cpp_code_analysis::FileView>,
+    > = std::collections::HashMap::new();
     let mut places = Vec::new();
     for reference_group in &found.files {
         for reference in &reference_group.references {
@@ -604,14 +606,16 @@ pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
                 continue;
             }
             if let Some(owner) = &owner {
-                let view = parsed.entry(reference_group.file.clone()).or_insert_with(|| {
-                    session.files().held(&reference_group.file).map(|held| {
-                        cpp_code_analysis::FileView::parse_with(
-                            held,
-                            &cpp_parser::MacroEnvironment::default(),
-                        )
-                    })
-                });
+                let view = parsed
+                    .entry(reference_group.file.clone())
+                    .or_insert_with(|| {
+                        session.files().held(&reference_group.file).map(|held| {
+                            cpp_code_analysis::FileView::parse_with(
+                                held,
+                                &cpp_parser::MacroEnvironment::default(),
+                            )
+                        })
+                    });
                 if let Some(view) = view.as_ref()
                     && an_occurrence_of_another_class(
                         session,
