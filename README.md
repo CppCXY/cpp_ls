@@ -42,19 +42,18 @@ project root, so a Visual Studio solution and an unconfigured checkout both work
 is used for exact per-file flags.
 
 **4. Every claim in this repository is measured.** **2,000+ tests**, plus probes that run against real
-headers rather than fixtures. [`docs/buglist.md`](docs/buglist.md) is a record of before/after numbers: a sweep of
+headers rather than fixtures. [`docs/open-questions.md`](docs/open-questions.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
 (**GCC 40, Clang 29, MSVC 62**) all run in CI.
 
 ## Crates
 
-| Crate | What it is |
-| --- | --- |
-| [`cpp_parser`](crates/cpp_parser) [![crates.io](https://img.shields.io/crates/v/cpp_parser.svg)](https://crates.io/crates/cpp_parser) [![docs.rs](https://img.shields.io/docsrs/cpp_parser.svg)](https://docs.rs/cpp_parser) | A lossless C++ parser over preprocessed text: a rowan CST with error recovery, C++23/C23 features, CUDA, and vendor extensions |
-| [`cpp_code_analysis`](crates/cpp_code_analysis) [![crates.io](https://img.shields.io/crates/v/cpp_code_analysis.svg)](https://crates.io/crates/cpp_code_analysis) [![docs.rs](https://img.shields.io/docsrs/cpp_code_analysis.svg)](https://docs.rs/cpp_code_analysis) | The preprocessor and cook, the index and its cache, symbol scopes, type inference, modules/partitions, diagnostics |
-| [`cpp_ls`](crates/cpp_ls) [![crates.io](https://img.shields.io/crates/v/cpp_ls.svg)](https://crates.io/crates/cpp_ls) [![docs.rs](https://img.shields.io/docsrs/cpp_ls.svg)](https://docs.rs/cpp_ls) | The server: LSP transport, handlers, configuration, and the binary |
-| [`cpp_formatter`](crates/cpp_formatter) [![crates.io](https://img.shields.io/crates/v/cpp_formatter.svg)](https://crates.io/crates/cpp_formatter) [![docs.rs](https://img.shields.io/docsrs/cpp_formatter.svg)](https://docs.rs/cpp_formatter) | An independent formatter with clang-format's configuration surface |
-| [`inspect`](tools/inspect) | A CLI that asks the same layers the server does — `hover`, `define`, `members`, `complete`, `facts`, `type`, `diagnostics`, `tree` — with no editor in the loop |
+| Crate | crates.io | What it is |
+| --- | --- | --- |
+| [`cpp_parser`](crates/cpp_parser) | [![crates.io](https://img.shields.io/crates/v/cpp_parser.svg)](https://crates.io/crates/cpp_parser) | A lossless C++ parser over preprocessed text: a rowan CST with error recovery, C++23/C23 features, CUDA, and vendor extensions |
+| [`cpp_code_analysis`](crates/cpp_code_analysis) | [![crates.io](https://img.shields.io/crates/v/cpp_code_analysis.svg)](https://crates.io/crates/cpp_code_analysis)  | The preprocessor and cook, the index and its cache, symbol scopes, type inference, modules/partitions, diagnostics |
+| [`cpp_ls`](crates/cpp_ls) | [![crates.io](https://img.shields.io/crates/v/cpp_ls.svg)](https://crates.io/crates/cpp_ls) | The server: LSP transport, handlers, configuration, and the binary |
+| [`cpp_formatter`](crates/cpp_formatter) | [![crates.io](https://img.shields.io/crates/v/cpp_formatter.svg)](https://crates.io/crates/cpp_formatter) | An independent formatter with clang-format's configuration surface |
 
 ## What it answers
 
