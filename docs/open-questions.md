@@ -400,6 +400,16 @@ The one case that was internal before this work — `LuaParser.cpp:51`'s `pos`, 
 — is what the five steps above fixed, so this number is the reach of the fix rather than a coincidence. It is the
 probe to re-run after any change to the alias walk, the shape table, or the cache version.
 
+**One disagreement left, and it is about the harness rather than the answer.** `real_project_probe`'s
+`what_a_size_call_returns` builds its own session, asks, pumps once and asks again — and on that flow **both** answers
+are still `_Alty_traits::size_type`, while the server over stdio answers `size_t pos`. The difference is how many
+drains the refinement passes get: the query's `ask_for_refinement` is served by the next idle round, and the class
+behind `size_type` (`std::allocator_traits`) only answers correctly once `<xmemory>`'s **and** its own dependants have
+been refined. The product surface is the server, and that is the measurement the objective named; the crate-level
+probe needs to keep pumping until its answer settles rather than for exactly one round. Recorded here rather than
+fixed, because a probe that waits is a one-line change and a probe that assumes the ordering is what misled this
+investigation twice already.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 Reported after the above, with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` drawn as
