@@ -277,6 +277,14 @@ gave 2 and 3 files with parse errors, and `grid.h` had 5 errors in one and 12 in
 from the **index** — the first translation unit the compile database says compiles this header — rather than from
 what happens to be in memory. That is the next step, and the reason this section exists.
 
+**Why the walk is not simply replaced by the index's composition.** Composing every header's environment *is*
+deterministic, and it was measured with the session's own test: a header's reading takes `value_b` from the
+**includer's own text** (`#define KIND int value_b;` in `b.cpp`), and a composed environment never holds a macro a
+`.c` file defines for itself, because composition walks *includes* and the index records headers' macros. With
+composition only, that test finds **nothing** where the walk finds `value_b`. So an accurate header reading needs a
+real translation unit, and *which one is available* is a property of the session — the next change has to take the
+unit from the index and pay for its walk where it matters, rather than take whatever the memory holds.
+
 **A summary is a shape-only reading, so a declaration a macro writes is not in the index.** Measured on the
 dependency the build just added:
 
