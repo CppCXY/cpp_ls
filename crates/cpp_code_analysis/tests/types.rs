@@ -3454,21 +3454,32 @@ int f() {
 
 /// **A container's `size()` is a size, not the name of an internal alias.**
 ///
-/// MSVC's `<vector>` writes the chain in three steps, and each one is a different shape of the alias walk:
-/// `vector` has no `size_type` of its own (it inherits `_Vector_val`'s), `_Vector_val`'s is
-/// `typename _Alty_traits::size_type`, and `_Alty_traits` is a member alias of the same class standing for
-/// `allocator_traits<_Alty>`, whose own `size_type` is `typename _Alloc::size_type`.
+/// MSVC's `<vector>` writes the chain in four steps, and the last one is why this is a cross-file fixture:
 ///
-/// Reported from an editor: `auto pos = _events.size();` drew `_Alloc_traits::size_type` — the walk stopped one step
-/// short, at a name no reader can use.
+/// ```cpp
+/// using _Alty        = _Rebind_alloc_t<_Alloc, _Ty>;          // an alias template from <xmemory>
+/// using _Alty_traits = allocator_traits<_Alty>;
+/// using size_type    = typename _Alty_traits::size_type;
+/// ```
+///
+/// `_Rebind_alloc_t` is declared in `<xmemory>`, which `<vector>` includes — and in the same file the chain resolves.
+/// The fixture puts it where the standard library has it, because that is the shape the walk stops on.
+///
+/// Reported from an editor: `auto pos = _events.size();` in `LuaParser.cpp:51` drew `_Alty_traits::size_type` — the
+/// walk stopped at `allocator_traits<_Alty>` without substituting `_Alty`.
 #[test]
 fn a_containers_size_called_on_an_object_is_its_size_type() {
-    let source = "\
+    const XMEMORY: &str = "\
 namespace std {
 template <class T> struct allocator { using value_type = T; using size_type = unsigned long long; };
 template <class A> struct allocator_traits { using size_type = typename A::size_type; };
 template <class A, class T> struct _Rebind_alloc { using type = A; };
 template <class A, class T> using _Rebind_alloc_t = typename _Rebind_alloc<A, T>::type;
+}
+";
+    let source = "\
+#include \"xmemory\"
+namespace std {
 template <class _Ty, class _Alloc = allocator<_Ty>> class vector {
     using _Alty        = _Rebind_alloc_t<_Alloc, _Ty>;
     using _Alty_traits = allocator_traits<_Alty>;
@@ -3483,10 +3494,13 @@ void f() {
     (void)pos;
 }
 ";
-    assert_eq!(
-        type_of_use(source, "pos").as_deref(),
-        Some("unsigned long long"),
-        "the chain ends at the size type, not at an alias of the allocator's"
+    let session = session_with(&[("/p/xmemory", XMEMORY), ("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let offset = last_word(source, "pos");
+    let found = session.type_at(&view, as_reading(&view, offset));
+    assert!(
+        matches!(&found, cpp_code_analysis::Known::Yes(known) if known.type_of == "unsigned long long"),
+        "the chain ends at the size type, not at an alias of the allocator's: {found:?}"
     );
 }
 

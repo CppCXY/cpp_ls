@@ -388,10 +388,22 @@ qualifier `_Alty_traits` to its target and then treats `allocator_traits<_Alty>`
 `_Alty` is not a member of `allocator_traits` and nothing substitutes it. `resolve_aliases` is the reader that knows
 how such an argument is written (it is what `finish_a_nested_name` uses for a base name), and it is not applied here.
 
-The fixture in `tests/types.rs` (`a_containers_size_called_on_an_object_is_its_size_type`) mirrors that chain —
-`_Rebind_alloc_t` included — and **passes**, so the difference is one the fixture does not have: in the standard
-library the alias template is declared in another header (`<xmemory>`), which is included. The next measurement is
-therefore the same fixture with `_Rebind_alloc_t` moved into an included file.
+The fixture in `tests/types.rs` (`a_containers_size_called_on_an_object_is_its_size_type`) mirrors that chain,
+`_Rebind_alloc_t` in an **included header** — the shape the standard library has — and it **passes**. The trace of
+the fixture and the trace of the real project differ at exactly one line:
+
+```text
+fixture   member of "allocator_traits<_Alty>": 1 listed, 0 unlisted, looking for "size_type"
+          → the member resolved, then `_Alty` → `_Rebind_alloc_t<_Alloc, int>` → `unsigned long long`
+
+real      member of "allocator_traits<_Alty>": 0 listed, 1 unlisted, looking for "size_type"
+          → no member resolved, so the walk answered the spelling it had
+```
+
+So the alias walk is not where this stops in the real project: **MSVC's `std::allocator_traits` answers with an empty
+member list from this session**. That is the same root cause as `std::vector` being unnameable — the header's scopes
+come from `_STD_BEGIN`, and a header nobody asks to refine has its summary at file scope. The two entries are one
+defect seen twice, and the work is the demand-driven refinement recorded below, not another step in the walk.
 
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
