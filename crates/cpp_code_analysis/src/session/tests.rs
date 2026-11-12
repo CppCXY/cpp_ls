@@ -5789,3 +5789,50 @@ fn a_program_read_is_charged_to_the_budget() {
         "and what the read cost is charged to the budget"
     );
 }
+
+/// **A header is read in one translation unit's context, and it is the same one every time.**
+///
+/// Nothing in the language says which translation unit a header is "in": the analysis reads it with the macros of
+/// one of the units that contains it in force. It used to take *any* such unit out of a hash map, so the answer
+/// depended on the map's layout — measured on neovim's `grid.h`, which is clean on its own and reads
+/// `__declspec(dllexport) ScreenGrid …` when `main.c`'s unit answers for it, because `main.c:3` defines `EXTERN`
+/// for its own translation unit. The census (517 files indexed) reported 2 errors there; the same file asked alone
+/// reported 0.
+///
+/// The rule is now the **lowest root path** among the units held, which is a function of the files rather than of
+/// their iteration order. `b.cpp` and `c.cpp` define the same name differently; the header's reading has to be
+/// `b.cpp`'s whichever order the two were read in.
+#[test]
+fn a_header_is_read_in_the_same_translation_unit_every_time() {
+    for order in [["/p/b.cpp", "/p/c.cpp"], ["/p/c.cpp", "/p/b.cpp"]] {
+        let files = MemoryFiles::new()
+            .with_file("/p/h.h", "KIND\n")
+            .with_file("/p/b.cpp", "#define KIND int value_b;\n#include \"h.h\"\n")
+            .with_file("/p/c.cpp", "#define KIND int value_c;\n#include \"h.h\"\n");
+        let memory = Memory::new("header-context", &files);
+        let mut session = memory.session();
+        let roots: Vec<PathBuf> = order.iter().map(PathBuf::from).collect();
+        session.add_project_files(roots.clone());
+        session.index_everything();
+        for root in &roots {
+            session.cook(root).expect("the root is cooked");
+        }
+        session.cook("/p/h.h").expect("the header is cooked");
+
+        let names: Vec<String> = session
+            .index()
+            .cooked_declarations(Path::new("/p/h.h"))
+            .expect("the header has a reading")
+            .iter()
+            .map(|fact| fact.name.clone())
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "value_b"),
+            "the lowest root path decides the context, whichever order the roots were read in ({order:?}): {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "value_c"),
+            "and the other translation unit's context is not used ({order:?}): {names:?}"
+        );
+    }
+}

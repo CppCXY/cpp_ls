@@ -8143,9 +8143,22 @@ impl<F: FileProvider + Clone> Session<F> {
         // fallback that makes a header cookable at all, not a replacement for the walk.
         let held = {
             let held_units = self.held_units();
+            // **Which unit answers for a header, when several can.** A file that is the root of its own program is
+            // read through its own walk (the arm below), so the question is only about a file some *other* walk
+            // reached — and every file that includes it is one such walk. They are not interchangeable: neovim's
+            // `grid.h` reads clean on its own, and reads `__declspec(dllexport) ScreenGrid …` when `main.c`'s unit
+            // answers for it, because `main.c:3` defines `EXTERN` **for its own translation unit** before including
+            // anything.
+            //
+            // `held_units` is a hash map, so "any unit that contains the file" was an answer that changed with the
+            // map's layout — the same header could be rendered two ways in one session, and the census measured
+            // exactly that (`grid.h` 2 errors in the 517-file session, 0 alone). The lowest root path wins
+            // instead: still one real translation unit's context, but a function of the files that are held rather
+            // than of their iteration order.
             held_units
                 .values()
-                .find(|held| !held.provisional && held.unit.environment_of(&path).is_some())
+                .filter(|held| !held.provisional && held.unit.environment_of(&path).is_some())
+                .min_by(|left, right| left.unit.files().next().cmp(&right.unit.files().next()))
                 .map(|held| std::sync::Arc::clone(&held.unit))
         };
         let can_be_a_root = {
