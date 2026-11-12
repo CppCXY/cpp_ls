@@ -374,15 +374,24 @@ alias step: "allocator_traits<_Alty>" in std::vector<MarkEvent>   ← the target
 —                                                                 and the walk stops here
 ```
 
-`_Alty_traits` is declared in `_Vector_val`, a **base** of `vector`, where it is
-`allocator_traits<_Alty>` and `_Alty` is `_Rebind_alloc_t<_Alloc, _Ty>`. Resolving `_Alty` needs `_Vector_val`'s own
-parameters paired with the arguments `vector` applied to that base, and that pairing is not carried when the walk
-descends into the class that declared the name: the substitution it applies uses the *current* class's parameters, so
-`allocator_traits<_Alty>` comes out unchanged and `size_type` inside it cannot be looked up.
+`_Alty_traits` is declared **in `vector` itself**, not in a base (an earlier version of this note said a base, which
+was wrong — `<vector>` lines 465-480):
 
-The next step is therefore: carry the base's arguments when the walk moves into `declared_in` — `a_member_the_class_declares`
-already knows which class declared the member, and the base clause it came through is what says what that class was
-applied to.
+```cpp
+using _Alty        = _Rebind_alloc_t<_Alloc, _Ty>;
+using _Alty_traits = allocator_traits<_Alty>;
+using size_type    = typename _Alty_traits::size_type;
+```
+
+So the missing step is the substitution of `_Alty` **inside** `allocator_traits<_Alty>`: the walk resolves the
+qualifier `_Alty_traits` to its target and then treats `allocator_traits<_Alty>` as a spelling to look up, where
+`_Alty` is not a member of `allocator_traits` and nothing substitutes it. `resolve_aliases` is the reader that knows
+how such an argument is written (it is what `finish_a_nested_name` uses for a base name), and it is not applied here.
+
+The fixture in `tests/types.rs` (`a_containers_size_called_on_an_object_is_its_size_type`) mirrors that chain —
+`_Rebind_alloc_t` included — and **passes**, so the difference is one the fixture does not have: in the standard
+library the alias template is declared in another header (`<xmemory>`), which is included. The next measurement is
+therefore the same fixture with `_Rebind_alloc_t` moved into an included file.
 
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 

@@ -3465,15 +3465,17 @@ int f() {
 fn a_containers_size_called_on_an_object_is_its_size_type() {
     let source = "\
 namespace std {
-template <class T> struct allocator { using size_type = unsigned long long; };
+template <class T> struct allocator { using value_type = T; using size_type = unsigned long long; };
 template <class A> struct allocator_traits { using size_type = typename A::size_type; };
-template <class T> struct _Vector_val {
-    using _Alty = allocator<T>;
+template <class A, class T> struct _Rebind_alloc { using type = A; };
+template <class A, class T> using _Rebind_alloc_t = typename _Rebind_alloc<A, T>::type;
+template <class _Ty, class _Alloc = allocator<_Ty>> class vector {
+    using _Alty        = _Rebind_alloc_t<_Alloc, _Ty>;
     using _Alty_traits = allocator_traits<_Alty>;
+public:
     using size_type = typename _Alty_traits::size_type;
     size_type size() const;
 };
-template <class T> struct vector : _Vector_val<T> { };
 }
 std::vector<int> events;
 void f() {
