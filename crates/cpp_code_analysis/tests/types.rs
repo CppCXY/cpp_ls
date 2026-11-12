@@ -3452,25 +3452,16 @@ int f() {
     );
 }
 
-/// **A base chosen by a `conditional_t` over a library trait picks the branch the trait selects.** — *open*
+/// **A base chosen by a `conditional_t` over a library trait picks the branch the trait selects.**
 ///
 /// This is the standard library's own shape, reduced: `allocator_traits<A> : conditional_t<_Is_default_allocator<A>::value,
 /// _Default_allocator_traits<A>, _Normal_allocator_traits<A>>`, where the trait is a **partial specialization** —
-/// `_Is_default_allocator<allocator<T>> : true_type` against the principal `false_type`.
-///
-/// Measured today, `type_of_use` answers **`allocator_traits<A>::size_type`**, and the spelling says there are two
-/// gaps before the right branch can be chosen:
-///
-/// * **the defaulted template argument is not applied at the use**: `std::vector<int>` writes one argument and `A`
-///   defaults to `allocator<T>`, so `A` is still standing where `allocator<int>` belongs;
-/// * **the trait cannot be decided**: `a_pattern_matches` compares a specialization's slot to the argument as
-///   **text**, so `allocator<_Ty>` does not match `std::allocator<MarkEvent>` — the head is the same class and the
-///   comparison is not;
-/// * and after both, `conditional<true, A, B>::type` must select `A` for the value to be usable at all.
-///
-/// Asserted and ignored rather than left red: it is the next reproducer, and it says what the answer must be.
+/// `_Is_default_allocator<allocator<T>> : true_type` against the principal `false_type`. It took four steps to make
+/// true, and each one is a rule of its own: the class's defaulted argument is substituted at the use
+/// (`A = allocator<T>`), a specialization's slot matches a qualified argument by head and recursively, the trait's
+/// value is the base its matching specialization inherits, and the `conditional` then selects one branch. Until all
+/// four, `pos` answered `allocator_traits<A>::size_type`.
 #[test]
-#[ignore = "open: a conditional base over a library trait, and a defaulted argument; see docs/open-questions.md"]
 fn a_conditional_base_picks_the_branch_its_trait_selects() {
     let source = "\
 namespace std {
@@ -3499,46 +3490,6 @@ void f() {
     (void)pos;
 }
 ";
-    let session = session_with(&[("/p/a.cpp", source)]);
-    let view = session.view("/p/a.cpp").expect("the file is held");
-    for class in [
-        "allocator_traits<allocator<int>>",
-        "std::allocator_traits<allocator<int>>",
-        "_Default_allocator_traits<allocator<int>>",
-    ] {
-        match cpp_code_analysis::index::project::members_of(
-            session.index(),
-            &view.scopes,
-            &view.root,
-            std::path::Path::new("/p/a.cpp"),
-            class,
-        ) {
-            cpp_code_analysis::Known::Yes(list) => {
-                eprintln!(
-                    "[cond] members_of({class:?}): {} listed, {} unlisted",
-                    list.members.len(),
-                    list.unlisted.len()
-                );
-                for one in list.members.iter().filter(|one| one.fact.name == "size_type") {
-                    eprintln!(
-                        "[cond]   size_type: {:?}, ambiguous {}, in {}",
-                        one.fact.type_of, one.ambiguous, one.declared_in
-                    );
-                }
-            }
-            other => eprintln!("[cond] members_of({class:?}): {other:?}"),
-        }
-    }
-    for (path, fact) in session.index().every_fact_named("_Is_default_allocator") {
-        eprintln!(
-            "[cond] _Is_default_allocator in {}: kind {:?}, pattern {:?}, bases {:?}, parameters {:?}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            fact.kind,
-            fact.pattern,
-            fact.bases,
-            fact.parameters
-        );
-    }
     assert_eq!(
         type_of_use(source, "pos").as_deref(),
         Some("unsigned long long"),

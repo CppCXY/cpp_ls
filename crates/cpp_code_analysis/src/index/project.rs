@@ -2133,12 +2133,25 @@ pub fn members_of(
     let listed = match &listed {
         Known::No | Known::Unknown(_) => match class.contains("::") {
             true => listed,
-            false => match qualified_from_the_index(index, path, class) {
-                Some(qualified) if qualified != class => {
-                    members_of_inner(index, scopes, root, path, &qualified)
+            // **The name, without the arguments, is what the index can qualify.** `allocator_traits<allocator<int>>`
+            // is a template id, and `qualified_from_the_index` matches a class *name* — asking it for the id found
+            // nothing, so a base the index files as `std::allocator_traits` was `NotDeclaredHere` while the same
+            // class with its qualification written out answered. Measured on the conditional fixture: the member
+            // list was right for `std::allocator_traits<allocator<int>>` and unknown for the bare spelling the walk
+            // uses. The arguments are put back afterwards, which is what the empty-list arm below already did.
+            false => {
+                let bare = base_type_name(class);
+                match qualified_from_the_index(index, path, bare) {
+                    Some(qualified) if qualified != bare => {
+                        let qualified = match class.find('<') {
+                            Some(at) => format!("{qualified}{}", &class[at..]),
+                            None => qualified.to_string(),
+                        };
+                        members_of_inner(index, scopes, root, path, &qualified)
+                    }
+                    _ => listed,
                 }
-                _ => listed,
-            },
+            }
         },
         Known::Yes(list) if list.members.is_empty() && !class.contains("::") => {
             match qualified_from_the_index(index, path, base_type_name(class)) {
@@ -2576,15 +2589,15 @@ fn members_of_inner(
             // is asked, was never reached. Measured on `tests/types.rs`' conditional fixture: the member list of
             // `std::allocator_traits<allocator<int>>` came from `_Normal_allocator_traits` — one of the names inside
             // the clause, picked by the other base path — instead of the branch the trait selects.
-            let head_is_an_alias = index.files_declaring(&head, path).into_iter().any(|declared| {
-                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
-            });
+            let head_is_an_alias = index
+                .files_declaring(&head, path)
+                .into_iter()
+                .any(|declared| {
+                    declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+                });
             if head_is_an_alias {
                 let candidates = the_classes_a_base_clause_names(index, path, &written);
-                for one in candidates
-                    .into_iter()
-                    .filter(|one| !visited.contains(one))
-                {
+                for one in candidates.into_iter().filter(|one| !visited.contains(one)) {
                     next.push((one, owner.clone()));
                 }
                 continue;
