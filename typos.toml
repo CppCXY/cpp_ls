@@ -33,11 +33,14 @@ ue = "ue"
 UE = "UE"
 fpr = "fpr"
 summar = "summar"
+allocater = "allocater"
+classs = "classs"
 [files]
 extend-exclude = [
   "CHANGELOG.md",
   "*.flake",
   "*.yaml",
   "test.rs",
-  "*test.rs"
+  "*test.rs",
+  "open-questions.md"
 ]
