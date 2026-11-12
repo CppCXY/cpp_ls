@@ -494,6 +494,38 @@ differently — the member list is honest about the ambiguity and the trait has 
 That means evaluating `_Is_default_allocator<std::allocator<int>>::value`: match (2) selects the specialization, and
 the answer is the `true_type`/`false_type` base it inherits. That is the next round.
 
+## A partial specialization whose slot writes `typename` truncates in the parser — open
+
+Found while closing the `size_type` chain. MSVC's `<xmemory>` decides the branch with
+
+```cpp
+template <class _Ty>
+struct _Is_default_allocator<allocator<_Ty>, void_t<typename allocator<_Ty>::_From_primary>>
+    : is_same<typename allocator<_Ty>::_From_primary, allocator<_Ty>>::type {};
+```
+
+and the index holds **no fact for it at all** — only the principal
+`struct _Is_default_allocator : false_type {}` (`parameters ["_Alloc", ""]`, `bases ["false_type"]`). The reason is
+the parse, printed by `inspect tree --project <msvc include> --file <msvc include>/xmemory --line 486`:
+
+```text
+tree at 486:1:
+  token Token(StructKeyword) "struct"
+  Syntax(StructDef) "struct _Is_default_allocator<allocator<_Ty>, void_t<typename"
+  Syntax(DeclSpecifierSeq) "struct _Is_default_allocator<allocator<_Ty>, void_t<typename"
+```
+
+The class head stops **inside** the second slot, at `typename`: the declaration is truncated, so the fact builder
+sees a class with no base clause and no pattern, and the index never holds the specialization.
+`the_bool_a_trait_has` therefore falls back to the principal's `false_type`, `allocator_traits` takes the
+`_Normal_allocator_traits` branch, and `size_type` is `typename _Get_size_type<_Alloc>::type` where it should be
+`size_t`.
+
+This is a **parser** defect, not a semantic one: a `typename` inside a template argument list in a class head is a
+dependent type name, and the head has to keep scanning past it. The fixture that made the semantic half work
+(`tests/types.rs::a_conditional_base_picks_the_branch_its_trait_selects`) passes because its specialization slots have
+no `typename`.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

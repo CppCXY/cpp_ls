@@ -412,6 +412,35 @@ fn what_a_size_call_returns() {
         }
     }
 
+    // **The trait that decides the branch**, as the index records it: the specialization has two parameters in
+    // MSVC's `<xmemory>` (`_Is_default_allocator<allocator<_Ty>, void_t<…>>`), while the use writes one.
+    for (path, fact) in session.index().every_fact_named("_Is_default_allocator") {
+        eprintln!(
+            "[size-probe] trait in {}: kind {:?}, pattern {:?}, bases {:?}, parameters {:?}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            fact.kind,
+            fact.pattern,
+            fact.bases,
+            fact.parameters
+        );
+    }
+
+    if let Some(summary) = session
+        .index()
+        .summary(&vector_header.with_file_name("xmemory"))
+    {
+        for fact in summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.name.contains("_Is_default_allocator"))
+        {
+            eprintln!(
+                "[size-probe] xmemory fact: name {:?}, pattern {:?}, bases {:?}, kind {:?}, at {}",
+                fact.name, fact.pattern, fact.bases, fact.kind, fact.range.start_offset
+            );
+        }
+    }
+
     let vector_header_path = vector_header.clone();
     eprintln!(
         "[size-probe] `<vector>` refined: {}, `<xmemory>` refined: {}",
