@@ -235,6 +235,17 @@ fn the_message(
     if !matches!(borrowed.kind, Origin::ByValueParameter | Origin::Temporary) {
         return None;
     }
+    // **A parameter that owns no storage hands over the caller's bytes.** `S(std::string s) : v(s)` copies the
+    // argument into `s`, and `s` dies — but `Word(TextRange, std::string_view item) : Item(item)` copies a *view*: the
+    // parameter object dies and the characters it names do not, because they are the caller's. The same holds for a
+    // `const char*`, which owns no storage either. Reported from `EmmyLuaCodeStyle`'s `spell::Word`, whose correct
+    // constructor was underlined as "a parameter that is destroyed"; see `Borrowed::owner_owns_nothing`.
+    if matches!(borrowing, Borrowing::View(_))
+        && borrowed.kind == Origin::ByValueParameter
+        && borrowed.owner_owns_nothing
+    {
+        return None;
+    }
     let described = match borrowing {
         Borrowing::View(view) => view.as_str(),
         Borrowing::Reference => "reference",

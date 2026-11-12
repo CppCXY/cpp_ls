@@ -185,3 +185,60 @@ fn a_template_id_inside_a_template_is_silent() {
         "a plain type in a template's parameter list is still this rule's question",
     );
 }
+
+/// **A header is a fragment of its includers order** — the reported shape, from `EmmyLuaCodeStyle`:
+///
+/// ```cpp
+/// // LuaStyleEnum.h
+/// enum class FunctionSingleArgSpace { … };
+/// // LuaStyleStruct.h            — no include of the enum anywhere in this file
+/// struct SpaceBeforeSingleArg { FunctionSingleArgSpace table = FunctionSingleArgSpace::Always; };
+/// // LuaStyle.h
+/// #include "LuaStyleEnum.h"
+/// #include "LuaStyleStruct.h"
+/// ```
+///
+/// The project compiles as written, and the header is never compiled on its own. The finding was reported anyway —
+/// "declared in `luastyleenum.h`, which this file does not include" — which argues with a style, not with a program.
+/// The rule now asks the files that include the header; one of them missing the enum header is what a finding needs.
+#[test]
+fn a_header_inside_its_includers_order_is_silent() {
+    let fragment = codes_in(
+        &[
+            ("/p/style_enum.h", "enum class Space { Always };\n"),
+            (
+                "/p/style_struct.h",
+                "struct Before { Space table = Space::Always; };\n",
+            ),
+            (
+                "/p/style.h",
+                "#include \"style_enum.h\"\n#include \"style_struct.h\"\n",
+            ),
+        ],
+        "/p/style_struct.h",
+    );
+    assert_silent_about(
+        &fragment,
+        DiagnosticCode::MissingInclude,
+        "the only includer reaches the enum header before the fragment",
+    );
+
+    // **The same fragment, included by a file that never reaches the enum** — that translation unit does not compile,
+    // and it is the finding the rule is for.
+    let broken = codes_in(
+        &[
+            ("/p/style_enum.h", "enum class Space { Always };\n"),
+            (
+                "/p/style_struct.h",
+                "struct Before { Space table = Space::Always; };\n",
+            ),
+            ("/p/only_struct.cpp", "#include \"style_struct.h\"\n"),
+        ],
+        "/p/style_struct.h",
+    );
+    assert_reported(
+        &broken,
+        DiagnosticCode::MissingInclude,
+        "an includer that does not reach the enum is the broken translation unit",
+    );
+}

@@ -113,3 +113,40 @@ fn a_string_literal_and_an_unknown_pointer_are_silent() {
         "`q` may point at anything, and the rule does not guess",
     );
 }
+
+/// **A view member of a view parameter** — the reported shape, from `EmmyLuaCodeStyle`'s `spell::Word`:
+///
+/// ```cpp
+/// struct Word {
+///     TextRange Range;
+///     std::string_view Item;
+///     Word(TextRange range, std::string_view item) : Range(range), Item(item) {}
+/// };
+/// ```
+///
+/// `item` is a by-value parameter, but it is a **view**: the bytes it names belong to the caller, and copying it into
+/// the member copies a pointer and a length. It is the same argument [`Borrowed::owner_is_a_view`] already makes for a
+/// view *local* in `dangling-return` — and it was reported as "a parameter that is destroyed", which is true of the
+/// parameter object and false of what the parameter refers to.
+#[test]
+fn a_view_member_of_a_view_parameter_is_silent() {
+    let view = codes_of(
+        "struct string_view {};\nstruct Word {\n    string_view Item;\n    Word(string_view item) : Item(item) {}\n};\n",
+    );
+    assert_silent_about(
+        &view,
+        DiagnosticCode::DanglingField,
+        "a view parameter names the caller's bytes; the member copies the view, not the parameter",
+    );
+
+    // **A pointer parameter is the same shape**: `const char* p` owns nothing either, and a view built from it names
+    // whatever the caller passed.
+    let pointer = codes_of(
+        "struct string_view {};\nstruct S {\n    string_view v;\n    S(const char *p) : v(p) {}\n};\n",
+    );
+    assert_silent_about(
+        &pointer,
+        DiagnosticCode::DanglingField,
+        "the characters a pointer parameter names are the caller's",
+    );
+}

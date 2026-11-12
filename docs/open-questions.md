@@ -732,3 +732,60 @@ its six members eighteen times, and the member list — and the hover — showed
 
 The probes that carry these numbers are `real_project_probe.rs::what_guard_the_cached_summary_records`,
 `…::does_the_cached_rendering_hold_the_header_eighteen_times` and `…::where_the_duplicate_declarations_come_from`.
+
+## Two checks that underlined correct code
+
+Reported with two screenshots: `missing-include` on `FunctionSingleArgSpace` in
+`CodeFormatCore/include/CodeFormatCore/Config/LuaStyleStruct.h`, and `dangling-field` on `spell::Word`'s
+`std::string_view Item` in `CodeFormatCore/include/CodeFormatCore/Diagnostic/Spell/Util.h`.
+
+### What the project said
+
+Every check over the project's own **198** files produced **four** findings from these two rules, and all four were
+wrong:
+
+```text
+missing-include  LuaStyleStruct.h               `FunctionSingleArgSpace` is declared in luastyleenum.h, which this file does not include
+missing-include  CodeFormatLib/src/Types.h      `DiagnosticType` is declared in diagnostictype.h, which this file does not include
+dangling-field   Spell/Util.h                   `Item` is a `string_view` initialised from `item`, a parameter that is destroyed …
+dangling-field   Util/include/Util/format.h     `Expr` is a `string_view` initialised from `expr`, a parameter that is destroyed …
+```
+
+### Why the `missing-include` findings were wrong
+
+A header is not compiled on its own: its text is spliced into whichever translation unit includes it, and that file owns
+the include order. `LuaStyleStruct.h` uses `FunctionSingleArgSpace` and includes neither it nor `LuaStyleEnum.h` — and
+the project compiles because `LuaStyle.h` includes the enum on line 4 and the struct on line 5. `CodeFormatLib/src/Types.h`
+is the same shape: `LuaCodeFormat.h` includes the diagnostic headers before it. The rule's premise ("the program compiles
+only because another translation unit's include order happened to pull that header in first") is a statement about a
+**translation unit**, and a header is not one.
+
+### Why the `dangling-field` findings were wrong
+
+`Word(TextRange range, std::string_view item) : Range(range), Item(item) {}` copies a *view*: the parameter object dies
+at the closing brace, and the characters it names are the caller's. The rule treated every by-value parameter as a copy
+that dies with its storage — which is true of `S(std::string s) : v(s)` and false of a view or a pointer, and the
+difference was already known to the same analysis: `Borrowed::owner_is_a_view` exists because a view *local* was
+reported as "a local that is destroyed" in `dangling-return`.
+
+### What the rules do now
+
+* `missing-include` in a file a compiler does not compile on its own is about **the files that include it**: the name is
+  missing only if some includer does not already reach the declaring header (`an_includer_misses`). A header nothing
+  includes is still reported, because nothing makes the name visible there.
+* `dangling-field` stays silent for a **view member initialised from a by-value parameter that owns no storage** — a
+  view or a pointer. A reference member is unaffected (binding a reference from a view would be a conversion temporary),
+  and `S(std::string s) : v(s)` still reports.
+* The `Borrowed` flag is renamed `owner_owns_nothing` and computed for locals (views only — a *local* pointer is exactly
+  `dangling-return`'s question) and for by-value parameters (views and pointers).
+
+### After
+
+```text
+[checks] missing-include 0, dangling-field 0        (the same 198 files)
+```
+
+The true positives stay covered: `dangling_field::a_view_member_of_a_by_value_parameter_is_reported`,
+`…::a_pointer_member_of_a_parameters_buffer_is_reported`, and `missing_include::a_header_inside_its_includers_order_is_silent`'s
+second half, where the same fragment is included by a file that never reaches the enum and is still reported.
+`real_project_probe.rs::what_the_two_reported_checks_say_about_the_project` prints the count.

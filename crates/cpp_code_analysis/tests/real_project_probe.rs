@@ -1298,3 +1298,72 @@ fn what_guard_the_cached_summary_records() {
         None => eprintln!("[guard] no summary for Types.h"),
     }
 }
+
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn what_the_two_reported_checks_say_about_the_project() {
+    // The two findings an editor reported: `missing-include` for `FunctionSingleArgSpace` in `LuaStyleStruct.h`, and
+    // `dangling-field` for `Word`'s `std::string_view Item` in `Spell/Util.h`. This runs every check over the
+    // project's own files and prints the two codes, so the question "is this one file or a family" has a number.
+    let Some(root) = project() else {
+        eprintln!("[checks] the project is not here");
+        return;
+    };
+    let mut files = sources_under(&root);
+    files.retain(|path| {
+        path.components().all(|part| {
+            let text = part.as_os_str().to_string_lossy();
+            text != "3rd" && text != "out" && text != ".cppls"
+        })
+    });
+    files.sort();
+    eprintln!("[checks] {} file(s)", files.len());
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files(files.iter().cloned());
+
+    let mut missing = 0usize;
+    let mut dangling = 0usize;
+    for (index, file) in files.iter().enumerate() {
+        session.want_cooked_reading(file);
+        for _ in 0..6 {
+            session.index_everything();
+            session.catch_up(file);
+            if session.pending_work() == 0 {
+                break;
+            }
+        }
+        let Some(found) = session.diagnostics(file) else {
+            continue;
+        };
+        for finding in found.checks.iter().filter(|finding| {
+            matches!(
+                finding.code,
+                cpp_code_analysis::DiagnosticCode::MissingInclude
+                    | cpp_code_analysis::DiagnosticCode::DanglingField
+            )
+        }) {
+            match finding.code {
+                cpp_code_analysis::DiagnosticCode::MissingInclude => missing += 1,
+                _ => dangling += 1,
+            }
+            eprintln!(
+                "[checks] {:?} {} :: {}:{} {}",
+                finding.code,
+                file.strip_prefix(&root).unwrap_or(file).display(),
+                finding.range.start_offset,
+                finding.range.length,
+                finding.message
+            );
+        }
+        if index % 40 == 0 {
+            eprintln!("[checks] … {index} file(s) asked");
+        }
+    }
+    eprintln!("[checks] missing-include {missing}, dangling-field {dangling}");
+}

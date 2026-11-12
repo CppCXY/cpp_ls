@@ -121,7 +121,7 @@ impl Check for DanglingReturn {
                     // whatever the view was made from, which this function never owned. Reported from
                     // `EmmyLuaCodeStyle`'s `LuaSource::Slice`: `std::string_view source = GetSource(); return
                     // source.substr(…)` was underlined as "a local that is destroyed".
-                    Origin::Local if borrowed.owner_is_a_view => None,
+                    Origin::Local if borrowed.owner_owns_nothing => None,
                     Origin::Local => Some(format!(
                         "the returned `{view}` refers to `{name}`, a local that is destroyed when the function \
                          returns",

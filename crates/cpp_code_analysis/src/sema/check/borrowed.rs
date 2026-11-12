@@ -62,11 +62,16 @@ pub(crate) struct Borrowed {
     pub(crate) through: Option<&'static str>,
     /// Is this the **address** of the referent (`&x`)?
     pub(crate) address_of: bool,
-    /// **Is the local the borrow comes from itself a view?** A `string_view` local owns no bytes: handing out a copy of
-    /// it, or a subrange of it, copies a pointer and a length, so destroying it destroys nothing and `dangling-return`
-    /// must not call it "a local that is destroyed". Measured on `EmmyLuaCodeStyle`'s `LuaSource::Slice`
-    /// (`std::string_view source = GetSource(); … return source.substr(…)`), whose correct code was underlined.
-    pub(crate) owner_is_a_view: bool,
+    /// **Does the binding itself own any storage?** A `string_view` local or parameter owns no bytes: handing out a
+    /// copy of it, or a subrange of it, copies a pointer and a length, so destroying the binding destroys nothing —
+    /// `dangling-return` must not call it "a local that is destroyed", and `dangling-field` must not call a
+    /// `string_view` parameter "destroyed" when its view is copied into another view. A **parameter's** pointer is the
+    /// same shape: the characters a `const char*` names belong to whoever passed them. (A *local* pointer is not, and
+    /// the two functions that compute this are separate for that reason — see [`the_binding_owns_nothing`].) Measured
+    /// on `EmmyLuaCodeStyle`: a view local (`LuaSource::Slice`, `std::string_view source = GetSource(); … return
+    /// source.substr(…)`) whose correct code was underlined, and later `spell::Word`'s
+    /// `Word(TextRange, std::string_view item) : Item(item) {}` reported as a dangling field.
+    pub(crate) owner_owns_nothing: bool,
 }
 
 /// **A view type, by the name every library spells it with.**
@@ -176,8 +181,13 @@ pub(crate) fn origin_of(
                 description,
                 through: None,
                 address_of: false,
-                owner_is_a_view: origin == Origin::Local
-                    && the_binding_is_a_view(context, &binding),
+                // **A local and a by-value parameter are the two bindings this can be about.** Both are copies the
+                // function owns — unless what they hold is a view or a pointer, which owns no bytes at all.
+                owner_owns_nothing: match origin {
+                    Origin::Local => the_binding_owns_nothing(context, &binding),
+                    Origin::ByValueParameter => a_parameter_owns_nothing(context, &binding),
+                    _ => false,
+                },
             })
         }
         // `x.member` is a subobject of what `x` is: the local dies with its member. `v[i]` is an element of `v`, which is the
@@ -199,7 +209,7 @@ pub(crate) fn origin_of(
             description: "this".to_string(),
             through: None,
             address_of: false,
-            owner_is_a_view: false,
+            owner_owns_nothing: false,
         }),
         CppExpr::UnaryExpr(unary) => {
             let operator = unary.get_operator_text();
@@ -299,7 +309,7 @@ pub(crate) fn origin_of(
                 description: literal.syntax().text().to_string(),
                 through: None,
                 address_of: false,
-                owner_is_a_view: false,
+                owner_owns_nothing: false,
             })
         }
         _ => Some(unknown(expression.text().to_string())),
@@ -336,8 +346,12 @@ fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &crate::Bindi
 /// other shape — measured on `EmmyLuaCodeStyle`'s `LuaSource::Slice`, which is
 /// `std::string_view source = GetSource(); … return source.substr(…)`.
 ///
+/// **A pointer is not this question**, deliberately: `const char* p = local.c_str(); return p;` hands out storage the
+/// *local* owns, which is exactly what `dangling-return` is for. [`a_parameter_owns_nothing`] is where a pointer counts,
+/// because a parameter's pointer names the caller's bytes rather than a local's.
+///
 /// The declaration is found the way [`declared_static`] finds it: the innermost declaration containing the name.
-fn the_binding_is_a_view(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+fn the_binding_owns_nothing(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
     let name_start = binding.name_range.start_offset;
     let declaration = context
         .own::<cpp_parser::CppDeclaration>()
@@ -346,8 +360,10 @@ fn the_binding_is_a_view(context: &CheckContext<'_>, binding: &crate::Binding) -
             usize::from(range.start()) <= name_start && name_start < usize::from(range.end())
         })
         .max_by_key(|declaration| usize::from(declaration.syntax().text_range().start()));
-    let Some(specifiers) = declaration.and_then(|declaration| declaration.get_decl_specifiers())
-    else {
+    let Some(declaration) = declaration else {
+        return false;
+    };
+    let Some(specifiers) = declaration.get_decl_specifiers() else {
         return false;
     };
     let written = specifiers
@@ -357,13 +373,38 @@ fn the_binding_is_a_view(context: &CheckContext<'_>, binding: &crate::Binding) -
     view_name_of(&written).is_some()
 }
 
+/// **Does a by-value parameter own any storage?** — the same question for the other binding that is a copy.
+///
+/// Asked of the **parameter node**, which is where a parameter's type lives (`CppParam::get_type_text` composes it from
+/// the specifiers and the declarator's `*`/`&`/`[]` parts). A `std::string_view item` parameter owns no bytes and a
+/// `const char* p` owns none either: what they name belongs to the caller, so copying one into a view member is not a
+/// borrow of the parameter. Measured on `EmmyLuaCodeStyle`'s `spell::Word`, whose correct
+/// `Word(TextRange range, std::string_view item) : Item(item) {}` was reported as "a parameter that is destroyed".
+fn a_parameter_owns_nothing(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+    let start = binding.range.start_offset;
+    let end = binding.range.end_offset();
+    let parameter = context
+        .own::<cpp_parser::CppParam>()
+        .filter(|parameter| {
+            let range = parameter.syntax().text_range();
+            usize::from(range.start()) <= start && end <= usize::from(range.end())
+        })
+        .max_by_key(|parameter| usize::from(parameter.syntax().text_range().start()));
+    let Some(parameter) = parameter else {
+        return false;
+    };
+    let written = parameter.get_type_text();
+    // A pointer's trailing `*` is the declarator's (`int* p`, `const char *p`), and `view_name_of` classifies the rest.
+    written.trim_end().ends_with('*') || view_name_of(&written).is_some()
+}
+
 fn unknown(description: String) -> Borrowed {
     Borrowed {
         kind: Origin::Unknown,
         description,
         through: None,
         address_of: false,
-        owner_is_a_view: false,
+        owner_owns_nothing: false,
     }
 }
 
@@ -373,7 +414,7 @@ fn temporary(expression: &cpp_parser::CppSyntaxNode) -> Borrowed {
         description: expression.text().to_string(),
         through: None,
         address_of: false,
-        owner_is_a_view: false,
+        owner_owns_nothing: false,
     }
 }
 

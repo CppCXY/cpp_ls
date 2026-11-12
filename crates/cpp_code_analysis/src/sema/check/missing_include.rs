@@ -45,6 +45,20 @@
 //! for `import std;`, and every vendored tree outside the workspace is therefore invisible to this rule without a
 //! single name being listed.
 //!
+//! # A header is a fragment of its includers' order, not a translation unit
+//!
+//! A header is not compiled on its own: its text is spliced into whichever translation unit includes it, and that file
+//! owns the include order. `EmmyLuaCodeStyle`'s `LuaStyleStruct.h` uses `FunctionSingleArgSpace` from `LuaStyleEnum.h`
+//! and includes neither, and the project compiles because `LuaStyle.h` includes the enum **first** and the struct
+//! second; `CodeFormatLib/src/Types.h` and `DiagnosticType.h` have the same shape through the diagnostic headers of
+//! `LuaCodeFormat.h`. Both were reported — "declared in `luastyleenum.h`, which this file does not include" — which is a
+//! statement about a style the project has not adopted, not about a program that does not compile.
+//!
+//! So for a file a compiler does not compile on its own, the finding is made about **the files that include it**: the
+//! name is missing only if some includer does not already reach the declaring header. When every includer does, the
+//! program compiles as written and the rule says nothing. A header nothing includes is reported, because nothing makes
+//! the name visible in it at all.
+//!
 //! # Why it can be turned off
 //!
 //! `[diagnostics] disable = ["missing-include"]` — the mechanism every rule already uses. A rule about *the style of
@@ -193,6 +207,12 @@ fn the_candidate(
         )) {
             return None;
         }
+        // **A header is a fragment of its includers' order**, and this is the file the missing include would break —
+        // see `an_includer_misses` and the module documentation. A translation unit answers for itself, which is the
+        // case the rule was written for.
+        if !is_a_source_file(path) && !an_includer_misses(context, path, &declaring) {
+            continue;
+        }
         let rank = how_strongly_it_answers(&declaring, name, path);
         if best.as_ref().is_none_or(|(known, _)| rank < *known) {
             let file = declaring
@@ -203,6 +223,30 @@ fn the_candidate(
         }
     }
     best.map(|(_, file)| file)
+}
+
+/// **Does some file that includes `path` fail to reach `declaring`?** — the question a header's finding is really about.
+///
+/// A header is text spliced into a translation unit, and the unit's include order is what decides whether the name is
+/// visible. `LuaStyleStruct.h` uses `FunctionSingleArgSpace` and includes neither it nor its header, and the program
+/// compiles because `LuaStyle.h` includes `LuaStyleEnum.h` first — measured on `EmmyLuaCodeStyle`, where this and
+/// `CodeFormatLib/src/Types.h` (`DiagnosticType`) were the rule's only two findings and both were this shape.
+///
+/// So the finding belongs to the file whose translation unit it breaks: one includer that does not reach the declaring
+/// header. `true` when there is no includer at all, because then nothing makes the name visible in this file — no
+/// include order exists to fix it.
+fn an_includer_misses(context: &CheckContext<'_>, path: &Path, declaring: &Path) -> bool {
+    let declaring = crate::file::paths::normalize_path(declaring, cfg!(windows));
+    let includers = context.index().includers_of(path);
+    if includers.is_empty() {
+        return true;
+    }
+    includers.iter().any(|includer| {
+        !context
+            .index()
+            .include_closure(includer)
+            .contains(&declaring)
+    })
 }
 
 /// **Is this a file a translation unit is compiled from, rather than a header to include?**
