@@ -352,6 +352,82 @@ fn how_many_deduced_types_are_internal_spellings() {
 
 #[test]
 #[ignore = "a probe: needs the external project"]
+fn the_two_reported_enums_in_the_parser() {
+    // Reported with screenshots: `BinOpr::OPR_SHR` in `LuaParser.cpp:1010` is drawn as a **property**, and
+    // `case TK_LE:` in the same file at 1019 gets **no semantic token** (`variable.other.unknown`). The two enums are
+    // in headers that file includes directly — `enum class BinOpr` in `LuaOperatorType.h`, `enum LuaTokenTypeDetail`
+    // in `LuaTokenTypeDetail.h` — while the earlier fix was measured on `SpaceAnalyzer.cpp`, another file.
+    let Some(root) = project() else {
+        eprintln!("[enum2] the project is not here");
+        return;
+    };
+    let file = root.join("LuaParser/src/Parse/LuaParser.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[enum2] no LuaParser.cpp");
+        return;
+    };
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    session.want_cooked_reading(&file);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    for spelling in ["TK_LE", "OPR_SHR", "BinOpr", "LuaTokenTypeDetail"] {
+        match session.index().definitions(spelling, &file) {
+            Known::Yes(found) => {
+                eprintln!("[enum2] `{spelling}`: {} declaration(s)", found.found.len());
+                for one in found.found.iter().take(3) {
+                    eprintln!(
+                        "[enum2]   {} kind {:?}, scope {:?}, type_of {:?}",
+                        one.file.file_name().unwrap_or_default().to_string_lossy(),
+                        one.fact.kind,
+                        one.fact.scope,
+                        one.fact.type_of
+                    );
+                }
+            }
+            other => eprintln!("[enum2] `{spelling}`: {other:?}"),
+        }
+        match session.index().kind_of(spelling, &file) {
+            Known::Yes(kind) => eprintln!("[enum2] kind_of({spelling}): {kind:?}"),
+            other => eprintln!("[enum2] kind_of({spelling}): {other:?}"),
+        }
+    }
+
+    let Some(view) = session.view_of_the_file(&file) else {
+        eprintln!("[enum2] no view");
+        return;
+    };
+    let names = session.classified_names(&view);
+    for spelling in ["TK_LE", "OPR_SHR"] {
+        let found: Vec<_> = names
+            .iter()
+            .filter(|name| view.get_token_text(name.range) == Some(spelling))
+            .collect();
+        eprintln!(
+            "[enum2] {spelling}: {} classification(s) {:?}",
+            found.len(),
+            found
+                .iter()
+                .map(|name| (name.kind, name.provenance))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+#[ignore = "a probe: needs the external project"]
 fn what_a_size_call_returns() {
     // Reported with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` is drawn as
     // `_Alloc_traits::size_type` — an alias of an alias of a member of a class, not a type a reader can use. The

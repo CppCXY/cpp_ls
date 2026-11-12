@@ -230,6 +230,18 @@ fn what_the_real_server_answers_about_the_reported_line() {
             },
         }),
     );
+    let legend_names: Vec<String> = initialized["result"]["capabilities"]["semanticTokensProvider"]
+        ["legend"]["tokenTypes"]
+        .as_array()
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!("[hover-probe] legend: {legend_names:?}");
     eprintln!(
         "[hover-probe] initialize: {}",
         if initialized.get("result").is_some() {
@@ -375,6 +387,82 @@ fn what_the_real_server_answers_about_the_reported_line() {
             (50, 10),
             "`pos`",
         );
+    }
+
+    // --- Semantic tokens for the two reported enum sites in `LuaParser.cpp` -------------------------
+    //
+    // `BinOpr::OPR_SHR` at 1010 was reported as drawn `property`, and `case TK_LE:` at 1019 as drawn with no token
+    // at all. The analysis answers `EnumMember` for both, so this asks the server what it actually sends — decoded
+    // against the legend it advertises, which is the only way the numbers mean anything.
+    if let Ok(parser_text) = std::fs::read_to_string(&parser) {
+        let parser_uri = uri_of(&parser);
+        let legend = client.request(
+            7000,
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": parser_uri } }),
+        );
+        let legend_names: Vec<String> = Vec::new();
+        let _ = legend_names;
+
+        // The client's decode: five numbers per token, the first two relative.
+        let numbers: Vec<u64> = legend["result"]["data"]
+            .as_array()
+            .map(|data| data.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        let mut line = 0u64;
+        let mut character = 0u64;
+        let mut tokens: Vec<(u64, u64, u64)> = Vec::new();
+        for token in numbers.chunks(5) {
+            if token.len() < 5 {
+                break;
+            }
+            if token[0] == 0 {
+                character += token[1];
+            } else {
+                line += token[0];
+                character = token[1];
+            }
+            tokens.push((line, character, token[2]));
+        }
+        eprintln!("[hover-probe] semantic tokens: {} token(s)", tokens.len());
+
+        for (needle, inside) in [("BinOpr::OPR_SHR", "BinOpr::".len()), ("case TK_LE:", 5)] {
+            let Some(at) = parser_text.find(needle) else {
+                eprintln!("[hover-probe] {needle:?} is not in the file");
+                continue;
+            };
+            let offset = at + inside;
+            let before = &parser_text[..offset];
+            let at_line = before.matches('\n').count() as u64;
+            let at_character = before
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count() as u64;
+            let found = tokens
+                .iter()
+                .find(|(line, character, _)| *line == at_line && *character == at_character);
+            let named = found.map(|(line, character, kind)| {
+                (
+                    *line,
+                    *character,
+                    legend_names
+                        .get(*kind as usize)
+                        .cloned()
+                        .unwrap_or_else(|| format!("index {kind}")),
+                )
+            });
+            eprintln!("[hover-probe] token at {at_line}:{at_character} ({needle:?}): {named:?}");
+            ask_until_stable(
+                &mut client,
+                8000 + at_line as i64,
+                "textDocument/hover",
+                &parser_uri,
+                (at_line as u32, at_character as u32),
+                needle,
+            );
+        }
     }
 
     client.request(9000, "shutdown", Value::Null);
