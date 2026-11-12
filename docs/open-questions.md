@@ -432,6 +432,18 @@ The alias target of `conditional_t` was followed **without substituting its argu
 names are still in the spelling (`_Test,_Ty1,_Ty2`) where the written arguments belong. That is the next fix, and it
 is the shape this whole entry is about — an alias template whose target must be substituted before it is a class.
 
+**Round 3: the obvious fix is a trap, and the reproducer is now a test.**
+`an_alias_template_used_as_a_base_substitutes_its_arguments` (`tests/types.rs`) is a local fixture of the same
+shape — an alias template whose target is `typename pick<X, Y>::type`, used as a base — and it fails today with
+`unlisted: ["pick_t<chosen<int>, other<int>>"]`, so the defect is reproducible without the standard library.
+
+Calling `a_spelling_through_the_aliases` from the base walk to resolve it was tried and **overflowed the stack**:
+that walk asks member questions, a member question builds a member list, and a member list walks bases. The fix
+therefore has to be static — the alias fact's own parameters and target, read from the index, then the target member's
+fact, substituted, bounded — and for `conditional_t` it has to stay sound where the condition cannot be evaluated:
+the members **both** branches agree on, which is the rule `the_return_the_overloads_agree_on` already applies. The
+test is `#[ignore]`d rather than deleted, and says all of that where the next reader will see it.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

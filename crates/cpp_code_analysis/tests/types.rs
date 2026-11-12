@@ -3452,6 +3452,64 @@ int f() {
     );
 }
 
+/// **An alias template used as a base has its arguments substituted into the alias's target.** — *open*
+///
+/// The standard library writes `allocator_traits<_Alloc> : conditional_t<…>` — a base that is an **alias template**,
+/// so the base is not a class until the alias's parameters are replaced by what the clause wrote. Measured on
+/// `EmmyLuaCodeStyle`, the member list reported
+/// `NotDeclaredHere("conditional<_Test,_Ty1,_Ty2>::type")`: the target's own parameter names were still standing,
+/// and the base was `unlisted`, so `size_type` was in no member list.
+///
+/// Asserted and ignored rather than deleted: it is the reproducer for the next step of the generics work, and it says
+/// what the answer must be.
+///
+/// # Why the fix is not "call the alias walk here"
+///
+/// It was tried. `a_spelling_through_the_aliases` turns such a spelling into a type and is the obvious tool, but it
+/// asks member questions, a member question builds a member list, and a member list walks bases — **measured as a
+/// stack overflow** (`STATUS_STACK_OVERFLOW` on this very test). The resolution therefore has to be a static one: the
+/// alias fact's own parameters and target, read from the index, then the target member's fact, substituted; and it
+/// has to bound its own steps. For `conditional_t` it also has to stay sound — the condition is a library trait over
+/// a template parameter and cannot be evaluated, so the honest answer is the members **both** branches agree on, the
+/// same agreement rule `the_return_the_overloads_agree_on` applies.
+#[test]
+#[ignore = "open: an alias-template base is not resolved; see docs/open-questions.md, the `size_type` entry"]
+fn an_alias_template_used_as_a_base_substitutes_its_arguments() {
+    let source = "\
+template <class T> struct chosen { using size_type = unsigned long long; };
+template <class T> struct other { using size_type = unsigned long long; };
+template <class X, class Y> struct pick { using type = X; };
+template <class X, class Y> using pick_t = typename pick<X, Y>::type;
+template <class T> struct traits : pick_t<chosen<T>, other<T>> { };
+struct User : traits<int> { };
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let list = cpp_code_analysis::index::project::members_of(
+        session.index(),
+        &view.scopes,
+        &view.root,
+        std::path::Path::new("/p/a.cpp"),
+        "User",
+    );
+    let cpp_code_analysis::Known::Yes(list) = list else {
+        panic!("`User` is a class: {list:?}");
+    };
+    let names: Vec<&str> = list
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"size_type"),
+        "the alias's target names `chosen<T>`, whose members are the base's: {names:?} (unlisted: {:?})",
+        list.unlisted
+            .iter()
+            .map(|one| one.spelling.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// **A class template that is forward-declared and then defined has the *definition's* base clause.**
 ///
 /// MSVC's `<xmemory>` writes `struct allocator_traits;` at line 554 and, at 755,

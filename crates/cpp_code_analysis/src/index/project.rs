@@ -2557,6 +2557,13 @@ fn members_of_inner(
                 // A base nothing here can resolve. Its members are **missing from the list** rather than absent
                 // from the type, and naming the base is what makes the gap actionable — the fix is an include
                 // path or a file that was never indexed, not a different query.
+                //
+                // **An alias template is not asked of the alias walk here.** It was tried — `conditional_t<…>` is a
+                // type, and `a_spelling_through_the_aliases` is the walk that turns such a spelling into one — and
+                // it **overflowed the stack**: that walk asks member questions, a member question builds a member
+                // list, and a member list walks bases, so the two are in a cycle. The resolution has to be a static
+                // one (the alias fact's own parameters and target, read from the index) and has to bound its own
+                // steps; see `docs/open-questions.md`.
                 Known::Unknown(reason) => {
                     list.unlisted.push(UnlistedBase {
                         spelling: shown,
