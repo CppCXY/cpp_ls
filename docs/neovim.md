@@ -30,16 +30,17 @@ the summaries are shared by nothing. The whole checkout is therefore a two-hour 
 a warm cache. `CPPLS_NEOVIM_EVERY=8` asks every eighth file instead — 65 files, every directory of `src` — and
 `CPPLS_NEOVIM_LIMIT` still caps the count.
 
-The number to compare against is the first census of the same checkout, taken before the dependency tree existed:
+The number to compare against is the first census of the same checkout, taken on another machine before the
+dependency tree existed. It read all 517 files, so the rates — not the counts — are what line up:
 
 ```text
-                    first census (517 files)   this sample (65 files)
-files with parse errors          28                   2
-parse errors                     59                   5
-`new` lines unparsed             13                   0
-expected primary expression      18                   2
-include-not-found               177                   2
-undefined-name                  258                  10
+                                    first census (517 files)   this sample (65 files)
+files with a parse error                28   (5.4%)               2   (3.1%)
+parse errors                            59                        5
+`new` lines unparsed                    13                        0
+expected primary expression             18                        2
+include-not-found                      177                        2
+undefined-name                         258                       10
 ```
 
 The two files that still fail are not grammar defects, and are described in §5 and §6.
