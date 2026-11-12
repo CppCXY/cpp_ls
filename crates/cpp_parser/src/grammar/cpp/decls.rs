@@ -2382,17 +2382,25 @@ fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
 /// Three things license the reading, and each of the neighbours fails one of them:
 ///
 /// ```text
-/// static char *(names[3]) = …    a type in front, an operator, a name in the group, an initializer after it
+/// static char *(names[3]) = …    an operator, a name in the group, an initializer after it
 /// char *(void);                  no name in the group — a type-id, and the declarator rule owns it
-/// a * (b);                       `a` is not a type, so `a_declaration_is_the_better_reading` is not answered
+/// a * (b);                       a product: the value is discarded, and that reading is left alone
 /// T (x) = 1;                     no operator — the `(`-at-the-cursor branch already reads it
 /// ```
+///
+/// **A `=` after the group decides it without any type table**, and that is the case the eight neovim declarations
+/// are written in: `static histentry_T *(history[HIST_COUNT]) = …`, where `histentry_T` is a typedef from a header
+/// and the file's own reading has never heard of it. The left operand of an assignment must be a modifiable
+/// lvalue, and a product is not one — so `a * (name[N]) = …` has no expression reading at all. A known type is
+/// needed only for the followers that *could* continue one (`;`, `,`, `[`, `(`), which is why the type question is
+/// asked at the end rather than at the top.
 fn at_a_parenthesised_declarator_of_a_variable(p: &CppParser) -> bool {
-    // **A type has to be in front.** The same question the initializer guard asks, and the reason this shape is a
-    // declarator rather than a product: `a * (b)` is multiplication unless `a` is a type, and the type table is
-    // what answers. At file scope a declaration is the only statement there is, and the answer is still asked the
-    // same way so that one rule covers both scopes.
-    if !the_declaration_has_a_type(p) {
+    // **Something has to stand in the declaration's type position.** A *known* type is what the ambiguous
+    // followers need, but the `=` case needs only that a type was **written**: `histentry_T` is a typedef from a
+    // header that this file's own reading has never seen, and it is still where the type goes. What must not happen
+    // is the rule claiming a statement that has no type position at all — `*(p) = q;` is an assignment through a
+    // pointer, and reading it as a declaration of `p` is a silent wrong tree.
+    if !the_declaration_has_a_type(p) && !p.has_declaration_type_name() {
         return false;
     }
 
@@ -2478,14 +2486,21 @@ fn at_a_parenthesised_declarator_of_a_variable(p: &CppParser) -> bool {
 
     // What may follow a declarator: an initializer, the end of this one, another declarator, an array suffix
     // (`int (*p)[3]`), or the parameter list the parenthesised name is a function's.
-    matches!(
-        p.token_kind_at(index),
-        CppTokenKind::Assign
-            | CppTokenKind::Semicolon
-            | CppTokenKind::Comma
-            | CppTokenKind::LeftBracket
-            | CppTokenKind::LeftParen
-    )
+    //
+    // **The `=` decides by itself**; the rest need the declaration to have a type, because each of them has a
+    // reading that continues an expression — `a * (b);` discards a product, `a * (b)[c]` indexes one, and
+    // `a * (b)(c)` calls one.
+    if p.token_kind_at(index) == CppTokenKind::Assign {
+        return true;
+    }
+    the_declaration_has_a_type(p)
+        && matches!(
+            p.token_kind_at(index),
+            CppTokenKind::Semicolon
+                | CppTokenKind::Comma
+                | CppTokenKind::LeftBracket
+                | CppTokenKind::LeftParen
+        )
 }
 
 /// The index of the last significant token before `index`.

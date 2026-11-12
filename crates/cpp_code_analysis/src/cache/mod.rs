@@ -203,7 +203,15 @@ use std::path::{Path, PathBuf};
 /// written before this holds no fact for the table (`neovim`'s `src/nvim/option.c:210` and seven more), or holds the
 /// parenthesised name as a *parameter* of a function that names nothing. The key's parts are unchanged, so the old
 /// entries decode happily and keep the wrong facts — which is what this number is for.
-pub const FORMAT_VERSION: u32 = 20;
+/// # Why this moved to 21
+///
+/// **A parenthesised declarator with an initializer is a declaration even when its type is a name this file's own
+/// reading has never seen.** `static histentry_T *(history[HIST_COUNT]) = …` is neovim's `cmdhist.c:35`, where
+/// `histentry_T` is a typedef from `cmdhist.h`; the `=` is what decides, because the left of an assignment must be
+/// a modifiable lvalue and a product is not one. Before this the table had no fact at all, or a parameter invented
+/// from the group — the same shape the entry for 20 describes, one spelling further out. The key's parts are
+/// unchanged, so an old entry decodes happily and keeps the missing declaration.
+pub const FORMAT_VERSION: u32 = 21;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

@@ -100,6 +100,11 @@ fn a_parenthesised_declarator_names_what_it_holds() {
             "typedef struct { int a; } S; static S *const (lines[2]) = { 0 };",
             "lines",
         ),
+        (
+            "a type from a header",
+            "static histentry_T *(history[HIST_COUNT]) = { 0 };",
+            "history",
+        ),
         ("no storage class", "char *(lines[]) = { 0 };", "lines"),
         (
             "a pointer with no suffix",
@@ -180,6 +185,20 @@ fn a_product_is_not_a_parenthesised_declarator() {
         ["b", "f"],
         "`b` must not be declared a second time inside `f`"
     );
+
+    // **An assignment through a pointer is not a declaration either**, and it is the shape the `=` case would
+    // otherwise claim: `*(p) = q;` has the group, the operator and the `=`, and no type position at all.
+    let source = "void f(int *p, int q) { *(p) = q; }";
+    let tree = CppParser::parse(source, ParserConfig::default().with_language(c11()));
+    assert_eq!(tree.get_errors(), [], "{source} does not parse");
+    let root = CppTranslationUnit::cast(tree.get_red_root()).expect("a translation unit");
+    let declared: Vec<String> = root
+        .syntax()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert_eq!(declared, ["f"], "{source} declares nothing but the function");
 }
 
 #[test]
