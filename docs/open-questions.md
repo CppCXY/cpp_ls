@@ -494,9 +494,29 @@ differently — the member list is honest about the ambiguity and the trait has 
 That means evaluating `_Is_default_allocator<std::allocator<int>>::value`: match (2) selects the specialization, and
 the answer is the `true_type`/`false_type` base it inherits. That is the next round.
 
-## A partial specialization whose slot writes `typename` truncates in the parser — open
+## A partial specialization whose first slot is a template-id gets no fact — open
 
-Found while closing the `size_type` chain. MSVC's `<xmemory>` decides the branch with
+Found while closing the `size_type` chain, and **corrected twice**, so the wrong readings are recorded here too:
+
+1. The first reading was "the parser truncates the class head at `typename`". It does not: `inspect tree` prints a
+   node's text cut at about sixty characters, and the cut landed on a token boundary. The tree for
+   `struct B<A<T>, void_t<T>> : A<T> {}` is complete, `StructDef` and all.
+2. The second reading was "no partial specialization produces a fact". That was the fixture's fault: two
+   declarations had been concatenated onto one line, so the second was never a declaration.
+
+What the fact builder actually does, with `inspect facts` on a minimal file:
+
+```text
+template <class T> struct A {};
+template <class V> struct void_t {};
+template <class T, class = void> struct B {};
+template <class T> struct B<T, void_t<T>> : A<T> {};      →  B type over [T]        the specialization IS recorded
+template <class T> struct B<T, int>      : A<T> {};       →  B type over [T]        recorded
+template <class T> struct B<A<T>, void_t<T>> : A<T> {};   →  only the primary       NOT recorded
+```
+
+So the trigger is narrow: a partial specialization whose **first** slot is a **template-id**. A template-id in the
+second slot is fine. MSVC's `<xmemory>` writes exactly the failing shape —
 
 ```cpp
 template <class _Ty>
@@ -504,27 +524,11 @@ struct _Is_default_allocator<allocator<_Ty>, void_t<typename allocator<_Ty>::_Fr
     : is_same<typename allocator<_Ty>::_From_primary, allocator<_Ty>>::type {};
 ```
 
-and the index holds **no fact for it at all** — only the principal
-`struct _Is_default_allocator : false_type {}` (`parameters ["_Alloc", ""]`, `bases ["false_type"]`). The reason is
-the parse, printed by `inspect tree --project <msvc include> --file <msvc include>/xmemory --line 486`:
-
-```text
-tree at 486:1:
-  token Token(StructKeyword) "struct"
-  Syntax(StructDef) "struct _Is_default_allocator<allocator<_Ty>, void_t<typename"
-  Syntax(DeclSpecifierSeq) "struct _Is_default_allocator<allocator<_Ty>, void_t<typename"
-```
-
-The class head stops **inside** the second slot, at `typename`: the declaration is truncated, so the fact builder
-sees a class with no base clause and no pattern, and the index never holds the specialization.
+— and the index holds no fact for it (`17000` is the principal, `17304` is the next declaration: nothing between).
 `the_bool_a_trait_has` therefore falls back to the principal's `false_type`, `allocator_traits` takes the
 `_Normal_allocator_traits` branch, and `size_type` is `typename _Get_size_type<_Alloc>::type` where it should be
-`size_t`.
-
-This is a **parser** defect, not a semantic one: a `typename` inside a template argument list in a class head is a
-dependent type name, and the head has to keep scanning past it. The fixture that made the semantic half work
-(`tests/types.rs::a_conditional_base_picks_the_branch_its_trait_selects`) passes because its specialization slots have
-no `typename`.
+`size_t`. The parser is not at fault; the next step is the fact builder's class-declaration path, where the head
+with a template-id in its first argument is not being turned into a fact.
 
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
