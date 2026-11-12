@@ -235,9 +235,9 @@ platform's headers. `env.c` — the other file — parses clean.
 
 ## 6. What is left
 
-Three readings are still wrong on this checkout, and none of them is a grammar rule that is missing a case.
+Two readings are still wrong on this checkout, and neither is a grammar rule that is missing a case.
 
-**A macro leaked from another translation unit.** `src/nvim/grid.h:20` is
+**A header is read in another translation unit's context — the *choice* is fixed, the *source* is not.** `src/nvim/grid.h:20` is
 
 ```c
 EXTERN ScreenGrid default_grid INIT( = SCREEN_GRID_INIT);
@@ -260,25 +260,50 @@ where `EXTERN` and `INIT` come from `src/nvim/macros_defs.h`:
 Windows. Because the census indexes `main.c` as a project file, `EXTERN` is in the environment of *every* file, so
 `grid.h` takes the `#else` arm and reads `__declspec(dllexport) ScreenGrid default_grid …`, which the parser refuses.
 Measured both ways: `inspect diagnostics --cook --index` on `grid.h` alone answers **0 errors**; the same file in the
-517-file session answers 2 at line 20. This is the "two readings of one file disagree" the first census recorded for
-`drawline.c`, with the cause found: the macro environment is built per project rather than per translation unit.
+517-file session answered 2 at line 20. This is the "two readings of one file disagree" the first census recorded
+for `drawline.c`. **Half of it is fixed**: `held_units` is a hash map, and `find` took *any* unit that contained the
+header, so the answer changed with the map's layout; the choice is now the **lowest root path** among the units
+held, and `session::tests::a_header_is_read_in_the_same_translation_unit_every_time` pins it (it failed on the
+previous selection with the *other* root's macro).
 
-**`Boolean`, `Dict(…)` and `Map(…)` — a header's declarations are not the parser's.** `mapping.c:2774` and
-`highlight_group.c:72`, `:920`, `:1710` fail on declarations whose *type* is a macro or a typedef this file's own
-reading never sees:
+**Half of it is not**: *which* units are held depends on what the session has cooked, so a project-wide run can
+still read the same header through different translation units — two consecutive census runs of the same binary
+gave 2 and 3 files with parse errors, and `grid.h` had 5 errors in one and 12 in the other. The choice has to come
+from the **index** — the first translation unit the compile database says compiles this header — rather than from
+what happens to be in memory. That is the next step, and the reason this section exists.
 
-```c
-static Map(cstr_t, int) highlight_unames = MAP_INIT;          // highlight_group.c:72  Map is a macro in map_defs.h
-void modify_keymap(…, Dict(keymap) *opts, Error *err)          // mapping.c:2774       Dict is a macro in defs.h
-Boolean link = GET_BOOL_OR_TRUE(opts, get_highlight, link);    // highlight_group.c:1710  Boolean is a typedef
+**A summary is a shape-only reading, so a declaration a macro writes is not in the index.** Measured on the
+dependency the build just added:
+
+```text
+inspect summary ... /uv.h    4 declaration(s), 61 macro fact(s)
+inspect facts   ... /uv.h    uv__queue, next, prev, UV_ERRNO_MAP — and nothing after line 193
 ```
 
-A file is parsed with its own text and the macros in force, not with its headers' declarations — the analysis
-resolves those names through the index, but the *parser* cannot. `Map(cstr_t, int)` is left as text, so
-`static Map(cstr_t, int) highlight_unames` reads as a function-shaped declarator and the statements after it are
-misplaced. In a minimal project the same shape parses cleanly, which is what makes this an **environment** question
-rather than a grammar one: the macro is in the file's include chain but not in the expansion table the parser is
-given.
+`uv.h` declares about 150 functions as `UV_EXTERN int uv_run(uv_loop_t *, uv_run_mode);` — neovim's use of libuv
+is almost entirely those. The *cooked* reading of the same file expands `UV_EXTERN` (the dump shows
+`unsigned int uv_version(void);`), but the **summary** is parsed from the file's own text with its `#define`s left
+as directives, so the declaration reads `UV_EXTERN int uv_run(…)`: the type is a name the parser cannot place, the
+declaration is lost, and only the macros are recorded.
+
+That is what the census's `uv_* names: 15 asked, 2 resolved` is measuring, and it is the same mechanism behind
+`Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers:
+
+```c
+static Map(cstr_t, int) highlight_unames = MAP_INIT;          // highlight_group.c:72   Map is a macro in map_defs.h
+void modify_keymap(…, Dict(keymap) *opts, Error *err)          // mapping.c:2774        Dict is a macro in api/private/defs.h
+Boolean link = GET_BOOL_OR_TRUE(opts, get_highlight, link);    // highlight_group.c:1710 Boolean is a typedef in types_defs.h
+```
+
+`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail for that reason: the file is parsed with
+its own text and the macros *in force*, but the declarations those macros would expand to are not in the index, so
+neither the parser nor the scope walk can see the parameter's type. In a minimal project the same shape parses
+cleanly — the macro is in the file's include chain, and the missing half is the **index's** reading of the header
+that defines it, not the file's own.
+
+The next step is therefore not a grammar rule: a summary that is asked for a declaration should answer from the
+file's **cooked** declarations when it has them (the session already keeps them per file), or the summary pass
+should expand the file's own macros. Both are measured options for the round after this one.
 
 `src/coverity-model.c:139` is `return __coverity_alloc_nosize__()` with no semicolon. Invalid C, not ours.
 
