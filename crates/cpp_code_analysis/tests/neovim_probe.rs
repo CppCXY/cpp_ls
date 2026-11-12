@@ -142,7 +142,16 @@ fn what_the_analysis_says_about_neovim() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(usize::MAX);
-    let files: Vec<PathBuf> = all.iter().take(limit).cloned().collect();
+    // **Every `n`th file**, for a census that is representative rather than alphabetical. With the dependency tree
+    // built, a *cold* file costs ~30 s (its closure's summaries are keyed by the environment in force, and each root
+    // file has its own), so the whole checkout is a two-hour run the first time; every eighth file is 65 files and
+    // still covers every directory.
+    let every: usize = std::env::var("CPPLS_NEOVIM_EVERY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let files: Vec<PathBuf> = all.iter().step_by(every).take(limit).cloned().collect();
     eprintln!(
         "[nvim] {} file(s) of {} withheld; {} are C",
         files.len(),
@@ -187,6 +196,17 @@ fn what_the_analysis_says_about_neovim() {
     let mut uv_names_resolved = 0usize;
     let started = Instant::now();
 
+    // **The project is read once, not once per file.** `index_everything` drains a queue, and asking it after every
+    // `want_cooked_reading` re-walked the whole project for every file: measured on this checkout, the first ten
+    // files cost 12.8 s — eleven minutes for 517 — and almost all of it was the same headers read again. The
+    // per-file loop below asks for the reading and waits for it; work that is still pending is drained there.
+    for _ in 0..6 {
+        session.index_everything();
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
     for (index, file) in files.iter().enumerate() {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
@@ -198,11 +218,14 @@ fn what_the_analysis_says_about_neovim() {
             uv_files.push(file.clone());
         }
         session.want_cooked_reading(file);
-        for _ in 0..6 {
-            session.index_everything();
-            session.catch_up(file);
-            if session.pending_work() == 0 {
-                break;
+        session.catch_up(file);
+        if session.pending_work() > 0 {
+            for _ in 0..6 {
+                session.index_everything();
+                session.catch_up(file);
+                if session.pending_work() == 0 {
+                    break;
+                }
             }
         }
         let Some(found) = session.diagnostics(file) else {
@@ -361,7 +384,7 @@ fn what_the_analysis_says_about_neovim() {
             }
         }
 
-        if index % 50 == 0 {
+        if index % 10 == 0 {
             eprintln!(
                 "[nvim] … {index}/{} after {:?}",
                 files.len(),
