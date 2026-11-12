@@ -16019,9 +16019,20 @@ impl ProjectIndex {
         //
         // A fact whose own qualified name is longer than the one asked about is a member, and a qualified request
         // (`TextRange::StartOffset`) still matches: its qualified name is the name asked for.
+        // **An enumerator is not a member for this question.** An unscoped enumeration's enumerators are visible in
+        // the enclosing scope — `TK_ELSEIF` is written bare in `case TK_ELSEIF:` — and a scoped one's are what
+        // `Color::Red` names with the qualifier dropped by the token being coloured. Their facts have a scope (the
+        // enumeration's) and are not members of a class, so the rule below must not drop them: measured on
+        // `EmmyLuaCodeStyle`, `TK_ELSEIF` declared in `LuaTokenTypeDetail.h` was filtered out here and the use in
+        // `SpaceAnalyzer.cpp` got **no token at all** (`0 classification(s)`, and the editor drew it as
+        // `variable.other.unknown`).
         let certain: Vec<_> = certain
             .into_iter()
-            .filter(|found| found.fact.scope.is_none() || found.fact.qualified_name() == name)
+            .filter(|found| {
+                found.fact.scope.is_none()
+                    || found.fact.qualified_name() == name
+                    || IndexedKind::of(&found.fact).enumerator
+            })
             .collect();
 
         let mut kinds: Vec<IndexedKind> = certain

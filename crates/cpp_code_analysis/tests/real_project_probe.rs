@@ -272,6 +272,170 @@ fn the_alias_before_and_after_the_index_is_read() {
 
 #[test]
 #[ignore = "a probe: needs the external project"]
+fn what_a_size_call_returns() {
+    // Reported with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` is drawn as
+    // `_Alloc_traits::size_type` — an alias of an alias of a member of a class, not a type a reader can use. The
+    // chain the standard library writes is `size_type` → `_Alloc_traits::size_type` → `allocator_traits<…>::size_type`
+    // → `typename _Alloc::size_type` → `size_t`, and the question is which step stops.
+    let Some(root) = project() else {
+        eprintln!("[size-probe] the project is not here");
+        return;
+    };
+    let file = root.join("LuaParser/src/Parse/LuaParser.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[size-probe] no LuaParser.cpp");
+        return;
+    };
+    let Some(at) = text.find("auto pos = _events.size();") else {
+        eprintln!("[size-probe] the line is not there");
+        return;
+    };
+    let cursor = at + "auto ".len();
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    session.want_cooked_reading(&file);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    // **The standard header has to be asked for.** The server's session resolved `std::vector<MarkEvent>` — its hover
+    // says so — which means `<vector>` was refined there; nothing in a plain session asks for it, and the summary
+    // alone has the class at file scope (see the `_STD_BEGIN` entry in `docs/open-questions.md`).
+    let vector_header = PathBuf::from(
+        r"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\vector",
+    );
+    session.want_refinement(&vector_header);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let Some(view) = session.view(&file) else {
+        eprintln!("[size-probe] no view");
+        return;
+    };
+    let reading = view
+        .reading_offset_of(FileOffset::new(cursor))
+        .unwrap_or(ReadingOffset::new(cursor));
+    match session.type_at(&view, reading) {
+        Known::Yes(found) => eprintln!("[size-probe] pos: `{}`", found.type_of),
+        Known::Unknown(reason) => eprintln!("[size-probe] pos: unknown — {reason:?}"),
+        Known::No => eprintln!("[size-probe] pos: no"),
+    }
+}
+
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn an_enum_member_from_a_header_at_its_use() {
+    // Reported with a screenshot: `case TK_ELSEIF:` in `SpaceAnalyzer.cpp` is drawn as `variable.other.unknown` —
+    // no semantic token at all — while the enumerator is declared in `LuaTokenTypeDetail.h`, which that file
+    // includes directly. The same spelling is also declared in `3rd/lua-5.4.3/src/llex.h`, a different enum.
+    let Some(root) = project() else {
+        eprintln!("[enum-probe] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCore/src/Format/Analyzer/SpaceAnalyzer.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[enum-probe] no SpaceAnalyzer.cpp");
+        return;
+    };
+    let Some(at) = text.find("case TK_ELSEIF:") else {
+        eprintln!("[enum-probe] the case label is not there");
+        return;
+    };
+    let cursor = at + "case ".len();
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    session.want_cooked_reading(&file);
+    for _ in 0..40 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    match session.index().definitions("TK_ELSEIF", &file) {
+        Known::Yes(found) => {
+            eprintln!(
+                "[enum-probe] `TK_ELSEIF`: {} declaration(s)",
+                found.found.len()
+            );
+            for one in &found.found {
+                eprintln!(
+                    "[enum-probe]   {} kind {:?}, scope {:?}",
+                    one.file.display(),
+                    one.fact.kind,
+                    one.fact.scope
+                );
+            }
+        }
+        other => eprintln!("[enum-probe] `TK_ELSEIF`: {other:?}"),
+    }
+    // **The step the colour actually takes** — `kind_of`, which answers one `IndexedKind` rather than a list.
+    match session.index().kind_of("TK_ELSEIF", &file) {
+        Known::Yes(kind) => eprintln!("[enum-probe] kind_of: {kind:?}"),
+        other => eprintln!("[enum-probe] kind_of: {other:?}"),
+    }
+
+    // **The view the colouring pass is given** — `semantic_token/mod.rs` asks `view_of_the_file`, because a token's
+    // position must be in the file's own coordinates; the cooked view's ranges are the rendering's.
+    let Some(view) = session.view_of_the_file(&file) else {
+        eprintln!("[enum-probe] no view");
+        return;
+    };
+    let names = session.classified_names(&view);
+    // **By text, not by offset.** A `Name`'s range and a `ReadingOffset` are different coordinate systems; the
+    // question here is what the enumerator's uses are drawn as, so every classification of the spelling is printed
+    // with the text it covers.
+    let uses: Vec<_> = names
+        .iter()
+        .filter(|name| view.get_token_text(name.range) == Some("TK_ELSEIF"))
+        .collect();
+    eprintln!(
+        "[enum-probe] {} classification(s) of the spelling:",
+        uses.len()
+    );
+    for name in &uses {
+        eprintln!(
+            "[enum-probe]   at {}, kind {:?}, declaration {}, provenance {:?}",
+            name.range.start_offset, name.kind, name.declaration, name.provenance
+        );
+    }
+    let reading = view
+        .reading_offset_of(FileOffset::new(cursor))
+        .unwrap_or(ReadingOffset::new(cursor));
+    match session.definition(&view, reading) {
+        Known::Yes(found) => eprintln!(
+            "[enum-probe] definition: {} kind {:?}",
+            found.file.display(),
+            found.fact.kind
+        ),
+        other => eprintln!("[enum-probe] definition: {other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "a probe: needs the external project"]
 fn what_the_session_says_about_the_reported_line() {
     let Some(root) = project() else {
         eprintln!("[probe] the project is not here");

@@ -969,12 +969,17 @@ pub(crate) fn kind_of_index(found: IndexedKind) -> Option<NameKind> {
         DeclKind::Function if found.constructor => NameKind::Type,
         DeclKind::Function if found.scope.is_some() => NameKind::Method,
         DeclKind::Function => NameKind::Function,
-        // **A variable with a scope is a field**, by the same reading as a function with a scope being a method.
-        DeclKind::Variable if found.scope.is_some() => NameKind::Property,
         // **An enumerator is not a variable to a reader.** The index has one kind for both — and says which is
         // which on [`IndexedKind::enumerator`] — while a theme draws an enumerator with its enumeration. Drawn as a
         // plain variable, `Color::Red` read as a global constant that happened to live inside a type.
+        //
+        // **Before the scoped-variable arm, not after it.** An enumerator always has a scope — the enumeration's —
+        // so the field rule below matched first and every enumerator was drawn as a `property`. Measured on
+        // `EmmyLuaCodeStyle`'s `TK_ELSEIF`: `kind_of` answered `Variable, scope Some("LuaTokenTypeDetail"),
+        // enumerator true`, and the colour said `Property`.
         DeclKind::Variable if found.enumerator => NameKind::EnumMember,
+        // **A variable with a scope is a field**, by the same reading as a function with a scope being a method.
+        DeclKind::Variable if found.scope.is_some() => NameKind::Property,
         // A variable **template**'s declaration: a family of values rather than one — the distinction the buffer
         // path reads from its tree and this path reads from the fact's recorded template parameters.
         DeclKind::Variable if found.template => NameKind::VariableTemplate,

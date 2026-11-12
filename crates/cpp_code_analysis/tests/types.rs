@@ -3452,7 +3452,43 @@ int f() {
     );
 }
 
-/// **A deduced type keeps the alias the source wrote.** `auto text = b.get();` where `get` returns `std::string` is a
+/// **A container's `size()` is a size, not the name of an internal alias.**
+///
+/// MSVC's `<vector>` writes the chain in three steps, and each one is a different shape of the alias walk:
+/// `vector` has no `size_type` of its own (it inherits `_Vector_val`'s), `_Vector_val`'s is
+/// `typename _Alty_traits::size_type`, and `_Alty_traits` is a member alias of the same class standing for
+/// `allocator_traits<_Alty>`, whose own `size_type` is `typename _Alloc::size_type`.
+///
+/// Reported from an editor: `auto pos = _events.size();` drew `_Alloc_traits::size_type` — the walk stopped one step
+/// short, at a name no reader can use.
+#[test]
+fn a_containers_size_called_on_an_object_is_its_size_type() {
+    let source = "\
+namespace std {
+template <class T> struct allocator { using size_type = unsigned long long; };
+template <class A> struct allocator_traits { using size_type = typename A::size_type; };
+template <class T> struct _Vector_val {
+    using _Alty = allocator<T>;
+    using _Alty_traits = allocator_traits<_Alty>;
+    using size_type = typename _Alty_traits::size_type;
+    size_type size() const;
+};
+template <class T> struct vector : _Vector_val<T> { };
+}
+std::vector<int> events;
+void f() {
+    auto pos = events.size();
+    (void)pos;
+}
+";
+    assert_eq!(
+        type_of_use(source, "pos").as_deref(),
+        Some("unsigned long long"),
+        "the chain ends at the size type, not at an alias of the allocator's"
+    );
+}
+
+/// **A deduced type keeps the alias the source wrote.** `auto text = b.get();` where `get` returns
 /// `std::string` — not `basic_string<char, char_traits<char>, allocator<char>>`, which is what the alias *stands for*
 /// and what an editor drew in the inlay hint of `LuaCodeFormat.cpp:131`.
 ///

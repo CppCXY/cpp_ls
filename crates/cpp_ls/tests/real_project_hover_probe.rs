@@ -351,6 +351,32 @@ fn what_the_real_server_answers_about_the_reported_line() {
         std::thread::sleep(Duration::from_secs(2));
     }
 
+    // --- `auto pos = _events.size();` in `LuaParser.cpp:51`, where the inlay drew `_Alloc_traits::size_type` ------
+    let parser = root.join("LuaParser/src/Parse/LuaParser.cpp");
+    if let Ok(parser_text) = std::fs::read_to_string(&parser) {
+        client.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri_of(&parser),
+                    "languageId": "cpp",
+                    "version": 1,
+                    "text": parser_text,
+                }
+            }),
+        );
+        let parser_uri = uri_of(&parser);
+        // `auto pos` — `pos` begins at column 9 of the line, which is line 50 when counted from zero.
+        ask_until_stable(
+            &mut client,
+            6000,
+            "textDocument/hover",
+            &parser_uri,
+            (50, 10),
+            "`pos`",
+        );
+    }
+
     client.request(9000, "shutdown", Value::Null);
     client.notify("exit", Value::Null);
 }

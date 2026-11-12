@@ -336,6 +336,54 @@ was sent as `property` and drawn as nothing. The fix is the fallback the file al
 `property` is standard but not universal. A client that lists it still gets it.
 `a_field_a_client_cannot_draw_as_a_property_is_drawn_as_a_variable` pins both halves.
 
+## An enumerator from a header had no colour at its use — **fixed**
+
+Reported with a screenshot: `case TK_ELSEIF:` in `SpaceAnalyzer.cpp` was drawn as `variable.other.unknown` — no
+semantic token at all — and the reporter added that `enum class` names are missing at their uses too. The enumerator
+is declared in `LuaTokenTypeDetail.h`, which that file includes directly.
+
+Two rules were wrong, and both are about scope:
+
+* `ProjectIndex::kind_of` keeps a candidate whose `scope` is set only when the qualified name is what was asked. That
+  is right for a constructor (`TextRange::TextRange` is not another meaning of `TextRange`) and wrong for an
+  enumerator: an unscoped enumeration's enumerators are visible in the enclosing scope, so the fact's scope is the
+  *enumeration's* while the spelling asked is the bare one. Measured: `kind_of("TK_ELSEIF", SpaceAnalyzer.cpp)` answered
+  **`Unknown(ConditionalCompilation)`**, and the use got zero classifications.
+* `kind_of_index` matched "a `Variable` with a scope is a property" before it asked `enumerator`, and an enumerator
+  always has a scope, so that arm always won.
+
+After both, over the same probe: `kind_of` → `IndexedKind { kind: Variable, scope: Some("LuaTokenTypeDetail"),
+enumerator: true }`, and the use has **one classification, `EnumMember`**. `tests/semantic.rs`'
+`an_enumerator_from_a_header_is_an_enum_member_at_its_use` pins the unscoped and the `enum class` spelling, on the
+**plain** view — the one the colouring pass is given, where a cross-file answer is the index's.
+
+## `size()` of a vector answers `_Alty_traits::size_type` — open
+
+Reported after the above, with a screenshot: `auto pos = _events.size();` in `LuaParser.cpp:51` drawn as
+`_Alty_traits::size_type`. Reproduced over stdio with the same client (`real_project_hover_probe.rs`): the hover says
+`_Alty_traits::size_type pos`.
+
+The fixture that mirrors the shape (`tests/types.rs`, `a_containers_size_called_on_an_object_is_its_size_type`) answers
+`unsigned long long`, so the fixture is not the shape the library has. What the trace of the real case shows
+(`CPPLS_TRACE_INFERENCE=1`):
+
+```text
+alias step: "_Alty_traits::size_type" in std::vector<MarkEvent>   the return type
+alias step: "_Alty_traits"            in std::vector<MarkEvent>
+alias step: "allocator_traits<_Alty>" in std::vector<MarkEvent>   ← the target, with `_Alty` still unsubstituted
+—                                                                 and the walk stops here
+```
+
+`_Alty_traits` is declared in `_Vector_val`, a **base** of `vector`, where it is
+`allocator_traits<_Alty>` and `_Alty` is `_Rebind_alloc_t<_Alloc, _Ty>`. Resolving `_Alty` needs `_Vector_val`'s own
+parameters paired with the arguments `vector` applied to that base, and that pairing is not carried when the walk
+descends into the class that declared the name: the substitution it applies uses the *current* class's parameters, so
+`allocator_traits<_Alty>` comes out unchanged and `size_type` inside it cannot be looked up.
+
+The next step is therefore: carry the base's arguments when the walk moves into `declared_in` — `a_member_the_class_declares`
+already knows which class declared the member, and the base clause it came through is what says what that class was
+applied to.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

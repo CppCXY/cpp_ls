@@ -2421,3 +2421,58 @@ void f() {}
         "a keyword inside an `@code` block is a keyword: {found:?}"
     );
 }
+
+/// **An enumerator declared in another file is an `EnumMember` where it is used** — for an unscoped enumeration and
+/// for an `enum class` alike.
+///
+/// Reported from an editor with a screenshot: `case TK_ELSEIF:` in `SpaceAnalyzer.cpp` was drawn as
+/// `variable.other.unknown` — no token at all — while the enumerator is declared in `LuaTokenTypeDetail.h`, which
+/// that file includes directly. Two rules were wrong, and both are about scope:
+///
+/// * [`ProjectIndex::kind_of`] keeps a candidate whose `scope` is set only when the qualified name is what was asked,
+///   which is right for a constructor (`TextRange::TextRange` is not another meaning of `TextRange`) and wrong for an
+///   enumerator: an unscoped enumeration's enumerators are visible in the enclosing scope, so the fact's scope is the
+///   *enumeration's* and the spelling asked is the bare one. The answer was `Unknown(ConditionalCompilation)` — a
+///   reason that says nothing about what happened either.
+/// * `kind_of_index` matched "a `Variable` with a scope is a property" before it asked `enumerator`, so an enumerator
+///   that did survive was drawn as a `property`. An enumerator always has a scope, so that arm always won.
+///
+/// This is the **plain** view on purpose: it is the one the colouring pass is given (`semantic_token` asks
+/// `view_of_the_file`, because a token's position must be in the file's own coordinates), and the cross-file answer is
+/// the index's — a binding in this file would never ask it.
+#[test]
+fn an_enumerator_from_a_header_is_an_enum_member_at_its_use() {
+    let header = "\
+enum LuaTokenType { TK_AND, TK_ELSEIF, TK_END };
+enum class Colour { Red, Green };
+";
+    let source = "\
+#include \"tok.h\"
+int f(int kind) {
+    switch (kind) {
+        case TK_ELSEIF: return 1;
+        default: return 0;
+    }
+}
+Colour c = Colour::Red;
+";
+    let session = session_with(&[("/p/tok.h", header), ("/p/a.cpp", source)]);
+    let view = session
+        .view_of_the_file("/p/a.cpp")
+        .expect("the file is held");
+
+    let kinds: Vec<(String, NameKind)> = session
+        .classified_names(&view)
+        .into_iter()
+        .filter_map(|name| Some((view.get_token_text(name.range)?.to_string(), name.kind)))
+        .collect();
+
+    assert!(
+        kinds.contains(&("TK_ELSEIF".to_string(), NameKind::EnumMember)),
+        "the unscoped enumerator, used bare: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&("Red".to_string(), NameKind::EnumMember)),
+        "and a scoped one, used as `Colour::Red`: {kinds:?}"
+    );
+}
