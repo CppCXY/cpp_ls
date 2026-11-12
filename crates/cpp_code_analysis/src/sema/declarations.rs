@@ -905,6 +905,14 @@ impl DeclarationShapes {
             // [`Shape::pattern`].
             let pattern = match kind {
                 CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef => {
+                    if crate::probes::inference() {
+                        eprintln!(
+                            "[shape] class node {:?} at {:?}: text {:?}",
+                            kind,
+                            node.text_range(),
+                            node.text().to_string().lines().next().unwrap_or("")
+                        );
+                    }
                     written_class_pattern(&node)
                 }
                 _ => None,
