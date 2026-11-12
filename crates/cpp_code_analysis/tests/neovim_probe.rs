@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cpp_code_analysis::file::coordinates::FileOffset;
+use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
 use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn project() -> Option<PathBuf> {
@@ -47,7 +47,10 @@ fn sources_under(root: &Path) -> Vec<PathBuf> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            if name == "build" || name == ".git" || name == ".cppls" || name == "test" {
+            // **The checkout's own sources, not its build products.** `build/` holds generated C, `.deps/` holds the
+            // downloaded libuv/Lua/tree-sitter sources, and `test/` is a Lua test suite — none of them is what a reader
+            // of this project edits, and counting them would make the census a measure of the dependencies.
+            if name.starts_with('.') || name == "build" || name == "test" {
                 continue;
             }
             if path.is_dir() {
@@ -169,6 +172,19 @@ fn what_the_analysis_says_about_neovim() {
     let mut new_examples: Vec<String> = Vec::new();
     let mut uv_files: Vec<PathBuf> = Vec::new();
     let mut files_with_unplaced = 0usize;
+    // **What a reader can ask of a name**, which is the measure that matters for C support: an identifier the pass
+    // classifies is one the editor can colour, hover and jump from; one it does not is a name with no answer.
+    let mut identifiers = 0usize;
+    let mut classified = 0usize;
+    let mut classified_by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut definition_asked = 0usize;
+    let mut definition_yes = 0usize;
+    let mut definition_ambiguous = 0usize;
+    let mut definition_unknown = 0usize;
+    let mut type_asked = 0usize;
+    let mut type_known = 0usize;
+    let mut uv_names_asked = 0usize;
+    let mut uv_names_resolved = 0usize;
     let started = Instant::now();
 
     for (index, file) in files.iter().enumerate() {
@@ -208,6 +224,69 @@ fn what_the_analysis_says_about_neovim() {
         }
         if found.unplaced > 0 {
             files_with_unplaced += 1;
+        }
+        // **The editor's own questions**, asked of the file's plain reading — the one a hover and a completion read.
+        if let Some(view) = session.view_of_the_file(file) {
+            let names = session.classified_names(&view);
+            let by_start: std::collections::HashMap<usize, &cpp_code_analysis::semantic::Name> =
+                names
+                    .iter()
+                    .map(|name| (name.range.start_offset, name))
+                    .collect();
+            classified += names.len();
+            for name in &names {
+                *classified_by_kind
+                    .entry(format!("{:?}", name.kind))
+                    .or_default() += 1;
+            }
+            let tokens: Vec<&cpp_parser::CppTokenData> = view
+                .tree
+                .get_tokens()
+                .iter()
+                .filter(|token| token.kind == cpp_parser::CppTokenKind::Identifier)
+                .collect();
+            identifiers += tokens.len();
+            // A hover on a macro is answered by the macro question and one on a member through the object's type, so
+            // those are not `definition`'s to answer — asking would understate the editor.
+            let step = (tokens.len() / 40).max(1);
+            for token in tokens.iter().step_by(step) {
+                let Some(text) = view.get_token_text(token.range) else {
+                    continue;
+                };
+                let at = token.range.start_offset;
+                if let Some(name) = by_start.get(&at)
+                    && (name.kind == cpp_code_analysis::semantic::NameKind::Macro
+                        || (!name.declaration
+                            && matches!(
+                                name.kind,
+                                cpp_code_analysis::semantic::NameKind::Property
+                                    | cpp_code_analysis::semantic::NameKind::Method
+                            )))
+                {
+                    continue;
+                }
+                let reading = ReadingOffset::new(at);
+                definition_asked += 1;
+                let answered = session.definition(&view, reading);
+                let described = format!("{answered:?}");
+                if matches!(answered, Known::Yes(_)) {
+                    definition_yes += 1;
+                } else if described.starts_with("Unknown(Ambiguous") {
+                    definition_ambiguous += 1;
+                } else {
+                    definition_unknown += 1;
+                }
+                if text.starts_with("uv_") || text.starts_with("UV_") {
+                    uv_names_asked += 1;
+                    if matches!(answered, Known::Yes(_)) {
+                        uv_names_resolved += 1;
+                    }
+                }
+                type_asked += 1;
+                if matches!(session.type_at(&view, reading), Known::Yes(_)) {
+                    type_known += 1;
+                }
+            }
         }
         if !found.errors.is_empty() {
             files_with_errors += 1;
@@ -335,6 +414,24 @@ fn what_the_analysis_says_about_neovim() {
     for (name, count) in names.iter().take(10) {
         eprintln!("[nvim]   {count:5}  {name}");
     }
+    eprintln!(
+        "[nvim] names: {identifiers} identifier(s), {classified} classified ({:.1}%)",
+        100.0 * classified as f64 / identifiers.max(1) as f64
+    );
+    let mut kinds: Vec<(String, usize)> = classified_by_kind.into_iter().collect();
+    kinds.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    for (kind, count) in kinds.iter().take(12) {
+        eprintln!("[nvim]   {count:7}  {kind}");
+    }
+    eprintln!(
+        "[nvim] definition: {definition_asked} asked, {definition_yes} resolved ({:.1}%), {definition_ambiguous} ambiguous, {definition_unknown} unknown",
+        100.0 * definition_yes as f64 / definition_asked.max(1) as f64
+    );
+    eprintln!(
+        "[nvim] type_at: {type_asked} asked, {type_known} known ({:.1}%)",
+        100.0 * type_known as f64 / type_asked.max(1) as f64
+    );
+    eprintln!("[nvim] uv_* names: {uv_names_asked} asked, {uv_names_resolved} resolved");
     eprintln!("[nvim] {} file(s) include uv.h", uv_files.len());
     if let Some(file) = uv_files.first() {
         let text = std::fs::read_to_string(file).unwrap_or_default();

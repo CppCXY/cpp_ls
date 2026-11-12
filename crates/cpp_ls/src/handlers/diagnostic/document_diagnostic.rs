@@ -34,7 +34,15 @@ pub async fn on_pull_document_diagnostic(
 
     let for_the_query = path.clone();
     let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
-        super::diagnose_file(session, &for_the_query).map(|(_, items)| items)
+        let answer = super::diagnose_file(session, &for_the_query).map(|(_, items)| items);
+        // **A pull is where a session's tables are biggest**, so it is where the breakdown is worth printing: the
+        // report is the session's own accounting, not the resident set, and the two differ by the allocator's slack —
+        // which is the number a "memory keeps growing" report is about. `CPPLS_TRACE_MEMORY=1` in the server's
+        // environment.
+        if std::env::var_os("CPPLS_TRACE_MEMORY").is_some() {
+            eprintln!("[memory] pull: {}", session.memory_report());
+        }
+        answer
     })
     .await;
 

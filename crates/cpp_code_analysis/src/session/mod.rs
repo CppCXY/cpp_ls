@@ -251,6 +251,34 @@ const PROGRAM_READ_ATTEMPTS: u8 = 3;
 /// (a generated file included everywhere), and it keeps the per-file reading, which never blocks and never runs away.
 const THE_LARGEST_PROGRAM_READ_AT_ONCE: usize = 8 * 1024 * 1024;
 
+/// **What a program read costs in memory for each byte of the source it is made of** — the parse tree of the whole
+/// cooked stream, plus the facts the sweep files, plus the rendered text the sweep's spans point into. The tree alone
+/// is `docs/parser-review.md`'s 8–24× the source; measured on `test_cpp`, **one read of a 6 MB standard-heavy closure
+/// left the server ~280 MB of private bytes heavier**, which is ~48× the source — so the tree is not the only thing
+/// the read allocates, and the estimate has to cover all of it to be a budget rather than a wish.
+const PROGRAM_READ_BYTES_PER_SOURCE_BYTE: usize = 48;
+
+/// **How much a session may spend on whole-program reads before the rest of the files keep their own reading.**
+///
+/// A program read is the one operation that allocates hundreds of megabytes at once: the cooked stream of a
+/// `<iostream>` closure is a few megabytes of text, its tree is tens of times that, and the facts are another pass
+/// over it. Measured on `C:\Users\zc\Desktop\test_cpp` (sixteen small `.cpp` files, each including a handful of
+/// standard headers): **opening eight files left the server at 608 MB of private bytes while its own tables held
+/// 150 MB, and opening nineteen reached 5 GB** — the process's heap never gives back what one read's parse took, so
+/// every further open added another peak. The session's tables are all bounded; this is the allocation that is not.
+///
+/// So the reads are budgeted rather than counted: a reader opening one file (the ordinary case) always gets its
+/// program, and a client that opens twenty tabs gets the compiler's reading for the first ~500 MB of them and the
+/// per-file reading — which is what every file nobody has opened gets anyway — for the rest. `units_read` still says
+/// once per program, so a file refused here is not re-considered until the session restarts, unlike the size budget
+/// above.
+///
+/// **Five hundred and twelve megabytes is about one standard-heavy program**: a `<iostream>` closure is ~6 MB of
+/// source, ~288 MB by the estimate above, so two of them do not fit and the second file keeps its own reading. That
+/// is deliberate: one whole-program read is the useful unit (`the_program_to_read` reads one at a time), and the
+/// report this constant exists for was **5 GB from nineteen opened files**.
+const PROGRAM_READ_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+
 /// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
 ///
 /// A payload bound, like [`COOK_SLICE`]: the rule above it is "a header's own headers are where the standard
@@ -706,6 +734,9 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **What this session's whole-program reads have cost, in the same estimate as the budget above** — see
+    /// [`PROGRAM_READ_BUDGET_BYTES`]. Only grows; a read cannot be un-had.
+    program_read_bytes: usize,
     /// **Translation units the session has been told to read as programs** that are not open documents — the module
     /// interface units, in practice.
     ///
@@ -1918,6 +1949,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
             units_read: std::collections::HashSet::new(),
+            program_read_bytes: 0,
             programs_wanted: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
             checks_memo: std::sync::Mutex::new(None),
@@ -7276,11 +7308,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// fact lost. The cause was the one `index_unit_rendering`'s crossing fence now quarantines — a file whose
     /// unclosed scope used to swallow the rest of the program.
     pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
+        let cost = self.the_cost_of_reading_a_program(root);
         let gathering = std::time::Instant::now();
         let prepared = self.prepare_a_unit_reading(root)?;
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
         let reading = self.commit_a_unit_reading(prepared)?;
+        self.program_read_bytes = self.program_read_bytes.saturating_add(cost);
         if crate::probes::units() {
             eprintln!(
                 "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
@@ -7372,6 +7406,9 @@ impl<F: FileProvider + Clone> Session<F> {
         let open = self.documents.paths().into_iter().find(|path| {
             !self.units_read.contains(&queue_key(path))
                 && !self.the_program_is_too_large_to_read_at_once(path)
+                // **And the memory budget**, which is what stops twenty open tabs from costing twenty programs'
+                // worth of heap: see [`PROGRAM_READ_BUDGET_BYTES`].
+                && self.program_read_bytes + self.the_cost_of_reading_a_program(path) <= PROGRAM_READ_BUDGET_BYTES
                 // **A file that imports a module is not read as a program.** Its `import std;` is not an `#include`:
                 // the unit walk would read the file *alone* — measured, 1 file and 33 tokens — and replace its
                 // rendering with one that has no `std` in it at all, after which every completion in the file is
@@ -7419,6 +7456,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// walks the index already did give the file list, and the VFS is holding the texts (a file it is not holding is
     /// counted as empty here and read by the walk itself). A file the index cannot describe has no closure and is
     /// therefore not too large — the read will fail on its own terms.
+    /// **What reading this program is expected to allocate** — the same closure sum the size budget walks, times
+    /// [`PROGRAM_READ_BYTES_PER_SOURCE_BYTE`].
+    fn the_cost_of_reading_a_program(&self, root: &Path) -> usize {
+        let bytes: usize = self
+            .closure_paths_from(root, None)
+            .iter()
+            .map(|path| self.text(path).map_or(0, |text| text.len()))
+            .sum();
+        bytes.saturating_mul(PROGRAM_READ_BYTES_PER_SOURCE_BYTE)
+    }
+
     fn the_program_is_too_large_to_read_at_once(&self, root: &Path) -> bool {
         let bytes: usize = self
             .closure_paths_from(root, None)

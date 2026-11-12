@@ -5729,3 +5729,63 @@ fn a_conditional_macros_value_is_folded_when_every_definition_agrees() {
         "both definitions in force say 0x10"
     );
 }
+
+/// **A program read is charged to a memory budget, not only counted** — see [`PROGRAM_READ_BUDGET_BYTES`].
+///
+/// The measurement this guards: opening nineteen files left the server at **5 GB of private bytes**, because each
+/// opened file's program read allocates ~280 MB of parse tree and facts at once and the heap never gives it back.
+/// The budget refuses further reads once it is spent, and the file keeps the per-file reading — the same reading
+/// every file nobody has opened has.
+#[test]
+fn a_session_stops_reading_programs_once_its_memory_budget_is_spent() {
+    let main = "#include \"api.h\"\nApi a;\n";
+    let second = "#include \"api.h\"\nApi b;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", "struct Api { int x; };\n")
+        .with_file("/p/main.cpp", main)
+        .with_file("/p/second.cpp", second);
+    let fixture = Memory::new("a-program-read-budget", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.did_open("/p/second.cpp", second);
+    session.index_everything();
+    session.pretend_a_pause(super::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1));
+
+    assert!(
+        session.the_program_to_read().is_some(),
+        "nothing has been read yet, so one file's program is next"
+    );
+    session.program_read_bytes = super::PROGRAM_READ_BUDGET_BYTES;
+    assert_eq!(
+        session.the_program_to_read(),
+        None,
+        "the budget is spent, so no file's program is read"
+    );
+    session.program_read_bytes = 0;
+    assert!(
+        session.the_program_to_read().is_some(),
+        "and the budget is what refused it, not something about these files"
+    );
+}
+
+/// **And a read is what spends it** — the other half of the gate: a budget nothing charges is a budget that never
+/// fires, which would read every program the client opens.
+#[test]
+fn a_program_read_is_charged_to_the_budget() {
+    let main = "#include \"api.h\"\nApi a;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", "struct Api { int x; };\n")
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("a-program-read-is-charged", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+    assert_eq!(session.program_read_bytes, 0, "nothing read yet");
+
+    let read = session.read_the_unit(Path::new("/p/main.cpp"));
+    assert!(read.is_some(), "the fixture's program is readable");
+    assert!(
+        session.program_read_bytes > 0,
+        "and what the read cost is charged to the budget"
+    );
+}
