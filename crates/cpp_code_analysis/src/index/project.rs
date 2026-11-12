@@ -2552,6 +2552,26 @@ fn members_of_inner(
                 continue;
             }
 
+            // **A base clause whose head is an *alias template* is not a class.** `conditional_t<…>` is a Type fact
+            // with a `type_of` target and no members, so `direct_members("conditional_t")` answered an **empty class**
+            // and the clause contributed nothing at all — the `Unknown` arm below, which is where the static resolver
+            // is asked, was never reached. Measured on `tests/types.rs`' conditional fixture: the member list of
+            // `std::allocator_traits<allocator<int>>` came from `_Normal_allocator_traits` — one of the names inside
+            // the clause, picked by the other base path — instead of the branch the trait selects.
+            let head_is_an_alias = index.files_declaring(&head, path).into_iter().any(|declared| {
+                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+            });
+            if head_is_an_alias {
+                let candidates = the_classes_a_base_clause_names(index, path, &written);
+                for one in candidates
+                    .into_iter()
+                    .filter(|one| !visited.contains(one))
+                {
+                    next.push((one, owner.clone()));
+                }
+                continue;
+            }
+
             let members = match direct_members(index, scopes, root, path, &base) {
                 Known::Yes(members) => members,
                 // **A clause that is a *type* rather than a class name.** `allocator_traits<_Alloc> : conditional_t<…>`

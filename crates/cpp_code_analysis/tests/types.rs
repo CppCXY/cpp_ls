@@ -3499,6 +3499,46 @@ void f() {
     (void)pos;
 }
 ";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    for class in [
+        "allocator_traits<allocator<int>>",
+        "std::allocator_traits<allocator<int>>",
+        "_Default_allocator_traits<allocator<int>>",
+    ] {
+        match cpp_code_analysis::index::project::members_of(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            std::path::Path::new("/p/a.cpp"),
+            class,
+        ) {
+            cpp_code_analysis::Known::Yes(list) => {
+                eprintln!(
+                    "[cond] members_of({class:?}): {} listed, {} unlisted",
+                    list.members.len(),
+                    list.unlisted.len()
+                );
+                for one in list.members.iter().filter(|one| one.fact.name == "size_type") {
+                    eprintln!(
+                        "[cond]   size_type: {:?}, ambiguous {}, in {}",
+                        one.fact.type_of, one.ambiguous, one.declared_in
+                    );
+                }
+            }
+            other => eprintln!("[cond] members_of({class:?}): {other:?}"),
+        }
+    }
+    for (path, fact) in session.index().every_fact_named("_Is_default_allocator") {
+        eprintln!(
+            "[cond] _Is_default_allocator in {}: kind {:?}, pattern {:?}, bases {:?}, parameters {:?}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            fact.kind,
+            fact.pattern,
+            fact.bases,
+            fact.parameters
+        );
+    }
     assert_eq!(
         type_of_use(source, "pos").as_deref(),
         Some("unsigned long long"),
