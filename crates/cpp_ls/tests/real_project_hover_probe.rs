@@ -666,3 +666,105 @@ fn every_name_on_the_reported_screen_of_code_format_clib() {
     client.request(9000, "shutdown", Value::Null);
     client.notify("exit", Value::Null);
 }
+
+/// **The two reported files, pulled from the real server** — the editor's own request, `textDocument/diagnostic`.
+///
+/// `LuaStyleStruct.h` was told `FunctionSingleArgSpace` is declared in `LuaStyleEnum.h`, "which this file does not
+/// include" — true of the file and false of the program, because `LuaStyle.h` includes the enum first. `Spell/Util.h`'s
+/// `Word(TextRange, std::string_view item) : Item(item) {}` was told the member is a `string_view` initialised from "a
+/// parameter that is destroyed" — true of the parameter object and false of the characters it names. This asks the
+/// server for both files' reports and prints every item, so the fix is verified where the reader saw the squiggle.
+#[test]
+#[ignore = "a probe: needs the external project and the real standard library"]
+fn the_two_reported_files_have_no_finding_from_the_server() {
+    let Some(root) = project() else {
+        eprintln!("[diag-probe] the project is not here");
+        return;
+    };
+    let files = [
+        root.join("CodeFormatCore/include/CodeFormatCore/Config/LuaStyleStruct.h"),
+        root.join("CodeFormatCore/include/CodeFormatCore/Diagnostic/Spell/Util.h"),
+    ];
+
+    let mut client = Client::start(&root);
+    client.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": {
+                "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    client.notify("initialized", json!({}));
+
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            eprintln!("[diag-probe] {}", file.display());
+            continue;
+        };
+        let uri = uri_of(file);
+        client.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text }
+            }),
+        );
+        let started = Instant::now();
+        let mut id = 100;
+        let mut last: Option<Vec<String>> = None;
+        while started.elapsed() < PATIENCE {
+            let answer = client.request(
+                id,
+                "textDocument/diagnostic",
+                json!({ "textDocument": { "uri": uri } }),
+            );
+            id += 1;
+            // A request made before the file is read answers `error: diagnostics are not ready`; that is a retry,
+            // not a finding.
+            let items = answer["result"]["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let described: Vec<String> = items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}:{} {:?}",
+                        item["code"].as_str().unwrap_or("(no code)"),
+                        item["range"]["start"]["line"],
+                        item["range"]["start"]["character"],
+                        item["message"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            if last.as_ref() != Some(&described) {
+                eprintln!(
+                    "[diag-probe] {} after {:?}: {} item(s) {:?}",
+                    file.file_name().unwrap_or_default().to_string_lossy(),
+                    started.elapsed(),
+                    described.len(),
+                    described
+                );
+                last = Some(described.clone());
+            }
+            if !items.is_empty() || (started.elapsed() > Duration::from_secs(20) && last.is_some())
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        if last.as_ref().is_none_or(|items| !items.is_empty()) {
+            eprintln!(
+                "[diag-probe] {} still reports: {last:?}",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+
+    client.request(9000, "shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+}

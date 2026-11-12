@@ -785,6 +785,10 @@ reported as "a local that is destroyed" in `dangling-return`.
 [checks] missing-include 0, dangling-field 0        (the same 198 files)
 ```
 
+And the editor's own request, `textDocument/diagnostic`, asked of the real server for the two reported files:
+`LuaStyleStruct.h` → 0 items, `Spell/Util.h` → 0 items
+(`cpp_ls/tests/real_project_hover_probe.rs::the_two_reported_files_have_no_finding_from_the_server`).
+
 The true positives stay covered: `dangling_field::a_view_member_of_a_by_value_parameter_is_reported`,
 `…::a_pointer_member_of_a_parameters_buffer_is_reported`, and `missing_include::a_header_inside_its_includers_order_is_silent`'s
 second half, where the same fragment is included by a file that never reaches the enum and is still reported.
