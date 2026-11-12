@@ -2521,7 +2521,19 @@ fn members_of_inner(
             Known::Yes(bases) => bases
                 .into_iter()
                 .filter(|written| !names_a_template_parameter(base_type_name(written), &parameters))
-                .map(|written| (written, class.to_string()))
+                // **The first level's clauses are substituted too.** Every later level already went through
+                // [`substitute_a_base_clause`] — `_Vector_base<_Tp, _Alloc>` inside `vector<int>` is written in the
+                // level above — but the class's *own* base clauses were used as written. Measured on the conditional
+                // fixture: `allocator_traits<allocator<int>> : conditional_t<_Is_default_allocator<A>::value, …>`
+                // kept `A`, so the trait was asked about the parameter instead of `allocator<int>`, matched no
+                // specialization, and took the primary `false_type` branch — `size_type` came from
+                // `_Normal_allocator_traits` where the right answer was `_Default_allocator_traits`'s.
+                .map(|written| {
+                    (
+                        substitute_a_base_clause(index, path, &class, &written),
+                        class.to_string(),
+                    )
+                })
                 .collect(),
             Known::Unknown(reason) => {
                 list.unlisted.push(UnlistedBase {
@@ -2740,9 +2752,18 @@ fn substitute_a_base_clause(
     let Some((head, mut arguments)) = split_template_arguments(shown) else {
         return clause.to_string();
     };
-    let Some(declared) = index
-        .files_declaring(&head, path)
-        .into_iter()
+    // **The class is keyed by its bare name.** The spelling here is often qualified — `std::allocator_traits<…>` —
+    // and `files_declaring` matches the name a fact records, which is the bare one. A qualified lookup therefore
+    // found nothing and the clause came back with its parameters still standing: measured on the conditional
+    // fixture, `A` was never replaced by `allocator<int>`, so the trait was asked about the parameter, matched no
+    // specialization, and the base was the wrong `conditional` branch.
+    let mut candidates = index.files_declaring(&head, path);
+    if candidates.is_empty() {
+        let bare = head.rsplit("::").next().unwrap_or(&head).to_string();
+        candidates = index.files_declaring(&bare, path);
+    }
+    let Some(declared) = candidates
+        .iter()
         .find(|declared| declared.fact.kind == crate::DeclKind::Type)
     else {
         return clause.to_string();
@@ -2798,6 +2819,9 @@ fn substitute_a_base_clause(
 /// [`the_return_the_overloads_agree_on`] applies to overloads.
 fn the_classes_a_base_clause_names(index: &ProjectIndex, path: &Path, clause: &str) -> Vec<String> {
     let mut spelling = clause.trim().to_string();
+    if crate::probes::inference() {
+        eprintln!("[base-clause] asked about {clause:?}");
+    }
 
     for _ in 0..MAX_ALIAS_HOPS {
         let without_typename = spelling
@@ -2805,6 +2829,9 @@ fn the_classes_a_base_clause_names(index: &ProjectIndex, path: &Path, clause: &s
             .unwrap_or(&spelling)
             .trim()
             .to_string();
+        if crate::probes::inference() {
+            eprintln!("[base-clause]   step: {without_typename:?}");
+        }
 
         // **A member type** — `Class<…>::member`.
         if let Some((class, member)) = split_at_the_last_scope(&without_typename) {
