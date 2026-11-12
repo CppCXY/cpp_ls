@@ -4034,7 +4034,19 @@ fn written_class_pattern(declaration: &CppSyntaxNode) -> Option<String> {
     }
 
     let after = &head[found?..];
-    let end = after.find([':', '{', ';']).unwrap_or(after.len());
+    // **A `:` ends the head only when it is not half of a `::`.** The head of a specialization may name a dependent
+    // type inside its argument list — `void_t<typename allocator<_Ty>::_From_primary>` is MSVC's own spelling — and
+    // cutting at that colon truncated the pattern in the middle of the name, so `a_pattern_matches` was asked to match
+    // text that was never written. Measured on `tests/types.rs::a_partial_specialization_is_a_declaration_with_a_pattern`.
+    let end = after
+        .char_indices()
+        .find(|(index, character)| match character {
+            '{' | ';' => true,
+            ':' => after.as_bytes().get(index + 1) != Some(&b':'),
+            _ => false,
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(after.len());
     let written = after[..end].trim();
 
     written.contains('<').then(|| written.to_string())

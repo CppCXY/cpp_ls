@@ -3452,6 +3452,50 @@ int f() {
     );
 }
 
+/// **A partial specialization is a declaration: it must produce a fact, with its pattern.**
+///
+/// The shape is MSVC's, reduced — `<xmemory>` decides `allocator_traits`'s base with
+/// `struct _Is_default_allocator<allocator<_Ty>, void_t<typename allocator<_Ty>::_From_primary>> : …`, and the index
+/// holds **no fact at all** for that specialization (measured on the real header: the principal is at offset 17000 and
+/// the next declaration at 17304, with nothing between). Without it the trait can never be true, `allocator_traits`
+/// takes the wrong `conditional_t` branch, and `auto pos = events.size();` answers `_Alty_traits::size_type`.
+///
+/// This is asserted in the repository rather than through a fixture written by hand to a temporary file: that pipeline
+/// was measured to give two different answers for one shape between runs, so it is not evidence.
+#[test]
+#[ignore = "open: the fact exists but its pattern is not recorded (docs/open-questions.md, the size_type entry)"]
+fn a_partial_specialization_is_a_declaration_with_a_pattern() {
+    let source = "\
+template <class T> struct A { };
+template <class V> struct void_t { };
+template <class T, class = void> struct B : A<T> { };
+template <class T> struct B<A<T>, void_t<typename A<T>::From>> : A<T> {
+    using inner = int;
+};
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let facts: Vec<_> = session
+        .index()
+        .every_fact_named("B")
+        .into_iter()
+        .map(|(_, fact)| fact.clone())
+        .collect();
+    let patterns: Vec<Option<&str>> = facts.iter().map(|fact| fact.pattern.as_deref()).collect();
+    assert!(
+        facts.len() >= 2,
+        "the principal and its specialization are two declarations: {patterns:?}"
+    );
+    assert!(
+        patterns.iter().any(Option::is_some),
+        "and the specialization records the pattern it matches: {patterns:?}"
+    );
+    let inner = session.index().every_fact_named("inner");
+    assert!(
+        !inner.is_empty(),
+        "the specialization's member is declared too"
+    );
+}
+
 /// **A base chosen by a `conditional_t` over a library trait picks the branch the trait selects.**
 ///
 /// This is the standard library's own shape, reduced: `allocator_traits<A> : conditional_t<_Is_default_allocator<A>::value,
