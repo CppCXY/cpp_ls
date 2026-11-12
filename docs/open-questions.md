@@ -468,6 +468,19 @@ specialization**: `template <class _Ty> struct _Is_default_allocator<allocator<_
 principal template's `false_type`. Selecting a partial specialization is the next piece of the generics work; until it
 exists, `size_type` is honestly ambiguous and `auto pos = _events.size();` keeps answering `_Alty_traits::size_type`.
 
+**Round 5 measured the shape of that piece, with a fixture that needs no standard library**:
+`tests/types.rs::a_conditional_base_picks_the_branch_its_trait_selects` (ignored, and it says what the answer must
+be). It answers `allocator_traits<A>::size_type` today, and the spelling names **three** gaps in order:
+
+1. **the defaulted template argument is not applied at the use** — `std::vector<int>` writes one argument, `A`
+   defaults to `allocator<T>`, and `A` is still standing where `allocator<int>` belongs. `substituted_spelling_with_defaults`
+   exists for member types; the class level here passes only the written arguments.
+2. **`a_pattern_matches` compares text** — the slot `allocator<_Ty>` against the argument `std::allocator<MarkEvent>`:
+   the same class, spelled differently, so it does not match. Matching a template-id slot needs head names and a
+   recursive comparison, not string equality.
+3. **`conditional<true, A, B>::type` must select `A`** once the two above are decided — `conditional` has partial
+   specializations for `true` and `false`, which is the same selection mechanism as (2).
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

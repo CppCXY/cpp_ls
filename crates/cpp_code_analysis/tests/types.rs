@@ -3452,6 +3452,60 @@ int f() {
     );
 }
 
+/// **A base chosen by a `conditional_t` over a library trait picks the branch the trait selects.** — *open*
+///
+/// This is the standard library's own shape, reduced: `allocator_traits<A> : conditional_t<_Is_default_allocator<A>::value,
+/// _Default_allocator_traits<A>, _Normal_allocator_traits<A>>`, where the trait is a **partial specialization** —
+/// `_Is_default_allocator<allocator<T>> : true_type` against the principal `false_type`.
+///
+/// Measured today, `type_of_use` answers **`allocator_traits<A>::size_type`**, and the spelling says there are two
+/// gaps before the right branch can be chosen:
+///
+/// * **the defaulted template argument is not applied at the use**: `std::vector<int>` writes one argument and `A`
+///   defaults to `allocator<T>`, so `A` is still standing where `allocator<int>` belongs;
+/// * **the trait cannot be decided**: `a_pattern_matches` compares a specialization's slot to the argument as
+///   **text**, so `allocator<_Ty>` does not match `std::allocator<MarkEvent>` — the head is the same class and the
+///   comparison is not;
+/// * and after both, `conditional<true, A, B>::type` must select `A` for the value to be usable at all.
+///
+/// Asserted and ignored rather than left red: it is the next reproducer, and it says what the answer must be.
+#[test]
+#[ignore = "open: a conditional base over a library trait, and a defaulted argument; see docs/open-questions.md"]
+fn a_conditional_base_picks_the_branch_its_trait_selects() {
+    let source = "\
+namespace std {
+template <class T> struct false_type { static constexpr bool value = false; };
+template <class T> struct true_type { static constexpr bool value = true; };
+template <class T> struct allocator { using value_type = T; };
+template <class T> struct _Is_default_allocator : false_type { };
+template <class T> struct _Is_default_allocator<allocator<T>> : true_type { };
+template <bool C, class A, class B> struct conditional;
+template <class A, class B> struct conditional<true, A, B> { using type = A; };
+template <class A, class B> struct conditional<false, A, B> { using type = B; };
+template <bool C, class A, class B> using conditional_t = typename conditional<C, A, B>::type;
+template <class T> struct _Default_allocator_traits { using size_type = unsigned long long; };
+template <class T> struct _Normal_allocator_traits { using size_type = typename T::size_type; };
+template <class A>
+struct allocator_traits
+    : conditional_t<_Is_default_allocator<A>::value, _Default_allocator_traits<A>, _Normal_allocator_traits<A>> { };
+template <class T, class A = allocator<T>> struct vector {
+    using size_type = typename allocator_traits<A>::size_type;
+    size_type size() const;
+};
+}
+std::vector<int> events;
+void f() {
+    auto pos = events.size();
+    (void)pos;
+}
+";
+    assert_eq!(
+        type_of_use(source, "pos").as_deref(),
+        Some("unsigned long long"),
+        "`_Is_default_allocator<allocator<int>>` is true, so the base is `_Default_allocator_traits`"
+    );
+}
+
 /// **An alias template used as a base has its arguments substituted into the alias's target.** — *open*
 ///
 /// The standard library writes `allocator_traits<_Alloc> : conditional_t<…>` — a base that is an **alias template**,
