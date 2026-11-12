@@ -240,7 +240,7 @@ platform's headers. `env.c` — the other file — parses clean.
 
 ## 6. What is left
 
-Two readings are still wrong on this checkout, and neither is a grammar rule that is missing a case.
+One reading is still wrong on this checkout, and it is not a grammar rule that is missing a case.
 
 **A header is read in another translation unit's context — the *choice* is fixed, the *source* is not.** `src/nvim/grid.h:20` is
 
@@ -333,21 +333,19 @@ loop.c                 0 parse errors
 Test: `session::tests::a_headers_own_guard_does_not_empty_its_rendering` — a two-line guarded header cooks to 0
 declarations on the previous rule, and to its `Widget` after it.
 
-**The remaining case: `Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers.** The guard fix does not change
-these, and what they show is narrower than an empty header:
+**`Boolean`, `Dict(…)` and `Map(…)` — measured, and not a defect.** These were the last three files with a parse
+error, and they are clean once the file is read the way an editor reads it:
 
-```c
-static Map(cstr_t, int) highlight_unames = MAP_INIT;          // highlight_group.c:72   Map is a macro in map_defs.h
-void modify_keymap(…, Dict(keymap) *opts, Error *err)          // mapping.c:2774        Dict is a macro in api/private/defs.h
-Boolean link = GET_BOOL_OR_TRUE(opts, get_highlight, link);    // highlight_group.c:1710 Boolean is a typedef in types_defs.h
+```text
+inspect diagnostics --cook            3 errors   (72:42, 920:1, 1710:11)   <- the tool alone, project not indexed
+inspect diagnostics --cook --index    0 errors
 ```
 
-`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail, and the guard fix did not change them: the
-`Map(…)`/`Dict(…)` spellings are still text in those files' own renderings. What that says is narrower than it was
-— the header is no longer empty, and the macro is unconditional in it — so the remaining question is why a *root*
-file's rendering does not see the macros of the headers it includes. `highlight_group.c` includes
-`nvim/map_defs.h` at line 38 and uses `Map(cstr_t, int)` at line 72, and asking the analysis what is in force there
-answers `NotDeclaredHere("Map")`.
+The tool's `--index` is the difference, and it is not a subtlety of the grammar: without it the project is never
+indexed, so the cook's environment holds no macro from any header, and `Map(cstr_t, int)` — `map_defs.h:43`,
+`#define Map(T, U) Map_##T##_##U` — stays text. The server's pump indexes the closure before it cooks, so the editor
+sees the declaration; `mapping.c:2774` (`Dict(keymap) *opts`, `#define Dict(name) KeyDict_##name`) is clean the same
+way.
 
 `src/coverity-model.c:139` is `return __coverity_alloc_nosize__()` with no semicolon. Invalid C, not ours.
 
