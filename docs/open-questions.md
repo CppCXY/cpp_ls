@@ -515,8 +515,25 @@ template <class T> struct B<T, int>      : A<T> {};       →  B type over [T]  
 template <class T> struct B<A<T>, void_t<T>> : A<T> {};   →  only the primary       NOT recorded
 ```
 
-So the trigger is narrow: a partial specialization whose **first** slot is a **template-id**. A template-id in the
-second slot is fine. MSVC's `<xmemory>` writes exactly the failing shape —
+So the trigger is narrow, and **round 18 narrowed it further** — the first reading ("first slot is a template-id")
+is not it, because `struct B<A<T>, A<T>> : A<T> { using inner = T; }` **does** produce a fact (`4:27 B`, with its
+member). The shapes measured with `inspect facts`:
+
+```text
+B<T, void_t<T>>                       fact ✔
+B<A<T>, A<T>>                         fact ✔
+B<T, void_t<typename A<T>::From>>     no fact ✘
+B<A<T>, void_t<A<T>::From>>           no fact ✘
+B<A<T>, void_t<typename A<T>::From>>  no fact ✘
+```
+
+What separates them is a **qualified dependent name inside the specialization's argument list** — `A<T>::From`, with
+or without `typename` — while a bare `A<T>` in the same position is fine. Facts are built from **bindings**
+(`build_scopes` → `sema/declarations.rs`), so the missing fact means the binding was never created, and the next step
+is `declared_name`/`name_node_along_declarator` on this head shape.
+
+`_Is_default_allocator<allocator<_Ty>, void_t<typename allocator<_Ty>::_From_primary>>` is the failing shape in the
+standard library, and its absence is what keeps `size_type` unresolved.
 
 ```cpp
 template <class _Ty>
