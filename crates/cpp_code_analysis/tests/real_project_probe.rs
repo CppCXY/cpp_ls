@@ -393,12 +393,61 @@ fn what_a_size_call_returns() {
             other => eprintln!("[size-probe] `{spelling}`: {other:?}"),
         }
     }
+    // **What the index recorded about the class itself** — the base clause is the whole question: `allocator_traits`
+    // has an empty body and inherits `size_type` from whichever `conditional_t` branch its allocator selects.
+    for spelling in ["std::allocator_traits", "std::_Normal_allocator_traits"] {
+        match session.index().definitions(spelling, &file) {
+            Known::Yes(found) => {
+                for one in &found.found {
+                    eprintln!(
+                        "[size-probe] `{spelling}` fact: kind {:?}, scope {:?}, bases {:?}, cooked file {}",
+                        one.fact.kind,
+                        one.fact.scope,
+                        one.fact.bases,
+                        session.index().cooked_reading(&one.file).is_some()
+                    );
+                }
+            }
+            other => eprintln!("[size-probe] `{spelling}`: {other:?}"),
+        }
+    }
+
     let vector_header_path = vector_header.clone();
     eprintln!(
         "[size-probe] `<vector>` refined: {}, `<xmemory>` refined: {}",
         session.is_refined(&vector_header_path),
         session.is_refined(&vector_header_path.with_file_name("xmemory"))
     );
+
+    // **The member list itself**, and the base it could not resolve: the trace says `0 listed, 1 unlisted`, and the
+    // spelling of that base says which generic shape is missing.
+    for class in ["allocator_traits", "std::allocator_traits", "std::vector"] {
+        match cpp_code_analysis::index::project::members_of(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &file,
+            class,
+        ) {
+            Known::Yes(list) => {
+                eprintln!(
+                    "[size-probe] members_of({class:?}): {} listed, {} unlisted",
+                    list.members.len(),
+                    list.unlisted.len()
+                );
+                for one in &list.unlisted {
+                    eprintln!(
+                        "[size-probe]   unlisted: `{}` — {:?}",
+                        one.spelling, one.reason
+                    );
+                }
+                for one in list.members.iter().take(4) {
+                    eprintln!("[size-probe]   member: `{}`", one.fact.name);
+                }
+            }
+            other => eprintln!("[size-probe] members_of({class:?}): {other:?}"),
+        }
+    }
 }
 
 #[test]

@@ -2666,12 +2666,24 @@ fn the_base_clauses_of(
         return Known::Yes(crate::sema::declarations::declared_bases_of(root, binding));
     }
     let base = base_type_name(class).to_string();
-    if let Some(declared) = index
-        .files_declaring(&base, path)
-        .into_iter()
-        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
-    {
-        return Known::Yes(declared.fact.bases.clone());
+    // **The definition, not the forward declaration.** A class template is declared and then defined — MSVC's
+    // `<xmemory>` forward-declares `allocator_traits` at line 554 and defines it at 755 — and the two facts are the
+    // same entity written twice, with **only the second carrying the base clause**. Taking the first Type fact
+    // answered `bases: []` for a class whose whole body is its base, so `size_type` was in no member list:
+    // measured on `EmmyLuaCodeStyle`, `members_of("std::allocator_traits")` answered `0 listed, 0 unlisted` and
+    // `auto pos = _events.size();` stopped at `_Alty_traits::size_type`.
+    //
+    // A definition is what the language calls the class ([basic.def]: a declaration is a definition unless it is
+    // only a name), so the rule needs no preference beyond the fact's own flag. A name with no definition keeps the
+    // first declaration, which is all there is.
+    let candidates = index.files_declaring(&base, path);
+    let is_a_type = |declared: &VisibleDeclaration<'_>| declared.fact.kind == crate::DeclKind::Type;
+    let chosen = candidates
+        .iter()
+        .position(|declared| is_a_type(declared) && declared.fact.definition)
+        .or_else(|| candidates.iter().position(is_a_type));
+    if let Some(at) = chosen {
+        return Known::Yes(candidates[at].fact.bases.clone());
     }
     bases_of(index, scopes, root, path, class)
 }

@@ -413,6 +413,25 @@ The remaining gap is one layer further in: `allocator_traits` now resolves but i
 `0 listed, 1 unlisted` — the **unlisted** entry is the base that declares `size_type`, so the walk has a base it
 cannot resolve rather than a class it cannot find. That is the next measurement: which base, and why.
 
+**Round 2** answered that. The base clause was not read at all at first, and that was a second defect:
+`the_base_clauses_of` took the **first** Type fact for the name, which for a class template is the **forward
+declaration** — `xmemory:554` declares `allocator_traits`, `755` defines it with
+`: conditional_t<_Is_default_allocator<_Alloc>::value, _Default_allocator_traits<_Alloc>,
+_Normal_allocator_traits<_Alloc>> {}`. The forward declaration has no bases, so the walk saw none. The preference is
+now the fact's own `definition` flag — a definition is what the language calls the class.
+
+After that, the gap is exactly one spelling:
+
+```text
+unlisted: `conditional_t<_Is_default_allocator<_Alloc>::value, _Default_allocator_traits<_Alloc>,
+                         _Normal_allocator_traits<_Alloc>>`
+  — NotDeclaredHere("conditional<_Test,_Ty1,_Ty2>::type")
+```
+
+The alias target of `conditional_t` was followed **without substituting its arguments**: the library's own parameter
+names are still in the spelling (`_Test,_Ty1,_Ty2`) where the written arguments belong. That is the next fix, and it
+is the shape this whole entry is about — an alias template whose target must be substituted before it is a class.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

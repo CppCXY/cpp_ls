@@ -3452,6 +3452,50 @@ int f() {
     );
 }
 
+/// **A class template that is forward-declared and then defined has the *definition's* base clause.**
+///
+/// MSVC's `<xmemory>` writes `struct allocator_traits;` at line 554 and, at 755,
+/// `struct allocator_traits : conditional_t<…> {};` — an **empty body** whose every member is inherited. The base
+/// walk read the first Type fact it found, which is the forward declaration, whose `bases` is empty: measured on
+/// `EmmyLuaCodeStyle`, `members_of("std::allocator_traits")` answered `0 listed, 0 unlisted`, and `size_type` was in
+/// no list at all.
+#[test]
+fn a_class_template_forward_declared_then_defined_uses_the_definitions_bases() {
+    let source = "\
+template <class T> struct traits;
+template <class T> struct base {
+    using size_type = unsigned long long;
+};
+template <class T> struct traits : base<T> { };
+struct User : traits<int> { };
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let list = cpp_code_analysis::index::project::members_of(
+        session.index(),
+        &view.scopes,
+        &view.root,
+        std::path::Path::new("/p/a.cpp"),
+        "User",
+    );
+    let cpp_code_analysis::Known::Yes(list) = list else {
+        panic!("`User` is a class: {list:?}");
+    };
+    let names: Vec<&str> = list
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"size_type"),
+        "the inherited member comes through the definition's base: {names:?} (unlisted: {:?})",
+        list.unlisted
+            .iter()
+            .map(|one| one.spelling.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// **A container's `size()` is a size, not the name of an internal alias.**
 ///
 /// MSVC's `<vector>` writes the chain in four steps, and the last one is why this is a cross-file fixture:
