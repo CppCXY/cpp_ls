@@ -2791,8 +2791,20 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut entries: Vec<cpp_parser::IncludedMacro> = Vec::new();
         let mut chosen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // **The file being rendered contributes nothing to its own starting environment.** Its `#define`s are what
+        // *it* says, and the renderer reads them itself, in order, from offset 0 — handing them back as "what was in
+        // force before the first line" would make a definition later in the file visible earlier. Measured, and it is
+        // not a corner: a header's own include guard is a `#ifndef X / #define X` at the top, the summary records
+        // that define as **Unconditional** on purpose (`deguard_the_files_own_guard` — the file is read once per
+        // translation unit), so it entered the environment, `#ifndef X` was false, and every guarded header rendered
+        // **empty**. `uv.h`: 13 263 tokens in, 0 bytes out; the same file rendered with its own guard excluded is
+        // 37 112 bytes and 1 712 declarations.
+        let root = normalize_path(path, cfg!(windows));
         for file in order.iter().rev() {
             let key = normalize_path(file, cfg!(windows));
+            if key == root {
+                continue;
+            }
             let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
                 continue;
             };

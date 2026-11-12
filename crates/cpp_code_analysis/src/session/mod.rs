@@ -8304,6 +8304,16 @@ impl<F: FileProvider + Clone> Session<F> {
             (None, None) => return None,
         };
         let indexer = FileIndexer::new(files, config);
+        if crate::probes::cooking() {
+            eprintln!(
+                "render_cook: {} text {} tokens {} rendered {} ({})",
+                path.display(),
+                text.len(),
+                tokens.len(),
+                rendered.text.len(),
+                if unit.is_some() { "unit" } else { "composed" }
+            );
+        }
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
             declarations: indexed.summary.declarations.len(),
@@ -8403,6 +8413,17 @@ impl<F: FileProvider + Clone> Session<F> {
             // 45 ms rebuilt against 1.2 ms served, see `docs/refinement.md` §3.2. Written *before* the index insert
             // because the write borrows the store and the insert needs it mutably; both are cheap.
             let cooked: crate::index::CookedFile = indexed.into();
+            if crate::probes::cooking() {
+                // **How many declarations the cook found**, which the cache line above does not say: a cook that
+                // renders an empty stream is filed as "this file has been read" and then shadows the file's
+                // summary, and the count is the one number that tells that apart from a file that declares
+                // nothing.
+                eprintln!(
+                    "commit_a_cooked: {} declaration(s) for {}",
+                    cooked.declarations.len(),
+                    path.display()
+                );
+            }
             self.store.put_the_cooked_reading(&path, &cooked);
             self.store.index_mut().insert_cooked(&path, cooked);
         }

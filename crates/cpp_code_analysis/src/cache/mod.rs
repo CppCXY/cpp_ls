@@ -211,7 +211,15 @@ use std::path::{Path, PathBuf};
 /// a modifiable lvalue and a product is not one. Before this the table had no fact at all, or a parameter invented
 /// from the group — the same shape the entry for 20 describes, one spelling further out. The key's parts are
 /// unchanged, so an old entry decodes happily and keeps the missing declaration.
-pub const FORMAT_VERSION: u32 = 21;
+/// # Why this moved to 22
+///
+/// **A header's own include guard no longer empties its rendering.** The composed environment — what a header gets
+/// when no program read it — took the file's *own* unconditional macro facts, and the summary records
+/// `#ifndef X / #define X` as unconditional on purpose (`deguard_the_files_own_guard`). So `X` was defined before the
+/// first line, `#ifndef X` was false, and every guarded header rendered to nothing: neovim's
+/// `.deps/usr/include/uv.h` was 13 263 tokens in and **0 bytes** out, and its cooked reading was filed with 0
+/// declarations where the file has 1 912. Those empty readings are on disk, so the number moves.
+pub const FORMAT_VERSION: u32 = 22;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

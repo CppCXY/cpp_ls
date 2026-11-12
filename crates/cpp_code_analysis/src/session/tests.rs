@@ -5905,3 +5905,42 @@ fn a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked() {
         other => panic!("the macro's declaration is not in the index: {other:?}"),
     }
 }
+
+
+/// **A header's own include guard does not make its body inactive.**
+///
+/// The summary records `#ifndef H_H / #define H_H` at the top of a header as an **unconditional** definition —
+/// `deguard_the_files_own_guard`, because the file is read once per translation unit — and the *composed*
+/// environment (the one a header gets when no program has read it) took the file's own facts. So `H_H` was defined
+/// **before the first line**, `#ifndef H_H` was false, and the whole file rendered empty: a per-file cook of every
+/// guarded header produced no declarations at all.
+///
+/// Measured on neovim's `.deps/usr/include/uv.h`: 13 263 tokens in, **0 bytes** out, and 0 declarations filed; with
+/// the file's own facts excluded, 37 112 bytes and **1 712** declarations — which is what `uv_run` and the rest of
+/// libuv need to be answerable at all.
+#[test]
+fn a_headers_own_guard_does_not_empty_its_rendering() {
+    let files = MemoryFiles::new()
+        .with_file(
+            "/p/guarded.h",
+            "#ifndef GUARDED_H\n#define GUARDED_H\nstruct Widget { int size; };\n#endif\n",
+        )
+        .with_file("/p/a.c", "#include \"guarded.h\"\nvoid f(void) { }\n");
+    let fixture = Memory::new("own-guard", &files);
+    let mut session = fixture.session();
+    session.add_project_files([PathBuf::from("/p/a.c")]);
+    session.index_everything();
+    // **The composed environment**: no program read this header, and it has an includer, so it is not a root and
+    // gets the environment the index can describe rather than a timeline.
+    session.cook("/p/guarded.h").expect("the header cooks");
+
+    let facts = session
+        .index()
+        .cooked_declarations(Path::new("/p/guarded.h"))
+        .expect("the header has a reading");
+    assert_eq!(
+        facts.iter().filter(|fact| fact.name == "Widget").count(),
+        1,
+        "the declaration inside the guard is in the rendered reading: {facts:?}"
+    );
+}
