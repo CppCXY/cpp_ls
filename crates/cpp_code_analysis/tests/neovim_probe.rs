@@ -151,7 +151,23 @@ fn what_the_analysis_says_about_neovim() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1)
         .max(1);
-    let files: Vec<PathBuf> = all.iter().step_by(every).take(limit).cloned().collect();
+    // **One path only**, for a question about one file: `CPPLS_NEOVIM_ONLY=event/loop.c` reads the files whose path
+    // contains that text. `CPPLS_NEOVIM_LIMIT` and `CPPLS_NEOVIM_EVERY` still apply, so this narrows rather than
+    // replaces the sample.
+    let only = std::env::var("CPPLS_NEOVIM_ONLY").ok();
+    let files: Vec<PathBuf> = all
+        .iter()
+        .filter(|path| {
+            only.as_ref().is_none_or(|text| {
+                path.to_string_lossy()
+                    .replace('\\', "/")
+                    .contains(text.as_str())
+            })
+        })
+        .step_by(every)
+        .take(limit)
+        .cloned()
+        .collect();
     eprintln!(
         "[nvim] {} file(s) of {} withheld; {} are C",
         files.len(),
@@ -194,6 +210,7 @@ fn what_the_analysis_says_about_neovim() {
     let mut type_known = 0usize;
     let mut uv_names_asked = 0usize;
     let mut uv_names_resolved = 0usize;
+    let closure = std::env::var_os("CPPLS_NEOVIM_CLOSURE").is_some_and(|value| !value.is_empty());
     let started = Instant::now();
 
     // **The project is read once, not once per file.** `index_everything` drains a queue, and asking it after every
@@ -218,10 +235,21 @@ fn what_the_analysis_says_about_neovim() {
             uv_files.push(file.clone());
         }
         session.want_cooked_reading(file);
+        // **What an editor does with the file it is looking at.** The pump cooks the open file's direct includes and
+        // one level under them (`Session::want_the_closure_cooked`), and that is where the declarations behind an
+        // `#include` come from: a header that was never cooked contributes no *cooked* declarations, and
+        // `UV_EXTERN int uv_run(…)` is not in its shape-only summary either. `CPPLS_NEOVIM_CLOSURE=1` asks the census
+        // to do the same, which is the difference between "a file read on its own" and "a file being looked at".
+        if closure {
+            session.want_the_closure_cooked(file);
+        }
         session.catch_up(file);
         if session.pending_work() > 0 {
             for _ in 0..6 {
                 session.index_everything();
+                if closure {
+                    session.advance(8);
+                }
                 session.catch_up(file);
                 if session.pending_work() == 0 {
                     break;

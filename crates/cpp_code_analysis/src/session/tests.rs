@@ -5836,3 +5836,72 @@ fn a_header_is_read_in_the_same_translation_unit_every_time() {
         );
     }
 }
+
+
+/// **A name a macro writes is in the index only once the header that writes it has been cooked.**
+///
+/// A summary is the *shape-only* reading: `DECL(lib_open)` is a macro call and nothing else, so the name index has
+/// no `lib_open` from it. The **cooked** reading is where the declaration appears, and the session keeps one per
+/// file — so the answer depends on whether anything cooked the header:
+///
+/// ```text
+/// census path    cook the .c, never its include   ->  NotDeclaredHere
+/// editor path    the pump cooks the include too   ->  the declaration, in lib.h
+/// ```
+///
+/// The editor path is the contract, not a convenience: `Session::want_the_closure_cooked` runs for every open
+/// document and reaches the direct includes and one level under them. This test pins both, because the first is
+/// what a project-wide run measures (the census asks for one file's reading) and the second is what a reader sees.
+///
+/// Measured on neovim: `uv.h`'s ~150 functions are written `UV_EXTERN int uv_run(…)`, its summary holds **4**
+/// declarations and 61 macros, and the census's `uv_* names: 15 asked, 2 resolved` is the first path.
+#[test]
+fn a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked() {
+    let files = MemoryFiles::new()
+        .with_file(
+            "/p/lib.h",
+            "#define DECL(name) extern int name(void);\nDECL(lib_open);\n",
+        )
+        .with_file(
+            "/p/a.c",
+            "#include \"lib.h\"\nvoid f(void) { lib_open(); }\n",
+        );
+    let fixture = Memory::new("macro-declaration", &files);
+
+    // **Read on its own.** The include is never cooked, so the declaration is nowhere in the index.
+    let mut alone = fixture.session();
+    alone.add_project_files([PathBuf::from("/p/a.c")]);
+    alone.index_everything();
+    alone.cook("/p/a.c").expect("the file is cooked");
+    let view = alone.view("/p/a.c").expect("the file reads");
+    let at = view
+        .source
+        .find("lib_open")
+        .expect("the call is in the text");
+    assert!(
+        matches!(alone.definition(&view, ReadingOffset::new(at)), Known::Unknown(_)),
+        "nothing cooked the header, so the declaration is nowhere in the index"
+    );
+
+    // **Looked at.** The pump cooks the open file's closure, the header's cooked reading is where the macro's
+    // declaration is, and the jump lands in `lib.h`.
+    let mut editor = fixture.session();
+    editor.did_open(
+        "/p/a.c",
+        "#include \"lib.h\"\nvoid f(void) { lib_open(); }\n",
+    );
+    editor.index_everything();
+    editor.advance(64);
+    let view = editor.view("/p/a.c").expect("the file reads");
+    let at = view
+        .source
+        .find("lib_open")
+        .expect("the call is in the text");
+    match editor.definition(&view, ReadingOffset::new(at)) {
+        Known::Yes(found) => {
+            assert_eq!(found.file, Path::new("/p/lib.h"));
+            assert_eq!(found.fact.name, "lib_open");
+        }
+        other => panic!("the macro's declaration is not in the index: {other:?}"),
+    }
+}

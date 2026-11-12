@@ -289,8 +289,34 @@ is almost entirely those. The *cooked* reading of the same file expands `UV_EXTE
 as directives, so the declaration reads `UV_EXTERN int uv_run(…)`: the type is a name the parser cannot place, the
 declaration is lost, and only the macros are recorded.
 
-That is what the census's `uv_* names: 15 asked, 2 resolved` is measuring, and it is the same mechanism behind
-`Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers:
+**The cooked reading is supposed to answer for that, and here it does not.** The census was given the editor's own
+closure cook (`CPPLS_NEOVIM_CLOSURE=1`, `Session::want_the_closure_cooked`) and the numbers did not move:
+
+```text
+                         one file at a time   with the closure cook
+uv_* names asked/resolved      15 / 2                15 / 2
+definition resolved            73.0%                73.0%
+```
+
+Measured on one real file — `src/nvim/event/loop.c`, which includes `uv.h` and calls `uv_run`:
+
+```text
+uv.h summary              4 declarations
+uv.h cooked reading       0 declarations        <- filed as "this file has been read"
+uv_run                    NotDeclaredHere
+... after one more cook of uv.h alone:
+uv.h cooked reading       2168 declarations
+uv_* names                4 asked, 4 resolved    <- uv_run is there
+```
+
+So the dependency's declarations *are* reachable — one explicit cook of the header found 2168 of them, and the four
+`uv_*` names of that file resolved. What is broken is that an **empty** cooked reading is filed for the header, and
+`want_the_closure_cooked` then treats the file as read (`already_read` is `cooked_declarations(path).is_some()`), so
+nothing cooks it again. A cook that finds *nothing* where the file's own text declares something is a failed cook,
+and it must be refused rather than stored — the same rule `cooking_refused` already applies to a render that
+declines.
+
+**The same mechanism is behind `Boolean`, `Dict(…)` and `Map(…)` in neovim's own headers:**
 
 ```c
 static Map(cstr_t, int) highlight_unames = MAP_INIT;          // highlight_group.c:72   Map is a macro in map_defs.h
@@ -298,15 +324,14 @@ void modify_keymap(…, Dict(keymap) *opts, Error *err)          // mapping.c:27
 Boolean link = GET_BOOL_OR_TRUE(opts, get_highlight, link);    // highlight_group.c:1710 Boolean is a typedef in types_defs.h
 ```
 
-`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail for that reason: the file is parsed with
-its own text and the macros *in force*, but the declarations those macros would expand to are not in the index, so
-neither the parser nor the scope walk can see the parameter's type. In a minimal project the same shape parses
-cleanly — the macro is in the file's include chain, and the missing half is the **index's** reading of the header
-that defines it, not the file's own.
+`mapping.c:2774` and `highlight_group.c:72`, `:920`, `:1710` still fail for that reason: the declaration those
+macros expand to lives in a header whose cooked reading is missing or empty. A test pins the mechanism at the
+session level — `session::tests::a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked` reads the same
+two-file fixture twice: the `.c` alone answers `NotDeclaredHere`, and with the closure cooked (what the pump does
+for every open document) the jump lands in the header.
 
-The next step is therefore not a grammar rule: a summary that is asked for a declaration should answer from the
-file's **cooked** declarations when it has them (the session already keeps them per file), or the summary pass
-should expand the file's own macros. Both are measured options for the round after this one.
+The next step is therefore not a grammar rule: a cook that produces no declarations for a file whose summary has
+some must be refused, and the header re-cooked — one explicit cook is what turned 0/4 into 4/4 above.
 
 `src/coverity-model.c:139` is `return __coverity_alloc_nosize__()` with no semicolon. Invalid C, not ours.
 

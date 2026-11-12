@@ -2901,7 +2901,18 @@ impl<F: FileProvider + Clone> Session<F> {
     /// never reports itself idle — which is a hang, not a slowdown. (Measured the hard way: the pump spun for over
     /// a minute in `a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is`, and every request behind it
     /// waited.)
-    fn want_the_closure_cooked(&mut self, root: &Path) {
+    /// **Cook what a reader of this file will ask about**: its own reading, its direct includes (up to
+    /// [`COOK_ONE_LEVEL_FURTHER`]) and the headers those include (up to [`COOK_TWO_LEVELS_FURTHER`]).
+    ///
+    /// This is what the pump does for **every open document** once the index is idle, and it is the contract a
+    /// caller who is *looking at* a file gets: a header is where the declarations behind a `#include` live, and a
+    /// header that was never cooked contributes no **cooked** declarations — so a name a macro writes
+    /// (`UV_EXTERN int uv_run(…)`) is in neither the shape-only summary nor the index until something cooks it.
+    ///
+    /// Public because a caller outside the pump can be looking at a file too — `tests/neovim_probe.rs` reads a
+    /// project the way an editor does, and asking for one file's reading instead of this was measuring a smaller
+    /// machine than the server is.
+    pub fn want_the_closure_cooked(&mut self, root: &Path) {
         let already_read =
             |session: &Self, path: &Path| session.store.index().cooked_declarations(path).is_some();
 
