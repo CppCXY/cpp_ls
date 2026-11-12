@@ -6844,15 +6844,7 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             inputs.push((path.as_path(), crate::cache::content_hash(&text)));
         }
-        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
-        let mut folded = String::new();
-        for (path, hash) in &inputs {
-            folded.push_str(&path.to_string_lossy());
-            folded.push('|');
-            folded.push_str(&hash.to_string());
-            folded.push(';');
-        }
-        crate::cache::content_hash(&folded) == stored
+        crate::cache::a_rendering_key(&inputs) == stored
     }
 
     /// **The texts a unit's cook reads, and the key its rendering is filed under.**
@@ -6877,21 +6869,21 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
-        let mut inputs: Vec<(&std::path::Path, u64)> = sources
+        let inputs: Vec<(&std::path::Path, u64)> = sources
             .iter()
             .map(|(path, text)| (path.as_path(), crate::cache::content_hash(text)))
             .collect();
-        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
-        let key = {
-            let mut folded = String::new();
-            for (path, hash) in &inputs {
-                folded.push_str(&path.to_string_lossy());
-                folded.push('|');
-                folded.push_str(&hash.to_string());
-                folded.push(';');
-            }
-            crate::cache::content_hash(&folded)
-        };
+        // **Folded with the reader, not only with the texts** — see [`crate::cache::a_rendering_key`], whose note
+        // records why: a rendering is a function of the reader as well as of the bytes, and a key that names only the
+        // bytes cannot invalidate a stream whose inputs happen not to have moved.
+        let key = crate::cache::a_rendering_key(&inputs);
+        if crate::probes::units() {
+            eprintln!(
+                "unit inputs: {} file(s), reader {:016x}, key {key:016x}",
+                inputs.len(),
+                crate::cache::READING_FINGERPRINT
+            );
+        }
 
         (sources, key)
     }

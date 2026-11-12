@@ -143,12 +143,22 @@ const MAX_CONTRIBUTIONS: usize = 512;
 
 /// **The identities a contribution is filed under.**
 ///
-/// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the
-/// names its conditions read (the projection), and the store's revision — which stands for the contents of every file
-/// the subtree reaches, because it moves whenever any summary is dropped.
+/// Four things, and each is a way the answer could differ: the file, the contents of the file, the values of the names
+/// its conditions read (the projection), and **the reader** — which is not about the text at all. A contribution is a
+/// *reading*: above all it records `visit_once`, whether this reading concluded that the file protects itself from a
+/// second inclusion, and a reader that concludes something else about the same bytes is a different answer under the
+/// same key.
+///
+/// # The measurement
+///
+/// A summary decoded from the cache carried `visit_once: false` for a file that begins with `#pragma once` (the codec
+/// never wrote the field — see [`crate::summary_codec::CODEC_VERSION`] 39), and the walk re-entered that header at
+/// every inclusion: **1 404 file entries** where a cold start builds **206**, one header spliced **18 times**, and a
+/// class answering 18 members of one name. This table would have kept replaying that conclusion after the codec was
+/// fixed, because the file's bytes had not moved — the same reason [`crate::cache::a_rendering_key`] folds the reader.
 pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 {
     let mut hash = crate::index::walk_census::hash(file.to_string_lossy().as_bytes());
-    for part in [content, projection] {
+    for part in [content, projection, crate::cache::READING_FINGERPRINT] {
         hash = hash.rotate_left(7) ^ part;
     }
     hash

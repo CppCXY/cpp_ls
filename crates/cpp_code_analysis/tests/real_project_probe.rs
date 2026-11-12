@@ -362,10 +362,10 @@ fn the_two_reported_enums_in_the_parser() {
         return;
     };
     let file = root.join("LuaParser/src/Parse/LuaParser.cpp");
-    let Ok(text) = std::fs::read_to_string(&file) else {
+    if std::fs::read_to_string(&file).is_err() {
         eprintln!("[enum2] no LuaParser.cpp");
         return;
-    };
+    }
 
     let mut session = Session::open_with_config_file(
         root.clone(),
@@ -1115,4 +1115,186 @@ fn what_the_session_says_about_the_reported_line() {
         .filter(|name| name.range.start_offset == at)
         .count();
     eprintln!("[probe] {} name(s) start exactly at the qualifier", count);
+}
+
+/// **The member list the reported popup was drawn from**, asked of the real project.
+///
+/// `declarations_in(FormatRange)` answers **6** declarations now and answered **108** with eighteen of them named
+/// `EndLine` while the project's cache held a summary whose `visit_once` was lost on the way to disk (see
+/// `crates/cpp_code_analysis/src/summary_codec.rs`, version 39). `member_markdown` prints one line per candidate, so
+/// eighteen copies of one declaration were eighteen identical lines `std::size_t EndLine` in one hover.
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn where_the_duplicate_declarations_come_from() {
+    // `declarations_in(FormatRange)` is 6 with the file added to the project and **108** once the file is *opened*
+    // (`did_open`), with 18 of them named `EndLine`. This prints each copy's file and range, so the question is
+    // answered by the data: one fact repeated eighteen times, or eighteen summaries each holding it.
+    let Some(root) = project() else {
+        eprintln!("[dup] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCLib/src/CodeFormatCLib.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[dup] no CodeFormatCLib.cpp");
+        return;
+    };
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, &text);
+    for _ in 0..10 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let found = session.index().declarations_in("FormatRange", &file);
+    eprintln!(
+        "[dup] declarations_in(FormatRange): {} declaration(s)",
+        found.len()
+    );
+    for (index, declaration) in found.iter().enumerate() {
+        eprintln!(
+            "[dup]   {index}: {} scope {:?} name {:?} range {:?}",
+            declaration.file.display(),
+            declaration.fact.scope,
+            declaration.fact.name,
+            declaration.fact.range
+        );
+    }
+
+    // The same through the member list, which is what the hover prints a line per candidate from.
+    if let Some(view) = session.view_of_the_file(&file) {
+        match session.members_of(&view, "FormatRange") {
+            Known::Yes(list) => {
+                eprintln!(
+                    "[dup] members_of(FormatRange): {} member(s)",
+                    list.members.len()
+                );
+                for member in list
+                    .members
+                    .iter()
+                    .filter(|member| member.fact.name == "EndLine")
+                {
+                    eprintln!(
+                        "[dup]   member {} range {:?} declared_in {:?} depth {}",
+                        member.file.display(),
+                        member.fact.range,
+                        member.declared_in,
+                        member.depth
+                    );
+                }
+            }
+            other => eprintln!("[dup] members_of(FormatRange): {other:?}"),
+        }
+    }
+}
+
+/// **The stream the cache serves, counted** — one copy of a `#pragma once` header, not eighteen.
+///
+/// `RenderedUnit::text` is what the parse sees. A cold start of `EmmyLuaCodeStyle` renders 742 907 tokens and
+/// enters 206 files; the cache that lost `visit_once` rendered 919 228 tokens, entered 1 404 files, and held
+/// `struct FormatRange` **18 times** — which is the whole defect the hover reported.
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn does_the_cached_rendering_hold_the_header_eighteen_times() {
+    // The reading with 450 declarations appears on the first pass and only with the project's on-disk cache: a clean
+    // `Session` answers 25. So the question is what the *rendering* the cache serves holds — the cook's output for
+    // this translation unit, as the cache kept it. `RenderedUnit::text` is the stream the parse sees, and a header
+    // that appears in it eighteen times is a header the program declares eighteen times.
+    let Some(root) = project() else {
+        eprintln!("[render] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCLib/src/CodeFormatCLib.cpp");
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    for _ in 0..6 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    match session.render_the_unit(&file) {
+        Some(unit) => {
+            eprintln!(
+                "[render] {} token(s) of text, {} file entr(ies), {} byte(s)",
+                unit.spans.len(),
+                unit.files.len(),
+                unit.text.len()
+            );
+            let copies = unit.text.matches("struct FormatRange").count();
+            let slices = unit
+                .files
+                .iter()
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Types.h"))
+                })
+                .count();
+            eprintln!(
+                "[render] `struct FormatRange` appears {copies} time(s); Types.h is a file entry {slices} time(s)"
+            );
+        }
+        None => eprintln!("[render] no rendering"),
+    }
+}
+
+/// **What the stored summary says about the file's own guard, after a round trip through the cache.**
+///
+/// Run twice: the first run writes the entry, the second reads it back. `visit_once: true` both times is the whole
+/// fix — the encoder did not write the field, so every decoded summary said `false` and the walk re-entered every
+/// `#pragma once` header at every inclusion.
+#[test]
+#[ignore = "a probe: needs the external project"]
+fn what_guard_the_cached_summary_records() {
+    // The walk skips a second visit to a file only when the **summary** says how the file guards itself
+    // (`Guard::PragmaOnce`, `Guard::Macro`). A summary written before that rule was understood says `Guard::None`,
+    // and then a `#pragma once` header is entered at every inclusion — measured as eighteen copies of `Types.h` in
+    // one program's stream, and one member of a class per copy.
+    let Some(root) = project() else {
+        eprintln!("[guard] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCLib/src/CodeFormatCLib.cpp");
+    let header = root.join("CodeFormatCore/include/CodeFormatCore/Format/Types.h");
+
+    let mut session = Session::open_with_config_file(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+        None,
+    );
+    session.add_project_files([file.clone()]);
+    for _ in 0..6 {
+        session.index_everything();
+        session.catch_up(&file);
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+    match session.index().summary(&header) {
+        Some(summary) => eprintln!(
+            "[guard] the summary of Types.h records {:?} ({} include(s) of its own, {} declaration(s))",
+            summary.guards,
+            summary.includes.len(),
+            summary.declarations.len()
+        ),
+        None => eprintln!("[guard] no summary for Types.h"),
+    }
 }

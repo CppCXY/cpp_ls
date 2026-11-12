@@ -258,7 +258,18 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// subscript on a `std::vector` answers `Unknown`, because the only reader that can resolve `reference` is the one
 /// holding the class, and it needs the spelling to do it. An entry written before this holds `None` for every
 /// declaration, which is the answer that stops the subscript — a wrong answer rather than an old one.
-pub const CODEC_VERSION: u32 = 38;
+///
+/// # Version 39
+///
+/// **A summary's guards gained `visit_once`** — whether the file writes `#pragma once`, which is what a walk reads to
+/// decide that a second `#include` must not re-enter it. The field was recorded on a unit's *frame* (version 24) and
+/// on the summary in memory, and it was never written here: every summary read back from the cache said `false`, so a
+/// warm start re-entered every `#pragma once` header at every inclusion. Measured on `EmmyLuaCodeStyle`: one program's
+/// stream held `CodeFormatCore/Format/Types.h` **18 times** (919 228 tokens and 1 404 file entries, against 742 907 and
+/// 206 from a cold start), the class it declares answered **108 members with 18 named `EndLine`**, and a hover drew
+/// one identical line per copy — the report this number is for. An entry written before this is a wrong answer for
+/// every `#pragma once` header, not a missing one, which is what moves the number.
+pub const CODEC_VERSION: u32 = 39;
 
 /// Write a summary as bytes.
 ///
@@ -324,6 +335,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     }
 
     put_u32(&mut out, summary.guards.own_guard.unwrap_or(u32::MAX));
+    put_u8(&mut out, u8::from(summary.guards.visit_once));
 
     // The readings come last, and they are the only section whose absence a reader could not detect from the
     // others: a file with no macro-opened scope writes one zero. That is the same shape a reader written before
@@ -697,6 +709,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         u32::MAX => None,
         region => Some(region),
     };
+    guards.visit_once = reader.u8()? != 0;
 
     let mut macro_readings = Vec::new();
     for _ in 0..reader.count()? {
@@ -1340,7 +1353,9 @@ mod tests {
                 },
             ],
             guards: SummaryGuards {
-                visit_once: false,
+                // **Not the default**, for the reason `every_field` exists: the encoder that dropped this field on the
+                // way to disk round-tripped a default and looked right. See the note at version 39.
+                visit_once: true,
                 regions: vec![
                     range(200, 12),
                     range(240, 20),

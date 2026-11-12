@@ -706,21 +706,64 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // file's own guard is false). `files` is per slice, which is right for the tokens and wrong for the answer:
         // the caller files one reading per path, so a duplicate would replace the first with an empty one. Merged
         // here, in the order the entries happened, and the counters summed.
+        //
+        // **A declaration is merged by where it is written, not concatenated.** A position in a file names one
+        // declaration however many times the stream arrived at it, and the answer has to say so: a stream that held
+        // one header more than once — eighteen copies of `CodeFormatCore/Format/Types.h`, built while a decoded
+        // summary had lost `visit_once` — gave the class **108 members, 18 of them named `EndLine`**, one per copy of
+        // the same declaration at the same offset, and the hover drew one line for each. The same rule for a
+        // `#define`, whose name range is the position that names it.
         let mut merged: Vec<(std::path::PathBuf, crate::CookedFile)> =
             Vec::with_capacity(files.len());
         let mut where_to: std::collections::HashMap<std::path::PathBuf, usize> =
             std::collections::HashMap::new();
+        // The sites each merged entry already holds, parallel to `merged`.
+        let mut declared: Vec<std::collections::HashSet<(usize, usize, usize)>> = Vec::new();
+        let mut defined: Vec<std::collections::HashSet<(usize, usize)>> = Vec::new();
         for (path, cooked) in files {
             match where_to.get(&path) {
                 Some(&index) => {
                     let held = &mut merged[index].1;
-                    held.declarations.extend(cooked.declarations);
-                    held.macros.extend(cooked.macros);
+                    for fact in cooked.declarations {
+                        let site = (
+                            fact.range.start_offset,
+                            fact.range.length,
+                            fact.name_range.start_offset,
+                        );
+                        if declared[index].insert(site) {
+                            held.declarations.push(fact);
+                        }
+                    }
+                    for fact in cooked.macros {
+                        if defined[index].insert((fact.range.start_offset, fact.range.length)) {
+                            held.macros.push(fact);
+                        }
+                    }
                     held.diagnostics.extend(cooked.diagnostics);
                     held.unplaced += cooked.unplaced;
                 }
                 None => {
                     where_to.insert(path.clone(), merged.len());
+                    declared.push(
+                        cooked
+                            .declarations
+                            .iter()
+                            .map(|fact| {
+                                (
+                                    fact.range.start_offset,
+                                    fact.range.length,
+                                    fact.name_range.start_offset,
+                                )
+                            })
+                            .collect(),
+                    );
+                    defined.push(
+                        cooked
+                            .macros
+                            .iter()
+                            .map(|fact| (fact.range.start_offset, fact.range.length))
+                            .collect(),
+                    );
                     merged.push((path, cooked));
                 }
             }

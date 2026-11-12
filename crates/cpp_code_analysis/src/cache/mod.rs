@@ -209,7 +209,15 @@ pub const FORMAT_VERSION: u32 = 18;
 /// * `cpp_parser::VERSION` — the parser's sources move with its version, and a released binary is the only one
 ///   whose cache survives a restart into a different parser;
 /// * this crate's own `CARGO_PKG_VERSION` and [`FORMAT_VERSION`] — the numbers that move when a *reading* of this
-///   crate changes.
+///   crate changes;
+/// * [`crate::summary_codec::CODEC_VERSION`] — the number that moves when the **record** changes shape. It belongs
+///   here rather than being left to the record's own header because not everything keyed by this fingerprint is a
+///   summary: a unit's rendering, its facts and a walk contribution are all derived from summaries, and a decoder
+///   that drops a field makes every one of them wrong. Measured, for version 39 of that number: `visit_once` was
+///   never written, so a warm start made the walk re-enter every `#pragma once` header at every inclusion — one
+///   header appeared **18 times** in a program's stream and a class answered 108 members with 18 same-named ones —
+///   while a cold start, whose summaries were never decoded, answered one. A codec bump that leaves a rendering
+///   keyed as before serves that wrong stream for as long as the files it names do not change.
 ///
 /// # The cost, written down rather than hidden
 ///
@@ -227,6 +235,7 @@ pub const READING_FINGERPRINT: u64 = {
     hash = fnv1a(hash, cpp_parser::VERSION.as_bytes());
     hash = fnv1a(hash, env!("CARGO_PKG_VERSION").as_bytes());
     hash = fnv1a(hash, &FORMAT_VERSION.to_le_bytes());
+    hash = fnv1a(hash, &crate::summary_codec::CODEC_VERSION.to_le_bytes());
     hash
 };
 
@@ -382,6 +391,49 @@ pub fn content_hash(text: &str) -> u64 {
     fnv1a64(text.as_bytes())
 }
 
+/// **The key a translation unit's rendering is filed under** — the files the walk read, their texts, and the reader
+/// that would produce the stream.
+///
+/// The *inputs* say which program this is: a file the reader has open and has not saved comes from the overlay, so an
+/// edit changes the program without changing its name, and a key over the names alone would answer with text the files
+/// no longer have. The **fingerprint** says which reader read it, and it is here for the reason
+/// [`SummaryKey::reading_fingerprint`] states for summaries: a rendering is a function of the cook and of the parse as
+/// well as of the bytes, and a key that names only the bytes keeps serving a stream an older build produced.
+///
+/// # The measurement
+///
+/// It was missing, and a real project's hover carried it. The rendering that answered for `CodeFormatCLib.cpp` was
+/// 919 228 tokens with `struct FormatRange` **18 times** in it — the class's member list answered 108 members with
+/// **18 named `EndLine`**, and the popup drew thirteen-odd identical lines `std::size_t EndLine` — where the same
+/// project rendered 742 907 tokens and **one** copy once its broken summary was re-read. An entry like that had no
+/// key component that could move when the reading moved: every reader that produced it folded the closure's texts and
+/// nothing else, so the text being unchanged made the answer permanent. (The reading itself was the defect —
+/// `visit_once` lost in the summary's codec, [`crate::summary_codec::CODEC_VERSION`] 39 — but a cache that cannot tell
+/// two readers apart is how a fixed reading keeps answering.)
+///
+/// Sorted here rather than by the callers, because two callers compute this key — the render, and the check that a
+/// stored rendering still describes the files it names — and a disagreement about the order would be a permanent cache
+/// miss for one of them.
+pub fn a_rendering_key(inputs: &[(&std::path::Path, u64)]) -> u64 {
+    a_rendering_key_by(inputs, READING_FINGERPRINT)
+}
+
+/// [`a_rendering_key`] with the fingerprint as a parameter — the only way to test that the key folds it, since the
+/// real one is a constant.
+fn a_rendering_key_by(inputs: &[(&std::path::Path, u64)], fingerprint: u64) -> u64 {
+    let mut inputs = inputs.to_vec();
+    inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut folded = String::with_capacity(inputs.len() * 48);
+    folded.push_str(&format!("rendering|{fingerprint:016x};"));
+    for (path, hash) in inputs {
+        folded.push_str(&path.to_string_lossy());
+        folded.push('|');
+        folded.push_str(&format!("{hash:016x}"));
+        folded.push(';');
+    }
+    content_hash(&folded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
@@ -460,6 +512,47 @@ mod tests {
             from_one_root.file_name(),
             from_another.file_name(),
             "the file name is the content's, the directory is the project's"
+        );
+    }
+
+    #[test]
+    fn a_rendering_is_keyed_by_its_reader_as_well_as_by_its_text() {
+        // The key a unit's rendering is filed under. Its two properties are both measured requirements: the same
+        // inputs in any order are the same program (the walk's order is the stream's, not this fold's), and the same
+        // inputs read by a different reader are a **different** answer — that is the half whose absence served a
+        // rendering with eighteen copies of one header (see [`super::a_rendering_key`]).
+        let one = std::path::Path::new("/p/a.cpp");
+        let two = std::path::Path::new("/p/b.h");
+        let inputs = [
+            (one, content_hash("int x;\n")),
+            (two, content_hash("int y;\n")),
+        ];
+        let flipped = [
+            (two, content_hash("int y;\n")),
+            (one, content_hash("int x;\n")),
+        ];
+
+        assert_eq!(
+            super::a_rendering_key(&inputs),
+            super::a_rendering_key(&flipped),
+            "the same files and texts are the same program"
+        );
+
+        let edited = [
+            (one, content_hash("int z;\n")),
+            (two, content_hash("int y;\n")),
+        ];
+        assert_ne!(
+            super::a_rendering_key(&inputs),
+            super::a_rendering_key(&edited),
+            "an edit changes the program"
+        );
+
+        let reader = super::READING_FINGERPRINT;
+        assert_ne!(
+            super::a_rendering_key_by(&inputs, reader),
+            super::a_rendering_key_by(&inputs, reader ^ 1),
+            "a rendering is keyed by the reader that produced it"
         );
     }
 

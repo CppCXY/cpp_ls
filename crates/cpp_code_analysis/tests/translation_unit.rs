@@ -1517,3 +1517,64 @@ fn a_namespace_whose_brace_ends_the_file() {
     }
     println!("boundary {boundary}; namespace ancestors of `b`: {inside:?}");
 }
+
+/// **A header the stream holds twice declares its member once.**
+///
+/// An unguarded header included twice is spliced twice — that is what a preprocessor does, and the cook keeps doing
+/// it — so the unit's per-slice facts hold every declaration of that header twice, at the same offsets. The merge
+/// that files one reading per path used to concatenate them, and the answer was a class with two members named
+/// `EndLine`: measured on a real project whose *cached* rendering held one header eighteen times, the member list
+/// answered 108 members and a hover drew thirteen-odd identical lines. A declaration is a position in a file, and
+/// the same position read twice is one declaration.
+#[test]
+fn a_header_the_stream_holds_twice_declares_its_member_once() {
+    let files = [
+        (
+            "/p/range.h",
+            "struct FormatRange {\n    unsigned long EndLine;\n    unsigned long EndCol;\n};\n",
+        ),
+        (
+            "/p/main.cpp",
+            "#include \"range.h\"\n#include \"range.h\"\n",
+        ),
+    ];
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
+
+    // **The premise**: the stream really does hold the header twice. If the cook learns to drop the second
+    // inclusion, this fails first and says why — the rule below would then be untested rather than wrong.
+    assert_eq!(
+        stitched.text.matches("struct FormatRange").count(),
+        2,
+        "an unguarded header included twice is spliced twice:\n{}",
+        stitched.text
+    );
+
+    let configuration = CompilerConfig::default();
+    let indexer = FileIndexer::new(&unit.files, &configuration);
+    let indexed =
+        indexer.index_unit_rendering(Path::new("/p/main.cpp"), &stitched, SummaryKey::new(0, 0));
+    let (_, cooked) = indexed
+        .files
+        .iter()
+        .find(|(path, _)| path.ends_with("range.h"))
+        .expect("the header is one entry of the reading");
+    let named = |wanted: &str| {
+        cooked
+            .declarations
+            .iter()
+            .filter(|fact| fact.name == wanted)
+            .count()
+    };
+    assert_eq!(
+        named("FormatRange"),
+        1,
+        "one class, however many inclusions"
+    );
+    assert_eq!(named("EndLine"), 1, "one member, however many inclusions");
+    assert_eq!(named("EndCol"), 1, "and its neighbours are not lost either");
+    assert_eq!(cooked.declarations.len(), 3, "{:?}", cooked.declarations);
+}

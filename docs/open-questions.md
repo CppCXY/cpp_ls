@@ -667,3 +667,68 @@ for a **qualified** name, the files that declare its **last segment** are exactl
 recovered `buglist.md` has no §33; the closest record is §4, "the macro environment a written view wants is never
 built by the pump". A citation to a deleted document is not a record, and the ignore reason should either be
 re-pointed at a live document or the test un-ignored once the ask exists.
+
+## The hover that drew one member thirteen times
+
+Reported with a screenshot of `CodeFormatCLib.cpp`: hovering drew a popup holding thirteen-odd identical lines
+`std::size_t EndLine` and a scrollbar — a "very mysterious overload" about a data member. The file is four functions
+over `FormatRange`, whose `EndLine` is one `std::size_t` in `CodeFormatCore/Format/Types.h`.
+
+### What was measured, in the order it named the defect
+
+Every name on the reported screen was asked of the **real server over stdio**, then every byte offset in the file
+(1 600-odd hovers, 133 distinct answers): no answer held the popup, because a freshly started server answered one
+declaration. A `Session` opened with `add_project_files` answered the same — **6** declarations in `FormatRange`, one
+named `EndLine`.
+
+The difference is `did_open`. With the file opened the way an editor opens it, the same session answered
+**108 declarations — 18 named `EndLine` — all at the same ranges in `types.h`**, and `members_of` returned 108
+members; `member_markdown` prints one line per candidate and does not de-duplicate, which is the popup exactly. The
+copies were *not* duplicate postings: the scope's posting list held 18 distinct slots, 25 declarations apart, so one
+**reading** of the file contained eighteen copies of the same 25 declarations.
+
+The rendering of that translation unit said the same thing: `struct FormatRange` appeared **18 times** in
+`RenderedUnit::text`, `types.h` was a file entry **20 times**, and the stream was 919 228 tokens and 1 404 file
+entries — against **742 907 tokens, 206 entries and one copy** from the same project with an empty cache.
+
+### The cause: `visit_once` was never written to the cache
+
+`SummaryGuards::visit_once` is what the walk reads to decide that a second `#include` must not re-enter a file. It was
+recorded on a unit's *frame* (codec version 24) and on the summary in memory — and the file summary's encoder never
+wrote it, so every summary decoded from `.cppls` said `false`:
+
+```text
+stored summary:   SummaryGuards { regions: [], conditionals: [], own_guard: None, visit_once: false }
+fresh summary:    SummaryGuards { regions: [], conditionals: [], own_guard: None, visit_once: true  }
+```
+
+A cold start therefore entered `#pragma once` headers once, and a warm start re-entered each at **every** inclusion.
+`EmmyLuaCodeStyle`'s headers all begin with `#pragma once`, so one header included through eighteen paths declared
+its six members eighteen times, and the member list — and the hover — showed it.
+
+### The fix
+
+* `summary_codec` writes and reads `visit_once`, `CODEC_VERSION` 38 → **39**, and the `every_field` fixture now sets
+  it to `true` so the round-trip test fails if the encoder stops writing it.
+* `READING_FINGERPRINT` folds `CODEC_VERSION`, so a record whose *shape* changed also moves the key of everything
+  derived from it — a rendering, a unit's facts, a cooked reading, a walk contribution. Measured before this: a
+  rendering kept answering after the summary reader was fixed, because nothing about the closure's *texts* had moved.
+* `cache::a_rendering_key` and `walk_cache::key` fold `READING_FINGERPRINT` for the same reason at their own layer: a
+  rendering and a walk contribution are functions of the reader as well as of the bytes.
+* The unit's per-file merge files a declaration **by where it is written**, not by inclusion: `(range, name_range)` is
+  the identity, so a stream that holds one header twice declares its members once. Regression test:
+  `translation_tests::a_header_the_stream_holds_twice_declares_its_member_once` (it fails with `2` classes against the
+  old concatenation).
+
+### After the fix, measured on the same polluted cache
+
+```text
+[guard]  SummaryGuards { …, visit_once: true }     (twice: written, then read back)
+[render] 742 907 token(s) of text, 206 file entr(ies)
+[render] `struct FormatRange` appears 1 time(s); Types.h is a file entry 2 time(s)
+[dup]    declarations_in(FormatRange): 6 declaration(s) … members_of(FormatRange): 6 member(s)
+[clib-probe] 17:10 `EndLine`: "std::size_t EndLine — FormatRange::EndLine — a variable of type std::size_t, in FormatRange"
+```
+
+The probes that carry these numbers are `real_project_probe.rs::what_guard_the_cached_summary_records`,
+`…::does_the_cached_rendering_hold_the_header_eighteen_times` and `…::where_the_duplicate_declarations_come_from`.

@@ -191,9 +191,11 @@ fn ask_until_stable(
                 started.elapsed()
             );
         }
-        // **Two identical non-`null` answers** is what "settled" means here: the first says the server has an
-        // answer, the second says it is not about to change under a still-running index pass.
-        if !changed && !answer["result"].is_null() {
+        // **Two identical answers** is what "settled" means here: the first says the server has an answer (or has
+        // none), the second says it is not about to change under a still-running index pass. Before this, a `null`
+        // answer — which *is* an answer, and the one the enum report was about — was re-asked for the whole patience
+        // and printed nothing at all.
+        if !changed {
             return answer;
         }
         last = answer.clone();
@@ -464,6 +466,202 @@ fn what_the_real_server_answers_about_the_reported_line() {
             );
         }
     }
+
+    client.request(9000, "shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+}
+
+/// **Every byte offset in the reported file**, asked of the real server — which position, if any, draws the popup.
+///
+/// The screenshot has one popup holding thirteen-odd identical lines `std::size_t EndLine` and a scrollbar, so more
+/// are below the fold. Hovering each *name* on the screen answered one declaration for each, so the position that
+/// draws the list is not one of them: it is somewhere this probe has not looked — the `.` of `range.EndLine`, the
+/// whitespace after it, the closing brace. This walks the file byte by byte, groups the answers, and prints the ones
+/// that repeat a line, which is the shape [`cpp_ls`]'s member list has when the member list itself repeats.
+#[test]
+#[ignore = "a probe: needs the external project and the real standard library"]
+fn every_offset_in_the_reported_file() {
+    let Some(root) = project() else {
+        eprintln!("[offset-probe] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCLib/src/CodeFormatCLib.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[offset-probe] no CodeFormatCLib.cpp");
+        return;
+    };
+
+    let mut client = Client::start(&root);
+    client.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": {
+                "textDocument": { "hover": { "contentFormat": ["markdown", "plaintext"] } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    client.notify("initialized", json!({}));
+    let uri = uri_of(&file);
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text }
+        }),
+    );
+
+    let mut id = 100;
+    // **Answers by text, with the first position that produced each and how often** — a HashMap cannot be iterated in
+    // the order the reader wants, so the order is kept beside it.
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashMap<String, (u32, u32, usize)> =
+        std::collections::HashMap::new();
+    let mut silent = 0usize;
+    for offset in 0..text.len() {
+        if !text.is_char_boundary(offset) {
+            continue;
+        }
+        let (line, character) = position_of(&text, offset);
+        let answer = client.request(
+            id,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        );
+        id += 1;
+        if answer["result"].is_null() {
+            silent += 1;
+            continue;
+        }
+        let contents = &answer["result"]["contents"];
+        let value = contents["value"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| contents.to_string());
+        match seen.get_mut(&value) {
+            Some(entry) => entry.2 += 1,
+            None => {
+                order.push(value.clone());
+                seen.insert(value, (line, character, 1));
+            }
+        }
+    }
+
+    eprintln!(
+        "[offset-probe] {} distinct answer(s), {silent} silent",
+        order.len()
+    );
+    for value in &order {
+        let (line, character, count) = seen[value];
+        let repeated = value.matches("std::size_t EndLine").count();
+        if repeated > 1 || count > 20 {
+            eprintln!(
+                "[offset-probe] at {line}:{character} ×{count} (EndLine lines: {repeated}): {value:?}"
+            );
+        } else {
+            let head: String = value.chars().take(90).collect();
+            eprintln!("[offset-probe] at {line}:{character} ×{count}: {head}");
+        }
+    }
+
+    client.request(9000, "shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+}
+
+/// **Every identifier on one screen of a file, asked of the real server** — the popup the editor draws, verbatim.
+///
+/// Reported with a screenshot of `CodeFormatCLib.cpp`: hovering produced eight identical lines `std::size_t EndLine`
+/// in one popup. This asks the protocol for every name on lines 6–26 and prints the markdown it gets back, so the
+/// question "which query said that" is answered by the server rather than by reading the handler.
+#[test]
+#[ignore = "a probe: needs the external project and the real standard library"]
+fn every_name_on_the_reported_screen_of_code_format_clib() {
+    let Some(root) = project() else {
+        eprintln!("[clib-probe] the project is not here");
+        return;
+    };
+    let file = root.join("CodeFormatCLib/src/CodeFormatCLib.cpp");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("[clib-probe] no CodeFormatCLib.cpp");
+        return;
+    };
+
+    let mut client = Client::start(&root);
+    client.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": {
+                "textDocument": { "hover": { "contentFormat": ["markdown", "plaintext"] } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    client.notify("initialized", json!({}));
+    let uri = uri_of(&file);
+    client.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text }
+        }),
+    );
+
+    // **The names of each line, by byte offset** — a hand-rolled scan, because a probe that needed the analysis to
+    // say where the names are would be asking the suspect to describe itself.
+    let mut id = 100;
+    let mut answers = 0usize;
+    let mut silent = 0usize;
+    for (number, line) in text.lines().enumerate() {
+        if !(5..=25).contains(&number) {
+            continue;
+        }
+        let mut offset = 0usize;
+        let bytes = line.as_bytes();
+        while offset < bytes.len() {
+            if !(bytes[offset].is_ascii_alphabetic() || bytes[offset] == b'_') {
+                offset += 1;
+                continue;
+            }
+            let start = offset;
+            while offset < bytes.len()
+                && (bytes[offset].is_ascii_alphanumeric() || bytes[offset] == b'_')
+            {
+                offset += 1;
+            }
+            let word = &line[start..offset];
+            let character = line[..start].chars().count() as u32;
+            let answer = client.request(
+                id,
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": number as u32, "character": character },
+                }),
+            );
+            id += 1;
+            if answer["result"].is_null() {
+                silent += 1;
+                continue;
+            }
+            answers += 1;
+            let contents = &answer["result"]["contents"];
+            let value = contents["value"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| contents.to_string());
+            eprintln!(
+                "[clib-probe] {number}:{character} `{word}` ({answers} answered, {silent} silent): {value:?}"
+            );
+        }
+    }
+    eprintln!("[clib-probe] {answers} answered, {silent} silent");
 
     client.request(9000, "shutdown", Value::Null);
     client.notify("exit", Value::Null);
