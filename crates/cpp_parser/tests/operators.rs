@@ -520,6 +520,48 @@ fn a_cast_to_a_name_the_file_never_declares_is_a_cast() {
 }
 
 #[test]
+fn a_prefix_operator_after_the_parentheses_is_the_casts_operand() {
+    // **`++` and `--` are not binary operators**, and the table above says they are ("each is a binary operator as
+    // well as a prefix"). They are not: they are only ever prefix or postfix, so the token after them decides which
+    // — an operand there means the operator is prefix, and a prefix operator means the parentheses held a *type*,
+    // because a postfix one ends an expression and cannot begin an operand.
+    //
+    // ```text
+    // (mpack_uint32_t)--remaining    a cast of `--remaining`   — neovim's src/mpack/mpack_core.c:280
+    // (a)--                          postfix: nothing follows, the parentheses held an expression
+    // (a)-- - b                      postfix, then a subtraction: the token after `--` is `-`, not an operand
+    // ```
+    for source in [
+        "void f(unsigned remaining) { unsigned i; i = (mpack_uint32_t)--remaining; }\n",
+        "void f(unsigned remaining) { unsigned i; i = (size_t)--remaining; }\n",
+        "void f(int n) { auto d = (MyType)++n; }\n",
+        "void f(int n) { auto d = (long)--n + 1; }\n",
+    ] {
+        parses(source);
+        assert_eq!(
+            count(source, CppSyntaxKind::CastExpr),
+            1,
+            "{source:?} is a cast of a prefixed operand"
+        );
+    }
+
+    // The two postfix spellings, which the same rule must leave alone.
+    for source in [
+        "void f() { auto d = (a)--; }\n",
+        "void f() { auto d = (a)++; }\n",
+        "void f() { auto d = (a)-- - b; }\n",
+        "void f() { auto d = (a)++ + b; }\n",
+    ] {
+        parses(source);
+        assert_eq!(
+            count(source, CppSyntaxKind::CastExpr),
+            0,
+            "{source:?} is a parenthesised expression with a postfix operator"
+        );
+    }
+}
+
+#[test]
 fn an_operand_after_the_parentheses_decides_the_cast_and_nothing_else_does() {
     // The other side of the rule. Every token left out of the operand set means something in an expression as
     // well, and each of the shapes below is a **valid expression** that must keep its reading:

@@ -1443,6 +1443,29 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
         }
     }
 
+    // **A `++`/`--` followed by an operand is a *prefix* operator, and its operand is the cast's.**
+    //
+    // [`starts_an_operand`] leaves the two out of its set for being "a binary operator as well as a prefix", and
+    // that is not true of them: `++` and `--` are only ever prefix or postfix, never infix. The token *after* one
+    // says which — an operand means the operator is prefix, and a prefix operator means the parentheses held a
+    // type, because a postfix operator ends the expression it applies to and cannot begin an operand:
+    //
+    // ```text
+    // (mpack_uint32_t)--remaining    a cast of `--remaining`       neovim's src/mpack/mpack_core.c:280
+    // (a)--                          postfix: nothing follows, so the parentheses held an expression
+    // (a)-- - b                      postfix, then a subtraction   — the token after `--` is `-`, not an operand
+    // ```
+    //
+    // Measured on the first line: it was read as a parenthesised expression, the `--` had no left operand, and the
+    // statement reported ``expected `;` after expression`` at the identifier behind it.
+    if matches!(
+        p.peek_token_kind_at(offset..offset + 1).first(),
+        Some(CppTokenKind::PlusPlus | CppTokenKind::MinusMinus)
+    ) && starts_an_operand(p, offset + 1)
+    {
+        return true;
+    }
+
     starts_an_operand(p, offset) || a_braced_initialiser_follows(p, offset)
 }
 
