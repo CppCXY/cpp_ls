@@ -187,7 +187,16 @@ use std::path::{Path, PathBuf};
 /// `allocator_traits`'s `conditional_t` base. An entry from before this bump decodes happily and holds the missing
 /// fact, so every existing cache has to be dropped — measured on `EmmyLuaCodeStyle`, where `auto pos = events.size();`
 /// still answered `_Alty_traits::size_type` from a summary built by the old reader.
-pub const FORMAT_VERSION: u32 = 18;
+///
+/// # Why this moved to 19
+///
+/// **A C file is read with C's keyword table**, so `new`, `delete`, `this`, `operator`, `template` and the alternative
+/// spellings (`compl`, `not`, `and`, …) are ordinary identifiers in `.c` and `.i` files instead of C++ keywords. A
+/// summary written before this holds one expression statement where a function with a parameter named `delete` was,
+/// and no declaration for a variable named `new` — measured on neovim: 28 files of 517 had a parse error before the
+/// gate and 17 after, and 13 lines stopped being unparsable. The key's parts are unchanged, so the old entries decode
+/// happily and keep the missing declarations, which is what this number is for.
+pub const FORMAT_VERSION: u32 = 19;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

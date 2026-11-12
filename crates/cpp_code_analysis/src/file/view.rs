@@ -809,11 +809,17 @@ impl FileView {
         file: &VfsFile,
         macros: &cpp_parser::MacroEnvironment,
         cuda: bool,
+        language: Option<cpp_parser::features::LanguageConfig>,
     ) -> FileView {
         let source = file.text.clone();
-        let config = cpp_parser::ParserConfig::default()
+        let mut config = cpp_parser::ParserConfig::default()
             .with_cuda(cuda)
             .with_macros_from_includes(macros);
+        // **The language the file is compiled as**, when the session knows it: a `.c` file read with C++'s keyword
+        // table cannot name a variable `new` or a parameter `delete` — see `CppLexer::name_to_kind`.
+        if let Some(language) = language {
+            config = config.with_language(language);
+        }
         let tree = cpp_parser::CppParser::parse(&source, config);
         let root = tree.get_red_root();
         let scopes = crate::sema::scopes::build_scopes(&root, macros);
@@ -833,7 +839,7 @@ impl FileView {
         }
     }
     pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
-        Self::parse_with_cuda(file, macros, false)
+        Self::parse_with_cuda(file, macros, false, None)
     }
 
     /// **A view of what the preprocessor produced**, rather than of the file's own tokens.

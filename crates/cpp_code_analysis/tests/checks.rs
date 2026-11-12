@@ -4175,3 +4175,49 @@ void f() {
         codes_of(source)
     );
 }
+
+/// **The errors a file produces**, as the diagnostics request reports them — the parser's channel rather than the
+/// checks'.
+fn errors_of_a_file(path: &str, source: &str) -> Vec<String> {
+    let files = MemoryFiles::new().with_file(path, source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from(path)]);
+    session.want_cooked_reading(std::path::Path::new(path));
+    session.index_everything();
+
+    session
+        .diagnostics(std::path::Path::new(path))
+        .map(|found| {
+            found
+                .errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **The session reads a `.c` file with C's keyword table.** `int new = 0;` compiles as C and does not as C++ — and
+/// the language comes from the compile database, or from the extension when there is none. Measured on neovim, whose
+/// `src/nvim/autocmd.c:1343` is `Object new = …` and whose `src/nvim/marktree.c:392` has a parameter named `delete`;
+/// read with C++'s table, the declaration fails and a whole function body is taken for an expression.
+#[test]
+fn a_c_file_may_name_things_cpp_reserves() {
+    let c = errors_of_a_file(
+        "/p/a.c",
+        "struct O { int x; };\nstruct O new = { 0 };\nvoid f(int delete) { (void)delete; }\n",
+    );
+    assert!(c.is_empty(), "those are names in C: {c:?}");
+
+    let cpp = errors_of_a_file("/p/a.cpp", "int new = 0;\n");
+    assert!(
+        !cpp.is_empty(),
+        "the same text in C++ is the keyword, and the declaration is not one"
+    );
+}

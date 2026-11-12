@@ -1446,6 +1446,8 @@ pub struct PreparedFile {
 struct BufferViewMaterials {
     file: VfsFile,
     cuda: bool,
+    /// The language the file is compiled as — see [`FileView::parse_with_cuda`].
+    language: Option<cpp_parser::features::LanguageConfig>,
     environment: Option<Arc<cpp_parser::MacroEnvironment>>,
 }
 
@@ -1459,7 +1461,7 @@ impl BufferViewMaterials {
     fn parse(self) -> PreparedBufferView {
         let key = buffer_view_key(&self.file, self.cuda, self.environment.clone());
         let macros = self.environment.unwrap_or_default();
-        let view = FileView::parse_with_cuda(&self.file, macros.as_ref(), self.cuda);
+        let view = FileView::parse_with_cuda(&self.file, macros.as_ref(), self.cuda, self.language);
         let weight = a_view_weighs(&view);
         PreparedBufferView {
             key,
@@ -3685,6 +3687,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .map(|file| BufferViewMaterials {
                     file: file.clone(),
                     cuda: self.config.cuda(),
+                    language: Some(self.config_for_file(&file.path).language),
                     environment: self.known_macros_of(&file.path, &file.text),
                 });
         Some(FileReadMaterials {
@@ -5425,7 +5428,12 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some(held);
         }
         let macros = known.unwrap_or_default();
-        let view = FileView::parse_with_cuda(file, macros.as_ref(), self.config.cuda());
+        let view = FileView::parse_with_cuda(
+            file,
+            macros.as_ref(),
+            self.config.cuda(),
+            Some(self.config_for_file(&file.path).language),
+        );
         self.remember_a_view(key, &view);
         Some(view)
     }

@@ -600,6 +600,11 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             ParserConfig::default()
                 .with_dialect(self.config.dialect())
                 .with_cuda(self.config.cuda())
+                // **The language the unit is compiled as.** A translation unit is one language, and `root` names it: a
+                // `main.c` whose stream writes `struct T *new = …` must be read with C's keyword table, or the
+                // declaration is an error and the whole program is filed from a recovery tree. See
+                // `CppLexer::name_to_kind`.
+                .with_language(self.config.language_for(root))
         };
 
         // **One parse, of the stream the caller cooked.**

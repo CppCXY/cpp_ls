@@ -612,3 +612,64 @@ fn a_float16_constant_parses_as_a_return_statement() {
 
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// **A word C++ reserves and C does not is an ordinary identifier in C** — the measurement is neovim, which names a
+/// variable `new` (`src/nvim/autocmd.c:1343`), a parameter `delete` (`src/nvim/marktree.c:392`) and a completion list
+/// `compl` (`src/nvim/insexpand.c:4116`). All three are valid C and none of them is valid C++.
+///
+/// The keyword table is one table for both languages, so the gate is the language: `LexerConfig::with_language`.
+#[test]
+fn a_word_cpp_reserves_is_a_name_in_c() {
+    fn source_of(text: &str, range: cpp_parser::SourceRange) -> &str {
+        &text[range.start_offset..range.end_offset()]
+    }
+    let c = cpp_parser::features::LanguageConfig::new()
+        .with_standard(cpp_parser::features::Standard::C11);
+    let words = [
+        "new", "delete", "compl", "this", "operator", "template", "class",
+    ];
+    let mut errors = Vec::new();
+    let lexed = CppLexer::new(
+        &words.join(" "),
+        LexerConfig::new(CppLanguageLevel::Cpp23).with_language(c),
+        &mut errors,
+    )
+    .tokenize();
+    let kinds: Vec<CppTokenKind> = lexed
+        .iter()
+        .filter(|token| {
+            let range = token.range;
+            !source_of(&words.join(" "), range).trim().is_empty()
+        })
+        .map(|token| token.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![CppTokenKind::Identifier; words.len()],
+        "every one of {words:?} is a name in C"
+    );
+
+    // …and the same words in C++ are what they look like: `new` and `delete` are keywords, and `compl` is an
+    // alternative spelling the *grammar* reads as `~` (so it lexes as an identifier here in both languages).
+    let mut errors = Vec::new();
+    let lexed = CppLexer::new(
+        "new delete class",
+        LexerConfig::new(CppLanguageLevel::Cpp23),
+        &mut errors,
+    )
+    .tokenize();
+    let kinds: Vec<CppTokenKind> = lexed
+        .iter()
+        .filter(|token| !source_of("new delete class", token.range).trim().is_empty())
+        .map(|token| token.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            CppTokenKind::NewKeyword,
+            CppTokenKind::DeleteKeyword,
+            CppTokenKind::ClassKeyword
+        ],
+        "the same table still reads C++ as C++"
+    );
+}

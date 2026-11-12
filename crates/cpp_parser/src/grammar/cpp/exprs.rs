@@ -145,6 +145,12 @@ fn the_alternative_operator(p: &CppParser, token: CppTokenKind) -> Option<CppTok
     if token != CppTokenKind::Identifier {
         return None;
     }
+    // **In C these spellings are ordinary names.** `<iso646.h>` gives a C program macros for the same operators, and
+    // the preprocessor expands those; a bare `compl` in C is neovim's "completion" variable
+    // (`src/nvim/insexpand.c`: `compl = compl->cp_next;`), which this table read as `~` and made unparsable.
+    if p.language().family() == Some(crate::features::Family::C) {
+        return None;
+    }
 
     Some(match p.current_token_text() {
         "and" => CppTokenKind::LogicalAnd,

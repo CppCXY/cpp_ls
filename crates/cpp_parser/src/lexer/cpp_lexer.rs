@@ -104,7 +104,24 @@ impl<'a> CppLexer<'a> {
         self.lexer_config.language().support(feature)
     }
 
+    /// **Is this file C rather than C++?** — asked only where the two languages disagree about a spelling.
+    ///
+    /// `Some(Family::C)` and not "not C++": a header with no `-std=` of its own is read by whichever language includes
+    /// it, and answering `true` for an unknown would turn every C++ keyword into a name in every header.
+    fn is_c(&self) -> bool {
+        self.lexer_config.language().family() == Some(crate::features::Family::C)
+    }
+
     fn name_to_kind(&self, name: &str) -> CppTokenKind {
+        // **A word C++ reserves and C does not is an ordinary identifier in C.** neovim is the measurement: it writes
+        // `Object new = …` (`src/nvim/autocmd.c:1343`), `struct trie_node_arr *new` (`driver-ti.c:197`),
+        // `void marktree_intersect_pair(…, bool delete)` (`marktree.c:392`) and `compl = compl->cp_next`
+        // (`insexpand.c:4116`). Read as keywords, the first three make their **declaration** unparsable — the
+        // expression reading then takes the `{` and a whole function body becomes one expression statement — which is
+        // how nine files of one project report a syntax error that is not in them.
+        if self.is_c() && a_word_c_does_not_reserve(name) {
+            return CppTokenKind::Identifier;
+        }
         match name {
             // Basic keywords
             "auto" => CppTokenKind::AutoKeyword,
@@ -1333,4 +1350,63 @@ pub fn lex(text: &str, config: &LexerConfig) -> (Vec<CppTokenData>, Vec<CppParse
     let mut errors = Vec::new();
     let tokens = CppLexer::new(text, *config, &mut errors).tokenize();
     (tokens, errors)
+}
+
+/// **The words that are keywords in C++ and have no keyword meaning in C** — see [`CppLexer::name_to_kind`].
+///
+/// The list is the C++-only half of the two languages' keywords: every spelling here is a valid identifier in C89
+/// through C23. The spellings C *does* have are deliberately absent, even where the two disagree about what they mean:
+/// `auto`, `const`, `inline`, `static`, `typedef`, `signed`, `sizeof`, `volatile`, … are keywords in both, and
+/// `alignas`/`alignof`/`bool`/`constexpr`/`false`/`nullptr`/`static_assert`/`thread_local`/`true` are C23's own — a C
+/// file that uses one as a name is the standard's problem, not the lexer's.
+///
+/// `class` is in the list although the *grammar* happens to accept it as a declarator name today: two rules for one
+/// question is how the two come to disagree.
+fn a_word_c_does_not_reserve(name: &str) -> bool {
+    matches!(
+        name,
+        // The C++ keywords C has never had.
+        "and"
+            | "and_eq"
+            | "bitand"
+            | "bitor"
+            | "catch"
+            | "class"
+            | "compl"
+            | "concept"
+            | "const_cast"
+            | "consteval"
+            | "constinit"
+            | "decltype"
+            | "delete"
+            | "dynamic_cast"
+            | "explicit"
+            | "export"
+            | "friend"
+            | "mutable"
+            | "namespace"
+            | "new"
+            | "noexcept"
+            | "not"
+            | "not_eq"
+            | "operator"
+            | "or"
+            | "or_eq"
+            | "private"
+            | "protected"
+            | "public"
+            | "reinterpret_cast"
+            | "requires"
+            | "static_cast"
+            | "template"
+            | "this"
+            | "throw"
+            | "try"
+            | "typeid"
+            | "typename"
+            | "using"
+            | "virtual"
+            | "xor"
+            | "xor_eq"
+    )
 }
