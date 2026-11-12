@@ -444,6 +444,30 @@ fact, substituted, bounded — and for `conditional_t` it has to stay sound wher
 the members **both** branches agree on, which is the rule `the_return_the_overloads_agree_on` already applies. The
 test is `#[ignore]`d rather than deleted, and says all of that where the next reader will see it.
 
+**Round 4: the static resolver landed, and the member list went `0` → `44`.** `the_classes_a_base_clause_names` reads
+facts only — an alias's `parameters` and `type_of`, then a class's member fact, substituted, bounded by
+`MAX_ALIAS_HOPS` — and returns **two** classes when the base is `conditional<Cond, A, B>::type`, because the condition
+is a library trait over a template parameter and choosing the primary template's `_Ty1` would be a guess. Both are
+walked and `mark_ambiguity` marks what they disagree about. `an_alias_template_used_as_a_base_substitutes_its_arguments`
+is green and no longer ignored, and on `EmmyLuaCodeStyle`:
+
+```text
+members_of("std::allocator_traits"): 44 listed, 0 unlisted      (was 0 listed)
+```
+
+The next blocker is exact, and it is **one feature**:
+
+```text
+size_type: type Some("size_t")                                  ambiguous true   std::_Default_allocator_traits<_Alloc>
+size_type: type Some("typename _Get_size_type<_Alloc>::type")   ambiguous true   std::_Normal_allocator_traits<_Alloc>
+```
+
+`allocator_traits<_Alloc> : conditional_t<_Is_default_allocator<_Alloc>::value, …>` — deciding the branch means
+evaluating `_Is_default_allocator<std::allocator<MarkEvent>>`, which is decided by **matching a partial
+specialization**: `template <class _Ty> struct _Is_default_allocator<allocator<_Ty>> : true_type {}` against the
+principal template's `false_type`. Selecting a partial specialization is the next piece of the generics work; until it
+exists, `size_type` is honestly ambiguous and `auto pos = _events.size();` keeps answering `_Alty_traits::size_type`.
+
 ## Why `std::vector` itself is missing, and the wrong lever I pulled at it
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without

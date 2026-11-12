@@ -444,6 +444,14 @@ fn what_a_size_call_returns() {
                 for one in list.members.iter().take(4) {
                     eprintln!("[size-probe]   member: `{}`", one.fact.name);
                 }
+                for name in ["size_type", "difference_type"] {
+                    for one in list.members.iter().filter(|one| one.fact.name == name) {
+                        eprintln!(
+                            "[size-probe]   `{name}`: type {:?}, ambiguous {}, declared in {}",
+                            one.fact.type_of, one.ambiguous, one.declared_in
+                        );
+                    }
+                }
             }
             other => eprintln!("[size-probe] members_of({class:?}): {other:?}"),
         }

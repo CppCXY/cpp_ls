@@ -2554,17 +2554,28 @@ fn members_of_inner(
 
             let members = match direct_members(index, scopes, root, path, &base) {
                 Known::Yes(members) => members,
-                // A base nothing here can resolve. Its members are **missing from the list** rather than absent
-                // from the type, and naming the base is what makes the gap actionable — the fix is an include
-                // path or a file that was never indexed, not a different query.
+                // **A clause that is a *type* rather than a class name.** `allocator_traits<_Alloc> : conditional_t<…>`
+                // names no class: `conditional_t` is an alias whose target is `typename conditional<…>::type`. The
+                // resolution is a static one — facts only, no member list — because the obvious tool,
+                // `a_spelling_through_the_aliases`, asks member questions, a member question builds a member list,
+                // and a member list walks bases: calling it here was measured as a **stack overflow**.
                 //
-                // **An alias template is not asked of the alias walk here.** It was tried — `conditional_t<…>` is a
-                // type, and `a_spelling_through_the_aliases` is the walk that turns such a spelling into one — and
-                // it **overflowed the stack**: that walk asks member questions, a member question builds a member
-                // list, and a member list walks bases, so the two are in a cycle. The resolution has to be a static
-                // one (the alias fact's own parameters and target, read from the index) and has to bound its own
-                // steps; see `docs/open-questions.md`.
+                // What comes back is a **list**, because `conditional<Cond, A, B>::type` is one of two classes and
+                // nothing here can evaluate the condition. Both are walked, and `mark_ambiguity` marks every member
+                // the two disagree about — so a member both branches declare with one type is answered, and one only
+                // one branch declares is not invented. See `docs/open-questions.md`, the `size_type` entry.
                 Known::Unknown(reason) => {
+                    let candidates = the_classes_a_base_clause_names(index, path, &written);
+                    let fresh: Vec<String> = candidates
+                        .into_iter()
+                        .filter(|one| !visited.contains(one))
+                        .collect();
+                    if !fresh.is_empty() {
+                        for one in fresh {
+                            next.push((one, owner.clone()));
+                        }
+                        continue;
+                    }
                     list.unlisted.push(UnlistedBase {
                         spelling: shown,
                         reason,
@@ -2742,6 +2753,114 @@ fn substitute_a_base_clause(
 /// [`DeclFact::name`], exactly as the index stores it. It is a declaration that exists, so it is not dropped here;
 /// a consumer that shows a list filters on the name it can print and reads the spelling from the source, which is
 /// where it lives.
+/// **The class — or the two classes — a base clause names, when the clause is a type rather than a class name.**
+///
+/// `allocator_traits<_Alloc> : conditional_t<…>` is the shape: `conditional_t` is an alias template whose target is
+/// `typename conditional<Cond, A, B>::type`, and the base is one of `A`/`B`. Two steps are enough for the standard
+/// library's spellings — an alias template, then a member type — and the loop is bounded by
+/// [`MAX_ALIAS_HOPS`] regardless, because a library can write `using A = typename B<T>::type;` twice.
+///
+/// # Facts only, and why that is a rule rather than a preference
+///
+/// This runs **inside** the base walk of a member list. Asking [`a_spelling_through_the_aliases`] here — the function
+/// that exists to turn such a spelling into a type — asks member questions, a member question builds a member list,
+/// and a member list walks bases: measured as `STATUS_STACK_OVERFLOW` on
+/// `tests/types.rs::an_alias_template_used_as_a_base_substitutes_its_arguments`. So this reads only facts:
+/// `files_declaring` for a class's template parameters, `declarations_in` for a member's recorded type, and
+/// substitutions in between.
+///
+/// # `conditional`, and why it answers two classes
+///
+/// `conditional<Cond, A, B>::type` is `A` or `B`, decided by a condition that is a library trait over a template
+/// parameter — `_Is_default_allocator<_Alloc>::value` is not something this layer can evaluate, and picking the
+/// primary template's `_Ty1` would be a guess that is wrong for every custom allocator. Both are returned instead:
+/// the caller walks both, and a member the two disagree about is marked ambiguous, which is the same rule
+/// [`the_return_the_overloads_agree_on`] applies to overloads.
+fn the_classes_a_base_clause_names(index: &ProjectIndex, path: &Path, clause: &str) -> Vec<String> {
+    let mut spelling = clause.trim().to_string();
+
+    for _ in 0..MAX_ALIAS_HOPS {
+        let without_typename = spelling
+            .strip_prefix("typename ")
+            .unwrap_or(&spelling)
+            .trim()
+            .to_string();
+
+        // **A member type** — `Class<…>::member`.
+        if let Some((class, member)) = split_at_the_last_scope(&without_typename) {
+            let (head, arguments) = match split_template_arguments(&class) {
+                Some((head, arguments)) => (head, arguments),
+                None => (class.trim().to_string(), Vec::new()),
+            };
+            let bare = head.rsplit("::").next().unwrap_or(&head).trim();
+            if bare == "conditional" && member.trim() == "type" && arguments.len() >= 3 {
+                return vec![arguments[1].clone(), arguments[2].clone()];
+            }
+            let parameters = index
+                .files_declaring(&head, path)
+                .into_iter()
+                .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+                .map(|declared| declared.fact.parameters.clone())
+                .unwrap_or_default();
+            let scope = index
+                .definition(bare, path)
+                .value()
+                .map(|found| found.fact.qualified_name())
+                .unwrap_or_else(|| head.clone());
+            let Some(fact) = index
+                .declarations_in(&scope, path)
+                .into_iter()
+                .find(|one| one.fact.name == member.trim())
+            else {
+                return Vec::new();
+            };
+            let Some(target) = fact.fact.type_of.clone() else {
+                return Vec::new();
+            };
+            let substituted =
+                crate::sema::types::substituted_spelling(&target, &parameters, &arguments);
+            if substituted == spelling {
+                return Vec::new();
+            }
+            spelling = substituted;
+            continue;
+        }
+
+        // **An alias template** — `Head<…>` whose fact records a target.
+        let Some((head, arguments)) = split_template_arguments(&without_typename) else {
+            return Vec::new();
+        };
+        let declared = index.files_declaring(&head, path);
+        if let Some(alias) = declared.iter().find(|declared| {
+            declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+        }) {
+            let Some(target) = alias.fact.type_of.clone() else {
+                return Vec::new();
+            };
+            let substituted = crate::sema::types::substituted_spelling(
+                &target,
+                &alias.fact.parameters,
+                &arguments,
+            );
+            if substituted == spelling {
+                return Vec::new();
+            }
+            spelling = substituted;
+            continue;
+        }
+        // **The chain ends at a class**, which is the answer — `chosen<int>` is a base, not an alias.
+        if declared
+            .iter()
+            .any(|declared| declared.fact.kind == crate::DeclKind::Type)
+        {
+            return vec![without_typename];
+        }
+        return Vec::new();
+    }
+
+    Vec::new()
+}
+
 fn direct_members(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,

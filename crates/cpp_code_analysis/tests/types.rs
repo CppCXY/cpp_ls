@@ -3473,7 +3473,6 @@ int f() {
 /// a template parameter and cannot be evaluated, so the honest answer is the members **both** branches agree on, the
 /// same agreement rule `the_return_the_overloads_agree_on` applies.
 #[test]
-#[ignore = "open: an alias-template base is not resolved; see docs/open-questions.md, the `size_type` entry"]
 fn an_alias_template_used_as_a_base_substitutes_its_arguments() {
     let source = "\
 template <class T> struct chosen { using size_type = unsigned long long; };
