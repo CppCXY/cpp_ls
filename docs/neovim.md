@@ -511,3 +511,27 @@ no type name to answer with. The probe now asks `type_at` only about variables, 
 What is left is 13 misses in the sample, and they are the classes §8 already lists: names inside macro *definition*
 bodies (`bit.c`'s `BRET`/`BIT_OP`), variables a macro declares (`args` from `MAXSIZE_TEMP_ARRAY`, `wp` from
 `FOR_ALL_TAB_WINDOWS`, `watchers`), and a few parameters of macro-heavy signatures (`name` in `deprecated.c:742`).
+**And the four `undefined-name` findings are declarations in *generated* headers.** They have no declaration in
+`src` at all: neovim's build writes `build/include/…/*.h.generated.h` and the sources `#include` them like any
+other header — `server_teardown` is at `build/include/msgpack_rpc/server.h.generated.h:13`, `tv_list_alloc` at
+`build/include/eval/typval.h.generated.h:15`. `tests/closure_symbol_probe.rs` measured the chain:
+
+```text
+[closure] server.h.generated.h summary read: false
+[closure] the closure holds the generated header: true (625 file(s))
+[closure] definition server_teardown -> Unknown(NotDeclaredHere("server_teardown"))
+[closure] the generated summary's own facts: None
+```
+
+So the include graph *reaches* the header (the resolver found it on disk, and `inspect facts` on it lists the
+declaration), and **nothing ever read it**: it is not a project file (the scan takes `src`), and
+`want_the_closure_cooked`'s nested pass is bounded by `COOK_ONE_LEVEL_FURTHER`, whose budget is spent on other
+nested files of the same file first — the generated header under `msgpack_rpc/` never gets a turn.
+
+**The obvious fix is wrong, and the suite says so.** Queueing a *read* for unread closure files (instead of
+skipping them, since a file with no summary cannot be cooked) was tried and reverted: it made
+`a_rendering_is_not_left_in_the_cache_for_the_next_session` fail — `definition("Live", api.h)` answered
+`from_the_source`'s branch (offset 23) instead of `alone` (53) or `Ambiguous`, which is exactly the leak that test
+exists for. Reading the header *inside the includer's cook* carries the includer's `#define` into what is filed
+against the header. The next change is therefore not "read more files": it is the environment question one step
+further out — the same arm as the paragraph above — and that test is the constraint on it.
