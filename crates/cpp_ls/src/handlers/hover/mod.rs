@@ -1209,6 +1209,75 @@ fn header_markdown(header: &cpp_code_analysis::HeaderTarget) -> String {
 }
 
 /// A macro, as the definition writes it.
+/// **Is this offset inside the macro's own definition?** — the question that keeps a `#define` from expanding
+/// under itself.
+///
+/// Only answerable in the file that writes the directive: a hover in another file is on a use by construction.
+fn on_the_definition(
+    view: &FileView,
+    file: &std::path::Path,
+    fact: &cpp_code_analysis::MacroFact,
+    at: cpp_code_analysis::file::coordinates::FileOffset,
+) -> bool {
+    if !is_the_viewed_file(view, file) {
+        return false;
+    }
+    let text = view.written_text().unwrap_or(&view.source);
+    let name = fact.range.start_offset.min(text.len());
+    let end = fact
+        .body_range
+        .map_or(fact.range.end_offset(), |body| body.end_offset())
+        .min(text.len());
+    let line_start = text[..name].rfind('\n').map_or(0, |offset| offset + 1);
+    let at = at.get();
+    at >= line_start && at <= end
+}
+
+/// **A macro's expansion as the lines a reader can read**: line splices gone, trailing space gone, indentation
+/// taken out, blank lines collapsed.
+///
+/// `#define kvi_ensure_space(v, len) \` followed by five lines of `\`-terminated body is *one* line of source and
+/// came out as one line of popup: a wall of `\` in a code span. The reader wants the shape the author wrote, which
+/// is what a fenced block with real newlines is — and the client highlights it, because the block says `cpp`.
+fn the_expansion_as_lines(expanded: &str) -> String {
+    // **The splices first**: `\` at the end of a line is the preprocessor's, not the author's.
+    let mut lines: Vec<String> = Vec::new();
+    for line in expanded.lines() {
+        let line = line.strip_suffix('\\').unwrap_or(line);
+        lines.push(line.trim_end().to_string());
+    }
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    // **The common indentation**, which is the directive's, not the expression's.
+    let indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut collapsed: Vec<&str> = Vec::new();
+    for line in &lines {
+        let line = &line[indent.min(line.len())..];
+        if line.trim().is_empty() && collapsed.last().is_some_and(|last| last.trim().is_empty()) {
+            continue;
+        }
+        collapsed.push(line);
+    }
+    collapsed.join("\n")
+}
+
+/// **A comment read from the text, rendered as the popup shows a declaration's** — see [`doc_comment_before`].
+///
+/// [`doc_comment_before`]: cpp_code_analysis::file::view::doc_comment_before
+fn documentation_text_from_the_lines(comment: &str) -> Option<String> {
+    let text = comment.trim();
+    (!text.is_empty()).then(|| render_documentation(text))
+}
+
 fn macro_markdown(
     session: &Session<DiskFiles>,
     view: &FileView,
@@ -1258,18 +1327,36 @@ fn macro_markdown(
     //
     // The rules applied are textual and the sentence says which: `#x` and `a ## b` are not applied, and the result's own
     // macro names are not expanded again. A reader comparing this with a compiler must know the difference.
+    // **A use, not the definition.** Hovering the `#define` itself is a question about the macro, and its own
+    // replacement list is already the code block above; expanding it under itself is noise — reported with a
+    // screenshot of `kvi_ensure_space`'s definition showing its whole body again as one line. Only a *use* has an
+    // answer the code block cannot give, because only a use puts arguments in.
     if let Some(at) = at
+        && !on_the_definition(view, &found.file, fact, at)
         && let Some(expanded) = session.the_expansion_of_a_macro(view, at)
         && !expanded.trim().is_empty()
     {
         out.push_str(&format!(
-            "\nExpands to `{}`\n\n*A textual expansion: `#` and `##` are not applied, and the result is not expanded again.*\n",
-            expanded.trim()
+            "\n**Expands to**\n\n{}\n\n*A textual expansion: `#` and `##` are not applied, and the result is not \
+             expanded again.*\n",
+            code_block(&the_expansion_as_lines(&expanded))
         ));
     }
 
+    // **A macro's documentation is a comment above a `#define`**, which the tree's owner accessors do not attach
+    // (they resolve a comment to a *declaration*; a directive is not one), so the text answers where the tree
+    // cannot. Measured on neovim's `src/klib/kvec.h`: `kv_drop` is documented with `@param[out]`/`@param[in]` and
+    // the popup showed the source lines as a code block and nothing else.
     if let Some(documentation) =
-        documentation_of_a_fact(session, view, &found.file, fact.range.start_offset)
+        documentation_of_a_fact(session, view, &found.file, fact.range.start_offset).or_else(|| {
+            is_the_viewed_file(view, &found.file)
+                .then(|| {
+                    let text = view.written_text().unwrap_or(&view.source);
+                    cpp_code_analysis::file::view::doc_comment_before(text, fact.range.start_offset)
+                })
+                .flatten()
+                .and_then(|comment| documentation_text_from_the_lines(&comment))
+        })
     {
         out.push_str(&format!("\n{documentation}\n"));
     }
@@ -2181,6 +2268,33 @@ fn a_standard_macro_meaning(word: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An expansion is a block of lines, not a wall of `\\`** — measured on neovim's `kvec.h`, where
+    /// `kvi_ensure_more_space`'s six-line body arrived as one line in a code span.
+    #[test]
+    fn an_expansion_is_dedented_and_loses_its_splices() {
+        let expanded = "  do { \\\n    if ((v).capacity < (v).size) { \\\n      kvi_resize((v), (v).capacity); \\\n    } \\\n  } while (0)";
+        assert_eq!(
+            the_expansion_as_lines(expanded),
+            "do {\n  if ((v).capacity < (v).size) {\n    kvi_resize((v), (v).capacity);\n  }\n} while (0)"
+        );
+    }
+
+    /// **A macro's documentation is the comment directly above it**, and a blank line ends the attachment.
+    #[test]
+    fn the_comment_above_a_define_is_the_macros_documentation() {
+        let text = "/// Drop last n items.\n///\n/// @param[out] v the vector.\n#define kv_drop(v, n) ((v).size -= (n))\n";
+        let comment = cpp_code_analysis::file::view::doc_comment_before(text, 60)
+            .expect("the comment is directly above the directive");
+        assert!(comment.contains("Drop last n items."), "{comment}");
+        assert!(comment.contains("@param[out] v the vector."), "{comment}");
+
+        let separated = "/// Not this one.\n\n#define kv_drop(v, n) ((v).size -= (n))\n";
+        assert!(
+            cpp_code_analysis::file::view::doc_comment_before(separated, 20).is_none(),
+            "a blank line between the comment and the directive ends the attachment"
+        );
+    }
     /// **A position-dependent standard macro says what it is**, because it has no value to show.
     ///
     /// `__cplusplus` had a card ("predefined by the compiler … as `202302L`") and `__LINE__` had none: the valued

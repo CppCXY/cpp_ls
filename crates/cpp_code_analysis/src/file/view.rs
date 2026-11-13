@@ -629,6 +629,71 @@ pub fn in_prose(text: &str, offset: usize) -> bool {
     })
 }
 
+/// **The documentation comment written immediately above `offset`**, read from the text alone.
+///
+/// The tree's answer ([`documentation_at`]) is built on the comment's *owner* accessors, and those resolve to a
+/// declaration — which a `#define` is not. Measured on neovim's `src/klib/kvec.h`: `kv_drop` is documented with
+///
+/// ```c
+/// /// Drop last n items from kvec without resizing
+/// ///
+/// /// @param[out]  v  Kvec to drop items from.
+/// /// @param[in]   n  Number of elements to drop.
+/// #define kv_drop(v, n) ((v).size -= (n))
+/// ```
+///
+/// and the hover card showed the source lines and no documentation at all.
+///
+/// The text is the authority for the same reason `might_be_documented` is: the directive is written in the file
+/// and nothing about it is in a rendering. Only a comment **directly above** counts — a blank line between the two
+/// ends the search, which is Doxygen's own rule — and the returned text has the line markers (`///`, ` * `) taken
+/// out so that [`render_documentation`](crate::file::view) reads commands rather than punctuation.
+pub fn doc_comment_before(text: &str, offset: usize) -> Option<String> {
+    let before = text.get(..offset.min(text.len()))?;
+    let mut lines: Vec<&str> = before.lines().collect();
+    // The offset's own line is the declaration's, so the walk starts above it.
+    lines.pop();
+    let mut collected: Vec<&str> = Vec::new();
+    for line in lines.iter().rev() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") {
+            collected.push(trimmed.trim_start_matches("///"));
+            continue;
+        }
+        if trimmed.starts_with("/**") || trimmed.starts_with("/*!") {
+            // A block comment: this line opens it, and the text after the opener is its first line.
+            let opened = trimmed.trim_start_matches("/**").trim_start_matches("/*!");
+            let opened = opened.trim_end_matches("*/");
+            if !opened.trim().is_empty() {
+                collected.push(opened);
+            }
+            break;
+        }
+        if trimmed.starts_with('*') && !collected.is_empty() {
+            collected.push(trimmed.trim_start_matches('*'));
+            continue;
+        }
+        if trimmed.is_empty() && !collected.is_empty() {
+            // A blank line **inside** a block comment is part of it; one above it ends the search.
+            collected.push("");
+            continue;
+        }
+        break;
+    }
+    // A blank line directly above the declaration is the one that ends the attachment, not a paragraph break.
+    while collected.first().is_some_and(|line| line.trim().is_empty()) {
+        collected.remove(0);
+    }
+    // …and one inside the comment is kept, which is what `render_documentation` reads as a block break.
+    let text = collected
+        .iter()
+        .rev()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 pub fn might_be_documented(text: &str, offset: usize) -> bool {
     let before = text
         .get(..offset.min(text.len()))
