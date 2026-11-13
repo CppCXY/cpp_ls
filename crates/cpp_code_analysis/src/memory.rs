@@ -119,6 +119,15 @@ pub struct MemoryReport {
     /// Distinct names in the inverted index.
     pub index_names_entries: usize,
     /// Distinct scopes in it.
+    /// **The slices prepared and not yet committed** — [`Session::prefetched`].
+    ///
+    /// A table the report did not name, and the only place a *summary* can be held without being in the index:
+    /// `commit_a_wave` moves entries out as it commits them and clears the map when the queue empties, but a wave
+    /// prepares up to four times the files it will commit. On `test_cpp/src/containers.cpp` the pump's own tables
+    /// reported 83–86 MB while the process grew to gigabytes and the work was finite (`pending` 26 → 10), so the
+    /// bytes had to be somewhere the report did not look.
+    pub prefetched: usize,
+    pub prefetched_bytes: usize,
     pub index_scope_entries: usize,
 }
 

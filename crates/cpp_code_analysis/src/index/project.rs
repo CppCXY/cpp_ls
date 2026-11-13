@@ -13944,6 +13944,12 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
+        if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+            eprintln!(
+                "[cook] inserted {path}, cooked map now {}",
+                self.cooked.len()
+            );
+        }
         let readings = self.cooked.entry(path.clone()).or_default();
         match program {
             None => readings.on_its_own = Some(reading),

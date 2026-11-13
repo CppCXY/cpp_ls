@@ -242,7 +242,11 @@ fn a_long_session_does_not_grow_without_bound() {
             eprintln!("[memory] opened {index} of {}", opened.len());
         }
         // **A request per open**, because a file is read and cooked *when something asks*: a `didOpen` alone only
-        // puts the text in the session.
+        // puts the text in the session. `CPPLS_MEMORY_NO_PULL` leaves it out, which is how a run can tell what the
+        // pull itself starts.
+        if std::env::var_os("CPPLS_MEMORY_NO_PULL").is_some() {
+            continue;
+        }
         client.request(
             1000 + index as i64,
             "textDocument/diagnostic",

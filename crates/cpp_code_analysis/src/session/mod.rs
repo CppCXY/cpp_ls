@@ -707,6 +707,16 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **Behind a lock of its own**, because the thing that asks is a *request*: it holds the session for reading, and
     /// taking the write lock to record a `HashSet` insert is the wait this whole phase exists to remove.
     refined_on_request: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+
+    /// **The stored-refinement questions that answered "not stored", by file and content hash.**
+    ///
+    /// `prepare_wave` asks the disk cache whether the slice's files have a stored refinement; answering that for
+    /// one file walks its **whole include closure** (`the_closure_fingerprint`, up to 8192 summaries). The answer
+    /// cannot change while the text does not — no refinement is storable any more, so a miss is permanent for that
+    /// content. Measured on `test_cpp/src/containers.cpp` (663-file closure): **20 MB in the wave stage on every
+    /// round** with `prepared 0`, i.e. sixteen closure walks a round that could never answer anything else.
+    /// Keyed by the index's content hash, because the file need not be held by the VFS when the slice is planned.
+    refinement_misses: std::sync::Mutex<std::collections::HashSet<(String, u64)>>,
     /// **The files whose reading in the index is a refined one** — what [`Session::is_refined`] answers, and what
     /// phase 1 needs to know when an answer is still the shape-only reading.
     refined_readings: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -1951,6 +1961,7 @@ impl<F: FileProvider + Clone> Session<F> {
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
             refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refinement_misses: std::sync::Mutex::new(std::collections::HashSet::new()),
             refined_readings: std::sync::Mutex::new(std::collections::HashSet::new()),
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
@@ -2424,7 +2435,18 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         let tables = self.store.index().table_accounting();
 
+        // **The prepared-but-uncommitted slices**, which no other field here covers: a `Prepared` holds a
+        // built summary (and maybe a rendering) and `commit_a_wave` clears the map only when the queue empties.
+        let (prefetched, prefetched_bytes) = (
+            self.prefetched.len(),
+            self.prefetched
+                .values()
+                .map(crate::index::store::Prepared::heap_bytes)
+                .sum::<usize>(),
+        );
         crate::MemoryReport {
+            prefetched,
+            prefetched_bytes,
             vfs_files,
             vfs_text_bytes,
             vfs_line_index_bytes,
@@ -2751,6 +2773,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// describes text that no longer exists.
     fn buffer_changed(&mut self, path: &Path, text: &str) {
         self.changed_input();
+
+        // **Every stored-refinement miss is about a text, and a text just moved.**
+        if let Ok(mut misses) = self.refinement_misses.lock() {
+            misses.clear();
+        }
         // **The clock the one indivisible piece of work is deferred by.** Recorded first, so that nothing this edit
         // starts can be mistaken for the idle period that follows it — see [`Session::a_unit_may_be_read_now`] and
         // [`UNTIL_A_UNIT_MAY_BE_READ`].
@@ -3600,8 +3627,25 @@ impl<F: FileProvider + Clone> Session<F> {
         // is left is the honest work, and the timelines are built for that and nothing else.
         let mut refinements: Vec<crate::FileSummary> = Vec::new();
         for path in &slice {
+            // **A miss for this content is permanent, so it is asked once** — see the field.
+            let key = self
+                .store
+                .index()
+                .summary(path)
+                .map(|summary| (queue_key(path), summary.key.content_hash));
+            if key.as_ref().is_some_and(|key| {
+                self.refinement_misses
+                    .lock()
+                    .is_ok_and(|misses| misses.contains(key))
+            }) {
+                continue;
+            }
             if let Some(summary) = self.store.the_stored_refinement(path) {
                 refinements.push(summary);
+            } else if let Some(key) = key
+                && let Ok(mut misses) = self.refinement_misses.lock()
+            {
+                misses.insert(key);
             }
         }
         // **No timelines are built for the pass any more** (phase 2): the reading is composed from the index's macro
@@ -8612,6 +8656,13 @@ impl<F: FileProvider + Clone> Session<F> {
                     path.display()
                 );
             }
+            if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                eprintln!(
+                    "[cook] committing {} with {} declaration(s)",
+                    path.display(),
+                    cooked.declarations.len()
+                );
+            }
             self.store.put_the_cooked_reading(&path, &cooked);
             self.store.index_mut().insert_cooked(&path, cooked);
         }
@@ -8628,6 +8679,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// It takes the queue's front, so a caller that gathers, renders and commits them in order has done exactly what
     /// `finish_a_slice`'s loop used to do — with everything but the pop outside the write lock.
     pub fn claim_cooking(&mut self, how_many: usize) -> Vec<PathBuf> {
+        // **An A/B for the measurement, not a setting**: with `CPPLS_NO_COOKS` set the pump cooks nothing, which
+        // is how much of the `containers.cpp` growth is the cooking pass itself rather than the indexing.
+        if std::env::var_os("CPPLS_NO_COOKS").is_some() {
+            return Vec::new();
+        }
         self.cooking.take(how_many)
     }
 

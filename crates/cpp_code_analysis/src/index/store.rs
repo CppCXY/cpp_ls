@@ -327,6 +327,20 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// **What this holds**, for [`crate::MemoryReport`]: the summary it built (a file's declarations and its
+    /// macros, all owned) and, when the cook kept one, the rendering.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let summary = match &self.outcome {
+            PreparedOutcome::Built { summary, .. } => summary.heap_bytes(),
+            _ => 0,
+        };
+        summary
+            + self
+                .rendering
+                .as_ref()
+                .map_or(0, |rendered| rendered.weight())
+    }
+
     pub(crate) fn with_environment(&self) -> bool {
         self.with_environment
     }

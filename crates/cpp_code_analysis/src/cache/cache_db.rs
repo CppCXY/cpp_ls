@@ -335,7 +335,6 @@ impl CacheDb {
     /// binary cannot read is a schema to throw away rather than migrate. `reading_fingerprint` covers changes to the
     /// *readers* (the summary codec's meaning), which `SCHEMA_VERSION` cannot see because they do not change the
     /// table layout.
-
     pub fn open(directory: &Path, reading_fingerprint: u64) -> Result<CacheDb> {
         std::fs::create_dir_all(directory)?;
         let path = directory.join(DATABASE_FILE);

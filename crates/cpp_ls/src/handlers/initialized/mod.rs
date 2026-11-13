@@ -364,7 +364,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // level is not `trace`.
             log::trace!("pump: round");
             let allocs_at_round_start = crate::allocated_bytes();
-            let here_at_round_start = cpp_code_analysis::alloc::bytes_here();
+            #[allow(unused_assignments)]
             let mut allocs_after_wave = allocs_at_round_start;
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
@@ -377,6 +377,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .analysis()
                 .with_snapshot(|session| session.next_open_file_to_read())
                 .flatten();
+            if let Some(path) = &open_file
+                && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some()
+            {
+                eprintln!("[read] next open file to read: {}", path.display());
+            }
             if let Some(path) = open_file
                 && context.analysis().read_queued_file(&path).await
             {
@@ -418,7 +423,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
             allocs_after_wave = crate::allocated_bytes();
-            let here_after_wave = cpp_code_analysis::alloc::bytes_here();
             log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held, committed)) = context
@@ -684,12 +688,16 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     .analysis()
                     .with_snapshot(|session| (session.cache_sizes(), session.memory_report()));
                 eprintln!(
-                    "[allocs] wave {} MB, drain {} MB, renders {} MB, commit {} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, session tables {} MB (until end {} MB)",
+                    "[allocs] wave {} MB, drain {} MB, renders {} MB, commit {} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, prefetched {} ({} MB), session tables {} MB (until end {} MB)",
                     (allocs_after_wave - allocs_at_round_start) / (1024 * 1024),
                     (allocs_before_the_drain - allocs_after_wave) / (1024 * 1024),
                     (allocs_after_the_renders - allocs_after_the_drain) / (1024 * 1024),
                     (allocs_after_the_commits - allocs_after_the_renders) / (1024 * 1024),
                     sizes.as_ref().map_or(0, |(sizes, _)| sizes.summaries),
+                    sizes.as_ref().map_or(0, |(_, report)| report.prefetched),
+                    sizes
+                        .as_ref()
+                        .map_or(0, |(_, report)| { report.prefetched_bytes / (1024 * 1024) }),
                     sizes.as_ref().map_or(0, |(sizes, _)| sizes.cooked_files),
                     sizes.as_ref().map_or(0, |(_, report)| {
                         (report.summary_bytes
@@ -756,7 +764,24 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // Yield between slices: the runtime is also serving requests, and a loop that never awaits would
                 // hold the worker it runs on.
                 was_pending = true;
-                tokio::task::yield_now().await;
+                // **A round that did nothing waits; one that worked yields.** `yield_now` is what keeps
+                // requests served while a slice is being built, and it is a *busy* loop when there is no slice:
+                // measured on `test_cpp/src/containers.cpp` with cooking disabled, the pump took private bytes
+                // from 476 MB to 1 228 MB in eight seconds while every stage it measures allocated **0 MB** —
+                // the allocations were the loop itself, thousands of rounds a second for a backlog it could not
+                // move. Waiting is the honest answer for a round with nothing to do; the notify that arrives
+                // with real work wakes it.
+                let did_nothing = prepared_count == 0
+                    && claimed_count == 0
+                    && drain_was_empty
+                    && committed == 0
+                    && re_read == 0
+                    && cooked == 0;
+                if did_nothing {
+                    context.analysis().wait_for_work(IDLE_WAIT).await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
                 continue;
             }
 
