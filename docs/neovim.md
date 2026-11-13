@@ -365,3 +365,45 @@ way.
 `BracesAroundStatements`, `ElseAfterReturn` and `MacroParentheses` are style rules, and they fire on a C codebase
 exactly as their clang-tidy namesakes do. They are not wrong — but on a project that has not adopted them they are
 most of what a reader sees, which is the reason `[diagnostics] disable` exists.
+
+## 8. Re-measured after the declarator and guard rounds
+
+One run, one binary (2026-11-13), against the same checkout with the build tree built. **Every tenth file**
+(`CPPLS_NEOVIM_EVERY=10`, 52 files of 517, 21 of them `.c`) with the editor's closure cook
+(`CPPLS_NEOVIM_CLOSURE=1`) — the full checkout is a ~50-minute run by construction (each file is an open with its own
+environment, measured at 4.7 s per file), so the census below is a *rate* with the sample named rather than a count.
+
+```text
+52 file(s) of 517 withheld; 21 are C          244.9 s      (4.7 s/file)
+files with parse errors                        0
+files without a reading                        0
+files with unplaced errors                     0
+`new` as a name                                0 site(s), 0 on a line that does not parse
+include-not-found                              4   <execinfo.h> <langinfo.h>
+                                                   <sanitizer/asan_interface.h> <sanitizer/ubsan_interface.h>
+undefined-name                                 1   (Search)
+names                                          43 200 identifiers, 35 307 classified (81.7%)
+definition                                     1 495 asked, 1 094 resolved (73.2%), 17 ambiguous, 384 unknown
+type_at                                        1 495 asked, 723 known (48.4%)
+uv_* names                                     5 asked, 4 resolved
+```
+
+The four include misses are headers MinGW does not ship (glibc/sanitizer), not a search-path defect, and `Search` is
+one name. The findings that remain are the style rules of §7 (BracesAroundStatements 15, MacroParentheses 5,
+ElseAfterReturn 2, and one each of MissingInclude/MissingReturn/Redefinition).
+
+One C file that exercises the dependency, `src/nvim/event/loop.c` (includes `uv.h`, calls `uv_run`), read the way an
+editor reads it:
+
+```text
+parse errors 0 | names 354 identifiers, 339 classified (95.8%)
+definition 26/30 resolved (86.7%) | type_at 18/30 (60.0%) | uv_* 4 asked, 4 resolved
+```
+
+The two rates are the honest gap that is left: **type_at is under half**, and the 384 unresolved definitions are the
+same population — a name whose type is written by a macro or by a header that only a program read resolves. That is
+the next round, and it is why the provenance of a name matters more than its count.
+
+For comparison, the census that opened this document (before the keyword, declarator and guard fixes, and without the
+dependency tree) had **17 files failing to parse, 26 parse errors, 283 undefined names and 175 include misses** on the
+full 517.
