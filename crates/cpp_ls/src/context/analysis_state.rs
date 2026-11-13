@@ -635,6 +635,7 @@ impl AnalysisState {
             // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
             // whether the session was missing or the query declined.
             let answer = session.as_ref().and_then(f);
+
             (
                 waited_for_the_session,
                 ran.elapsed().as_millis() as u64,

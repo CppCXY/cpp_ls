@@ -64,6 +64,7 @@ extern crate rust_i18n;
 rust_i18n::i18n!("./locales", fallback = "en");
 
 pub mod align;
+pub mod alloc;
 pub mod cache;
 pub mod completion;
 pub mod cuda;

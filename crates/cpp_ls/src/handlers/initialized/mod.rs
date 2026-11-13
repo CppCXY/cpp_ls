@@ -364,6 +364,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // level is not `trace`.
             log::trace!("pump: round");
             let allocs_at_round_start = crate::allocated_bytes();
+            let here_at_round_start = cpp_code_analysis::alloc::bytes_here();
             let mut allocs_after_wave = allocs_at_round_start;
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
@@ -417,6 +418,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
             allocs_after_wave = crate::allocated_bytes();
+            let here_after_wave = cpp_code_analysis::alloc::bytes_here();
             log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held, committed)) = context
@@ -529,6 +531,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 drain_was_empty,
                 asked.len()
             );
+            let allocs_before_the_drain = crate::allocated_bytes();
             let (prepared_drain, cooks, cooking_revision) = context
                 .analysis()
                 .run_blocking(move |session| {
@@ -541,7 +544,9 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 })
                 .await
                 .unwrap_or_default();
+            let allocs_after_the_drain = crate::allocated_bytes();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;
+            let allocs_after_the_renders = crate::allocated_bytes();
             let built: Vec<std::path::PathBuf> = rendered_cooks
                 .iter()
                 .map(|rendered| rendered.indexed.summary.path.clone())
@@ -551,6 +556,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
             // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
             log::trace!("pump: commit starts");
+            let allocs_after_the_commits = crate::allocated_bytes();
             let (re_read, cooked) = context
                 .analysis()
                 .update_session("index slice", |session| {
@@ -676,13 +682,24 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 let end = crate::allocated_bytes();
                 let sizes = context
                     .analysis()
-                    .with_snapshot(|session| session.cache_sizes());
+                    .with_snapshot(|session| (session.cache_sizes(), session.memory_report()));
                 eprintln!(
-                    "[allocs] wave {} MB, rest {} MB (prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}) | summaries {} cooked-readings {}",
-                    sizes.as_ref().map_or(0, |sizes| sizes.summaries),
-                    sizes.as_ref().map_or(0, |sizes| sizes.cooked_files),
+                    "[allocs] wave {} MB, drain {} MB, renders {} MB, commit {} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, session tables {} MB (until end {} MB)",
                     (allocs_after_wave - allocs_at_round_start) / (1024 * 1024),
-                    (end - allocs_after_wave) / (1024 * 1024),
+                    (allocs_before_the_drain - allocs_after_wave) / (1024 * 1024),
+                    (allocs_after_the_renders - allocs_after_the_drain) / (1024 * 1024),
+                    (allocs_after_the_commits - allocs_after_the_renders) / (1024 * 1024),
+                    sizes.as_ref().map_or(0, |(sizes, _)| sizes.summaries),
+                    sizes.as_ref().map_or(0, |(sizes, _)| sizes.cooked_files),
+                    sizes.as_ref().map_or(0, |(_, report)| {
+                        (report.summary_bytes
+                            + report.cooked_bytes
+                            + report.view_bytes
+                            + report.unit_bytes
+                            + report.rendering_bytes)
+                            / (1024 * 1024)
+                    }),
+                    (end - allocs_after_the_commits) / (1024 * 1024),
                 );
             }
 
