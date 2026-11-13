@@ -913,4 +913,30 @@ the growth is still the pump's.
 on every drain, and each drain pays a wave preparation over the closure. Refuse an ask that has been taken and
 served without `is_refined` becoming true (per content, cleared on edit — the rule `cooking_refused` already
 follows), so `pending_work()` can reach zero; and call `mi_collect(true)` after a closure cook burst, since the
-peaks are what is being kept.
+peaks are what is being kept.
+
+**Second round, measured** — the holder is outside every table the session reports, and the growth scales with
+the closure:
+
+```text
+src/main.cpp        (few includes):  flat at ~510 MB for 20 s idle
+src/containers.cpp  (17 headers):    2 553 MB in 55 s idle
+at 2 334 MB, a diagnostic pull reports: vfs 19 files, summaries 19, tables ~2 MB
+```
+
+So the session holds **19 files and ~2 MB** at the moment the process holds 2.3 GB. What *is* specific to
+`containers.cpp` is its closure: the pump's `want_the_closure_cooked` names its seventeen direct includes on every
+drain ("not read, cookable, not refused" — the prefix stays in `parsed_since_the_last_pass`), and
+`prepare_wave`/`prepare_the_re_read` pay a **closure-fingerprint walk per file per round** (up to 8192 files
+each), with the refinement fast path missing every time (847 `skipped: not stored` in 35 s).
+
+Tried and measured as **not** the cause, and reverted rather than kept:
+
+- `mi_collect(true)` from the pump and from the blocking threads that cook (7 calls in 10 s): no change;
+- redb's page cache (default **1 GiB**; now capped at 64 MB — kept as a bound, but it moved this number not at all);
+- making the pump wait instead of yield when its backlog survives the no-progress breaker: no change (the breaker
+  was not the spin).
+
+Next: a heap profile outside the session (mimalloc's own stats, or a sampling profiler) to name the allocation
+site, and a bisect of the seventeen includes (a file including only `<map>`, only `<variant>`, …) to find whether
+one header triggers the loop.

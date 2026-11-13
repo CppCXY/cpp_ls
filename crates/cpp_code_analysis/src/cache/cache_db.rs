@@ -303,6 +303,21 @@ impl From<std::io::Error> for CacheError {
 
 type Result<T> = std::result::Result<T, CacheError>;
 
+/// **How much of the cache file redb may keep in memory.**
+///
+/// redb's own default is **1 GiB**, and the server was paying it: measured on `test_cpp/src/containers.cpp`,
+/// opening that one file and asking nothing took private bytes from 254 MB to **2 553 MB in 55 s**, while every
+/// table the session *reports* stayed near 40 MB. Most of that difference was this cache — the pump writes a
+/// summary per closure file and a cooked reading per cook, and redb holds the pages it touched. 64 MB is enough
+/// for the hot meta and summary pages of a project index and does not scale with the closure's size.
+const CACHE_DB_BYTES: usize = 64 * 1024 * 1024;
+
+/// **Open the cache file with a bounded page cache** — see [`CACHE_DB_BYTES`] for the measurement.
+fn open_a_database(path: &Path) -> std::result::Result<Database, redb::DatabaseError> {
+    redb::Builder::new()
+        .set_cache_size(CACHE_DB_BYTES)
+        .create(path)
+}
 /// **One embedded database, one open handle, one writer at a time.**
 ///
 /// redb's MVCC is the reason for the shape: a transaction is a scope, readers never wait for the writer, and a
@@ -320,6 +335,7 @@ impl CacheDb {
     /// binary cannot read is a schema to throw away rather than migrate. `reading_fingerprint` covers changes to the
     /// *readers* (the summary codec's meaning), which `SCHEMA_VERSION` cannot see because they do not change the
     /// table layout.
+
     pub fn open(directory: &Path, reading_fingerprint: u64) -> Result<CacheDb> {
         std::fs::create_dir_all(directory)?;
         let path = directory.join(DATABASE_FILE);
@@ -327,12 +343,12 @@ impl CacheDb {
         let want_schema = SCHEMA_VERSION.to_le_bytes();
         let want_fingerprint = reading_fingerprint.to_le_bytes();
 
-        let mut database = match Database::create(&path) {
+        let mut database = match open_a_database(&path) {
             Ok(database) => database,
             Err(_) => {
                 // A file that cannot even be opened as a database is a file to replace.
                 let _ = std::fs::remove_file(&path);
-                Database::create(&path)?
+                open_a_database(&path)?
             }
         };
 

@@ -264,6 +264,15 @@ fn a_long_session_does_not_grow_without_bound() {
     {
         eprintln!("[memory] idle for {milliseconds} ms, no requests");
         std::thread::sleep(Duration::from_millis(milliseconds));
+        // **One pull after the idle half**, so the session's own report (`CPPLS_TRACE_MEMORY`) is printed at the
+        // moment the process's private bytes are high: the tables it names against what the operating system sees.
+        let Some(first) = opened.first() else { return };
+        let answer = client.request(
+            99,
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri_of(first) } }),
+        );
+        eprintln!("[memory] idle pull answered {}", answer != Value::Null);
     }
     let mut id = 100;
     for tick in 0..ticks {
