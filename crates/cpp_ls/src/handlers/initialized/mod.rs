@@ -366,11 +366,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         let rounds_started = std::time::Instant::now();
         loop {
             rounds += 1;
-            if rounds % 1000 == 0 && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
-                eprintln!(
-                    "[rounds] {rounds} in {:?}",
-                    rounds_started.elapsed()
-                );
+            if rounds.is_multiple_of(1000) && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
             }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
             // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
