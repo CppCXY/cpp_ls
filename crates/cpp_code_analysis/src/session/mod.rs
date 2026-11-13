@@ -1050,6 +1050,19 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// A refusal is not a conclusion about the file, only about *this* moment: [`Session::want_cooked_reading`] — a
     /// query that names the file — clears it and queues again, so nothing is lost but the retry.
     cooking_refused: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// **The files this session has already asked to cook** — so a closure is wanted once, not once per drain.
+    ///
+    /// `already_read` is the *index's* answer, and the index keeps a **bounded** map ([`crate::index::MAX_COOKED_FILES`]):
+    /// a reading that is evicted reads as "nobody cooked this" again, and [`Session::want_the_closure_cooked`] — called
+    /// for every open document on every idle drain — queued it again. Measured on `test_cpp` with twenty files open and
+    /// **no request at all**: 486 cook commits for **179 distinct files** in 33 s, the cooked map 124 → 179, session
+    /// tables 63 → 114 MB, and private bytes 600 → **900 MB** before a 1 GB cap killed the process. The work was not the
+    /// project: it was the same headers, cooked over and over.
+    ///
+    /// A file that has been *asked for* is asked for once per text. A query that needs the reading after an eviction
+    /// asks for it itself ([`Session::want_cooked_reading`], [`Session::view`]), and that is the asking side this loop
+    /// is not. Cleared for a file in [`Session::buffer_changed`], which is the one place its text moves.
+    cooked_or_wanted: std::sync::Mutex<std::collections::HashSet<String>>,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read
@@ -2007,6 +2020,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 RENDERING_SUMMARY_BYTES,
             )),
             cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
+            cooked_or_wanted: std::sync::Mutex::new(std::collections::HashSet::new()),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
@@ -2818,6 +2832,11 @@ impl<F: FileProvider + Clone> Session<F> {
         self.forget_refinement(path);
         self.store.forget(path);
         self.held_definitions().forget(path);
+        // **And the file is askable again**, because the reason it was asked for — its text — has moved; the closure
+        // loop must queue it once more, or an edited header would keep a stale reading for the rest of the session.
+        if let Ok(mut asked) = self.cooked_or_wanted.lock() {
+            asked.remove(&queue_key(path));
+        }
         // **The translation unit of *this* file, and only this file's.** A unit is a timeline over a closure, so an
         // edit that moves a directive has changed the one rooted here; it has not changed the one rooted at a file
         // that merely *includes* this one, whose timeline is still the same sequence of directives at the same
@@ -2939,6 +2958,12 @@ impl<F: FileProvider + Clone> Session<F> {
             if was_indexed {
                 self.queue.again(dependent.clone(), Priority::Rest, 0);
             }
+            // **And the dependent is askable again**, for the reason [`Session::buffer_changed`] gives about the
+            // edited file: its reading was just invalidated, so the closure loop must be free to queue it — an
+            // asked-once set that outlived an invalidation would leave the file on the old macro for the session.
+            if let Ok(mut asked) = self.cooked_or_wanted.lock() {
+                asked.remove(&queue_key(&dependent));
+            }
 
             // **The named rendering too.** `renderings` is keyed by the *dependent's* own text, which did not
             // change — so the entry left behind is a rendering of a world whose macros have moved, and the next
@@ -3029,9 +3054,27 @@ impl<F: FileProvider + Clone> Session<F> {
                 .map(|refused| refused.contains(&queue_key(path)))
                 .unwrap_or(false)
         };
+        // **And a file this session has already asked for is not asked for again.** `already_read` answers from the
+        // index's *bounded* cooked map, so an evicted reading reads as "nobody cooked this" and this loop — once per
+        // open document per idle drain — queued it a second, third and fourth time. See
+        // [`Session::cooked_or_wanted`] for the measurement that made the difference between a bounded pump and one
+        // that never idles.
+        let asked = |session: &Self, path: &Path| {
+            session
+                .cooked_or_wanted
+                .lock()
+                .map(|asked| asked.contains(&queue_key(path)))
+                .unwrap_or(false)
+        };
+        let remember = |session: &Self, path: &Path| {
+            if let Ok(mut asked) = session.cooked_or_wanted.lock() {
+                asked.insert(queue_key(path));
+            }
+        };
 
         for included in &direct {
             if !already_read(self, included)
+                && !asked(self, included)
                 && can_be_cooked(self, included)
                 && !refused(self, included)
             {
@@ -3042,6 +3085,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         included.display()
                     );
                 }
+                remember(self, included);
                 self.cooking.want(included);
             }
         }
@@ -3072,12 +3116,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 if budget == 0 {
                     break;
                 }
-                if already_read(self, &nested) || refused(self, &nested) {
+                if already_read(self, &nested) || asked(self, &nested) || refused(self, &nested) {
                     continue;
                 }
                 if !nested_files.contains(&nested) {
                     nested_files.push(nested.clone());
                 }
+                remember(self, &nested);
                 self.cooking.want(&nested);
                 budget -= 1;
             }
@@ -3107,15 +3152,17 @@ impl<F: FileProvider + Clone> Session<F> {
                 if budget == 0 {
                     break;
                 }
-                if already_read(self, &deeper) || refused(self, &deeper) {
+                if already_read(self, &deeper) || asked(self, &deeper) || refused(self, &deeper) {
                     continue;
                 }
+                remember(self, &deeper);
                 self.cooking.want(&deeper);
                 budget -= 1;
             }
         }
 
-        if !already_read(self, root) {
+        if !already_read(self, root) && !asked(self, root) {
+            remember(self, root);
             self.cooking.want(root);
         }
     }
@@ -4221,6 +4268,16 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
         let committed = self.commit_a_unit_reading(prepared)?;
+        // **The budget is charged here, which is the one place every path goes through.** It used to be charged in
+        // [`Session::read_the_unit`] only, and the pump does not take that path — it takes
+        // `AnalysisState::read_a_program`, which calls [`Session::commit_a_program`] directly. So
+        // [`PROGRAM_READ_BUDGET_BYTES`], the ceiling that exists so twenty open tabs do not cost twenty programs'
+        // worth of heap, was never paid by the only caller that reads in bulk: measured on `test_cpp` with twenty
+        // files open and **no request at all**, 1 094 MB in 34 s (killed by a 1 GB cap) with the session's own
+        // tables at ~75 MB, and the same run flat at **511 MB for 60 s** with `CPPLS_NO_PROGRAM_READ=1`.
+        self.program_read_bytes = self
+            .program_read_bytes
+            .saturating_add(self.the_cost_of_reading_a_program(root));
         self.units_read.insert(queue_key(root));
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("commit");
@@ -8732,6 +8789,12 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             self.store.put_the_cooked_reading(&path, &cooked);
             self.store.index_mut().insert_cooked(&path, cooked);
+            // **Cooked here counts as asked**, so the closure loop does not queue it again the moment its reading is
+            // evicted from the index's bounded map — a file cooked by a program read or by a query is exactly the
+            // "already read" this loop is trying to reach.
+            if let Ok(mut asked) = self.cooked_or_wanted.lock() {
+                asked.insert(queue_key(&path));
+            }
         }
         Some(reading)
     }

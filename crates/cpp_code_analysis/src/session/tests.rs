@@ -6037,3 +6037,59 @@ fn a_rendering_view_survives_twelve_buffer_views() {
         "the second ask is a cache hit, not a re-parse"
     );
 }
+
+/// **A program read charges the budget that bounds it** — the ceiling that keeps twenty open tabs from costing
+/// twenty programs' worth of heap.
+///
+/// The charge used to live in `Session::read_the_unit` only, and the pump does not take that path: it calls
+/// `Session::commit_a_program` directly (`AnalysisState::read_a_program`), so `PROGRAM_READ_BUDGET_BYTES` was never
+/// paid by the only caller that reads in bulk. Measured on `test_cpp` with twenty files open and **no request at
+/// all**: 1 094 MB in 34 s (killed by a 1 GB cap) against **511 MB flat for 60 s** with `CPPLS_NO_PROGRAM_READ=1`.
+#[test]
+fn a_program_read_charges_the_budget_that_bounds_it() {
+    let a = "#include \"a.h\"\nint main() { return 0; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.cpp", a)
+        .with_file("/p/a.h", "struct Widget { int size; };\n");
+    let fixture = Memory::new("a-program-read-is-priced", &files);
+    let mut session = fixture.session();
+    session.add_project_files([PathBuf::from("/p/a.cpp")]);
+    session.did_open("/p/a.cpp", a);
+    session.index_everything();
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+
+    assert_eq!(session.program_read_bytes, 0, "nothing was read yet");
+    let reading = session
+        .read_a_program_now()
+        .expect("the reader's own program is read");
+    assert_eq!(reading.root, Path::new("/p/a.cpp"));
+    let priced = session.the_cost_of_reading_a_program(Path::new("/p/a.cpp"));
+    assert!(priced > 0, "a program with a closure costs something");
+    assert_eq!(
+        session.program_read_bytes, priced,
+        "the read is charged what it costs, which is what makes the budget a budget"
+    );
+}
+
+/// **A program read that never happens is never charged** — the other half of the rule above, and the reason a
+/// declined read cannot exhaust the budget the next file needs.
+#[test]
+fn a_program_read_that_declines_charges_nothing() {
+    let files = MemoryFiles::new()
+        .with_file("/p/a.cpp", "int main() { return 0; }\n")
+        .with_file("/p/b.cpp", "int other() { return 0; }\n");
+    let fixture = Memory::new("a-declined-program-read-is-free", &files);
+    let mut session = fixture.session();
+    session.add_project_files([PathBuf::from("/p/a.cpp"), PathBuf::from("/p/b.cpp")]);
+    session.index_everything();
+    // Nothing is open and the project declined its unopened roots, so no program is owed at all.
+    assert!(
+        session.the_program_to_read().is_none(),
+        "nothing is owed without an open file"
+    );
+    assert!(session.read_a_program_now().is_none());
+    assert_eq!(
+        session.program_read_bytes, 0,
+        "a read that never happened is not charged"
+    );
+}

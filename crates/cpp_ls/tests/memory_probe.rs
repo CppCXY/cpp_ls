@@ -221,6 +221,12 @@ fn a_long_session_does_not_grow_without_bound() {
                     "diagnostic": { "dynamicRegistration": false },
                     "inlayHint": { "dynamicRegistration": false },
                     "syntaxToken": {},
+                    "codeLens": {},
+                    "documentSymbol": {},
+                    "foldingRange": {},
+                    "selectionRange": {},
+                    "signatureHelp": {},
+                    "completion": {},
                 },
                 "window": { "workDoneProgress": true },
             },
@@ -256,6 +262,62 @@ fn a_long_session_does_not_grow_without_bound() {
             "textDocument/diagnostic",
             json!({ "textDocument": { "uri": uri_of(path) } }),
         );
+    }
+
+    // **What a client asks when it opens a file** — `CPPLS_MEMORY_EDITOR=1`. A `didOpen` alone is not what an editor
+    // does: a language client asks for the outline, the lenses, the folds, the tokens, the hints and the pull, and
+    // each of those is a different query over the same closure. The `containers.cpp` report is about *opening* the
+    // file, so the probe has to make the same requests the client does, or it measures a smaller program.
+    if std::env::var_os("CPPLS_MEMORY_EDITOR").is_some() {
+        let Some(target) = opened.first() else { return };
+        let target_uri = uri_of(target);
+        let position = json!({ "line": 20, "character": 8 });
+        let range = json!({
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 200, "character": 0 },
+        });
+        let requests = [
+            (
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": target_uri } }),
+            ),
+            (
+                "textDocument/codeLens",
+                json!({ "textDocument": { "uri": target_uri } }),
+            ),
+            (
+                "textDocument/foldingRange",
+                json!({ "textDocument": { "uri": target_uri } }),
+            ),
+            (
+                "textDocument/selectionRange",
+                json!({ "textDocument": { "uri": target_uri }, "positions": [position.clone()] }),
+            ),
+            (
+                "textDocument/signatureHelp",
+                json!({ "textDocument": { "uri": target_uri }, "position": position.clone() }),
+            ),
+            (
+                "textDocument/completion",
+                json!({ "textDocument": { "uri": target_uri }, "position": position.clone() }),
+            ),
+            (
+                "textDocument/semanticTokens/full",
+                json!({ "textDocument": { "uri": target_uri } }),
+            ),
+            (
+                "textDocument/inlayHint",
+                json!({ "textDocument": { "uri": target_uri }, "range": range.clone() }),
+            ),
+        ];
+        for (offset, (method, params)) in requests.into_iter().enumerate() {
+            let started = Instant::now();
+            client.request(500 + offset as i64, method, params);
+            eprintln!(
+                "[memory] editor: {method} took {} ms",
+                started.elapsed().as_millis()
+            );
+        }
     }
 
     // **The questions an editor asks while a reader sits on one file.** Every iteration repeats them: a query that
@@ -318,13 +380,13 @@ fn a_long_session_does_not_grow_without_bound() {
         }
         if asks("hints") {
             client.request(
-            id,
-            "textDocument/inlayHint",
-            json!({
-                "textDocument": { "uri": target_uri },
-                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 60, "character": 0 } },
-            }),
-        );
+                id,
+                "textDocument/inlayHint",
+                json!({
+                    "textDocument": { "uri": target_uri },
+                    "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 60, "character": 0 } },
+                }),
+            );
             id += 1;
         }
         if tick % 10 == 0 {

@@ -745,6 +745,13 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     }),
                     (end - allocs_after_the_commits) / (1024 * 1024),
                 );
+                // **Which table grew**, when the question is a leak rather than a stage: the one line above names the
+                // total, and a total that climbs with `pending 0` and nothing cooked is the report this exists for.
+                if std::env::var_os("CPPLS_TRACE_MEMORY").is_some()
+                    && let Some((_, report)) = &sizes
+                {
+                    eprintln!("[tables] {report}");
+                }
             }
 
             if pending > 0 {
@@ -968,6 +975,10 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             //
 
             if pending == 0
+                // **An experiment switch**: a whole-program read is the session's largest single piece of work, and
+                // `CPPLS_NO_PROGRAM_READ` is how a run tells its cost from the pump's — the same shape as
+                // `CPPLS_NO_COOKS`.
+                && std::env::var_os("CPPLS_NO_PROGRAM_READ").is_none()
                 && let Some(wait) = context
                     .analysis()
                     .with_snapshot(
@@ -985,7 +996,18 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     // **Then breathe.** A project has one program per translation unit, and a pump that read them
                     // back to back would peg a core for minutes after every pause; one idle tick between them is
                     // the same pace the loop uses when it has nothing to do.
-                    if context.analysis().read_a_program().await {
+                    //
+                    // **And a program the session *declines* breathes too.** `read_a_program` answers `false` both
+                    // when nothing is owed and when the file it chose is over the byte budget — and an over-budget
+                    // file is *deliberately* re-considered on every drain (it may fit after an edit or a budget
+                    // frees). This branch used to `continue` with no wait in the second case, so the pump ran the
+                    // whole decision again at once: `the_program_to_read` walks the closure of **every open file** to
+                    // price it, so a project with twenty tabs open spun on twenty closure walks — measured on
+                    // `test_cpp` with no request at all: 1 094 MB in 34 s, killed by a 1 GB cap, one core busy, and
+                    // every pump stage reporting 0 MB. `CPPLS_NO_PROGRAM_READ=1` made the same run flat at 511 MB
+                    // for 60 s, which is how the read was named.
+                    let read = context.analysis().read_a_program().await;
+                    if read {
                         context.diagnostics().refresh_pull(context.clone());
                         context
                             .diagnostics()
@@ -997,8 +1019,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         if context.lsp_features().supports_refresh_semantic_tokens() {
                             context.client().refresh_semantic_tokens();
                         }
-                        context.analysis().wait_for_work(IDLE_WAIT).await;
                     }
+                    context.analysis().wait_for_work(IDLE_WAIT).await;
                 } else {
                     context.analysis().wait_for_work(wait).await;
                 }
