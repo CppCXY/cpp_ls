@@ -939,4 +939,36 @@ Tried and measured as **not** the cause, and reverted rather than kept:
 
 Next: a heap profile outside the session (mimalloc's own stats, or a sampling profiler) to name the allocation
 site, and a bisect of the seventeen includes (a file including only `<map>`, only `<variant>`, …) to find whether
-one header triggers the loop.
+one header triggers the loop.
+
+**The trigger, bisected to one statement** (temp files under `test_cpp/src`, deleted afterwards; the server opened
+one file and asked nothing for 15 s):
+
+```text
+17 includes + one trivial function              flat   ~535 MB
+the same with only the first 8 / only the last 9 flat   ~559 MB
+17 includes + sequences() and associative()     flat   ~518 MB
+17 includes + `struct Value` (std::visit)       flat   ~505 MB
+containers.cpp without vocabulary()             flat   ~568 MB
+vocabulary() alone, in its own file            2 555 MB
+      its optional+variant half                flat   ~539 MB
+      its any/tuple/pair half                  2 512 MB
+            std::any alone                      flat   ~565 MB
+            the tuple statements               2 595 MB
+                  `tuple_size_v<decltype(t)>`   flat   ~548 MB
+                  `std::get<0>(tuple)`          2 585 MB   ← the trigger
+```
+
+So the smallest reproducer is a file with the seventeen includes and
+
+```cpp
+std::tuple tuple{1, 2.5, std::string{"three"}};
+std::cout << std::get<0>(tuple);
+```
+
+`inspect diagnostics --index` on that file is **fast and quiet** (215 MB, 0 findings), so the loop is **not** in
+the check layer: it is in the server's pump path that the standalone tool does not run. The next question is
+therefore the pump's own, and the probe that answers it is one request order away: does the cook of that file
+land (`cooked_declarations` `Some`) or is it re-wanted every round? The in-process pump probe cannot see it — it
+does not cook at all (`cooking 67, cooked 0`), because cooking belongs to the server's `claim_cooking`/
+`render_cooks` path.
