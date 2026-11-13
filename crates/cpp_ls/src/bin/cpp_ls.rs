@@ -11,7 +11,7 @@ struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         cpp_ls::note_allocation(layout.size());
-        cpp_code_analysis::alloc::note_here(layout.size());
+        cpp_code_analysis::alloc::note(layout.size());
         unsafe { MiMalloc.alloc(layout) }
     }
 
@@ -21,13 +21,13 @@ unsafe impl GlobalAlloc for Counting {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         cpp_ls::note_allocation(new_size);
-        cpp_code_analysis::alloc::note_here(new_size);
+        cpp_code_analysis::alloc::note(new_size);
         unsafe { MiMalloc.realloc(pointer, layout, new_size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         cpp_ls::note_allocation(layout.size());
-        cpp_code_analysis::alloc::note_here(layout.size());
+        cpp_code_analysis::alloc::note(layout.size());
         unsafe { MiMalloc.alloc_zeroed(layout) }
     }
 }

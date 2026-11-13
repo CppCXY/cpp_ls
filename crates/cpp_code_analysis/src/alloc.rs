@@ -48,23 +48,3 @@ pub fn counting() -> bool {
     COUNTING.load(Ordering::Relaxed)
 }
 
-thread_local! {
-    /// **This thread's share of the counter** — the question "did the pump's own stage spend it, or another
-    /// thread?" is not answerable from a process-wide total.
-    static HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// One allocation, as the installed allocator reports it, **per thread as well as in total**.
-#[inline]
-pub fn note_here(bytes: usize) {
-    if COUNTING.load(Ordering::Relaxed) {
-        BYTES.fetch_add(bytes, Ordering::Relaxed);
-        HERE.with(|cell| cell.set(cell.get() + bytes));
-    }
-}
-
-/// What this thread has asked for.
-#[inline]
-pub fn bytes_here() -> usize {
-    HERE.with(std::cell::Cell::get)
-}
