@@ -1003,6 +1003,20 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
         return parse_expression_statement(p);
     }
 
+    // **`std::println(…);` is a call, and the declaration reading *succeeds* for it.** A qualified declarator is
+    // legal C++ — `void A::f() {}` — so the speculative pass below accepts `std::println("…", …)` as a function
+    // declaration of `std::println`, with no error to notice and a tree that round-trips: measured on
+    // `test_module`'s `main.cpp:52`, the statement came out a `Declaration` whose declarator was the call, and
+    // **there was no `CallExpr` anywhere** — so hover had four `std::println` overloads to choose between and
+    // nothing to choose them with.
+    //
+    // The language's own rule decides it: a declaration whose declarator is qualified and has **no return type
+    // before it** is a constructor or destructor of that class (`A::A()`, `A::~A()`), so the two segments name the
+    // same class. `X::Y(…)` with different segments is a call or a functional cast, never a declaration.
+    if a_qualified_name_that_cannot_be_declared(p) {
+        return parse_expression_statement(p);
+    }
+
     let start = p.current_token_index();
     let checkpoint = p.checkpoint();
     match decls::parse_declaration(p) {
@@ -2127,6 +2141,26 @@ fn parse_label_statement(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// **Is this statement a qualified name a declaration cannot begin with?** — see the rule in
+/// [`parse_declaration_or_expression_statement`].
+///
+/// The shape is `<ident> :: <ident> (` with different names: a function call on a namespace or an object
+/// (`std::println(...)`), or a functional cast. A *declaration* can start that way only for a constructor or
+/// destructor definition, where the two names are one class — and a destructor writes `~`, which this refuses.
+fn a_qualified_name_that_cannot_be_declared(p: &CppParser) -> bool {
+    let at = p.current_token_index();
+    if p.token_kind_at(at) != CppTokenKind::Identifier
+        || p.token_kind_at(at + 1) != CppTokenKind::Scope
+        || p.token_kind_at(at + 2) != CppTokenKind::Identifier
+        || p.token_kind_at(at + 3) != CppTokenKind::LeftParen
+    {
+        return false;
+    }
+    let first = p.token_text_at(at);
+    let second = p.token_text_at(at + 2);
+    first != second && second != "operator"
 }
 
 /// **Is this statement `name ( & …`?** — see the rule at the head of `parse_declaration_or_expression_statement`.

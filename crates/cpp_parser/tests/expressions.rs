@@ -817,4 +817,45 @@ fn a_member_name_is_not_on_the_next_line() {
         shapes.contains(&"ExpressionStat \"w.size;\"".to_string()),
         "and the member expression below it is still its own statement: {shapes:?}"
     );
+}
+
+/// **A statement that starts `namespace::name(...)` is a call, not a declaration.**
+///
+/// The declaration reading *succeeds* for it — a qualified declarator is legal C++ (`void A::f() {}`) — so the
+/// speculative pass accepted `std::println("…", 1)` as a function declaration, with no error and a tree that
+/// round-trips. Measured on `test_module`'s `main.cpp:52`: there was **no `CallExpr` anywhere** in the statement,
+/// so a hover on the callee had four overloads to choose between and nothing to choose them with.
+///
+/// The rule is the language's: a declaration whose declarator is qualified and has no return type before it is a
+/// constructor or destructor, so its two segments name the same class. `X::Y(...)` with different names is a call
+/// (or a functional cast).
+#[test]
+fn a_qualified_name_that_names_two_different_things_is_a_call() {
+    let tree = cpp_parser::CppParser::parse(
+        "void f() { std::println(\"x {}\u{3000}\u{9762}\u{79ef}\", 1.0); }\n",
+        ParserConfig::default(),
+    );
+    assert_eq!(tree.get_errors(), [], "the statement parses cleanly");
+    let calls = cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count();
+    assert_eq!(calls, 1, "the statement is one call expression");
+
+    // **And the shapes that *are* declarations keep their reading.**
+    for declaration in [
+        "struct A { A(); };\nA::A() {}\n", // an out-of-class constructor definition
+        "struct A { ~A(); };\nA::~A() {}\n", // and a destructor
+        "namespace n { struct B {}; }\nn::B value(1);\n", // a variable of a qualified type
+    ] {
+        let tree = cpp_parser::CppParser::parse(declaration, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "`{declaration}` is a declaration and parses cleanly"
+        );
+        let declarations =
+            cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(&tree.get_red_root()).count();
+        assert!(
+            declarations >= 2,
+            "`{declaration}` kept its declaration reading: {declarations}"
+        );
+    }
 }

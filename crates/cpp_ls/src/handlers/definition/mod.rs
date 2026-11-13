@@ -125,6 +125,27 @@ pub async fn on_goto_definition_handler(
             return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
         }
 
+        // **A module name or partition, which declares nothing either** — the same shape as the header above, and
+        // the same coordinate: an `import` is *resolved* in the rendering, so `:shapes` is a token of the file's own
+        // text and only there. `import :shapes;` in the module unit `geometry` names the partition `geometry:shapes`,
+        // which is a file of its own — reported from an editor, where a jump on `:shapes` landed in `shapes.cppm`, a
+        // *different* module that happens to share the partition's spelling. `Session::module_unit_at` resolves the
+        // position through the file's own module declaration, so the two cannot be confused.
+        if let Some(module) = session.module_unit_at(&view, in_the_file) {
+            let uri = path_to_uri(&module.file)?;
+            return Some(GotoDefinitionResponse::Scalar(Location {
+                uri,
+                // **At the top of the unit**, which is where a module declaration is written ([module.unit] puts it
+                // before every import and every declaration). A range inside the file would need that file's text,
+                // and this handler has no line index for a file the session may not hold; the name is what the hover
+                // reports, and the cursor lands on the declaration.
+                range: Range::new(
+                    lsp_types::Position::new(0, 0),
+                    lsp_types::Position::new(0, 0),
+                ),
+            }));
+        }
+
         // **A macro use**, which no declaration query can answer: the cook expanded it, so the rendering holds no
         // `C23_SUM` and `definitions` is a query about *declarations* — a macro has none. Measured on a C corpus:
         // `C23_SUM(count, 1, 2, 3)` answered nothing at all, while the *hover* on the same name worked, because hover

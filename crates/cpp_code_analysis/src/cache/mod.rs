@@ -251,7 +251,14 @@ use std::path::{Path, PathBuf};
 /// at 2 parse errors in the 517-file session and 0 alone). The unit is now the root the include graph names, and a
 /// unit it does not name never answers — when the named one is not held the environment is composed from the
 /// index. Cooked readings already on disk were made under the old choice, so the number moves.
-pub const FORMAT_VERSION: u32 = 26;
+/// # Why this moved to 27
+///
+/// **`std::println("…", 1);` is a call, and it was parsed as a declaration.** A qualified declarator is legal C++
+/// (`void A::f() {}`), so the speculative declaration pass accepted the statement with no error — and a
+/// declaration fact for `println` in scope `std` was filed from it, while the statement itself had no `CallExpr`
+/// for a hover to resolve the overload with. Measured on `test_module`: four `std::println` declarations listed,
+/// with the card saying the arguments would decide. Summaries on disk hold the bogus fact, so the number moves.
+pub const FORMAT_VERSION: u32 = 27;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

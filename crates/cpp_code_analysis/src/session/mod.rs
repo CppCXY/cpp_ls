@@ -5798,6 +5798,66 @@ impl<F: FileProvider + Clone> Session<F> {
         })
     }
 
+    /// **Which interface unit a module name or a partition at this position names** — what a jump on an import
+    /// goes to.
+    ///
+    /// `import :shapes;` names the partition `shapes` **of the module the file itself declares** ([module.unit]
+    /// places the module declaration before every import), so the file it names is `geometry:shapes` — *not* a
+    /// top-level module called `shapes`. Reported from an editor: a jump on `:shapes` in `geometry.cppm` landed in
+    /// `shapes.cppm`, a different module that happens to share the partition's spelling.
+    ///
+    /// The resolution is the summary's: `modules.partitions` holds one path per partition import, in import order,
+    /// resolved when the file was read by the same scanner that resolves an `import`. This maps the *position* to
+    /// its entry, which is the half the summary cannot keep — it stores paths, not where each one was written.
+    ///
+    /// `in_the_file` is an offset in the file's own text (an import is not in the rendering — it is resolved),
+    /// the same coordinate [`Session::header_at`] takes.
+    pub fn module_unit_at(
+        &self,
+        view: &FileView,
+        in_the_file: crate::file::coordinates::FileOffset,
+    ) -> Option<ModuleUnitTarget> {
+        let summary = self.store.index().summary(&view.path)?;
+        let info = crate::ModuleInfo::from_tree(&view.root);
+        let (position, import) = info.imports.iter().enumerate().find(|(_, import)| {
+            let at = in_the_file.get();
+            import.range.start_offset <= at && at < import.range.end_offset()
+        })?;
+
+        match &import.target {
+            // **A partition**: the nth partition import of this file, because that is the order the summary
+            // resolved them in. The module it belongs to is the file's own, by the language's own rule.
+            crate::ImportTarget::Partition(name) => {
+                let nth = info.imports[..position]
+                    .iter()
+                    .filter(|earlier| earlier.target.partition_name().is_some())
+                    .count();
+                let file = summary.modules.partitions.get(nth)?.clone();
+                let owner = summary.modules.module.as_deref().unwrap_or_default();
+                Some(ModuleUnitTarget {
+                    file,
+                    name: format!("{owner}:{name}"),
+                })
+            }
+            // **A module name**: the interface unit the index knows it by.
+            crate::ImportTarget::Module(name) => {
+                let interface = self
+                    .store
+                    .index()
+                    .interface_units()
+                    .into_iter()
+                    .find(|(module, _)| module.as_str() == name.as_ref())
+                    .map(|(_, unit)| PathBuf::from(unit))?;
+                Some(ModuleUnitTarget {
+                    file: interface,
+                    name: name.to_string(),
+                })
+            }
+            // A header unit is a header: `header_at` answers it, and it declares no module.
+            crate::ImportTarget::HeaderUnit { .. } => None,
+        }
+    }
+
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {
         let path = path.as_ref();
         let _whole = DiagTrace::new("diagnostics");
@@ -11256,6 +11316,16 @@ pub struct ModuleNote {
     pub message: String,
     pub start: usize,
     pub end: usize,
+}
+
+/// **The interface unit a module name or partition names**, as a jump needs it — see
+/// [`Session::module_unit_at`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleUnitTarget {
+    /// The interface unit that declares the module (or the partition).
+    pub file: PathBuf,
+    /// The name as the language spells it: `geometry:shapes` for a partition, `geometry` for a module.
+    pub name: String,
 }
 
 /// What a diagnostics channel should say about one file — see [`Session::diagnostics`].
