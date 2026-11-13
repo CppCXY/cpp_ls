@@ -75,12 +75,17 @@ fn sources_under(root: &Path) -> Vec<PathBuf> {
 /// is not a name — asking `type_at` about them would measure the probe rather than the analysis. A *function* is
 /// excluded for a different reason: its type is a function type, which a reader asks the signature for (the hover)
 /// rather than `type_at`, and the analysis answers the value question — `type_at` is documented for a variable. The
-/// denominator is the names a reader hovers to learn a *value's* type: variables, parameters, fields, enumerators.
+/// denominator is the names a reader hovers to learn a *value's* type: variables, parameters and fields.
+///
+/// An **enumerator** is not one of them, and the hover is why: its card says "an enumerator of (an anonymous
+/// enum)", which is the declaration rather than a type, and `type_at` has no better answer to give (`enum { Red };`
+/// declares no type name, and C gives the member `int` only by conversion). Asking it measures a question no client
+/// asks.
 fn a_type_is_expected(kind: cpp_code_analysis::semantic::NameKind) -> bool {
     use cpp_code_analysis::semantic::NameKind;
     matches!(
         kind,
-        NameKind::Variable | NameKind::Parameter | NameKind::Property | NameKind::EnumMember
+        NameKind::Variable | NameKind::Parameter | NameKind::Property
     )
 }
 

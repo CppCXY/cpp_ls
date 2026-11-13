@@ -2282,6 +2282,7 @@ mod tests {
         // **And a name that is not a macro is left alone.** `std::size_t` has no definers, so the card keeps the
         // fact's spelling rather than reconstructing anything.
         let other = DeclFact {
+            enumerator: false,
             returns: Some("std::size_t".to_string()),
             ..fact.clone()
         };

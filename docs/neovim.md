@@ -471,3 +471,30 @@ Measured on the 52-file sample: `IncludeNotFound` **4 → 2** (the two sanitizer
 `langinfo.h` stay because their guard is `defined(__linux__)`, which the *summary* cannot decide — it stores
 questions, not answers, and the compilation environment lives in the session rather than the index; see
 `docs/open-questions.md`).
+### The enumerator that was a variable (2026-11-13, later)
+
+`type_at` was 64.7% and the misses were dominated by one name kind: **enum members**. `DeclKind` has one variant
+for "a name that holds a value", and the index inferred an enumerator from *a written type being absent* plus *a
+scope being present* — which is exactly backwards for the shape C writes most, an anonymous
+`enum { WILD_FREE = 1, … };` whose members have no scope. So the declaration card said "an enumerator of (an
+anonymous enum)" while every use in another file was drawn as a `variable`: one name, two answers.
+
+**Fixed**: `DeclFact::enumerator`, set from the binding by every fact builder (`FORMAT_VERSION` 24, `CODEC_VERSION`
+40), and `IndexedKind::of` reads it instead of deriving. Measured on the same 52-file sample:
+
+```text
+                     before      after
+EnumMember names        625      1 939     (+1 314 enum uses)
+Variable names       12 115     10 801     (-1 314)
+type_at asked           829        549
+type_at known           536        536
+type_at rate          64.7%      97.6%
+```
+
+The rate moves because the question got honest, not because the analysis learned to type an enumerator: a hover on
+one answers the *declaration* ("an enumerator of …"), which is what a client shows, and `enum { Red };` declares
+no type name to answer with. The probe now asks `type_at` only about variables, parameters and fields.
+
+What is left is 13 misses in the sample, and they are the classes §8 already lists: names inside macro *definition*
+bodies (`bit.c`'s `BRET`/`BIT_OP`), variables a macro declares (`args` from `MAXSIZE_TEMP_ARRAY`, `wp` from
+`FOR_ALL_TAB_WINDOWS`, `watchers`), and a few parameters of macro-heavy signatures (`name` in `deprecated.c:742`).

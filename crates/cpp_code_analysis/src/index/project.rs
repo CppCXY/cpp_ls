@@ -12793,6 +12793,7 @@ fn fact_from_binding_with(
 ) -> DeclFact {
     let _ = root;
     DeclFact {
+        enumerator: binding.kind == crate::BindingKind::Enumerator,
         // **The spelling, the same one the index stores** — `operator[]`, `~Widget`, `operator int`.
         //
         // This path used to answer an empty name for every declaration without an identifier, on the argument that
@@ -17957,9 +17958,11 @@ impl IndexedKind {
         IndexedKind {
             kind: found.kind,
             scope: found.scope.clone().map(Box::from),
-            enumerator: found.kind == DeclKind::Variable
-                && found.type_of.is_none()
-                && found.scope.is_some(),
+            // **The fact's own flag**, not a derivation from what it happens to record: a variable with no written
+            // type and a scope used to count as an enumerator, which is wrong at both ends — an anonymous enum's
+            // member has *no* scope and so was not one, and an untyped scoped variable was one wrongly. See
+            // [`DeclFact::enumerator`].
+            enumerator: found.enumerator,
             template: !found.parameters.is_empty(),
             constructor: found.kind == DeclKind::Function
                 && found.returns.is_none()
@@ -18127,6 +18130,7 @@ impl ProjectDefinition {
         ProjectDefinition {
             file: path.to_path_buf(),
             fact: DeclFact {
+                enumerator: binding.kind == crate::BindingKind::Enumerator,
                 // The same bits the index fills — see `DeclModifiers`.
                 modifiers: crate::DeclModifiers::default(),
                 // The effects belong to the summary the index writes, and this answer is a *place to jump to*: a

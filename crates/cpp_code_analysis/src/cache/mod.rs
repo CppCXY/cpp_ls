@@ -226,9 +226,16 @@ use std::path::{Path, PathBuf};
 /// enumerator's *initializer*: `enum { A = 1, B = A };` named the enum `A`, filed every enumerator in scope `A`,
 /// and recorded a bogus *type* fact at the initializer's use. Measured on neovim's `src/nvim/state_defs.h`:
 /// `MODE_INSERT` came out `variable in REPLACE_FLAG` (the identifier `MODE_REPLACE`'s initializer names), and
-/// go-to-definition from `mouse.c` answered `NotDeclaredHere`. Summaries on disk hold those scopes and facts, so
 /// the number moves.
-pub const FORMAT_VERSION: u32 = 23;
+/// # Why this moved to 24
+///
+/// **A declaration fact records whether it is an enumerator.** `DeclKind` has one variant for "a name that
+/// holds a value", and the index inferred the distinction from the absence of a written type plus the presence
+/// of a scope — so an **anonymous** `enum { WILD_FREE, … }`'s members, which have no scope, were drawn as
+/// variables in every file that used them (measured on neovim's `cmdexpand.h`: the declaration card said "an
+/// enumerator", the use in `cmdexpand.c` said "a variable"), and an untyped scoped variable was drawn as an
+/// enumerator. The fact carries the flag now; entries written before it decode with `false`, so the number moves.
+pub const FORMAT_VERSION: u32 = 24;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

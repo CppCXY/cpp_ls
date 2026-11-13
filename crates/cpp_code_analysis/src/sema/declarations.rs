@@ -3677,6 +3677,9 @@ fn fact_for(
 
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
+        // **Read off the binding, which is the only layer that knows it** — `DeclKind` folds an enumerator into a
+        // variable, and the fact's scope cannot tell them apart for an anonymous enum.
+        enumerator: binding.kind == crate::BindingKind::Enumerator,
         // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
         // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
         modifiers: declared_modifiers_with(shapes, binding),

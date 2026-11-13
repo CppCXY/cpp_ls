@@ -104,6 +104,15 @@ impl DeclModifiers {
 /// call the symbol, what to filter by, and which branch it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclFact {
+    /// **Is this declaration an enumerator?** — `Red` in `enum { Red };`.
+    ///
+    /// A field rather than a derivation, and the measurement is why: [`DeclKind`] has one variant for "a name
+    /// that holds a value", so the index used to infer an enumerator from *the absence* of a written type plus
+    /// the *presence* of a scope. Both halves fail for the shape C writes most — an **anonymous** `enum { … }`
+    /// whose members have no scope at all — so `WILD_FREE` in neovim's `cmdexpand.h` was drawn as a `variable`
+    /// where `cmdexpand.c` used it, while the same name's declaration card said "an enumerator of (an anonymous
+    /// enum)". One name, two answers, and a theme that colours an enumerator with its enumeration.
+    pub enumerator: bool,
     /// The name as written, without qualification: `Widget` in `ns::Widget`.
     pub name: String,
     /// The **qualified** name of the scope the declaration was written in, without the name itself: `ns::C` for a

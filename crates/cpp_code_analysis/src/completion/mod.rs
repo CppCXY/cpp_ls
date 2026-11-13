@@ -2183,6 +2183,7 @@ mod tests {
     #[test]
     fn a_functions_detail_line_is_what_it_takes() {
         let fact = |returns: Option<&str>, parameter_list: Option<&str>| DeclFact {
+            enumerator: false,
             frees: 0,
             reflection: None,
             name: "format".to_string(),

@@ -836,20 +836,34 @@ has — instead of a second whole-program read. Two tests: the budget refuses (`
 its_memory_budget_is_spent`) and a read is charged (`a_program_read_is_charged_to_the_budget`). The cost is real: the
 second and later standard-heavy files of one session lose the compiler's whole-program reading, which is where
 cross-file macro scoping is decided. Removing the budget is the goal once the holder is found.
-## An include behind `#if defined(__linux__)` still warns
+## Two includes behind a `HAVE_…` guard still warn
 
-**Half fixed on 2026-11-13, and the remaining half is a missing input rather than a rule.** `include-not-found`
-now asks the index whether the branch the directive sits in is decided `Inactive` (`the_guard_is_taken`) and
-stays silent when it is. On the neovim census that removed two of four misses; the two that remain are
-`<execinfo.h>` and `<langinfo.h>`, behind `#if defined(__linux__)` — a guard whose answer needs the compiler's
-**predefined** macros for this file, and `visibility_at` sees only the summary's own macro facts (the file's own
-`#define`s and what its direct includes bring in).
+**Measured on 2026-11-13, and the answer is not the one the last edit of this section guessed.** The two
+remaining `include-not-found` findings in the neovim census are `<execinfo.h>` (`log.c:43`) and `<langinfo.h>`
+(`mbyte.c:2389`), behind `#ifdef HAVE_EXECINFO_BACKTRACE` and `#ifdef HAVE_LANGINFO_H`. The generated
+`build/cmake.config/auto/config.h` has both as `/* #undef … */` — comments, so nothing defines them — and the
+question was whether the check could decide that.
 
-The summary cannot hold the answer — it stores the question and is keyed without a compilation (`SummaryGuards`'
-own documentation) — so the fix is to pass the file's environment into the check: `Session` has it
-(`config_for_file(path)` gives the `-D`s, the toolchain discovery the predefined ones), and `CheckContext` would
-need to carry it to `visibility_at`. Measured consequence, so the next round can size it: two findings in 52
-files, both glibc-only headers.
+`tests/guard_probe.rs` answers it:
 
-Test that pins the behaviour today: `an_include_behind_an_undecided_guard_is_still_reported` — `#ifdef
-NEVER_DEFINED_ANYWHERE` keeps the finding because "I could not tell" must not become "nothing to see".
+```text
+[guard] the compilation environment is complete (a name nobody mentions is not defined)
+[guard] src/nvim/log.c: execinfo.h guard Region(0) -> taken=true; HAVE_EXECINFO_BACKTRACE: unknown=true mentioned=false
+[guard]   walk state: complete_before=false incomplete_here=true base_complete=true
+```
+
+So the compile environment **is** already what the check uses (`ProjectIndex::macros()` — the `-D`s and the
+compiler's `-dM` table — is what `macros_at` starts from), and passing it in is not the missing piece. What makes
+the guard `Unknown` is that the **walk takes the completeness claim back**: `macro_candidates` calls
+`mark_incomplete` when an `#include` it reaches does not resolve, and an unreadable file "may define anything", so
+from there on a name nothing mentions is `Unknown` rather than undefined. `log.c`'s closure reaches a header that
+does not resolve on this machine, and the state at the guard is already incomplete (`complete_before=false`).
+
+**Not fixed, and deliberately**: the honest reading of a missing header is "its macros may be anything". The
+alternatives are to find every missing header (the census's own four include misses say the search is not
+complete) or to narrow incompleteness to "only the names the missing header could define", which is the same
+guess with more steps. The warning is correct as a warning — it is what this analysis's search says about a file
+it could not find — and `include-not-found` is a `Warning` for exactly that reason. The census's two findings are
+therefore the honest floor until the include search finds everything on the machine.
+
+Test that pins the behaviour: `an_include_behind_an_undecided_guard_is_still_reported`.

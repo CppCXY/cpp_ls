@@ -269,7 +269,12 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// 206 from a cold start), the class it declares answered **108 members with 18 named `EndLine`**, and a hover drew
 /// one identical line per copy — the report this number is for. An entry written before this is a wrong answer for
 /// every `#pragma once` header, not a missing one, which is what moves the number.
-pub const CODEC_VERSION: u32 = 39;
+/// # Version 40
+///
+/// A declaration fact gained its **enumerator** byte, written last — see [`DeclFact::enumerator`]. A fact
+/// decoded from an older summary is not wrong about its other fields; it simply answers `false`, which is the
+/// answer that made an anonymous enum's members look like variables.
+pub const CODEC_VERSION: u32 = 40;
 
 /// Write a summary as bytes.
 ///
@@ -1190,6 +1195,9 @@ mod tests {
             use_filter: vec![0x00, 0xff, 0x55, 0xaa, 0x01, 0x80],
             declarations: vec![
                 DeclFact {
+                    // **The flag at `true`**, on this of the three declarations, so the byte is covered at both ends — the
+                    // two others say `false`. What the fixture's fact *is* is not a claim: it exists to exercise the format.
+                    enumerator: true,
                     frees: 0,
                     // **Both ends of the field**, like the rest of this fixture: this declaration has an annotation and
                     // the two after it have none, which is what the presence byte distinguishes.
@@ -1245,6 +1253,7 @@ mod tests {
                     guard: FactGuard::Unconditional,
                 },
                 DeclFact {
+                    enumerator: false,
                     frees: 0,
                     reflection: None,
                     name: "make".to_string(),
@@ -1283,6 +1292,7 @@ mod tests {
                     guard: FactGuard::Region(3),
                 },
                 DeclFact {
+                    enumerator: false,
                     frees: 0,
                     reflection: None,
                     name: String::new(),
@@ -1610,6 +1620,9 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
     // **The definition flag**, written last so the record grew at its end: the byte that lets a query prefer
     // `struct _Ty { … };` over an earlier `struct _Ty;` — see [`DeclFact::definition`].
     put_u8(out, u8::from(fact.definition));
+    // **And whether this declaration is an enumerator** — the flag whose absence made an anonymous enum's members
+    // indistinguishable from variables; see [`DeclFact::enumerator`]. Last for the same reason.
+    put_u8(out, u8::from(fact.enumerator));
 }
 
 /// Write one macro fact — see [`put_declaration`] for why this is shared.
@@ -1700,6 +1713,8 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
         },
         // The last byte of the record — see [`DeclFact::definition`].
         definition: reader.u8()? != 0,
+        // And the enumerator flag, after it — see [`DeclFact::enumerator`].
+        enumerator: reader.u8()? != 0,
     })
 }
 
@@ -1802,6 +1817,7 @@ fn a_cooked_reading_round_trips() {
     let reading = CookedFile {
         declarations: vec![
             DeclFact {
+                enumerator: false,
                 name: "Widget".to_string(),
                 scope: Some("std".to_string()),
                 kind: DeclKind::Type,
@@ -1834,6 +1850,7 @@ fn a_cooked_reading_round_trips() {
                 }),
             },
             DeclFact {
+                enumerator: false,
                 name: "f".to_string(),
                 scope: None,
                 kind: DeclKind::Function,

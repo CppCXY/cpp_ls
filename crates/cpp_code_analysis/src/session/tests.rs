@@ -1816,6 +1816,42 @@ fn an_anonymous_enum_declares_its_enumerators() {
         .expect("`LAJF` is a name");
     assert_eq!(lajf.kind, crate::semantic::NameKind::EnumMember);
 }
+/// **An enumerator of an anonymous enum is an enumerator in the file that *uses* it too.**
+///
+/// The declaration was already right (the test above), and the use in another file was not: the index has one kind
+/// for "a name that holds a value" and used to infer an enumerator from *a written type being absent* plus *a scope
+/// being present*. Both halves fail for the shape C writes most, an anonymous `enum { WILD_FREE, … };` whose members
+/// have no scope — measured on neovim, `WILD_FREE` in `cmdexpand.c` was drawn as a variable while its own
+/// declaration card said "an enumerator of (an anonymous enum)". The fact carries the flag now
+/// ([`DeclFact::enumerator`]), and this is the test that reads it from the far side.
+#[test]
+fn an_enumerators_use_in_another_file_is_an_enum_member() {
+    let header = "enum { WILD_FREE = 1, WILD_NEXT = 2 };\n";
+    let source = "#include \"api.h\"\nint f(void) { return WILD_FREE; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", header)
+        .with_file("/p/main.c", source);
+    let fixture = Memory::new("an-enumerators-use", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.c", source);
+    session.index_everything();
+    session.catch_up(std::path::Path::new("/p/main.c"));
+
+    let path = std::path::PathBuf::from("/p/main.c");
+    let view = session.view_of_the_file(&path).expect("a view");
+    let at = source.find("WILD_FREE").expect("the use");
+    let used = session
+        .classified_names(&view)
+        .into_iter()
+        .find(|name| name.range.start_offset == at)
+        .expect("`WILD_FREE` is a name");
+    assert_eq!(
+        used.kind,
+        crate::semantic::NameKind::EnumMember,
+        "the declaration says an enumerator, so the use must too"
+    );
+}
+
 /// **A member reached through `operator->`** — `config->Generate` on a smart-pointer-shaped class.
 ///
 /// Reported twice from an editor, in one sentence: *"a member cannot be found through a smart pointer, and there is no
