@@ -553,6 +553,14 @@ struct ViewKey {
     environment: Option<EnvironmentId>,
 }
 
+/// **The key the rendering cache uses** — the normalized spelling, because a caller may hold a canonicalized one.
+fn a_rendering_key(path: &Path, text_hash: u64) -> (PathBuf, u64) {
+    (
+        PathBuf::from(crate::file::paths::normalize_path(path, cfg!(windows))),
+        text_hash,
+    )
+}
+
 fn buffer_view_key(
     file: &VfsFile,
     cuda: bool,
@@ -2935,8 +2943,9 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The named rendering too.** `renderings` is keyed by the *dependent's* own text, which did not
             // change — so the entry left behind is a rendering of a world whose macros have moved, and the next
             // ask would find it instead of rendering again.
+            let dependent_key = a_rendering_key(&dependent, 0).0;
             if let Ok(mut known) = self.renderings.lock() {
-                known.retain(|(held, _)| held != &dependent);
+                known.retain(|(held, _)| a_rendering_key(held, 0).0 != dependent_key);
             }
         }
     }
@@ -4347,6 +4356,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return 0;
         }
         for (key, rendered) in prepared.rendered {
+            // **The key is normalized here too**, because this is the insert a cook's own rendering takes and the
+            // lookup normalizes: a drain prepared for a canonicalized spelling would otherwise be found by
+            // nobody. See `a_rendering_key`.
+            let key = a_rendering_key(&key.0, key.1);
             if let Ok(mut known) = self.renderings.lock() {
                 let weight = rendered.weight();
                 known.insert(key, rendered, weight);
@@ -5504,6 +5517,40 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The offset in the file's rendering a position in the file names** — the reverse of
+    /// `RenderedCooked::written_at`, and the half a position query needs when the file's own text cannot answer.
+    ///
+    /// `None` when the file has no rendering read yet (nothing has cooked it), which is a state and not an error:
+    /// the caller keeps the answer it had.
+    pub fn the_rendering_offset(
+        &self,
+        path: impl AsRef<Path>,
+        in_the_file: usize,
+    ) -> Option<usize> {
+        let requested = path.as_ref();
+        // **The index's spelling**, for the same reason `view` asks by it: a client sends `C:\…`, the resolver
+        // wrote `c:/…`, and a lookup by the caller's spelling finds nothing.
+        let key = self
+            .store
+            .index()
+            .summary(requested)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| requested.to_path_buf());
+        let traced = std::env::var("CPPLS_TRACE_HOVER").is_ok();
+        let file = self.vfs.held(&key)?;
+        let rendered = self.known_rendering_of(&file.path, &file.text);
+        if traced {
+            let renderings = self.renderings.lock().map(|known| known.len()).unwrap_or(0);
+            eprintln!(
+                "[map] held {:?}, rendering known {}, {renderings} cached",
+                file.path,
+                rendered.is_some()
+            );
+        }
+        let rendered = rendered?;
+        rendered.the_rendering_offset_of(in_the_file)
+    }
+
     /// **The view of what the file itself writes** — its own tokens, macros and all.
     ///
     /// The counterpart of [`Session::view`], and both are needed because they answer different questions:
@@ -5629,8 +5676,26 @@ impl<F: FileProvider + Clone> Session<F> {
         path: &Path,
         text: &str,
     ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
-        let key = (path.to_path_buf(), crate::cache::content_hash(text));
+        let key = a_rendering_key(path, crate::cache::content_hash(text));
+
         self.renderings.lock().ok()?.get(&key).cloned()
+    }
+
+    /// **Remember a rendering under the key [`Session::known_rendering_of`] reads** — the normalized spelling, not
+    /// the caller's. A CLI hands over what `std::fs::canonicalize` returned (`\\?\C:\…`) while the store writes
+    /// the index's spelling (`c:/…`), and the two never met: measured through `tools/inspect`, a rendering was in
+    /// the cache (`8 entries`) and `known_rendering_of` answered `None` for it, so hover's rendering fallback could
+    /// not ask anything.
+    fn remember_a_rendering(
+        &self,
+        path: &Path,
+        text_hash: u64,
+        rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    ) {
+        let weight = rendered.weight();
+        if let Ok(mut known) = self.renderings.lock() {
+            known.insert(a_rendering_key(path, text_hash), rendered, weight);
+        }
     }
 
     /// **The same view, with the macros this file's own includes define, built if it has to be.**
@@ -8616,7 +8681,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // Keyed by the hash of the text it was **made from** — the same one the check above just compared — rather
         // than by a second read of the file, so the entry cannot describe one text under another's key.
         if let Ok(mut known) = self.renderings.lock() {
-            let key = (path.clone(), text_hash);
+            let key = a_rendering_key(&path, text_hash);
             if crate::probes::view() {
                 eprintln!("commit: path {:?} hash {:?}", path, text_hash);
             }
@@ -8875,14 +8940,7 @@ impl<F: FileProvider + Clone> Session<F> {
             None => {
                 // Built and **kept**: the key is the one `known_rendering_of` reads, so the next ask is a lookup.
                 let built = std::sync::Arc::new(self.rendering_of(&path)?);
-                if let Ok(mut known) = self.renderings.lock() {
-                    let weight = built.weight();
-                    known.insert(
-                        (path.clone(), crate::cache::content_hash(&text)),
-                        built.clone(),
-                        weight,
-                    );
-                }
+                self.remember_a_rendering(&path, crate::cache::content_hash(&text), built.clone());
                 built
             }
         };

@@ -199,4 +199,3 @@ fn a_body_whose_code_is_one_call_is_silent_however_many_comments_it_has() {
         "a top-level `<<` is still a loose operator after the comment is gone",
     );
 }
-

@@ -307,6 +307,16 @@ pub fn hover(
         return Some(found);
     }
 
+    // **The rendering, when the file's own text has nothing to say.** A declaration a *macro* wrote is not in the
+    // file's text at all: `kvec_t(SignItem) signs = …` is `struct { … } signs = …` to a compiler, and the plain
+    // reading files `signs` with no type — so hovering the declarator, or a member of it, answered nothing
+    // (neovim's `src/nvim/decoration.c:1040`). The rendering is asked at the position mapped through its spans,
+    // because the expansion makes the two layouts differ on that very line. `view()` answers `None` unless a cook
+    // already read the rendering, so this costs nothing on a project that has not.
+    if let Some(found) = hover_of_the_rendering(session, view, in_the_file) {
+        return Some(found);
+    }
+
     // **The two vocabularies are the last questions, not the first.**
     //
     // `this` is a keyword *and* a value with a type in this context, and `nullptr` is a literal with one; the analysis
@@ -408,6 +418,38 @@ pub fn hover(
 }
 
 /// **The program's own answer** — declarations, types, expressions, headers, macros — and `None` when it has none.
+/// **The same question, asked of the rendering** — see the note in [`hover`].
+///
+/// A macro that expands to a *type* is the shape this exists for: the file's text has `kvec_t(SignItem) signs`, whose
+/// plain reading gives `signs` no type at all, and the rendering has `struct { … } signs`, whose members are real.
+/// The position is mapped through the rendering's spans rather than reused, because the expansion is longer than the
+/// invocation and every column after it moves.
+fn hover_of_the_rendering(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
+) -> Option<Hover> {
+    let traced = std::env::var("CPPLS_TRACE_HOVER").is_ok();
+    let mapped = session.the_rendering_offset(&view.path, in_the_file.get());
+    if traced {
+        eprintln!(
+            "[rendering] {} at {} maps to {mapped:?}",
+            view.path.display(),
+            in_the_file.get()
+        );
+    }
+    let offset = mapped?;
+    let rendered = session.view(&view.path)?;
+    if traced {
+        eprintln!(
+            "[rendering] the rendering view is {} byte(s)",
+            rendered.source.len()
+        );
+    }
+    let offset = cpp_code_analysis::file::coordinates::ReadingOffset::new(offset);
+    hover_of_the_program(session, &rendered, offset, in_the_file)
+}
+
 fn hover_of_the_program(
     session: &Session<DiskFiles>,
     view: &FileView,

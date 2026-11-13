@@ -217,7 +217,11 @@ impl CookedStream {
             });
         }
 
-        RenderedCooked { text, spans }
+        RenderedCooked {
+            text,
+            spans,
+            written_order: std::sync::OnceLock::new(),
+        }
     }
 }
 
@@ -268,6 +272,10 @@ pub struct RenderedCooked {
     pub text: String,
     /// One entry per token of the stream it was rendered from, in the same order.
     pub spans: Vec<RenderedSpan>,
+    /// **The reverse direction**, `(written start, cooked start)`, sorted by the file offset — built on the first
+    /// question that needs it and never invalidated, because a rendering does not change. See
+    /// [`RenderedCooked::the_rendering_offset_of`].
+    written_order: std::sync::OnceLock<Vec<(u32, u32)>>,
 }
 
 impl RenderedCooked {
@@ -342,6 +350,56 @@ impl RenderedCooked {
     /// `None` when the spelling is elsewhere — another file's macro body, or a reconstruction nobody can open.
     /// [`RenderedCooked::reported_at`] is the other question ("where do I point a diagnostic"), and it is the one
     /// a consumer that has a tree offset and an error wants.
+    /// **The offset in the rendering a position in the file names** — the reverse of [`RenderedCooked::written_at`],
+    /// and the half a *position query* needs.
+    ///
+    /// The rendering is what a compiler is handed and it is not laid out like the file: a family of macros replaces
+    /// `kvec_t(SignItem)` with `struct { size_t size; size_t capacity; SignItem *items; }`, all on the same line, so
+    /// the reader's column and the rendering's column part company there. Asked in the rendering's own coordinates,
+    /// hovering `signs` in `kvec_t(SignItem) signs = …` landed inside the expansion and answered nothing (neovim's
+    /// `src/nvim/decoration.c:1040`).
+    ///
+    /// A token the file wrote itself answers exactly. A position inside a macro invocation maps to the **first**
+    /// token the invocation produced, which is the best answer available: the expansion is not in the file, so a
+    /// caller that wanted the invocation itself asks [`RenderedCooked::written_at`] in the other direction.
+    pub fn the_rendering_offset_of(&self, written: usize) -> Option<usize> {
+        let order = self.written_order.get_or_init(|| {
+            let mut order: Vec<(u32, u32)> = self
+                .spans
+                .iter()
+                .filter_map(|span| {
+                    let written = span.written?;
+                    Some((written.start_offset as u32, span.cooked.start_offset as u32))
+                })
+                .collect();
+            order.sort_unstable();
+            order.dedup_by_key(|(written, _)| *written);
+            order
+        });
+        let at = order.partition_point(|(start, _)| (*start as usize) <= written);
+        if at == 0 {
+            return None;
+        }
+        // **The last span that starts at or before it** — the token the position is in, or whose expansion began
+        // there. Its extent is what says the position is inside it rather than in a gap between two tokens.
+        let (start, cooked) = order[at - 1];
+        let inside = self
+            .spans
+            .iter()
+            .find(|span| span.cooked.start_offset == cooked as usize)
+            .and_then(|span| span.written)
+            .is_some_and(|span| {
+                let end = span.end_offset();
+                (start as usize) <= written && written < end.max(start as usize + 1)
+            });
+        if inside {
+            Some(cooked as usize + (written - start as usize))
+        } else {
+            // A gap: the nearest token before it is the one the reader is next to.
+            Some(cooked as usize)
+        }
+    }
+
     pub fn written_at(&self, cooked_offset: usize) -> Option<SourceRange> {
         self.span_at(cooked_offset)?.written
     }

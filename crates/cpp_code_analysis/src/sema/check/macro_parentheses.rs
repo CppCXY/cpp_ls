@@ -47,10 +47,7 @@ impl Check for MacroParentheses {
             // `#define CORPUS_DEFINE_POINT(name, x, y) \` followed by `static const point name = …` is a *declaration*,
             // and a body judge that sees `\` where it expected `static` reported it. `is_dropped_in_a_body` drops
             // splices when the definition is parsed, so this is the same rule applied to the text a reader sees.
-            let body = context
-                .written
-                .get(start..end)
-                .unwrap_or("");
+            let body = context.written.get(start..end).unwrap_or("");
             // **Comments are removed before the body is judged, and that is a measurement.** `kvi_resize_full`
             // writes its whole replacement list as a call, with the arguments grouped, after four lines of
             // `/* … */` comments about capacity — and the `*` of `/*` was read as a multiplication at depth zero:
