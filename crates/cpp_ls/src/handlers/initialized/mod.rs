@@ -163,6 +163,27 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         Some(format!("Indexing {}", root.display())),
     );
 
+    // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
+    // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
+    // counters stand still is neither of them.
+    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        let watched = context.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let inbox = (watched.inbox().queued(), watched.inbox().applied());
+                let session = watched
+                    .analysis()
+                    .with_snapshot(|session| (session.pending_work(), session.pending_cooking()));
+                eprintln!(
+                    "[inbox] queued {} applied {} | session {session:?} | {} diagnostic computation(s)",
+                    inbox.0,
+                    inbox.1,
+                    watched.diagnostics().computations()
+                );
+            }
+        });
+    }
     index_in_background(context.clone(), version).await;
     context
         .diagnostics()

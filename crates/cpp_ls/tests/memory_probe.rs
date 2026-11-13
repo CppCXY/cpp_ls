@@ -138,6 +138,9 @@ impl Drop for Client {
     }
 }
 
+/// How many messages the server has sent — a flood is a memory report of its own.
+static MESSAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn read_messages(stdout: impl Read, tx: std::sync::mpsc::Sender<Value>) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -164,6 +167,7 @@ fn read_messages(stdout: impl Read, tx: std::sync::mpsc::Sender<Value>) {
         let Ok(message) = serde_json::from_slice::<Value>(&body) else {
             return;
         };
+        MESSAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if tx.send(message).is_err() {
             return;
         }
@@ -329,6 +333,10 @@ fn a_long_session_does_not_grow_without_bound() {
         std::thread::sleep(Duration::from_millis(120));
     }
     eprintln!("[memory] done: {ticks} tick(s)");
+    eprintln!(
+        "[memory] the server sent {} message(s)",
+        MESSAGES.load(std::sync::atomic::Ordering::Relaxed)
+    );
 
     client.request(9000, "shutdown", Value::Null);
     client.notify("exit", Value::Null);

@@ -161,6 +161,11 @@ impl DiagnosticService {
         });
     }
 
+    /// **How many diagnostic computations this process has run** — see [`computations`].
+    pub fn computations(&self) -> usize {
+        computations()
+    }
+
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
         for (_, pending) in self.pending.lock().await.drain() {
@@ -169,11 +174,21 @@ impl DiagnosticService {
     }
 }
 
+/// **How many diagnostic computations have run** — a process at one core with an empty inbox is either this or
+/// something else, and the count says which.
+static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The counter above, for a trace.
+pub fn computations() -> usize {
+    COMPUTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 async fn compute(
     context: &ServerContextSnapshot,
     uri: &Uri,
     cancel: CancellationToken,
 ) -> RequestOutcome<Vec<Diagnostic>> {
+    COMPUTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let delay = context
         .diagnostics()
         .change_delay_ms
