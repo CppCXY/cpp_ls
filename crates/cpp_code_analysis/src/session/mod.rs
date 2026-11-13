@@ -9636,14 +9636,23 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|(_, value)| value.unwrap_or_default().to_string())
     }
 
-    /// **What a macro invocation at `offset` expands to** — the replacement list with the invocation's arguments put in.
+    /// **What a macro invocation at `offset` expands to**, by the preprocessor's own rules: the replacement list with
+    /// the arguments substituted (`#` and `##` applied), and every macro the result names expanded again.
     ///
     /// `None` when the name is not a macro there, when it is a function-like macro **not followed by a call** (writing
     /// its name alone does not expand it), or when the argument list cannot be read (an unbalanced `(` in the text).
     ///
-    /// The substitution is textual, and deliberately: `#x` and `a ## b` are not applied, and the result's own macro names
-    /// are not expanded again. A consumer that shows this must say which rules it applied — see the `hover` card, which
-    /// does — because a reader comparing it with a compiler's answer would otherwise be looking at two different things.
+    /// # Why this is a cook and not a substitution
+    ///
+    /// A one-pass textual substitution is what this used to be, and it answered a different question from the one a
+    /// reader asks: `PASTE(foo, bar)` came back `foo ## bar` instead of `foobar`, a body naming another macro came back
+    /// with that macro's *name*, and `#x` stayed a hash. Every one of those is a difference from the compiler's answer
+    /// on a card whose whole purpose is to show that answer.
+    ///
+    /// So the invocation is handed to the same [`crate::preprocess::cooked::cook_with`] a file's reading goes through,
+    /// with the definitions this file has **in force before the use** and the closure's environment underneath — the
+    /// state a compiler is in at that line. The result is formatted (`cpp_formatter`), because an expansion is code and
+    /// the reader is going to read it as code.
     pub fn the_expansion_of_a_macro(
         &self,
         view: &FileView,
@@ -9656,96 +9665,10 @@ impl<F: FileProvider + Clone> Session<F> {
         if fact.kind != crate::MacroKind::Definition {
             return None;
         }
-
-        // **The body's text, from the file that writes it.** A macro's fact has file offsets, so the text is the
-        // defining file's own — which is this one for a macro written here, and a header otherwise.
-        let body_range = fact.body_range?;
-        let defining =
-            if crate::file::paths::normalize_path(&found.file, self.files.is_case_insensitive())
-                == crate::file::paths::normalize_path(&view.path, self.files.is_case_insensitive())
-            {
-                view.the_written_text().map(|text| text.to_string())
-            } else {
-                self.view_of_the_file(&found.file)
-                    .map(|other| other.source.to_string())
-            }?;
-        let body = defining
-            .get(body_range.start_offset..body_range.end_offset())?
-            .trim();
-
-        // An **object-like** macro is its replacement list, whatever follows the name.
-        if !fact.function_like {
-            return Some(body.to_string());
-        }
-
-        // **The parameters, from the `#define` line.** The fact records `function_like` and the body's range, not the
-        // names: they are the text between the name and the body, and reading it is the same rule the parser applied.
-        let between = defining.get(fact.range.end_offset()..body_range.start_offset)?;
-        let open = between.find('(')?;
-        let close = between.rfind(')')?;
-        if close < open {
-            return None;
-        }
-        let parameters: Vec<&str> = between[open + 1..close]
-            .split(',')
-            .map(str::trim)
-            .filter(|parameter| !parameter.is_empty())
-            .collect();
-
-        // **The argument list, read from the text at its `(`** — `(2, 5) rest` → `["2", "5"]`. The nesting and the
-        // literals are tracked because both appear in real arguments: `f(g(1, 2), 3)` has two arguments and
-        // `f("a,b", c)` has two as well. A list with no closing paren is `None` — the file is being edited and the text
-        // is not a call yet.
-        fn the_arguments_of_a_call(text: &str) -> Option<Vec<String>> {
-            let bytes = text.as_bytes();
-            if bytes.first() != Some(&b'(') {
-                return None;
-            }
-            let mut depth = 0i32;
-            let mut quote: Option<u8> = None;
-            let mut arguments: Vec<String> = Vec::new();
-            let mut current_start = 1usize;
-            let mut at = 0usize;
-            while at < bytes.len() {
-                let byte = bytes[at];
-                match quote {
-                    Some(ending) => {
-                        if byte == b'\\' {
-                            at += 2;
-                            continue;
-                        }
-                        if byte == ending {
-                            quote = None;
-                        }
-                    }
-                    None => match byte {
-                        b'"' | b'\'' => quote = Some(byte),
-                        b'(' | b'[' | b'{' => depth += 1,
-                        b')' | b']' | b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                let last = text[current_start..at].trim();
-                                if !last.is_empty() || !arguments.is_empty() {
-                                    arguments.push(last.to_string());
-                                }
-                                return Some(arguments);
-                            }
-                        }
-                        b',' if depth == 1 => {
-                            arguments.push(text[current_start..at].trim().to_string());
-                            current_start = at + 1;
-                        }
-                        _ => {}
-                    },
-                }
-                at += 1;
-            }
-            None
-        }
-
-        // **The invocation, from the file the cursor is in.** The name's own token is read from the bytes at `offset`,
-        // and the arguments are what follows the `(` that must come next for an expansion to happen at all.
         let written = view.the_written_text()?;
+
+        // **The invocation**: the name's own token, and for a function-like macro its argument list. A function-like
+        // macro not followed by `(` is not an invocation at all — a compiler keeps the name, and so does this.
         let bytes = written.as_bytes();
         let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
         let mut start = offset.get().min(bytes.len());
@@ -9759,40 +9682,121 @@ impl<F: FileProvider + Clone> Session<F> {
         if written.get(start..end)? != fact.name {
             return None;
         }
-        let after = &written[end..];
-        let paren = after.find(|character: char| !character.is_whitespace())?;
-        if !after[paren..].starts_with('(') {
+        if fact.function_like {
+            let after = &written[end..];
+            let paren = after.find(|character: char| !character.is_whitespace())?;
+            if !after[paren..].starts_with('(') {
+                return None;
+            }
+            let open = end + paren;
+            end = Self::the_matching_paren(&written, open)?;
+        }
+        let invocation = written.get(start..end)?;
+
+        // **The file's own definitions, in force at this line, then the invocation.** The cook executes them in order —
+        // the same sequence its own reading of the file passes — so the invocation is expanded in the state a compiler
+        // is in there. The offsets come from the hovered file's summary, which is the text `written` is.
+        let mut source = String::new();
+        let summary = self.store.index().summary(&view.path)?;
+        for defined in &summary.macros {
+            if defined.range.start_offset >= offset.get() {
+                break;
+            }
+            match defined.kind {
+                crate::MacroKind::Definition => {
+                    let Some(body_range) = defined.body_range else {
+                        continue;
+                    };
+                    let Some(body) = written.get(body_range.start_offset..body_range.end_offset()) else {
+                        continue;
+                    };
+                    // The parameter list is the text between the name and the body — the one piece a macro fact does
+                    // not carry, and the same rule the directive layer reads it by.
+                    let parameters = defined.function_like.then(|| {
+                        written
+                            .get(defined.range.end_offset()..body_range.start_offset)
+                            .map(str::trim)
+                            .unwrap_or("()")
+                    });
+                    source.push_str("#define ");
+                    source.push_str(&crate::preprocess::cooked::definition_text(
+                        &defined.name,
+                        parameters,
+                        body.trim(),
+                    ));
+                    source.push('\n');
+                }
+                crate::MacroKind::Undefinition => {
+                    source.push_str("#undef ");
+                    source.push_str(&defined.name);
+                    source.push('\n');
+                }
+            }
+        }
+        source.push_str(invocation);
+
+        // **The environment underneath**: the closure's unconditional definitions, and the compiler's own — the same
+        // two layers a file's cook starts from.
+        let environment = self.store.the_indexed_environment(&view.path)?;
+        let seed = crate::preprocess::macros::MacroTable::from_marked(self.store.index().macros());
+        let configuration = {
+            let mut parsed = self
+                .parsed_definitions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::preprocess::cooked::configuration_from_environment_and(&environment, true, &mut parsed)
+        };
+        let start_state = crate::preprocess::cooked::Over::new(&configuration.table, &seed);
+        let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
+        let rendered = crate::preprocess::cooked::cook_with(&source, &tokens, &start_state).render();
+        let text = rendered.text.trim().to_string();
+        if text.is_empty() {
             return None;
         }
-
-        let arguments = the_arguments_of_a_call(&written[end + paren..])?;
-        if arguments.len() != parameters.len() && !(parameters.len() == 1 && parameters[0] == "...")
-        {
-            return None;
-        }
-
-        // **A textual substitution, on identifier boundaries.**
-        let mut expanded = String::with_capacity(body.len());
-        let body_bytes = body.as_bytes();
-        let mut at = 0usize;
-        while at < body_bytes.len() {
-            if !is_a_word(body_bytes[at]) || (at > 0 && is_a_word(body_bytes[at - 1])) {
-                expanded.push(body_bytes[at] as char);
-                at += 1;
-                continue;
-            }
-            let word_start = at;
-            while at < body_bytes.len() && is_a_word(body_bytes[at]) {
-                at += 1;
-            }
-            let word = &body[word_start..at];
-            match parameters.iter().position(|parameter| *parameter == word) {
-                Some(position) => expanded.push_str(arguments.get(position)?.trim()),
-                None => expanded.push_str(word),
-            }
-        }
-        Some(expanded)
+        Some(cpp_formatter::format(&text, &cpp_formatter::Style::default()))
     }
+
+    /// The index of the `)` that closes the `(` at `open`, counting nesting and skipping literals.
+    ///
+    /// The argument list of a nested call is inside the first `(`, and a `)` in a string literal closes nothing:
+    /// `f("a)b", g(1))` has one argument. `None` is an unbalanced `(` — the text is being edited.
+    fn the_matching_paren(text: &str, open: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        if bytes.get(open) != Some(&b'(') {
+            return None;
+        }
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        let mut at = open;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            match quote {
+                Some(ending) => {
+                    if byte == b'\\' {
+                        at += 2;
+                        continue;
+                    }
+                    if byte == ending {
+                        quote = None;
+                    }
+                }
+                None => match byte {
+                    b'"' | b'\'' => quote = Some(byte),
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(at + 1);
+                        }
+                    }
+                    _ => {}
+                },
+            }
+            at += 1;
+        }
+        None
+    }
+
 
     /// **Every `import m;` this file writes, with the file each one reaches** — the module's answer to what
     /// [`crate::IncludeFact`] is for `#include`.

@@ -12,6 +12,12 @@ categories = ["development-tools"]
 [dependencies]
 cpp_parser.workspace = true
 
+# **An expansion is code, and the hover shows it as code.** `the_expansion_of_a_macro` hands the preprocessor's own
+# answer to the formatter before a reader sees it: `((a)+(b))` with the arguments substituted is not what a reader
+# wants to compare with the source, and re-spacing it by hand here would be a second formatter. The formatter depends
+# on `cpp_parser` only, so this edge closes no cycle.
+cpp_formatter.workspace = true
+
 # **The decisions this layer makes are invisible from outside it**, and a report that says "completion and the hints
 # come and go" cannot be answered from the LSP layer alone: whether a callee resolved, whether its parameter list was
 # readable, and which of the four ways a call produces no hint are all decided here, in `inlay` and `index::project`.

@@ -1325,8 +1325,10 @@ fn macro_markdown(
     // is `((2) > (5) ? (2) : (5))` only after the arguments go in. Reported from an editor, with a screenshot of exactly
     // that card.
     //
-    // The rules applied are textual and the sentence says which: `#x` and `a ## b` are not applied, and the result's own
-    // macro names are not expanded again. A reader comparing this with a compiler must know the difference.
+    // **The expansion is the preprocessor's own**: [`Session::the_expansion_of_a_macro`] runs the invocation through
+    // the same cook a file's reading goes through, so `#` and `##` are applied and the macros the result names are
+    // expanded again, and it formats the answer. The card used to say it was textual, and it was: `PASTE(foo, bar)`
+    // arrived as `foo ## bar`.
     // **A use, not the definition.** Hovering the `#define` itself is a question about the macro, and its own
     // replacement list is already the code block above; expanding it under itself is noise — reported with a
     // screenshot of `kvi_ensure_space`'s definition showing its whole body again as one line. Only a *use* has an
@@ -1337,8 +1339,8 @@ fn macro_markdown(
         && !expanded.trim().is_empty()
     {
         out.push_str(&format!(
-            "\n**Expands to**\n\n{}\n\n*A textual expansion: `#` and `##` are not applied, and the result is not \
-             expanded again.*\n",
+            "\n**Expands to**\n\n{}\n\n*The expansion a compiler makes: `#` and `##` applied, and every macro the \
+             result names expanded again — formatted.*\n",
             code_block(&the_expansion_as_lines(&expanded))
         ));
     }

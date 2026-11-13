@@ -500,7 +500,7 @@ type InForceDefinition<'a> = (&'a str, Option<std::sync::Arc<str>>, std::sync::A
 /// The parameter list is what makes a function-like definition expandable — substitution is by parameter, and a
 /// body without one would leave the parameter names standing where arguments belong. `None` is an object-like
 /// macro (or a caller that stores no parameters), and the text is then just the name and the body.
-fn definition_text(name: &str, parameters: Option<&str>, body: &str) -> String {
+pub(crate) fn definition_text(name: &str, parameters: Option<&str>, body: &str) -> String {
     let head = match parameters {
         Some(list) => format!("{name}{list}"),
         None => name.to_string(),
