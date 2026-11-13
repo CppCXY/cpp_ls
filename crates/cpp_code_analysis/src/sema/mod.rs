@@ -19,6 +19,7 @@ pub mod convert;
 pub mod declarations;
 pub mod deduce;
 pub mod model;
+pub mod layout;
 pub mod module_info;
 pub mod modules;
 pub mod parser_symbols;

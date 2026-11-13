@@ -1669,6 +1669,28 @@ fn declaration_markdown(
         });
     }
 
+    // **What the class costs in memory**, which is the question `sizeof` answers and no reading answers for the
+    // offsets — the shape rust-analyzer puts on a struct's hover. Shown only when every data member could be sized:
+    // the numbers beside a partial layout would be a guess, and a guess about offsets is worse than no answer.
+    if matches!(fact.kind, DeclKind::Type)
+        && let Known::Yes(layout) = session.the_layout_of(view, &fact.name)
+    {
+        if layout.unknown.is_empty() {
+            out.push_str(&format!("\n\n{}", layout.describe(&qualified)));
+        } else {
+            let named: Vec<String> = layout
+                .unknown
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect();
+            out.push_str(&format!(
+                "\n\n**Layout** — not computed: {} cannot be sized here (a bitfield, or a type the index does not \
+                 hold).\n",
+                named.join(", ")
+            ));
+        }
+    }
+
     if let FactGuard::Region(_) = fact.guard {
         out.push_str(
             "\n\nThis declaration is inside a conditional block, so whether it exists depends on the compilation \

@@ -11278,6 +11278,155 @@ impl<F: FileProvider + Clone> Session<F> {
         self.the_generated_members(written_type, &view.path, listed)
     }
 
+    /// **What a class costs in memory**: its size, its alignment, and where each data member sits — see
+    /// [`crate::sema::layout`].
+    ///
+    /// `written_type` is a spelling (`Widget`, `ns::Widget`). `Known::No` when the name is not a class with a body,
+    /// which is what "there is no layout to give" means here: a forward declaration has no size in this model, and
+    /// `sizeof` of one is a compile error rather than a number.
+    ///
+    /// The layout is **withheld** when one of the members cannot be sized: [`ClassLayout::unknown`] names them, and a
+    /// number beside a partial answer would be a guess. The one exception is a class with **no data members at all**,
+    /// which is one byte by the language's own rule and is reported as such.
+    pub fn the_layout_of(
+        &self,
+        view: &FileView,
+        written_type: &str,
+    ) -> Known<crate::sema::layout::ClassLayout> {
+        self.the_layout_of_a_class(view, written_type, 0)
+    }
+
+    fn the_layout_of_a_class(
+        &self,
+        view: &FileView,
+        written_type: &str,
+        depth: usize,
+    ) -> Known<crate::sema::layout::ClassLayout> {
+        if depth > 4 {
+            return Known::No;
+        }
+        let Known::Yes(list) = self.members_of(view, written_type) else {
+            return Known::No;
+        };
+        // **The class and its members as their file wrote them** — the text a union's keyword and a bitfield's `:` are
+        // read out of, at file offsets. `None` when the index cannot place the class: the layout is still computed for
+        // a class the asking file declares, and reported without the two spelling facts it cannot read.
+        let as_written = self.the_class_as_its_file_wrote_it(written_type, &view.path);
+        let union = as_written.as_ref().is_some_and(|(text, class_at, _)| {
+            let before = &text[..(*class_at).min(text.len())];
+            // The last keyword before the name wins: `template <class T> union U` is a union, and a `class` earlier
+            // in the text belongs to something else.
+            ["union", "struct", "class"]
+                .into_iter()
+                .filter_map(|keyword| before.rfind(keyword).map(|at| (at, keyword)))
+                .max_by_key(|(at, _)| *at)
+                .is_some_and(|(_, keyword)| keyword == "union")
+        });
+        let mut sized: Vec<(String, usize, usize)> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
+        // **Declaration order**, which is what decides the offsets: `members_of` answers in the index's own order
+        // (names sorted, because a lookup by name is what it is for), and a layout computed in that order is a
+        // different class. A member's own declaration offset is the only thing that says where it was written.
+        let mut own: Vec<&crate::index::ProjectMember> = list.own().collect();
+        own.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then(left.fact.range.start_offset.cmp(&right.fact.range.start_offset))
+        });
+        for member in own {
+            let fact = &member.fact;
+            // **Data members only**: a member function, a nested type, a `static` — none of them take a byte in the
+            // object, and `sizeof` does not count them.
+            if fact.kind != crate::DeclKind::Variable
+                || fact
+                    .modifiers
+                    .contains(crate::DeclModifiers::STATIC)
+            {
+                continue;
+            }
+            let Some(type_of) = fact.type_of.as_deref() else {
+                unknown.push(fact.name.clone());
+                continue;
+            };
+            // **A bitfield has no width in a fact**, and a layout computed without it puts the next member at the
+            // wrong offset — so the class is not answered rather than answered plausibly. The `:` is found at the
+            // member's **file** offset, which is why the class was read out of its summary above: a member fact that
+            // came from a cooked reading carries the rendering's offsets instead.
+            if as_written.as_ref().is_some_and(|(text, _, members)| {
+                members
+                    .get(&fact.name)
+                    .is_some_and(|at| Self::a_bitfield(text, *at))
+            }) {
+                unknown.push(fact.name.clone());
+                continue;
+            }
+            match self.the_size_of_a_type(view, type_of, depth) {
+                Some((size, alignment)) => sized.push((fact.name.clone(), size, alignment)),
+                None => unknown.push(fact.name.clone()),
+            }
+        }
+        Known::Yes(crate::sema::layout::ClassLayout::of(&sized, union, unknown))
+    }
+
+    /// **The class as its own file wrote it** — the text, the offset of the class's name, and where each data member's
+    /// name sits.
+    ///
+    /// A fact taken from a **cooked reading** carries offsets in that reading, which is a different text: the union's
+    /// keyword and a bitfield's `:` are found in the file's own bytes. The summary's facts are the file's, so this is
+    /// where a fact about spelling has to come from. One summary lookup per class, not per member.
+    fn the_class_as_its_file_wrote_it(
+        &self,
+        written_type: &str,
+        asked_from: &std::path::Path,
+    ) -> Option<(String, usize, std::collections::HashMap<String, usize>)> {
+        let found = self.store.index().definition(written_type, asked_from).value()?;
+        let text = self.view_of_the_file(&found.file)?.source;
+        let summary = self.store.index().summary(&found.file)?;
+        let simple = written_type.rsplit("::").next().unwrap_or(written_type);
+        let class = summary.declarations.iter().find(|fact| {
+            fact.name == simple
+                && fact.kind == crate::DeclKind::Type
+                && fact.parameter_list.is_none()
+        })?;
+        // **A member's `scope` is the class's qualified name**, which is the scope the class was written in plus its
+        // own name — `Widget` at file scope, `ns::Widget` in a namespace.
+        let qualified = match &class.scope {
+            Some(ctxt) => format!("{ctxt}::{simple}"),
+            None => simple.to_string(),
+        };
+        let members = summary
+            .declarations
+            .iter()
+            .filter(|fact| {
+                fact.kind == crate::DeclKind::Variable && fact.scope.as_deref() == Some(&qualified)
+            })
+            .map(|fact| (fact.name.clone(), fact.name_range.end_offset()))
+            .collect();
+        Some((text.to_string(), class.name_range.start_offset, members))
+    }
+
+    /// **Is this data member a bitfield?** — the text right after its name says so: `unsigned x : 3` has a `:` where
+    /// an initializer would have `=`, and a ternary's `:` lives after the one that starts the initializer.
+    fn a_bitfield(text: &str, at: usize) -> bool {
+        let after = text.get(at..).unwrap_or_default();
+        let end = after.find(';').unwrap_or(after.len().min(80));
+        after[..end].trim_start().starts_with(':')
+    }
+
+    /// The size and alignment of a member's written type, following a class the index holds.
+    fn the_size_of_a_type(&self, view: &FileView, spelling: &str, depth: usize) -> Option<(usize, usize)> {
+        if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelling) {
+            return Some(builtin);
+        }
+        let Known::Yes(nested) = self.the_layout_of_a_class(view, spelling, depth + 1) else {
+            return None;
+        };
+        if nested.unknown.is_empty() {
+            return Some((nested.size, nested.alignment));
+        }
+        None
+    }
+
     /// **The members `GENERATED_BODY()` writes that a macro cannot** — `Super` and `ThisClass`.
     ///
     /// Unreal's build tool writes `typedef <Base> Super;` and `typedef <TheClass> ThisClass;` into the generated code,
