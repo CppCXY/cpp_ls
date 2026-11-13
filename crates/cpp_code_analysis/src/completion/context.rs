@@ -45,6 +45,16 @@ use crate::sema::resolve::{self, MemberAccess, NamePosition};
 pub enum CompletionContext {
     /// After a `.` or `->`: the members of the object's type.
     Member(Box<MemberAccess>),
+    /// **A designator in a braced initializer** — `DecorSignHighlight conv = { .fl| }` — where the members are
+    /// the ones of the **declared variable's type**, and there is no object expression to infer it from.
+    ///
+    /// `of` is the type spelling read from the declaration (`DecorSignHighlight`), which is what the member
+    /// query is asked with.
+    Designator {
+        of: String,
+        written: String,
+        range: SourceRange,
+    },
     /// Inside or at the end of a `::`-qualified name: the names written directly in that scope.
     Qualified(NamePosition),
     /// An ordinary name position, including a cursor where nothing is written yet.
@@ -194,6 +204,12 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
         .or_else(|| member_access_from_the_text(root, offset))
     {
         return CompletionContext::Member(Box::new(access));
+    }
+
+    // **A designator**, after the member question: it is the same `.` with no object, inside a braced
+    // initializer.
+    if let Some(designator) = the_designator_at(root, offset) {
+        return designator;
     }
 
     match resolve::name_position_at(root, offset) {
@@ -474,6 +490,95 @@ pub fn module_name_from_the_text(text: &str, offset: usize) -> Option<(String, S
 
     let start = offset.checked_sub(written.len())?;
     Some((written.to_string(), SourceRange::new(start, written.len())))
+}
+
+/// **A designator**: the `.` written inside a braced initializer — `DecorSignHighlight conv = { .fl| }`.
+///
+/// It names a member of the **declared variable's** type and there is no object in the text at all, so the member
+/// reader answers nothing and the completion falls through to the names in scope. Measured through `tools/inspect`
+/// on
+///
+/// ```c
+/// DecorSignHighlight conv = {
+///   .
+/// };
+/// ```
+///
+/// which offered `f`, `DecorSignHighlight`, `case`, `catch`, … and none of `flags`, `priority`, `text`, `hl_id`.
+///
+/// # Why the text and not the tree
+///
+/// Because the parser has no initializer list here. A file being typed at is a file in recovery: measured on the
+/// same fixture, the tree at the dot was `token "." → CompoundStat → Declaration(f)` — the `{ … }` and the
+/// declarator were not nodes at all. What *is* written is unambiguous: a `.` with no object before it, back to the
+/// nearest unmatched `{`, and before that `{` a declaration's `name =`. The type is the text before the name.
+fn the_designator_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext> {
+    let operator = resolve::operator_in(root, offset).or_else(|| {
+        offset
+            .checked_sub(1)
+            .and_then(|before| resolve::operator_in(root, before))
+    })?;
+    // **Only `.`**: `->` names a pointer's pointee, which is never a designator.
+    if operator.text() != "." {
+        return None;
+    }
+    let dot = usize::from(operator.text_range().start());
+    // **An object before the dot is an ordinary member access**, which the caller has already tried.
+    if resolve::name_ending_before_an_operator(root, dot).is_some() {
+        return None;
+    }
+    let text = root.text().to_string();
+
+    // **The braced initializer around the dot**: the nearest `{` that nothing has closed. A `;` at depth zero
+    // before that means this is not an initializer list at all.
+    let mut depth = 0i32;
+    let mut opened = None;
+    for (at, character) in text[..dot].char_indices().rev() {
+        match character {
+            '}' => depth += 1,
+            '{' if depth > 0 => depth -= 1,
+            '{' => {
+                opened = Some(at);
+                break;
+            }
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    let open = opened?;
+
+    // **The declaration**: `<type> <name> = {`. Everything between the `=` and the statement's start is read
+    // backwards: the name is the last identifier before the `=`, and the type is the text before the name.
+    let before = text[..open].trim_end().strip_suffix('=')?;
+    let before = before.trim_end();
+    let name_start = before
+        .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .map_or(0, |at| at + 1);
+    if name_start >= before.len() {
+        return None;
+    }
+    let head = before[..name_start].trim_end();
+    let type_start = head.rfind([';', '{', '}']).map_or(0, |at| at + 1);
+    let of = head[type_start..].trim().to_string();
+    // **A spelling this reader will not guess**: a call or an expression is not a declaration's type.
+    if of.is_empty() || of.contains('(') || of.contains(')') || of.contains('=') {
+        return None;
+    }
+
+    // **The member being typed** — the word between the dot and the cursor, which is the prefix the list filters
+    // on and the range a client replaces.
+    let after = usize::from(operator.text_range().end());
+    let written: String = text
+        .get(after..offset)
+        .unwrap_or("")
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    Some(CompletionContext::Designator {
+        of,
+        range: SourceRange::new(after, written.len()),
+        written,
+    })
 }
 
 /// **The member access the text says is here, when the tree does not.**

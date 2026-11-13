@@ -488,6 +488,15 @@ pub fn completion_with(
         CompletionContext::Member(access) => {
             members(index, scopes, root, path, &access, offset, budget).set
         }
+        // **A designator lists the members of the declared variable's type** — see
+        // [`CompletionContext::Designator`] and `context::the_designator_at`. The type is a spelling the text
+        // gave, so the same member query is asked with it instead of with an object expression.
+        CompletionContext::Designator { of, written, range } => {
+            members_of_a_written_type(
+                index, scopes, root, path, offset, &of, written, range, budget,
+            )
+            .set
+        }
         CompletionContext::Qualified(position) => names(
             index, scopes, root, path, &position, offset, false, cuda, budget, unincluded, None,
         ),
@@ -909,6 +918,38 @@ fn leads_to_members(
     )
 }
 
+/// **The members of a type the *text* named** — the designator path of [`members`].
+///
+/// `of` is a spelling (`DecorSignHighlight`), not an object expression: a designator in a braced initializer has no
+/// object to infer a type from. The same tail lists the members, so the list a designator offers and the list the
+/// variable's own `.` would offer cannot disagree.
+fn members_of_a_written_type(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+    of: &str,
+    prefix: String,
+    replace: SourceRange,
+    budget: usize,
+) -> MemberAnswer {
+    let written = crate::sema::types::parse_type_spelling(of);
+    members_of_a_type(
+        index,
+        scopes,
+        root,
+        path,
+        offset,
+        &written,
+        false,
+        prefix,
+        replace,
+        of.to_string(),
+        budget,
+    )
+}
+
 fn members(
     index: &ProjectIndex,
     scopes: &ScopeTree,
@@ -970,8 +1011,41 @@ fn members(
     // a reader reported as "智能指针的补全没有考虑指向的内容": a smart pointer's own members are `operator->`,
     // `operator*`, `reset`, … — none of which can be reached through `->` — while the class it points at has exactly
     // the members the arrow means.
+    members_of_a_type(
+        index,
+        scopes,
+        root,
+        path,
+        offset,
+        &written,
+        access.arrow,
+        prefix,
+        replace,
+        access.object.text().to_string().trim().to_string(),
+        budget,
+    )
+}
+/// **The members of a class this crate already knows the *type* of** — the tail of [`members`], shared with the
+/// designator path, which has a type spelling and no object expression.
+///
+/// `subject` is what the refusal sentences name: the object's text (`conv`) for a written member access, the type
+/// spelling (`DecorSignHighlight`) for a designator in a braced initializer.
+#[allow(clippy::too_many_arguments)]
+fn members_of_a_type(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+    written: &crate::sema::types::Type,
+    arrow: bool,
+    prefix: String,
+    replace: SourceRange,
+    subject: String,
+    budget: usize,
+) -> MemberAnswer {
     let Some((class, followed_a_pointer)) =
-        the_class_after_the_operator(index, scopes, root, path, &written, access.arrow)
+        the_class_after_the_operator(index, scopes, root, path, written, arrow)
     else {
         // **A type that names no class has no members, and that is a fact rather than a gap.** Every way of working
         // the type out has already been taken by the time `the_class_after_the_operator` answers `None` — it follows
@@ -990,7 +1064,7 @@ fn members(
             },
             why: format!(
                 "the type of `{}` is `{written}`, which names no class to list members of",
-                access.object.text().to_string().trim()
+                subject
             ),
         };
     };
@@ -1120,7 +1194,7 @@ fn members(
     // `->append` with a range grown one byte left over the `>`, so accepting an item wrote `p-->append`. A reader on
     // `p->` typed the right operator; the rewrite is for the one case where the operator and the answer disagree,
     // which is a `.` on a pointer.
-    let (replace, items) = if followed_a_pointer && !access.arrow {
+    let (replace, items) = if followed_a_pointer && !arrow {
         let operator = replace.start_offset.saturating_sub(1);
         let items: Vec<crate::completion::CompletionItem> = items
             .into_iter()
@@ -1168,7 +1242,6 @@ fn members(
         why,
     }
 }
-
 /// A member list and **why it is what it is** — see [`members`], which is the only producer.
 ///
 /// The reason travels with the answer because the two are one reading: a diagnostic that had to ask a second query

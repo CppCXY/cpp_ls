@@ -3628,3 +3628,57 @@ lis
         "a macro that does not start with what the reader wrote is not offered: {labels:?}"
     );
 }
+
+/// **A designator offers the members of the declared variable's type.**
+///
+/// Reported from a real editor: typing `.` inside `DecorSignHighlight conv = { … }` offered `f`, `case`, `catch`,
+/// `class`, `dowhile`, … — the names in scope — and not one of the struct's members. The tree has no initializer
+/// list at that cursor (a file being typed at is a file in recovery: measured, `token "." → CompoundStat →
+/// Declaration(f)`), so the declaration is read from the text: the nearest unmatched `{`, the `=` before it, the
+/// name, and the type before the name.
+#[test]
+fn a_designator_in_a_braced_initializer_offers_the_structs_members() {
+    const FIXTURE: &str = r"typedef struct {
+  int flags;
+  int priority;
+  int text[4];
+  int hl_id;
+} DecorSignHighlight;
+void f(void) {
+  DecorSignHighlight conv = {
+    .
+  };
+}";
+
+    let at = FIXTURE.find("    .").expect("the designator's dot") + "    .".len();
+    let memory = MemoryFiles::new().with_file("/p/a.c", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.c")]);
+    let view = cooked_view(&mut session, "/p/a.c");
+
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(at),
+    );
+    let labels: Vec<String> = found.items.iter().map(|item| item.label.clone()).collect();
+    for member in ["flags", "priority", "text", "hl_id"] {
+        assert!(
+            labels.contains(&member.to_string()),
+            "`{member}` is a member of the initialised struct: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.contains(&"DecorSignHighlight".to_string()),
+        "and the list is the members, not the names in scope: {labels:?}"
+    );
+    assert_eq!(
+        found.scope, "DecorSignHighlight",
+        "the list names the class it is about"
+    );
+}
