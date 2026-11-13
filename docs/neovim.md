@@ -407,3 +407,50 @@ the next round, and it is why the provenance of a name matters more than its cou
 For comparison, the census that opened this document (before the keyword, declarator and guard fixes, and without the
 dependency tree) had **17 files failing to parse, 26 parse errors, 283 undefined names and 175 include misses** on the
 full 517.
+
+**The denominators were wrong, and an enum bug was behind some of the misses.** The first version of this
+section asked `definition` about every sampled token and `type_at` about every sampled token. Both counted names
+the analysis does not answer for by design — `#define`'s own words (`define`, `endif`, `defined` are identifiers
+lexically but not names), macros, type names, and functions whose *type* is a function type the hover answers. The
+probe now asks `definition` only about **classified** names (`get-name 96.8%`), and `type_at` only about
+**value-like** classified names — variables, parameters, fields, enumerators:
+
+```text
+definition      1 092 asked, 1 057 resolved (96.8%), 7 ambiguous, 28 unknown
+type_at           829 asked,   536 known    (64.7%)
+names          43 200 identifiers, 35 310 classified (81.7%)
+```
+
+And one real defect was found while reading the misses: **an anonymous enumeration was named after the first
+identifier in its body.** The name is written between the keyword and the body, but the reader took the first
+`NameExpr` in the subtree — which for `enum { MODE_NORMAL = 0x01, … MODE_REPLACE = REPLACE_FLAG | MODE_INSERT }` is
+the `REPLACE_FLAG` of an enumerator's initializer. Measured on `src/nvim/state_defs.h` before the fix:
+
+```text
+facts state_defs.h --name MODE_INSERT      25:3  MODE_INSERT  variable in REPLACE_FLAG
+hover mouse.c:894:18 (use of MODE_INSERT) NotDeclaredHere
+```
+
+After the fix (`CppEnumDef::get_name` reads between the keyword and the body, the scope walker no longer falls
+back to a declaration's last identifier, `FORMAT_VERSION` 23):
+
+```text
+facts state_defs.h --name MODE_INSERT      25:3  MODE_INSERT  variable
+hover mouse.c:894:18                      Declared in `state_defs.h:25:3`
+```
+
+Test: `an_anonymous_enum_is_not_named_after_an_initializer` (`tests/scopes.rs`). A two-line fixture,
+`enum { A = 1, B = A };`, is the whole defect: the scope used to come out `Enum{A}` with `A` bound as a *type* at
+the initializer's use.
+
+**What the remaining misses are**, from the probe's examples:
+
+* **Variables declared by a macro** — `win` from `FOR_ALL_TAB_WINDOWS(tab, win)` (`mark.c:1319`), `args` from
+  `MAXSIZE_TEMP_ARRAY(args, 3)` (`deprecated.c:1001`), `watchers` in `server.c:108`. The plain reading sees a call,
+  so the name has no declaration; resolving these needs the macro's expansion in the scope, which this layer does
+  not have.
+* **Names inside a macro definition body** (`bit.c`'s `BRET`/`BIT_OP`, `mpack`'s parser macros) — `UnparsableName`,
+  while the classifier still draws them as code names. The two layers disagree about whether a macro body is code;
+  that is the next round.
+* **A parameter type in a multi-line signature** whose list holds a macro invocation — `Integer src_id` in
+  `deprecated.c:220`, where `Dict(empty) *opts` sits later in the same list.

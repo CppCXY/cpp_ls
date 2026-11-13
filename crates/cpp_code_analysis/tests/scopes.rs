@@ -371,6 +371,39 @@ fn an_enum_holds_its_enumerators() {
     );
 }
 
+/// **An anonymous enumeration is not named after the first identifier in its body.**
+///
+/// Its name is written between the keyword and the body, and it has none — but the reader used to take the first
+/// `NameExpr` in the subtree, which for an anonymous enum is the first identifier of an enumerator's *initializer*.
+/// So `enum { A = 1, B = A };` named its scope `A`, filed both enumerators inside it, and recorded a *type* fact at
+/// the initializer. Measured on neovim's `src/nvim/state_defs.h`, whose `MODE_REPLACE = REPLACE_FLAG | MODE_INSERT`
+/// made every enumerator `variable in REPLACE_FLAG`: go-to-definition on `MODE_INSERT` from `mouse.c` answered
+/// `NotDeclaredHere`.
+#[test]
+fn an_anonymous_enum_is_not_named_after_an_initializer() {
+    let table = scopes("enum { A = 1, B = A };\n");
+
+    // No name between the kind's braces: the scope is unnamed and holds the two enumerators.
+    assert_eq!(shape(&table), "File(Enum{A,B})");
+
+    let file = table.root().unwrap();
+    let enumeration = table.scope(file).unwrap().children[0];
+    assert_eq!(
+        table.qualified_name_of(enumeration),
+        None,
+        "an unnamed enumeration has no qualified name"
+    );
+    assert_eq!(
+        kind_of(&table, enumeration, "A"),
+        Some(BindingKind::Enumerator)
+    );
+    assert_eq!(
+        kind_of(&table, file, "A"),
+        None,
+        "an enumerator is not in the file scope"
+    );
+}
+
 /// A function declares its name outside and binds its parameters inside.
 ///
 /// The distinction that makes `for (int i = 0; ...)` and `void f(int i)` behave: a parameter is visible in the

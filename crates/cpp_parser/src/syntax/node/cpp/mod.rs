@@ -1716,14 +1716,46 @@ impl CppEnumDef {
 
     /// The enum's name.
     ///
-    /// Searched as a subtree: `enum class E` is parsed as one `BuiltinType` specifier (the `class`
-    /// belongs to the same specifier as `enum`), so the name sits one level down.
+    /// **Written between the keyword and the body**, and read there rather than searched for in the subtree: the
+    /// subtree also holds the enumerators, and an initializer's identifiers are the first `NameExpr` in it as soon as
+    /// one enumerator is written in terms of another. Measured on `src/nvim/state_defs.h`:
+    ///
+    /// ```c
+    /// enum { MODE_NORMAL = 0x01, …, MAP_ALL_MODES = 0xff, REPLACE_FLAG = 0x100,
+    ///        MODE_REPLACE = REPLACE_FLAG | MODE_INSERT, … };
+    /// ```
+    ///
+    /// The first `NameExpr` below the node is the `REPLACE_FLAG` of `MODE_REPLACE`'s initializer, so the enumeration
+    /// was named `REPLACE_FLAG` — one *type* fact at that use, and **every enumerator filed inside a scope named
+    /// after it**: `MODE_INSERT` came out as `variable in REPLACE_FLAG`, and go-to-definition from `mouse.c` answered
+    /// `NotDeclaredHere`. The same defect in a two-line fixture: `enum { A = 1, B = A };` named the enum `A` after
+    /// `B`'s initializer.
+    ///
+    /// `enum class E` is one specifier whose `class` belongs to the `enum`, so the walk skips the scope keyword; a
+    /// `:` (the underlying type) or the `{` before any identifier means the enumeration is anonymous.
     pub fn get_name(&self) -> Option<CppNameToken> {
         self.get_enum_keyword()?;
-        self.syntax()
-            .descendants()
-            .find_map(CppNameExpr::cast)
-            .and_then(|it| it.get_name_token())
+        let mut past_the_keyword = false;
+        for element in self.syntax().descendants_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            match token.kind() {
+                CppKind::Token(CppTokenKind::EnumKeyword) => past_the_keyword = true,
+                CppKind::Token(CppTokenKind::ClassKeyword | CppTokenKind::StructKeyword)
+                    if past_the_keyword => {}
+                CppKind::Token(CppTokenKind::Identifier) if past_the_keyword => {
+                    return CppNameToken::cast(token);
+                }
+                CppKind::Token(CppTokenKind::LeftBrace | CppTokenKind::Colon)
+                    if past_the_keyword =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Is this a scoped enum (`enum class` / `enum struct`)?

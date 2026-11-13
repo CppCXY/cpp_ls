@@ -219,7 +219,16 @@ use std::path::{Path, PathBuf};
 /// first line, `#ifndef X` was false, and every guarded header rendered to nothing: neovim's
 /// `.deps/usr/include/uv.h` was 13 263 tokens in and **0 bytes** out, and its cooked reading was filed with 0
 /// declarations where the file has 1 912. Those empty readings are on disk, so the number moves.
-pub const FORMAT_VERSION: u32 = 22;
+/// # Why this moved to 23
+///
+/// **An enumeration's name is read where the language writes it, between the keyword and the body.** The name
+/// was the first `NameExpr` in the subtree, which for an anonymous enum is the first identifier of an
+/// enumerator's *initializer*: `enum { A = 1, B = A };` named the enum `A`, filed every enumerator in scope `A`,
+/// and recorded a bogus *type* fact at the initializer's use. Measured on neovim's `src/nvim/state_defs.h`:
+/// `MODE_INSERT` came out `variable in REPLACE_FLAG` (the identifier `MODE_REPLACE`'s initializer names), and
+/// go-to-definition from `mouse.c` answered `NotDeclaredHere`. Summaries on disk hold those scopes and facts, so
+/// the number moves.
+pub const FORMAT_VERSION: u32 = 23;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

@@ -886,7 +886,13 @@ impl ScopeWalker<'_> {
                 let range = cpp_parser::source_range(token.syntax().text_range());
                 name_from_text(&text, node).map(|name| (name, range))
             });
-        let declared = from_the_parser.or_else(|| declared_name(node));
+        // **No fallback to `declared_name`.** That reader answers a declaration's name by its *last* identifier —
+        // right for a declarator, wrong for an enumeration, whose body comes after the name and holds identifiers of
+        // its own. `enum { A = 1, B = A };` has no name; the fallback took the `A` of `B`'s initializer, named the
+        // scope `A`, and filed every enumerator inside it (measured on `state_defs.h`: `MODE_INSERT` in
+        // `REPLACE_FLAG`, and go-to-definition answered `NotDeclaredHere`). `CppEnumDef::get_name` reads the name
+        // where the language writes it, so there is no shape left for a fallback to cover.
+        let declared = from_the_parser;
         let declared_text = declared.as_ref().map(|(name, _)| name.kind.text());
 
         let scope = self.table.create_named_scope(

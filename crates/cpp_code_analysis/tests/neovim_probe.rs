@@ -71,6 +71,19 @@ fn sources_under(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// **Whether a type is the question to ask about this name.** A macro has no type, a namespace has none and a keyword
+/// is not a name — asking `type_at` about them would measure the probe rather than the analysis. A *function* is
+/// excluded for a different reason: its type is a function type, which a reader asks the signature for (the hover)
+/// rather than `type_at`, and the analysis answers the value question — `type_at` is documented for a variable. The
+/// denominator is the names a reader hovers to learn a *value's* type: variables, parameters, fields, enumerators.
+fn a_type_is_expected(kind: cpp_code_analysis::semantic::NameKind) -> bool {
+    use cpp_code_analysis::semantic::NameKind;
+    matches!(
+        kind,
+        NameKind::Variable | NameKind::Parameter | NameKind::Property | NameKind::EnumMember
+    )
+}
+
 fn is_a_c_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("c"))
@@ -208,6 +221,8 @@ fn what_the_analysis_says_about_neovim() {
     let mut definition_unknown = 0usize;
     let mut type_asked = 0usize;
     let mut type_known = 0usize;
+    let mut type_unknown_examples: Vec<String> = Vec::new();
+    let mut definition_unknown_examples: Vec<String> = Vec::new();
     let mut uv_names_asked = 0usize;
     let mut uv_names_resolved = 0usize;
     let closure = std::env::var_os("CPPLS_NEOVIM_CLOSURE").is_some_and(|value| !value.is_empty());
@@ -301,18 +316,25 @@ fn what_the_analysis_says_about_neovim() {
             // those are not `definition`'s to answer — asking would understate the editor.
             let step = (tokens.len() / 40).max(1);
             for token in tokens.iter().step_by(step) {
-                let Some(text) = view.get_token_text(token.range) else {
+                // **The token's own spelling**, kept apart from the file's text: the examples below print
+                // `file:line spelling`, and the line has to be counted in the file, not in the token.
+                let Some(spelling) = view.get_token_text(token.range) else {
                     continue;
                 };
                 let at = token.range.start_offset;
-                if let Some(name) = by_start.get(&at)
-                    && (name.kind == cpp_code_analysis::semantic::NameKind::Macro
-                        || (!name.declaration
-                            && matches!(
-                                name.kind,
-                                cpp_code_analysis::semantic::NameKind::Property
-                                    | cpp_code_analysis::semantic::NameKind::Method
-                            )))
+                // **Only a name the analysis classified is a name the editor draws.** An unclassified token is
+                // measured by the coverage number above; asking `definition` about `#define`'s own words would measure
+                // the lexer's tokens rather than the analysis's answers.
+                let Some(name) = by_start.get(&at) else {
+                    continue;
+                };
+                if name.kind == cpp_code_analysis::semantic::NameKind::Macro
+                    || (!name.declaration
+                        && matches!(
+                            name.kind,
+                            cpp_code_analysis::semantic::NameKind::Property
+                                | cpp_code_analysis::semantic::NameKind::Method
+                        ))
                 {
                     continue;
                 }
@@ -326,16 +348,43 @@ fn what_the_analysis_says_about_neovim() {
                     definition_ambiguous += 1;
                 } else {
                     definition_unknown += 1;
+                    if definition_unknown_examples.len() < 20 {
+                        let relative = file
+                            .strip_prefix(&root)
+                            .unwrap_or(file)
+                            .display()
+                            .to_string()
+                            .replace('\\', "/");
+                        definition_unknown_examples.push(format!(
+                            "{relative}:{} {spelling} {described}",
+                            line_of(&text, at)
+                        ));
+                    }
                 }
-                if text.starts_with("uv_") || text.starts_with("UV_") {
+                if spelling.starts_with("uv_") || spelling.starts_with("UV_") {
                     uv_names_asked += 1;
                     if matches!(answered, Known::Yes(_)) {
                         uv_names_resolved += 1;
                     }
                 }
-                type_asked += 1;
-                if matches!(session.type_at(&view, reading), Known::Yes(_)) {
-                    type_known += 1;
+                // **Only a name that can have a type is asked about a type** — see `a_type_is_expected`.
+                if a_type_is_expected(name.kind) {
+                    type_asked += 1;
+                    if matches!(session.type_at(&view, reading), Known::Yes(_)) {
+                        type_known += 1;
+                    } else if type_unknown_examples.len() < 25 {
+                        let relative = file
+                            .strip_prefix(&root)
+                            .unwrap_or(file)
+                            .display()
+                            .to_string()
+                            .replace('\\', "/");
+                        type_unknown_examples.push(format!(
+                            "{relative}:{} {spelling} ({:?})",
+                            line_of(&text, at),
+                            name.kind
+                        ));
+                    }
                 }
             }
         }
@@ -483,6 +532,18 @@ fn what_the_analysis_says_about_neovim() {
         100.0 * type_known as f64 / type_asked.max(1) as f64
     );
     eprintln!("[nvim] uv_* names: {uv_names_asked} asked, {uv_names_resolved} resolved");
+    if !type_unknown_examples.is_empty() {
+        eprintln!("[nvim] type_at unknown, by example:");
+        for example in &type_unknown_examples {
+            eprintln!("[nvim]   {example}");
+        }
+    }
+    if !definition_unknown_examples.is_empty() {
+        eprintln!("[nvim] definition unknown, by example:");
+        for example in &definition_unknown_examples {
+            eprintln!("[nvim]   {example}");
+        }
+    }
     eprintln!("[nvim] {} file(s) include uv.h", uv_files.len());
     if let Some(file) = uv_files.first() {
         let text = std::fs::read_to_string(file).unwrap_or_default();
