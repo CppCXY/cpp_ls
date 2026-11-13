@@ -271,12 +271,25 @@ header, so the answer changed with the map's layout; the choice is now the **low
 held, and `session::tests::a_header_is_read_in_the_same_translation_unit_every_time` pins it (it failed on the
 previous selection with the *other* root's macro).
 
-**Half of it is not**: *which* units are held depends on what the session has cooked, so a project-wide run can
-still read the same header through different translation units — two consecutive census runs of the same binary
-gave 2 and 3 files with parse errors, and `grid.h` had 5 errors in one and 12 in the other. The choice has to come
-from the **index** — the first translation unit the compile database says compiles this header — rather than from
-what happens to be in memory. That is the next step, and the reason this section exists.
+**Fixed (2026-11-13)**: the choice now comes from the **index**, not from what the session has cooked.
+`Session::the_unit_that_reads` walks the include graph's reverse edges (`includers_of`) breadth-first, shallowest
+first and smallest path within a level, and stops at a file that can be the root of its own program — one with a
+compile command, or one nothing includes. A unit the index does not name **never answers**: when the named one is
+not held, the environment is composed from the index, which is the same reading the second pass builds a summary
+from. The old rule ("the smallest root among the held units") made the answer a function of the session's history,
+which is what two runs of one binary disagreed about.
 
+Measured on the warm 52-file census: **165 s against 166 s** before the change — the choice costs nothing — with
+0 files failing to parse and the same usability rates (`definition` 96.8%, `type_at` 97.6%, `uv_*` 5/5).
+
+**What this did *not* fix, and where the next lever is.** The four `undefined-name` findings the census reports
+are in `src/nvim/main.c:182` (`server_teardown`), `:186` (`signal_teardown`), `api/deprecated.c:583`
+(`get_globvar_dict`) and `mbyte.c:3012` (`tv_list_alloc`). Those files are **roots**, read through their own walk
+(or through the composed arm when their unit is not held) — this rule is about headers, so it cannot move them.
+The same three files answer 0 findings through `inspect diagnostics --cook --index`, which is the other arm: a
+root's cook can disagree with the tool's single-file cook about the environment (`EXTERN` is defined by a `.c`
+file *for its own translation unit*, and which environment carries it is the same question one level up). That
+is the next change.
 **Why the walk is not simply replaced by the index's composition.** Composing every header's environment *is*
 deterministic, and it was measured with the session's own test: a header's reading takes `value_b` from the
 **includer's own text** (`#define KIND int value_b;` in `b.cpp`), and a composed environment never holds a macro a

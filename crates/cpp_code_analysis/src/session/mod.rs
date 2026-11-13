@@ -6741,6 +6741,57 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// The units table, with the lock taken — the one place the poison rule is written down.
+    /// **Which translation unit the index says reads this file** — the root a header's environment belongs to.
+    ///
+    /// A header is not the root of its own program: `wincon.h` includes neither `windef.h` nor `windows.h`, so a
+    /// timeline rooted at the header has no `WINAPI` in force. Which *other* file's timeline answers used to be
+    /// "a held unit that contains the header", and `held_units` is a hash map — so the answer changed with the map's
+    /// layout **and with what the session had cooked**. The census measured it: `grid.h` answered 2 parse errors in
+    /// the 517-file session and 0 alone (the docs' §6), because `main.c` defines `EXTERN` for its own translation
+    /// unit before including anything, and whether `main.c`'s unit answered depended on the run.
+    ///
+    /// The **index** names the unit now: breadth-first over [`ProjectIndex::includers_of`], shallowest first and
+    /// smallest path within a level, stopping at a file that can be the root of its own program — one with a
+    /// compile command, or one nothing includes. That is a function of the include graph and the project's file
+    /// list, both of which are the same on every run.
+    ///
+    /// Not cached: the walk is over the include graph's reverse edges, a handful of steps per header, and a cache
+    /// would have to be invalidated by every index insertion — the thing this method exists to stop depending on.
+    fn the_unit_that_reads(&self, path: &Path) -> Option<PathBuf> {
+        let project: std::collections::HashSet<String> =
+            self.project.iter().map(|root| queue_key(root)).collect();
+        let a_root = |candidate: &Path| {
+            if !project.contains(&queue_key(candidate)) {
+                return false;
+            }
+            self.config
+                .database
+                .as_ref()
+                .is_some_and(|database| database.command_for(candidate).is_some())
+                || self.store.index().includers_of(candidate).is_empty()
+        };
+
+        let mut seen: std::collections::HashSet<PathBuf> =
+            std::collections::HashSet::from([path.to_path_buf()]);
+        let mut level = self.store.index().includers_of(path);
+        while !level.is_empty() {
+            level.sort();
+            level.dedup();
+            if let Some(root) = level.iter().find(|candidate| a_root(candidate)) {
+                return Some(root.clone());
+            }
+            let mut next: Vec<PathBuf> = Vec::new();
+            for includer in &level {
+                if !seen.insert(includer.clone()) {
+                    continue;
+                }
+                next.extend(self.store.index().includers_of(includer));
+            }
+            level = next;
+        }
+        None
+    }
+
     fn held_units(&self) -> std::sync::MutexGuard<'_, UnitTable> {
         self.units
             .lock()
@@ -8152,25 +8203,45 @@ impl<F: FileProvider + Clone> Session<F> {
         // corpus at 41/52: a timeline sees the guarded `#define`s a closure's facts do not (`FactGuard::Special`), so a
         // composed environment is weaker exactly where a standard library puts its specifiers. Composition is the
         // fallback that makes a header cookable at all, not a replacement for the walk.
+        // **Which unit answers for a header, and the index is what says so.** A file that is the root of its own
+        // program is read through its own walk (the arm below), so the question is only about a file some *other*
+        // walk reached — and every file that includes it is one such walk. They are not interchangeable: neovim's
+        // `grid.h` reads clean on its own, and reads `__declspec(dllexport) ScreenGrid …` when `main.c`'s unit
+        // answers for it, because `main.c:3` defines `EXTERN` **for its own translation unit** before including
+        // anything.
+        //
+        // The choice used to be "the smallest root among the units that happen to be held", which is a function of
+        // **what the session had cooked**, not of the code: the census measured `grid.h` at 2 parse errors in the
+        // 517-file session and 0 alone, and two runs of one binary disagreed about which files erred. Now the
+        // index names the unit ([`Session::the_unit_that_reads`]) and a unit it does not name never answers: if the
+        // root the index names is in memory its timeline is used, and otherwise the environment is composed from
+        // the index (the same reading the second pass builds a summary from) — a weaker rendering, and the honest
+        // one, rather than a stronger rendering of a program this header is not part of.
         let held = {
+            let designated = self.the_unit_that_reads(&path).map(|root| queue_key(&root));
             let held_units = self.held_units();
-            // **Which unit answers for a header, when several can.** A file that is the root of its own program is
-            // read through its own walk (the arm below), so the question is only about a file some *other* walk
-            // reached — and every file that includes it is one such walk. They are not interchangeable: neovim's
-            // `grid.h` reads clean on its own, and reads `__declspec(dllexport) ScreenGrid …` when `main.c`'s unit
-            // answers for it, because `main.c:3` defines `EXTERN` **for its own translation unit** before including
-            // anything.
-            //
-            // `held_units` is a hash map, so "any unit that contains the file" was an answer that changed with the
-            // map's layout — the same header could be rendered two ways in one session, and the census measured
-            // exactly that (`grid.h` 2 errors in the 517-file session, 0 alone). The lowest root path wins
-            // instead: still one real translation unit's context, but a function of the files that are held rather
-            // than of their iteration order.
-            held_units
-                .values()
-                .filter(|held| !held.provisional && held.unit.environment_of(&path).is_some())
-                .min_by(|left, right| left.unit.files().next().cmp(&right.unit.files().next()))
-                .map(|held| std::sync::Arc::clone(&held.unit))
+            match designated {
+                Some(designated) => held_units
+                    .values()
+                    .filter(|held| {
+                        !held.provisional
+                            && held.unit.environment_of(&path).is_some()
+                            && held
+                                .unit
+                                .files()
+                                .next()
+                                .is_some_and(|root| queue_key(root) == designated)
+                    })
+                    .map(|held| std::sync::Arc::clone(&held.unit))
+                    .next(),
+                // **The index names no unit** — a file nothing in the project includes, or an index still being
+                // built. The smallest held root is the deterministic fallback, and it is the old rule.
+                None => held_units
+                    .values()
+                    .filter(|held| !held.provisional && held.unit.environment_of(&path).is_some())
+                    .min_by(|left, right| left.unit.files().next().cmp(&right.unit.files().next()))
+                    .map(|held| std::sync::Arc::clone(&held.unit)),
+            }
         };
         let can_be_a_root = {
             let included = !self.store.index().includers_of(&path).is_empty();

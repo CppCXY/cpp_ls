@@ -243,7 +243,15 @@ use std::path::{Path, PathBuf};
 /// `<uv.h>` although `src/nvim/os/fs.c` beside them resolves it from its response file. Those headers' summaries
 /// carry the unresolved includes (`IncludeFact::resolved`), and one unresolved include is what takes the macro
 /// environment's completeness claim back for every file that reaches it, so the number moves.
-pub const FORMAT_VERSION: u32 = 25;
+/// # Why this moved to 26
+///
+/// **Which translation unit a header is cooked in comes from the index, not from what is held.** A header's
+/// environment used to be "the smallest root among the units that happen to be in memory", so the same header
+/// could be rendered two ways in one session and two runs of one binary disagreed (the census measured `grid.h`
+/// at 2 parse errors in the 517-file session and 0 alone). The unit is now the root the include graph names, and a
+/// unit it does not name never answers — when the named one is not held the environment is composed from the
+/// index. Cooked readings already on disk were made under the old choice, so the number moves.
+pub const FORMAT_VERSION: u32 = 26;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
