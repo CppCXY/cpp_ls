@@ -205,6 +205,9 @@ fn what_the_analysis_says_about_neovim() {
     let mut findings: BTreeMap<String, usize> = BTreeMap::new();
     let mut include_misses: BTreeMap<String, usize> = BTreeMap::new();
     let mut undefined_names: BTreeMap<String, usize> = BTreeMap::new();
+    // **Where each undefined name was reported**, because a count without a file is a question nobody can
+    // answer from the outside: the same name in a header and in a test file are different findings.
+    let mut undefined_sites: Vec<String> = Vec::new();
     let mut files_with_errors = 0usize;
     let mut files_whose_first_error_is_new = 0usize;
     let mut other_first_errors: Vec<String> = Vec::new();
@@ -288,6 +291,19 @@ fn what_the_analysis_says_about_neovim() {
                     *include_misses.entry(finding.message.clone()).or_default() += 1;
                 }
                 cpp_code_analysis::DiagnosticCode::UndefinedName => {
+                    if undefined_sites.len() < 20 {
+                        let relative = file
+                            .strip_prefix(&root)
+                            .unwrap_or(file)
+                            .display()
+                            .to_string()
+                            .replace('\\', "/");
+                        undefined_sites.push(format!(
+                            "{relative}:{} {}",
+                            line_of(&text, finding.range.start_offset),
+                            finding.name
+                        ));
+                    }
                     *undefined_names.entry(finding.name.clone()).or_default() += 1;
                 }
                 _ => {}
@@ -518,6 +534,13 @@ fn what_the_analysis_says_about_neovim() {
     names.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for (name, count) in names.iter().take(10) {
         eprintln!("[nvim]   {count:5}  {name}");
+    }
+    // **And where each was reported**, because a count without a file is a question nobody outside can answer.
+    if !undefined_sites.is_empty() {
+        eprintln!("[nvim] undefined-name, by site:");
+        for site in undefined_sites.iter().take(20) {
+            eprintln!("[nvim]   {site}");
+        }
     }
     eprintln!(
         "[nvim] names: {identifiers} identifier(s), {classified} classified ({:.1}%)",
