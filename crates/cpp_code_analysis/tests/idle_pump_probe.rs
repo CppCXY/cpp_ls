@@ -53,7 +53,8 @@ fn project() -> PathBuf {
 #[ignore = "a probe: reads a real project and drains its pump"]
 fn what_an_idle_pump_does_after_the_closure_is_cooked() {
     let root = project();
-    let relative = std::env::var("CPPLS_IDLE_FILE").unwrap_or_else(|_| "src/containers.cpp".to_string());
+    let relative =
+        std::env::var("CPPLS_IDLE_FILE").unwrap_or_else(|_| "src/containers.cpp".to_string());
     let file = root.join(relative);
     let text = std::fs::read_to_string(&file).expect("the reported file is here");
     let mut session = cpp_code_analysis::Session::open(

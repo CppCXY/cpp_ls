@@ -1,10 +1,36 @@
 use clap::Parser;
 use cpp_ls::cmd_args::CmdArgs;
 use mimalloc::MiMalloc;
+use std::alloc::{GlobalAlloc, Layout};
 use std::error::Error;
 
+/// **mimalloc, plus a byte counter the pump can read** — see `cpp_ls::note_allocation` and `CPPLS_TRACE_ALLOCS`.
+/// The counting is off unless that variable is set, and the check is one relaxed load.
+struct Counting;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        cpp_ls::note_allocation(layout.size());
+        unsafe { MiMalloc.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { MiMalloc.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        cpp_ls::note_allocation(new_size);
+        unsafe { MiMalloc.realloc(pointer, layout, new_size) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        cpp_ls::note_allocation(layout.size());
+        unsafe { MiMalloc.alloc_zeroed(layout) }
+    }
+}
+
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: Counting = Counting;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let cmd_args = CmdArgs::parse();

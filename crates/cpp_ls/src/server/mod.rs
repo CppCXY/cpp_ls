@@ -18,6 +18,10 @@ const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[allow(unused)]
 pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send>> {
+    // **The allocation counter, on only when a run is being read for it** — see `cpp_ls::note_allocation`.
+    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        crate::COUNT_ALLOCATIONS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let (connection, threads) = match cmd_args.communication {
         cmd_args::Communication::Stdio => ::lsp_server::Connection::stdio(),
         cmd_args::Communication::Tcp => {

@@ -363,6 +363,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // manager" from "blocked on the analysis" from "blocked in the drain", and they cost nothing when the
             // level is not `trace`.
             log::trace!("pump: round");
+            let allocs_at_round_start = crate::allocated_bytes();
+            let mut allocs_after_wave = allocs_at_round_start;
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -414,6 +416,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
+            allocs_after_wave = crate::allocated_bytes();
             log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held, committed)) = context
@@ -667,6 +670,20 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 if dropped == 0 {
                     context.analysis().wait_for_work(IDLE_WAIT).await;
                 }
+            }
+
+            if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                let end = crate::allocated_bytes();
+                let sizes = context
+                    .analysis()
+                    .with_snapshot(|session| session.cache_sizes());
+                eprintln!(
+                    "[allocs] wave {} MB, rest {} MB (prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}) | summaries {} cooked-readings {}",
+                    sizes.as_ref().map_or(0, |sizes| sizes.summaries),
+                    sizes.as_ref().map_or(0, |sizes| sizes.cooked_files),
+                    (allocs_after_wave - allocs_at_round_start) / (1024 * 1024),
+                    (end - allocs_after_wave) / (1024 * 1024),
+                );
             }
 
             if pending > 0 {
