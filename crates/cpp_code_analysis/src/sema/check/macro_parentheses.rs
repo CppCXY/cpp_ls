@@ -50,13 +50,22 @@ impl Check for MacroParentheses {
             let body = context
                 .written
                 .get(start..end)
-                .unwrap_or("")
-                .trim_start_matches(['\\', ' ', '\t', '\n', '\r']);
+                .unwrap_or("");
+            // **Comments are removed before the body is judged, and that is a measurement.** `kvi_resize_full`
+            // writes its whole replacement list as a call, with the arguments grouped, after four lines of
+            // `/* … */` comments about capacity — and the `*` of `/*` was read as a multiplication at depth zero:
+            // "`kvi_resize_full`'s replacement list is not parenthesised" on a macro whose body is
+            // `kvi_resize(v, (v).capacity << 1)`. `is_a_call` failed for the same reason (the body started with a
+            // comment rather than a name). Measured on neovim's `src/klib/kvec.h:219`.
+            let body = the_code_of(body);
             // A body that is one token, a braced initialiser, a call, or already parenthesised is not this rule's shape.
             if body.is_empty()
-                || body.starts_with('(')
+                // **The whole body is one group**, not merely a body that starts with one: `(v).capacity << 1`
+                // begins with `(` and its `<<` is still outside the group — measured as a silent macro that is
+                // exactly the defect this rule exists for.
+                || is_one_group(&body)
                 || body.starts_with('{')
-                || body.starts_with("do") && !has_a_loose_operator(body)
+                || body.starts_with("do") && !has_a_loose_operator(&body)
             {
                 continue;
             }
@@ -70,10 +79,10 @@ impl Check for MacroParentheses {
             //
             // A caller's expression is spliced into the *parenthesised* place in all three, so there is no precedence to
             // get wrong — and a rule that reports them teaches a reader to ignore it on the one shape that matters.
-            if starts_a_declaration(body) || body.contains("##") || is_a_call(body) {
+            if starts_a_declaration(&body) || body.contains("##") || is_a_call(&body) {
                 continue;
             }
-            if !has_a_loose_operator(body) {
+            if !has_a_loose_operator(&body) {
                 continue;
             }
             // **`add_in_the_file`, because a `#define` is not in the rendering.** A directive is consumed before the
@@ -100,6 +109,92 @@ impl Check for MacroParentheses {
 /// `=` belongs to the declarator, so a caller's expression cannot collide with it. The list is the words that can begin
 /// one; a body starting with anything else (a name, a literal, a unary operator) is an expression and stays this rule's
 /// question.
+/// Is the whole body a single parenthesised group — `((a) > (b) ? (a) : (b))`?
+///
+/// A body that starts with `(` and closes before its last token is **not** one: `(v).capacity << 1` is a postfix
+/// expression with a shift after it, and treating it as grouped is how the rule went silent about a real defect.
+fn is_one_group(body: &str) -> bool {
+    if !body.starts_with('(') {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (at, character) in body.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return body[at + 1..].trim().is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// **A replacement list as code**: line splices gone, comments gone.
+///
+/// Both are text the preprocessor removes before a compiler sees the body, and both were read as operators by the
+/// scanners below — a splice is a `\\` at the end of a line, and the `*` of `/*` is a multiplication if nothing
+/// knows it is inside a comment. The strings themselves are kept: a `#define` that builds a format string is still
+/// a body with no loose operator, and removing the quotes would put its `%d` at depth zero.
+fn the_code_of(body: &str) -> String {
+    let mut code = String::with_capacity(body.len());
+    let mut characters = body.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            // A line splice: the backslash and the newline it escapes.
+            '\\' if characters.peek() == Some(&'\n') => {
+                characters.next();
+            }
+            '\\' if characters.peek() == Some(&'\r') => {
+                characters.next();
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+            }
+            '/' if characters.peek() == Some(&'*') => {
+                characters.next();
+                let mut previous = '\0';
+                for inside in characters.by_ref() {
+                    if previous == '*' && inside == '/' {
+                        break;
+                    }
+                    previous = inside;
+                }
+                code.push(' ');
+            }
+            '/' if characters.peek() == Some(&'/') => {
+                characters.next();
+                while let Some(inside) = characters.peek() {
+                    if *inside == '\n' {
+                        break;
+                    }
+                    characters.next();
+                }
+                code.push(' ');
+            }
+            // A string or a character literal is copied as it is: a `//` inside it is not a comment.
+            quote @ ('"' | '\'') => {
+                code.push(quote);
+                while let Some(inside) = characters.next() {
+                    code.push(inside);
+                    if inside == '\\' {
+                        if let Some(escaped) = characters.next() {
+                            code.push(escaped);
+                        }
+                    } else if inside == quote {
+                        break;
+                    }
+                }
+            }
+            other => code.push(other),
+        }
+    }
+    code.trim().to_string()
+}
+
 fn starts_a_declaration(body: &str) -> bool {
     const DECLARATION_WORDS: &[&str] = &[
         "static",

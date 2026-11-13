@@ -160,3 +160,43 @@ fn a_macro_that_expands_to_a_type_is_silent() {
         "an expression body without its own parentheses is the finding",
     );
 }
+
+/// **Comments are not code, and a body that is a call after four lines of `/* … */` is still a call.**
+///
+/// Measured on neovim's `src/klib/kvec.h:219`, where `kvi_resize_full` writes its replacement list as
+///
+/// ```c
+/// #define kvi_resize_full(v) \
+///   /* ARRAY_SIZE((v).init_array) is the minimal capacity of this vector. */ \
+///   /* … */ \
+///   kvi_resize((v), (v).capacity << 1)
+/// ```
+///
+/// and was reported as "its replacement list is not parenthesised": the `*` of `/*` was a multiplication at depth
+/// zero, and `is_a_call` could not see the call because the body began with a comment rather than with a name.
+#[test]
+fn a_body_whose_code_is_one_call_is_silent_however_many_comments_it_has() {
+    let kvec = codes_of(
+        "#define kvi_resize_full(v) \\\n \
+           /* ARRAY_SIZE((v).init_array) is the minimal capacity of this vector. */ \\\n \
+           /* Thus when the vector is full capacity may not be zero. */ \\\n \
+           kvi_resize((v), (v).capacity << 1)\n\
+         int f(int n) { return n + 1; }\n",
+    );
+    assert_silent_about(
+        &kvec,
+        DiagnosticCode::MacroParentheses,
+        "the code is one call: the `<<` is inside its argument list, and the comments are not code",
+    );
+
+    // The same body **without** the call's grouping is the finding: the comments do not hide a real operator.
+    let bare = codes_of(
+        "#define SHIFTED(v) /* shift it */ (v).capacity << 1\nint f(int n) { return n + 1; }\n",
+    );
+    assert_reported(
+        &bare,
+        DiagnosticCode::MacroParentheses,
+        "a top-level `<<` is still a loose operator after the comment is gone",
+    );
+}
+
