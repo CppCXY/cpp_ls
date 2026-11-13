@@ -817,7 +817,7 @@ fn a_member_name_is_not_on_the_next_line() {
         shapes.contains(&"ExpressionStat \"w.size;\"".to_string()),
         "and the member expression below it is still its own statement: {shapes:?}"
     );
-}
+}
 
 /// **A statement that starts `namespace::name(...)` is a call, not a declaration.**
 ///
@@ -836,7 +836,8 @@ fn a_qualified_name_that_names_two_different_things_is_a_call() {
         ParserConfig::default(),
     );
     assert_eq!(tree.get_errors(), [], "the statement parses cleanly");
-    let calls = cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count();
+    let calls =
+        cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count();
     assert_eq!(calls, 1, "the statement is one call expression");
 
     // **And the shapes that *are* declarations keep their reading.**
@@ -852,7 +853,8 @@ fn a_qualified_name_that_names_two_different_things_is_a_call() {
             "`{declaration}` is a declaration and parses cleanly"
         );
         let declarations =
-            cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(&tree.get_red_root()).count();
+            cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(&tree.get_red_root())
+                .count();
         assert!(
             declarations >= 2,
             "`{declaration}` kept its declaration reading: {declarations}"

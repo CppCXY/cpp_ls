@@ -367,7 +367,6 @@ mod tests {
         Known::Yes(spelling.to_string())
     }
 
-
     fn candidate(parameters: &[&str]) -> Candidate {
         Candidate::new(
             parameters

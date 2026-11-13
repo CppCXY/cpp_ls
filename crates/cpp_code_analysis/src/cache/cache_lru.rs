@@ -61,6 +61,20 @@ pub const EFFECT_ENTRIES: usize = 4096;
 /// headers, and room to switch back and forth". The count is the backstop: the byte budget is what actually decides.
 pub const VIEW_ENTRIES: usize = 8;
 
+/// **How many parse trees of a whole *rendering* a session keeps** — see [`Cache::rendering_views`].
+///
+/// A rendering is a file plus its whole include closure, so its parse is one to two orders of magnitude larger
+/// than a buffer's: measured on `test_cpp/src/containers.cpp` (seventeen standard headers), **~75 MB per parse**.
+/// Four is "the file being read, and the ones a reader stepped to", which is what one screen reaches.
+pub const RENDERING_VIEW_ENTRIES: usize = 4;
+
+/// **How many bytes of whole-rendering parse tree a session may hold** — see [`Cache::rendering_views`].
+///
+/// The same kind of number as [`VIEW_BYTES`], for the other population: 256 MB is three of the parses measured on
+/// `containers.cpp`, and the budget exists so four cheap enters cannot outweigh one expensive one — which is
+/// exactly what one shared cache of eight entries did (see [`Cache::rendering_views`]).
+pub const RENDERING_VIEW_BYTES: usize = 256 * 1024 * 1024;
+
 /// **How many bytes of parse tree the view cache may hold** — see [`Cache::views`].
 ///
 /// 64 MB of *estimated tree*, which is about 3–8 MB of rendering text. The number is chosen from what a view is worth:
@@ -105,6 +119,21 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     /// magnitude. See [`crate::session::a_view_weighs`] for the estimate.
     pub fn views() -> Self {
         Self::new(VIEW_ENTRIES, VIEW_BYTES)
+    }
+
+    /// **The parse trees of whole renderings**, bounded apart from the buffer views — [`RENDERING_VIEW_ENTRIES`]
+    /// of them and [`RENDERING_VIEW_BYTES`] of estimated tree.
+    ///
+    /// **Why a second cache, and the measurement.** A rendering is a unit — `test_cpp/src/containers.cpp` is
+    /// seventeen standard headers, several megabytes of text and ~75 MB of tree — while a buffer view is the five
+    /// kilobytes the reader typed. Held in *one* cache with a cap of eight entries, ten buffer views (a hover, a
+    /// pull and a semantic-token request each touch several) evict the one rendering: every later request parses the
+    /// whole unit again, and the allocator keeps the peaks. Measured on that project: private bytes went **190 MB →
+    /// 7 500 MB** over twelve rounds of eight requests, while the session's own tables stayed near **40 MB** — the
+    /// parse was never held long enough to be counted. Two populations, two caps: eight small views are cheap, and
+    /// one expensive one is not something ten cheap ones may throw away.
+    pub fn rendering_views() -> Self {
+        Self::new(RENDERING_VIEW_ENTRIES, RENDERING_VIEW_BYTES)
     }
 
     /// The macro environments a session remembers: [`MACRO_ENVIRONMENT_NAMES`] names across

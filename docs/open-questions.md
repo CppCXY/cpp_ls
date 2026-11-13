@@ -867,4 +867,50 @@ is why MinGW's guards are `Unknown`. That is the next change, and it would let `
 machine — and with it the two findings.
 
 Tests pinning today's behaviour: `an_include_behind_an_undecided_guard_is_still_reported` and
-`a_header_borrows_the_include_directories_of_a_source_beside_it`.
+`a_header_borrows_the_include_directories_of_a_source_beside_it`.
+
+## `containers.cpp` grows private bytes to gigabytes with no request at all — measured
+
+Reported: opening `test_cpp/src/containers.cpp` (seventeen standard headers) balloons the server. Measured through
+the real server (`crates/cpp_ls/tests/memory_probe.rs`), opening that one file and asking **nothing**:
+
+```text
+  0 s   254 MB
+ 10 s   600 MB
+ 20 s   900 MB
+ 35 s  1 375 MB
+ 55 s  2 553 MB   (killed by the probe's guard)
+```
+
+With requests it is faster (`12` rounds of eight requests took it to **7 500 MB**). The session's own tables stay
+near **40 MB** the whole time (`summaries 17.4 MB`, `views 4.6 MB`, `index tables 2.3 MB`), so the bytes are
+transient — something the pump does every round allocates and drops, and the allocator keeps the peaks.
+
+**What the pump is doing, in process** (`crates/cpp_code_analysis/tests/idle_pump_probe.rs`, a counting
+allocator): after the closure was walked (663 summaries),
+
+```text
+queue 0 (open 0, rest 0), refinements wanted 67
+reached idle in 10 000 rounds, 13 727 ms, pending 67   ← never reaches zero
+every later advance(256): 9 936 allocations, pending 67
+```
+
+`pending_work()` is 67 and the index queue is empty, so the pump never idles: each round prepares a wave for the
+open file's closure, and the refinement fast-path misses (`the_stored_refinement` → "not stored") **847 times in
+35 s** while only **106** distinct files are ever cooked (a finite, one-time pass — the cooks are not the leak).
+The server's own no-progress breaker (`initialized/mod.rs`, eight slices with nothing built) drops the cooking
+queue, but the asks that keep `pending_work()` above zero are **not** the cooking queue, and nothing refuses them.
+
+**A real defect found on the way, fixed**: the view cache held whole-unit rendering views (measured at ~75 MB of
+tree for this file) in the same eight-entry cache as buffer views, so ten cheap views evicted the expensive one and
+every request re-parsed the unit. `Cache::rendering_views` is now a cache of its own (`RENDERING_VIEW_ENTRIES`,
+`RENDERING_VIEW_BYTES`), pinned by
+`session::tests::a_rendering_view_survives_twelve_buffer_views` — which fails on the shared cache. It does **not**
+explain this report's growth (the unit's rendering here is 3 205 bytes, because its includes are not inlined), so
+the growth is still the pump's.
+
+**Next**: the refinement asks have no `cooking_refused` equivalent. A file the pass cannot serve is asked for again
+on every drain, and each drain pays a wave preparation over the closure. Refuse an ask that has been taken and
+served without `is_refined` becoming true (per content, cleared on edit — the rule `cooking_refused` already
+follows), so `pending_work()` can reach zero; and call `mi_collect(true)` after a closure cook burst, since the
+peaks are what is being kept.

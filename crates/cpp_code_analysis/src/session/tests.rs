@@ -5981,3 +5981,59 @@ fn a_headers_own_guard_does_not_empty_its_rendering() {
         "the declaration inside the guard is in the rendered reading: {facts:?}"
     );
 }
+
+/// **One cheap view does not evict one expensive one.**
+///
+/// A rendering view is a whole unit — `test_cpp/src/containers.cpp` is seventeen standard headers, measured at
+/// ~75 MB of parse tree — and a buffer view is the page being typed. Held in **one** cache of eight entries,
+/// twelve buffer views (a hover, a pull and a semantic-token request each touch several) threw the rendering away,
+/// so every later request parsed the whole unit again: private bytes 190 MB → 7 500 MB over twelve rounds while
+/// the session's own tables stayed near 40 MB. Two populations, two caches.
+#[test]
+fn a_rendering_view_survives_twelve_buffer_views() {
+    let main = "#include \"a.h\"\nint main() { return 0; }\n";
+    let mut files = MemoryFiles::new().with_file("/p/main.cpp", main);
+    for index in 0..12 {
+        files = files.with_file(format!("/p/h{index}.h"), "#define A 1\n");
+    }
+    let fixture = Memory::new("a-rendering-view-survives", &files);
+    let mut session = fixture.session();
+    let project: Vec<std::path::PathBuf> = (0..12)
+        .map(|index| std::path::PathBuf::from(format!("/p/h{index}.h")))
+        .collect();
+    session.add_project_files(project.iter().cloned());
+    session.did_open("/p/main.cpp", main);
+    for _ in 0..8 {
+        session.index_everything();
+        session.catch_up(std::path::Path::new("/p/main.cpp"));
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let rendered = session.view(std::path::Path::new("/p/main.cpp"));
+    assert!(rendered.is_some(), "the cook left a rendering to parse");
+    assert_eq!(
+        session.rendering_views.lock().expect("not poisoned").len(),
+        1,
+        "the rendering view is remembered in its own cache"
+    );
+
+    // The twelve cheap ones, each a distinct key and each far smaller than the rendering.
+    for header in &project {
+        let _ = session.view_of_the_file(header);
+    }
+    assert!(
+        session.views.lock().expect("not poisoned").len() <= 8,
+        "the buffer cache keeps its own cap"
+    );
+    assert_eq!(
+        session.rendering_views.lock().expect("not poisoned").len(),
+        1,
+        "and twelve buffer views did not throw it away"
+    );
+    assert!(
+        session.view(std::path::Path::new("/p/main.cpp")).is_some(),
+        "the second ask is a cache hit, not a re-parse"
+    );
+}

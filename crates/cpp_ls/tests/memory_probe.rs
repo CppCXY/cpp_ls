@@ -251,11 +251,27 @@ fn a_long_session_does_not_grow_without_bound() {
 
     // **The questions an editor asks while a reader sits on one file.** Every iteration repeats them: a query that
     // allocates per answer without freeing shows up as a slope, and one that is merely slow does not.
+    // **Which questions to ask**, so a growth can be attributed to one of them instead of guessed at:
+    // `CPPLS_MEMORY_ONLY=hover|diagnostic|tokens|hints`.
+    let only = std::env::var("CPPLS_MEMORY_ONLY").unwrap_or_default();
+    let asks = |what: &str| only.is_empty() || only == what;
+    // **No request at all, for a while** — the attribution: a growth with the editor still and no question asked is
+    // the pump's (indexing, cooking, refining), and one that needs a request is the request's.
+    if let Some(milliseconds) = std::env::var("CPPLS_MEMORY_IDLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        eprintln!("[memory] idle for {milliseconds} ms, no requests");
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
     let mut id = 100;
     for tick in 0..ticks {
         let target = &opened[tick % opened.len()];
         let target_uri = uri_of(target);
         for character in [4u32, 12, 20, 28, 36] {
+            if !asks("hover") {
+                continue;
+            }
             client.request(
                 id,
                 "textDocument/hover",
@@ -266,19 +282,24 @@ fn a_long_session_does_not_grow_without_bound() {
             );
             id += 1;
         }
-        client.request(
-            id,
-            "textDocument/diagnostic",
-            json!({ "textDocument": { "uri": target_uri } }),
-        );
-        id += 1;
-        client.request(
-            id,
-            "textDocument/semanticTokens/full",
-            json!({ "textDocument": { "uri": target_uri } }),
-        );
-        id += 1;
-        client.request(
+        if asks("diagnostic") {
+            client.request(
+                id,
+                "textDocument/diagnostic",
+                json!({ "textDocument": { "uri": target_uri } }),
+            );
+            id += 1;
+        }
+        if asks("tokens") {
+            client.request(
+                id,
+                "textDocument/semanticTokens/full",
+                json!({ "textDocument": { "uri": target_uri } }),
+            );
+            id += 1;
+        }
+        if asks("hints") {
+            client.request(
             id,
             "textDocument/inlayHint",
             json!({
@@ -286,7 +307,8 @@ fn a_long_session_does_not_grow_without_bound() {
                 "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 60, "character": 0 } },
             }),
         );
-        id += 1;
+            id += 1;
+        }
         if tick % 10 == 0 {
             eprintln!("[memory] tick {tick}");
         }

@@ -996,6 +996,17 @@ pub struct Session<F: FileProvider = DiskFiles> {
     views: std::sync::Mutex<
         cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
     >,
+
+    /// **The parse trees of whole renderings, in a cache of their own** — see [`Cache::rendering_views`].
+    ///
+    /// A rendering view and a buffer view are different populations: one is a whole unit's closure (measured at
+    /// ~75 MB of tree for `test_cpp/src/containers.cpp`), the other the few kilobytes a reader typed. Sharing one
+    /// eight-entry cache let ten buffer views evict the rendering, so **every** request after them re-parsed the
+    /// unit: private bytes went 190 MB → 7 500 MB over twelve rounds while the session's own tables stayed near
+    /// 40 MB. The dispatch is on the key: `ViewKey::rendering` is `Some` exactly for a rendering.
+    rendering_views: std::sync::Mutex<
+        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+    >,
     /// **The summary of a rendering**, by `(path, content hash of the rendered text)`.
     ///
     /// A rendering is what the preprocessor resolved, so a declaration a directive splits has one answer there —
@@ -1971,6 +1982,7 @@ impl<F: FileProvider + Clone> Session<F> {
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
             views: std::sync::Mutex::new(cache::cache_lru::Cache::views()),
+            rendering_views: std::sync::Mutex::new(cache::cache_lru::Cache::rendering_views()),
             rendering_summaries: std::sync::Mutex::new(cache::cache_lru::Cache::new(
                 RENDERING_SUMMARY_ENTRIES,
                 RENDERING_SUMMARY_BYTES,
@@ -2183,11 +2195,23 @@ impl<F: FileProvider + Clone> Session<F> {
             .sum();
 
         let (cooked_files, cooked_declarations) = self.store.index().cooked_size();
-        let (views, view_bytes) = self
-            .views
-            .lock()
-            .map(|known| (known.len(), known.weight()))
-            .unwrap_or((0, 0));
+        // **Both populations**, and the split is why the number is read from two caches: a rendering view is a
+        // whole unit's tree and a buffer view is a page, and a report that added only one of them would
+        // understate what a reader with a big file open is paying for.
+        let counted = |cache: &std::sync::Mutex<
+            cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+        >| {
+            cache
+                .lock()
+                .map(|known| (known.len(), known.weight()))
+                .unwrap_or((0, 0))
+        };
+        let (buffer_views, buffer_view_bytes) = counted(&self.views);
+        let (rendering_views, rendering_view_bytes) = counted(&self.rendering_views);
+        let (views, view_bytes) = (
+            buffer_views + rendering_views,
+            buffer_view_bytes + rendering_view_bytes,
+        );
         CacheSizes {
             renderings,
             rendering_bytes,
@@ -2207,15 +2231,30 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A hit is a handful of `Arc` bumps and one red root — see [`Session::view`] for what the key is made of and why
     /// none of it can serve a stale parse, and [`crate::file::view::ParsedView`] for why the cached half has no root.
     fn a_view_already_parsed(&self, key: &ViewKey) -> Option<FileView> {
-        let mut known = self.views.lock().ok()?;
+        let mut known = self.the_view_cache(key).lock().ok()?;
         let parsed = known.get(key)?;
         Some(FileView::from_parsed((**parsed).clone()))
+    }
+
+    /// **Which cache a view belongs in** — the rendering views apart from the buffer views. See
+    /// [`Session::rendering_views`] for the measurement that split them.
+    fn the_view_cache(
+        &self,
+        key: &ViewKey,
+    ) -> &std::sync::Mutex<
+        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+    > {
+        if key.rendering.is_some() {
+            &self.rendering_views
+        } else {
+            &self.views
+        }
     }
 
     /// Remember `view` under `key`, weighed by what it actually costs — see [`a_view_weighs`].
     fn remember_a_view(&self, key: ViewKey, view: &FileView) {
         let weight = a_view_weighs(view);
-        if let Ok(mut known) = self.views.lock() {
+        if let Ok(mut known) = self.the_view_cache(&key).lock() {
             let parsed = view.clone().into_parsed();
             known.insert(key, std::sync::Arc::new(parsed), weight);
         }
@@ -2341,11 +2380,23 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .unwrap_or((0, 0));
         let (dead_macro_files, dead_macro_offsets) = self.dead_macro_decisions();
-        let (views, view_bytes) = self
-            .views
-            .lock()
-            .map(|known| (known.len(), known.weight()))
-            .unwrap_or((0, 0));
+        // **Both populations**, and the split is why the number is read from two caches: a rendering view is a
+        // whole unit's tree and a buffer view is a page, and a report that added only one of them would
+        // understate what a reader with a big file open is paying for.
+        let counted = |cache: &std::sync::Mutex<
+            cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+        >| {
+            cache
+                .lock()
+                .map(|known| (known.len(), known.weight()))
+                .unwrap_or((0, 0))
+        };
+        let (buffer_views, buffer_view_bytes) = counted(&self.views);
+        let (rendering_views, rendering_view_bytes) = counted(&self.rendering_views);
+        let (views, view_bytes) = (
+            buffer_views + rendering_views,
+            buffer_view_bytes + rendering_view_bytes,
+        );
         let (walk_cache_entries, walk_cache_bytes) = self.store.contributions().accounting();
         let (walks_by_content_entries, walks_by_content_bytes) = self
             .walked_by_content
@@ -5118,8 +5169,14 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             wanted.remove(&path);
             if self.store.index().summary(&path).is_none() {
+                if crate::probes::cooking() {
+                    eprintln!("refinement ask not yet: {} (no summary)", path.display());
+                }
                 not_yet.push(path);
                 continue;
+            }
+            if crate::probes::cooking() {
+                eprintln!("refinement ask taken: {}", path.display());
             }
             if let Some(at) = self
                 .parsed_since_the_last_pass
