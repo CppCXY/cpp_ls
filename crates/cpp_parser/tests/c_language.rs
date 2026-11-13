@@ -84,7 +84,11 @@ fn names_cpp_reserves_are_names_in_c() {
 fn a_parenthesised_declarator_names_what_it_holds() {
     let declarations = [
         ("a keyword type", "static char *(lines[]) = { 0 };", "lines"),
-        ("a keyword type, sized", "static char *(names[3]) = { 0 };", "names"),
+        (
+            "a keyword type, sized",
+            "static char *(names[3]) = { 0 };",
+            "names",
+        ),
         (
             "a named type",
             "typedef int T; static T *(lines[3]) = { 0 };",
@@ -198,7 +202,11 @@ fn a_product_is_not_a_parenthesised_declarator() {
         .filter_map(CppDeclaration::cast)
         .filter_map(|declaration| declaration.get_name_text())
         .collect();
-    assert_eq!(declared, ["f"], "{source} declares nothing but the function");
+    assert_eq!(
+        declared,
+        ["f"],
+        "{source} declares nothing but the function"
+    );
 }
 
 #[test]

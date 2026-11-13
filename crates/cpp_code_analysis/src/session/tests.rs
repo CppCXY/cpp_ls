@@ -5837,7 +5837,6 @@ fn a_header_is_read_in_the_same_translation_unit_every_time() {
     }
 }
 
-
 /// **A name a macro writes is in the index only once the header that writes it has been cooked.**
 ///
 /// A summary is the *shape-only* reading: `DECL(lib_open)` is a macro call and nothing else, so the name index has
@@ -5879,7 +5878,10 @@ fn a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked() {
         .find("lib_open")
         .expect("the call is in the text");
     assert!(
-        matches!(alone.definition(&view, ReadingOffset::new(at)), Known::Unknown(_)),
+        matches!(
+            alone.definition(&view, ReadingOffset::new(at)),
+            Known::Unknown(_)
+        ),
         "nothing cooked the header, so the declaration is nowhere in the index"
     );
 
@@ -5905,7 +5907,6 @@ fn a_name_a_macro_writes_is_in_the_index_once_its_header_was_cooked() {
         other => panic!("the macro's declaration is not in the index: {other:?}"),
     }
 }
-
 
 /// **A header's own include guard does not make its body inactive.**
 ///
