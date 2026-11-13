@@ -108,3 +108,77 @@ fn why_the_two_platform_includes_still_warn() {
         }
     }
 }
+
+/// **Which include in the closure takes the completeness claim back?**
+///
+/// `mark_incomplete` fires on an `#include` the walk reaches and cannot resolve, and from then on every name nothing
+/// mentions is `Unknown` — which is what leaves `#ifdef HAVE_EXECINFO_BACKTRACE` undecided in `log.c`. So the
+/// question is which include that is, and whether it is genuinely absent on this machine or a search defect.
+///
+/// The walk here is the closure's: log.c, its includes, theirs. A file whose summary the session has not read is
+/// added and indexed, so the answer covers the whole closure rather than the first hop.
+#[test]
+#[ignore = "a probe: needs the neovim checkout"]
+fn which_include_in_the_closure_does_not_resolve() {
+    let root = project();
+    let start = root.join("src/nvim/log.c");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([start.clone()]);
+    for _ in 0..8 {
+        session.index_everything();
+        if session.pending_work() == 0 {
+            break;
+        }
+    }
+
+    let mut pending = vec![start.clone()];
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut missing: Vec<(PathBuf, String)> = Vec::new();
+    let mut read = 0usize;
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let summary = match session.index().summary(&path) {
+            Some(summary) => summary.clone(),
+            None => {
+                session.add_project_files([path.clone()]);
+                for _ in 0..4 {
+                    session.index_everything();
+                    if session.index().summary(&path).is_some() || session.pending_work() == 0 {
+                        break;
+                    }
+                }
+                read += 1;
+                match session.index().summary(&path) {
+                    Some(summary) => summary.clone(),
+                    None => continue,
+                }
+            }
+        };
+        for include in &summary.includes {
+            match &include.resolved {
+                Some(target) => pending.push(target.clone()),
+                None => missing.push((path.clone(), include.spelling.clone())),
+            }
+        }
+    }
+
+    eprintln!(
+        "[closure] {read} file(s) read on demand, {} unresolved include(s) in {} file(s)",
+        missing.len(),
+        seen.len()
+    );
+    missing.sort();
+    missing.dedup();
+    for (file, spelling) in missing.iter().take(40) {
+        eprintln!(
+            "[closure]   {} -> {spelling}",
+            file.strip_prefix(&root).unwrap_or(file).display()
+        );
+    }
+}

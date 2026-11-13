@@ -836,34 +836,35 @@ has — instead of a second whole-program read. Two tests: the budget refuses (`
 its_memory_budget_is_spent`) and a read is charged (`a_program_read_is_charged_to_the_budget`). The cost is real: the
 second and later standard-heavy files of one session lose the compiler's whole-program reading, which is where
 cross-file macro scoping is decided. Removing the budget is the goal once the holder is found.
-## Two includes behind a `HAVE_…` guard still warn
+## Two includes behind a `HAVE_…` guard still warn — the chain, measured
 
-**Measured on 2026-11-13, and the answer is not the one the last edit of this section guessed.** The two
-remaining `include-not-found` findings in the neovim census are `<execinfo.h>` (`log.c:43`) and `<langinfo.h>`
-(`mbyte.c:2389`), behind `#ifdef HAVE_EXECINFO_BACKTRACE` and `#ifdef HAVE_LANGINFO_H`. The generated
-`build/cmake.config/auto/config.h` has both as `/* #undef … */` — comments, so nothing defines them — and the
-question was whether the check could decide that.
+Two `include-not-found` findings survive the branch rule: `<execinfo.h>` (`log.c:43`) and `<langinfo.h>`
+(`mbyte.c:2389`), behind `#ifdef HAVE_EXECINFO_BACKTRACE` and `#ifdef HAVE_LANGINFO_H`. `auto/config.h` has both as
+`/* #undef … */` comments, so nothing defines them and a **complete** environment should decide both `#ifdef`s
+false. Three measurements say why it does not.
 
-`tests/guard_probe.rs` answers it:
+1. **The environment is complete and already what the check uses.** `CPPLS_TRACE_MEMORY`'s sibling
+   `tests/guard_probe.rs` prints `the compilation environment is complete`; `macros_at` starts from
+   `ProjectIndex::macros()` (the `-D`s plus the compiler's `-dM` table). Passing the environment in was never the
+   missing piece.
+2. **One unresolved `#include` takes the completeness claim back.** `macro_candidates` calls `mark_incomplete` for a
+   directive it cannot resolve — a header it never read may define anything — and from then on every unmentioned
+   name is `Unknown`. `tests/guard_probe.rs` lists **26** such directives in `log.c`'s closure.
+3. **The roots are guards the walk cannot evaluate.** `CPPLS_TRACE_GUARD=1` shows MinGW's own headers asking
+   `__MINGW_GNUC_PREREQ ( 4 , 1 )` and the walk answering `None` — its `MacrosHere` knows a macro's *name* and a
+   command-line *value*, not the body of a **function-like** macro. So branches this machine does not compile are
+   entered, and the includes inside them (`sys/socket.h`, `mach/mach.h`, `sys/sdt.h`) are “not found”.
 
-```text
-[guard] the compilation environment is complete (a name nobody mentions is not defined)
-[guard] src/nvim/log.c: execinfo.h guard Region(0) -> taken=true; HAVE_EXECINFO_BACKTRACE: unknown=true mentioned=false
-[guard]   walk state: complete_before=false incomplete_here=true base_complete=true
-```
+**Fixed in the same round, one layer down**: a header now borrows the include directories of the source beside it
+(`CompileCommands::a_command_for_a_header`, `FORMAT_VERSION` 25). A build lists only sources, so
+`src/nvim/os/fs.h` had no command and no `-isystem .deps/usr/include` — **eleven** headers of the closure
+reported `<uv.h>` unresolved. After the fix the closure's unresolved directives went **32 → 26** and every
+`uv.h` one is gone (6 of them); the remaining 26 are the platform headers above.
 
-So the compile environment **is** already what the check uses (`ProjectIndex::macros()` — the `-D`s and the
-compiler's `-dM` table — is what `macros_at` starts from), and passing it in is not the missing piece. What makes
-the guard `Unknown` is that the **walk takes the completeness claim back**: `macro_candidates` calls
-`mark_incomplete` when an `#include` it reaches does not resolve, and an unreadable file "may define anything", so
-from there on a name nothing mentions is `Unknown` rather than undefined. `log.c`'s closure reaches a header that
-does not resolve on this machine, and the state at the guard is already incomplete (`complete_before=false`).
+**Not fixed**: giving the walk's condition evaluator the *bodies* of function-like macros. `MacroFact` already
+carries `body_text` and `parameters`, and the cook expands them (`MacroView`); the walk's evaluator does not, which
+is why MinGW's guards are `Unknown`. That is the next change, and it would let `#ifdef HAVE_*` be decided on this
+machine — and with it the two findings.
 
-**Not fixed, and deliberately**: the honest reading of a missing header is "its macros may be anything". The
-alternatives are to find every missing header (the census's own four include misses say the search is not
-complete) or to narrow incompleteness to "only the names the missing header could define", which is the same
-guess with more steps. The warning is correct as a warning — it is what this analysis's search says about a file
-it could not find — and `include-not-found` is a `Warning` for exactly that reason. The census's two findings are
-therefore the honest floor until the include search finds everything on the machine.
-
-Test that pins the behaviour: `an_include_behind_an_undecided_guard_is_still_reported`.
+Tests pinning today's behaviour: `an_include_behind_an_undecided_guard_is_still_reported` and
+`a_header_borrows_the_include_directories_of_a_source_beside_it`.

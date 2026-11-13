@@ -311,16 +311,21 @@ impl CompilerConfig {
         let mut config = self.clone();
         let mut ahead: Vec<IncludePath> = Vec::new();
 
-        // **This file's own command, when the project has one.** It *replaces* whatever project-wide answer was in
-        // force rather than joining it: with one database entry per translation unit, the entry for another file is
-        // not a weaker answer but a different compilation, and its include directories are where the wrong header
-        // lives. `[compile].args` is the one thing that can override this, because a person who wrote the
-        // compilation down has said what it is — that is applied where the configuration is built, before this.
-        if let Some(command) = self
-            .database
-            .as_ref()
-            .and_then(|database| database.command_for(file))
-        {
+        // **The command this file's include paths come from.** Its own when the database has one; otherwise the
+        // command of a source beside it, because a header has no translation unit of its own — see
+        // [`CompileCommands::a_command_for_a_header`] for the measured consequence (eleven headers of one neovim
+        // closure could not see `<uv.h>`, and an unresolved include takes the macro environment's completeness with
+        // it).
+        let own_command =
+            self.database
+                .as_ref()
+                .and_then(|database| match database.command_for(file) {
+                    Some(own) => Some((own, false)),
+                    None => database
+                        .a_command_for_a_header(file)
+                        .map(|beside| (beside, true)),
+                });
+        if let Some((command, borrowed)) = own_command {
             // **The project's own edits apply to this file's command**, in the order the configuration documents:
             // `remove_args` drops, `extra_args` appends. Doing it here rather than once for the project is what
             // keeps the two keys meaning what they say now that the flags are per file.
@@ -352,20 +357,33 @@ impl CompilerConfig {
             // std::string>` had no type. The system entries are the one part of the search path the entry knows
             // nothing about, so they survive it — after its own directories, which is the order a compiler searches.
             let own = config_from_arguments(&arguments, command.directory.clone());
-            let system: Vec<IncludePath> = config
-                .include_paths
-                .iter()
-                .filter(|path| path.is_system)
-                .cloned()
-                .collect();
-            config.include_paths = own.include_paths;
-            for path in system {
-                let known = config
+            if borrowed {
+                // **Added in front rather than instead.** A command of its own is a statement about this file; one
+                // borrowed from the source beside it is a guess about whose flags apply, so the project's own
+                // directories survive and the borrowed ones go in front — the order a compiler searches.
+                let mut merged = own.include_paths;
+                for path in config.include_paths.iter() {
+                    if !merged.iter().any(|held| held.directory == path.directory) {
+                        merged.push(path.clone());
+                    }
+                }
+                config.include_paths = merged;
+            } else {
+                let system: Vec<IncludePath> = config
                     .include_paths
                     .iter()
-                    .any(|held| held.directory == path.directory);
-                if !known {
-                    config.include_paths.push(path);
+                    .filter(|path| path.is_system)
+                    .cloned()
+                    .collect();
+                config.include_paths = own.include_paths;
+                for path in system {
+                    let known = config
+                        .include_paths
+                        .iter()
+                        .any(|held| held.directory == path.directory);
+                    if !known {
+                        config.include_paths.push(path);
+                    }
                 }
             }
         }
@@ -862,6 +880,41 @@ impl CompileCommands {
             }
         }
 
+        best.map(|(_, command)| command)
+    }
+
+    /// **A command for a file the database has no entry for** — a header, in practice.
+    ///
+    /// A build lists its *sources*; a header is compiled as part of one of them and appears nowhere. So
+    /// [`CompileCommands::command_for`] answers `None` for it, and the project-wide configuration that answers
+    /// instead knows nothing about the `-I`/`-isystem` flags the build passed — measured on neovim: `src/nvim/os/fs.h`
+    /// includes `<uv.h>`, the header has no entry, and the `-isystem .deps/usr/include` that resolves it is in the
+    /// response file of `src/nvim/os/fs.c`. **Eleven** headers of one closure reported `uv.h` unresolved, and one
+    /// unresolved include is what takes the macro environment's completeness claim back (`Marked::mark_incomplete`)
+    /// for every file whose closure reaches it.
+    ///
+    /// The entry borrowed is a source **in the same directory**, the smallest path so the answer is deterministic.
+    /// Same directory and not "any entry": a database may describe several targets with different include roots, and
+    /// a header is the file the source beside it is most likely to compile. `None` when the directory has no
+    /// source — a header-only tree keeps the project-wide answer.
+    pub fn a_command_for_a_header(&self, file: &Path) -> Option<&CompileCommand> {
+        let parent = file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())?;
+        let wanted = normalize_for_comparison(parent);
+        let mut best: Option<(String, &CompileCommand)> = None;
+        for command in &self.commands {
+            let Some(own_parent) = command.file.parent() else {
+                continue;
+            };
+            if normalize_for_comparison(own_parent) != wanted {
+                continue;
+            }
+            let key = normalize_for_comparison(&command.file);
+            if best.as_ref().is_none_or(|(held, _)| key < *held) {
+                best = Some((key, command));
+            }
+        }
         best.map(|(_, command)| command)
     }
 }
@@ -1383,6 +1436,64 @@ fn define_from_a_config_file(written: &str) -> CommandLineMacro {
 #[cfg(test)]
 mod database_search_path_tests {
     use super::*;
+
+    /// **A header borrows the include directories of the source beside it.**
+    ///
+    /// A build lists its *sources*: a header has no entry of its own, so `command_for` answers `None` and the
+    /// project-wide configuration answers — without the `-isystem` directory the build passed. Measured on neovim:
+    /// **eleven headers** of one closure reported `<uv.h>` unresolved although `src/nvim/os/fs.c` beside them
+    /// resolves it from its response file, and one unresolved include takes the macro environment's completeness
+    /// claim back (`Marked::mark_incomplete`) for every file whose closure reaches it.
+    #[test]
+    fn a_header_borrows_the_include_directories_of_a_source_beside_it() {
+        let root = PathBuf::from("/p");
+        let source = root.join("os/fs.c");
+        let header = root.join("os/fs.h");
+        let database = CompileCommands {
+            commands: vec![CompileCommand {
+                file: source.clone(),
+                directory: Some(root.clone()),
+                arguments: vec![
+                    "cc".to_string(),
+                    "-isystem".to_string(),
+                    "/p/.deps/include".to_string(),
+                    "-I/p/src".to_string(),
+                    "-c".to_string(),
+                    source.to_string_lossy().into_owned(),
+                ],
+            }],
+            malformed: 0,
+        };
+        let config = CompilerConfig {
+            root: Some(root.clone()),
+            database: Some(std::sync::Arc::new(database)),
+            ..CompilerConfig::default()
+        };
+
+        let per_file = config.for_file(&header);
+        let directories: Vec<&Path> = per_file
+            .include_paths
+            .iter()
+            .map(|path| path.directory.as_path())
+            .collect();
+        assert!(
+            directories.contains(&Path::new("/p/.deps/include")),
+            "the header is compiled by the source beside it: {directories:?}"
+        );
+        assert!(directories.contains(&Path::new("/p/src")));
+
+        // …and a header with no source beside it keeps the project-wide answer, which is the honest `None`.
+        let lonely = config.for_file(&root.join("include/api.h"));
+        assert!(
+            lonely.include_paths.is_empty(),
+            "nothing beside it says anything: {:?}",
+            lonely
+                .include_paths
+                .iter()
+                .map(|path| path.directory.as_path())
+                .collect::<Vec<_>>()
+        );
+    }
 
     /// **A compile database entry replaces the project's directories, never the compiler's.**
     ///

@@ -235,7 +235,15 @@ use std::path::{Path, PathBuf};
 /// variables in every file that used them (measured on neovim's `cmdexpand.h`: the declaration card said "an
 /// enumerator", the use in `cmdexpand.c` said "a variable"), and an untyped scoped variable was drawn as an
 /// enumerator. The fact carries the flag now; entries written before it decode with `false`, so the number moves.
-pub const FORMAT_VERSION: u32 = 24;
+/// # Why this moved to 25
+///
+/// **A header resolves its includes with the flags of the source beside it.** A build lists its sources, so
+/// `command_for(header)` was `None` and the project-wide configuration answered — without the `-I`/`-isystem`
+/// directories the build passed — measured on neovim, where eleven headers of one closure could not resolve
+/// `<uv.h>` although `src/nvim/os/fs.c` beside them resolves it from its response file. Those headers' summaries
+/// carry the unresolved includes (`IncludeFact::resolved`), and one unresolved include is what takes the macro
+/// environment's completeness claim back for every file that reaches it, so the number moves.
+pub const FORMAT_VERSION: u32 = 25;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
