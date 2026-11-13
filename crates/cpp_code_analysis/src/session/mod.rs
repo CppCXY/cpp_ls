@@ -3741,11 +3741,13 @@ impl<F: FileProvider + Clone> Session<F> {
             if !done.is_empty() && committing.elapsed().as_millis() >= COMMIT_MS {
                 break;
             }
-            if self.queue.peek(1).first().is_some_and(|path| {
-                self.documents.is_open(path) && !self.prefetched.contains_key(&queue_key(path))
-            }) {
-                break;
-            }
+            // **A guard used to break out of this loop when the head was an open file with no prepared reading** —
+            // and `prepare_wave` *defers* open files, so it never has one. The head was then never popped, nothing
+            // committed, and the pump prepared the same wave for ever: measured on `test_cpp/src/containers.cpp`
+            // after one diagnostic pull, **17 rounds a second, one full core and ~90 MB/s**, with `pending` stuck
+            // at 66 and every session table at 66 MB. `index_one` builds the summary itself when the wave left the
+            // file alone — the treatment [`Session::advance`] already gives it, at the cost of one parse inside the
+            // write lock. A parse that is paid once beats a loop that is paid for ever.
             let Some((path, priority, depth)) = self.queue.pop() else {
                 break;
             };

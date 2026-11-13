@@ -337,7 +337,7 @@ impl AnalysisState {
             Some(state) => state,
             None => {
                 let path = path.to_path_buf();
-                self.run_blocking(move |session| {
+                self.run_blocking("a catch-up question", move |session| {
                     Some((
                         session.needs_catching_up(&path),
                         session.next_file_to_catch_up(&path),
@@ -364,7 +364,9 @@ impl AnalysisState {
         let guard = self.file_read_gate.clone().lock_owned().await;
         let path = path.to_path_buf();
         let gathered = self
-            .run_blocking(move |session| Some((session.gather_a_file_read(&path), guard)))
+            .run_blocking("gather a file read", move |session| {
+                Some((session.gather_a_file_read(&path), guard))
+            })
             .await;
         let Some((Some(materials), guard)) = gathered else {
             return false;
@@ -463,7 +465,9 @@ impl AnalysisState {
         // **The cheap half under the lock that is already taken for reads**, beside whatever other queries are doing.
         let gathering = root.clone();
         let materials = self
-            .run_blocking(move |session| session.gather_a_unit_read(&gathering))
+            .run_blocking("gather a unit read", move |session| {
+                session.gather_a_unit_read(&gathering)
+            })
             .await;
 
         // **The expensive half with no lock at all.** `spawn_blocking` rather than the analysis pool: this work is
@@ -607,7 +611,7 @@ impl AnalysisState {
     /// completion's own query is slow": with the writes in good order the first five completions after `didOpen`
     /// still took 60–1677 ms, and every millisecond of it was in this function's `ran` — the query's own work over an
     /// index that was still filling.
-    pub async fn run_blocking<R, F>(&self, f: F) -> Option<R>
+    pub async fn run_blocking<R, F>(&self, label: &'static str, f: F) -> Option<R>
     where
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
@@ -630,7 +634,7 @@ impl AnalysisState {
             let waited_for_the_session = locked.elapsed().as_millis() as u64;
             if traced {
                 eprintln!(
-                    "[query] permit {waited_for_a_permit} ms, gate {waited_for_the_gate} ms, session {waited_for_the_session} ms",
+                    "[query] {label}: permit {waited_for_a_permit} ms, gate {waited_for_the_gate} ms, session {waited_for_the_session} ms",
                 );
             }
             // The gate is released before the query runs: it orders an update against the queries already in
@@ -641,11 +645,11 @@ impl AnalysisState {
             // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
             // whether the session was missing or the query declined.
             if traced {
-                eprintln!("[query] compute starts");
+                eprintln!("[query] {label}: compute starts");
             }
             let answer = session.as_ref().and_then(f);
             if traced {
-                eprintln!("[query] compute done in {} ms", ran.elapsed().as_millis());
+                eprintln!("[query] {label}: compute done in {} ms", ran.elapsed().as_millis());
             }
 
             (
@@ -683,7 +687,7 @@ impl AnalysisState {
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
     {
-        match self.run_blocking(f).await {
+        match self.run_blocking("a query", f).await {
             Some(value) => RequestOutcome::Ready(value),
             None => RequestOutcome::Missing,
         }
@@ -769,7 +773,7 @@ impl AnalysisState {
 
         let target = to_prepare.clone();
         let ready = self
-            .run_blocking(move |session| {
+            .run_blocking("prepare the drain", move |session| {
                 Some(
                     session.index().summary(&target).is_some()
                         && session.index().cooked_declarations(&target).is_some()
@@ -789,7 +793,9 @@ impl AnalysisState {
 
         let target = to_prepare.clone();
         let Some(materials) = self
-            .run_blocking(move |session| session.gather_a_cook(&target))
+            .run_blocking("gather a cook", move |session| {
+                session.gather_a_cook(&target)
+            })
             .await
         else {
             return false;
@@ -1262,7 +1268,8 @@ mod tests {
         opened(&state, &root).await;
 
         let read_state = state.clone();
-        let read = tokio::spawn(async move { read_state.run_blocking(|_| Some(1)).await });
+        let read =
+            tokio::spawn(async move { read_state.run_blocking("a test", |_| Some(1)).await });
         let write_state = state.clone();
         let write = tokio::spawn(async move { write_state.update("a test's update", |_| 2).await });
 

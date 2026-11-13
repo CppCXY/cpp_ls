@@ -431,7 +431,9 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // lock was free and the thread was busy. That is the difference `spawn_blocking` makes.
             let prepared = context
                 .analysis()
-                .run_blocking(move |session| Some(session.prepare_background_wave(wave)))
+                .run_blocking("prepare a wave", move |session| {
+                    Some(session.prepare_background_wave(wave))
+                })
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
@@ -551,7 +553,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             let allocs_before_the_drain = crate::allocated_bytes();
             let (prepared_drain, cooks, cooking_revision) = context
                 .analysis()
-                .run_blocking(move |session| {
+                .run_blocking("prepare the drain", move |session| {
                     let revision = session.revision();
                     let cooks = claimed
                         .iter()
@@ -631,7 +633,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             if (re_read > 0 || cooked > 0) && pending == 0 {
                 let warmed = context
                     .analysis()
-                    .run_blocking(|session| Some(session.warm_the_pulls()))
+                    .run_blocking("warm the pulls", |session| Some(session.warm_the_pulls()))
                     .await
                     .unwrap_or(0);
                 if warmed > 0 {
@@ -952,6 +954,12 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     )
                     .flatten()
             {
+                if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                    eprintln!(
+                        "[program] a program read is owed (wait zero: {})",
+                        wait.is_zero()
+                    );
+                }
                 if wait.is_zero() {
                     // **Then breathe.** A project has one program per translation unit, and a pump that read them
                     // back to back would peg a core for minutes after every pause; one idle tick between them is

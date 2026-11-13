@@ -1011,4 +1011,16 @@ per request — that names the call in one run.
 So a pull is not the 90 MB/s — it allocates 117 MB once, in `prepare_for_a_diagnostic` — and the growth after it
 is something that starts then and keeps going: with the pump waiting (the fix above) its rounds allocate 0 MB,
 `pending` stays 66, and no stage runs; `[query]` lines show every query it did run at 0–6 ms. The next question is
-what runs at 100 % of a core *outside* both: the trace to add is thread-level, not stage-level.
+what runs at 100 % of a core *outside* both: the trace to add is thread-level, not stage-level.
+
+**The livelock, found and fixed.** `commit_a_wave` broke out of its commit loop when the head of the queue was an
+open document with no prepared reading — and `prepare_wave` *defers* open documents, so it never has one. Nothing
+committed, the head was never popped, and the pump prepared the same wave for ever: measured after one diagnostic
+pull on `containers.cpp`, **17 rounds a second, one full core, ~90 MB/s**, `pending` stuck at 66 with every session
+table at 66 MB. `index_one` builds the summary itself when the wave left the file alone — the treatment `advance`
+already gives it — so the guard is gone. Measured after: `pending` drains 66 → 8 → 4 → 0.
+
+What is left is the **peak**, not a loop: with `pending` at zero the process still reached 2.8 GB over 40 s, and the
+pump's rounds at that point allocate nothing measurable — the last unexplained number is ~16 `query_blocking` calls
+a second with no request arriving, which is either `refresh_pull`/`schedule_open_files` re-running or a query's own
+work; the next instrument is those two calls with the counter.
