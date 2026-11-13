@@ -74,7 +74,8 @@ impl Client {
     fn start(root: &Path) -> Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cpp_ls"))
             .arg("--log-path")
-            .arg("none")
+            // `none` unless a run is being read for its log lines (`CPPLS_MEMORY_LOG`).
+            .arg(std::env::var("CPPLS_MEMORY_LOG").unwrap_or_else(|_| "none".to_string()))
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
