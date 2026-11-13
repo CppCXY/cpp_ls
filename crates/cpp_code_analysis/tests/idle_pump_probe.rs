@@ -74,7 +74,12 @@ fn what_an_idle_pump_does_after_the_closure_is_cooked() {
         rounds += 1;
     }
     let (queued, open, rest) = session.queue_sizes();
-    eprintln!("[idle] queue {queued} (open {open}, rest {rest}), refinements wanted {}", session.pending_work() - queued);
+    eprintln!(
+        "[idle] queue {queued} (open {open}, rest {rest}), cooking {}, refinements wanted {}, pending total {}",
+        session.pending_cooking(),
+        session.refinements_wanted(),
+        session.pending_work()
+    );
     eprintln!(
         "[idle] reached idle in {rounds} rounds, {} ms, pending {}",
         started.elapsed().as_millis(),
@@ -104,8 +109,10 @@ fn what_an_idle_pump_does_after_the_closure_is_cooked() {
         let sizes = session.cache_sizes();
         let (queued, _, _) = session.queue_sizes();
         eprintln!(
-            "[idle] queue {queued} refinements {}",
-            session.pending_work() - queued
+            "[idle] queue {queued} cooking {} refinements {} pending {}",
+            session.pending_cooking(),
+            session.refinements_wanted(),
+            session.pending_work()
         );
         eprintln!(
             "[idle] drain {round}: {allocations} allocations, {} MB requested, pending {}, cooked {}, views {}/{} MB",

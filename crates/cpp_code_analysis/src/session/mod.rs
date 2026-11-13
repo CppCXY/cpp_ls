@@ -8647,7 +8647,12 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         for path in asked {
             if !built.iter().any(|made| made == path) {
+                if crate::probes::cooking() {
+                    eprintln!("refused a cook that built nothing: {}", path.display());
+                }
                 refused.insert(queue_key(path));
+            } else if crate::probes::cooking() {
+                eprintln!("a cook built: {}", path.display());
             }
         }
     }
