@@ -9758,7 +9758,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if text.is_empty() {
             return None;
         }
-        Some(cpp_formatter::format(&text, &cpp_formatter::Style::default()))
+        Some(cpp_formatter::reflow(&text, &cpp_formatter::Style::fallback_style()))
     }
 
     /// The index of the `)` that closes the `(` at `open`, counting nesting and skipping literals.
