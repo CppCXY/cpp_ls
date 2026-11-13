@@ -300,6 +300,11 @@ const COOK_TWO_LEVELS_FURTHER: usize = 24;
 
 const COOK_ONE_LEVEL_FURTHER: usize = 64;
 
+/// How many data members a class may have before the hover stops pricing its layout.
+///
+/// See the note in [`Session::the_layout_of`]: a layout is a visibility walk per member, and a header's registry
+/// struct (neovim's `file_buffer` has eighty members) cost **7.2 s** of hover with no bound.
+const LAYOUT_MEMBER_BUDGET: usize = 24;
 /// How many files a project scan will list before it stops.
 ///
 /// A bound on a directory walk whose size is a fact about a machine rather than about the project: a checkout with
@@ -11312,6 +11317,24 @@ impl<F: FileProvider + Clone> Session<F> {
         // read out of, at file offsets. `None` when the index cannot place the class: the layout is still computed for
         // a class the asking file declares, and reported without the two spelling facts it cannot read.
         let as_written = self.the_class_as_its_file_wrote_it(written_type, &view.path);
+        // **A hover is a request, and a layout is a visibility walk per member.** A class with more than this many
+        // data members is a registry — a header's `struct file_buffer` has eighty — and pricing every member costs
+        // seconds for a card the reader scrolls past. Measured on neovim: `file_buffer`'s card took **7.2 s** with
+        // no cap, and the layout it printed was incomplete anyway. The budget is per class and per request: what a
+        // reader opens is a struct with a handful of members.
+        let data_members = list
+            .own()
+            .filter(|member| {
+                member.fact.kind == crate::DeclKind::Variable
+                    && !member
+                        .fact
+                        .modifiers
+                        .contains(crate::DeclModifiers::STATIC)
+            })
+            .count();
+        if data_members > LAYOUT_MEMBER_BUDGET {
+            return Known::No;
+        }
         let union = as_written.as_ref().is_some_and(|(text, class_at, _)| {
             let before = &text[..(*class_at).min(text.len())];
             // The last keyword before the name wins: `template <class T> union U` is a union, and a `class` earlier
@@ -11417,6 +11440,16 @@ impl<F: FileProvider + Clone> Session<F> {
     fn the_size_of_a_type(&self, view: &FileView, spelling: &str, depth: usize) -> Option<(usize, usize)> {
         if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelling) {
             return Some(builtin);
+        }
+        // **A typedef is the type it names.** Real C decides its members through one — neovim's `file_buffer` has
+        // `pos_T b_op_start`, `handle_T handle`, `memline_T b_ml` — so without this the layout of most real structs
+        // is "not computed". The alias's own fact holds the spelling it expands to.
+        if let Known::Yes(aliased) = self.store.index().definition(spelling, &view.path)
+            && let Some(target) = aliased.fact.type_of.as_deref()
+            && target != spelling
+            && depth <= 8
+        {
+            return self.the_size_of_a_type(view, target, depth + 1);
         }
         let Known::Yes(nested) = self.the_layout_of_a_class(view, spelling, depth + 1) else {
             return None;

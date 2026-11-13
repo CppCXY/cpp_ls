@@ -143,3 +143,24 @@ fn an_empty_class_is_one_byte() {
     assert_eq!(layout.size, 1);
     assert_eq!(layout.alignment, 1);
 }
+/// **A typedef is the type it names**, which is how most real C writes its members: `pos_T b_op_start` is a struct.
+#[test]
+fn a_member_whose_type_is_a_typedef_is_sized_through_it() {
+    let layout = layout(
+        "\
+struct Inner { int x; int y; };
+typedef Inner Alias;
+struct Outer { Alias a; char c; };
+",
+        "Outer",
+    );
+    assert_eq!(
+        layout
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.offset, field.size))
+            .collect::<Vec<_>>(),
+        [("a", 0, 8), ("c", 8, 1)]
+    );
+    assert_eq!(layout.size, 12);
+}
