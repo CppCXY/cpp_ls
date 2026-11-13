@@ -454,6 +454,14 @@ fn unused_is_a_hint_that_a_client_may_grey_out() {
         RuleSeverity::Warning
     );
     assert!(DiagnosticCode::ParamTypeCheck.tags().is_empty());
+
+    // **A header this analysis could not find is a warning** — the claim is about its search (compile database,
+    // toolchain discovery, include graph), not about the language; a build can pass `-I` paths a reader's editor
+    // cannot see.
+    assert_eq!(
+        DiagnosticCode::IncludeNotFound.severity(),
+        RuleSeverity::Warning
+    );
 }
 
 /// **A value that cannot convert to a written builtin type is reported** at both places a value enters an object

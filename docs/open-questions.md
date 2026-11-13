@@ -836,3 +836,20 @@ has — instead of a second whole-program read. Two tests: the budget refuses (`
 its_memory_budget_is_spent`) and a read is charged (`a_program_read_is_charged_to_the_budget`). The cost is real: the
 second and later standard-heavy files of one session lose the compiler's whole-program reading, which is where
 cross-file macro scoping is decided. Removing the budget is the goal once the holder is found.
+## An include behind `#if defined(__linux__)` still warns
+
+**Half fixed on 2026-11-13, and the remaining half is a missing input rather than a rule.** `include-not-found`
+now asks the index whether the branch the directive sits in is decided `Inactive` (`the_guard_is_taken`) and
+stays silent when it is. On the neovim census that removed two of four misses; the two that remain are
+`<execinfo.h>` and `<langinfo.h>`, behind `#if defined(__linux__)` — a guard whose answer needs the compiler's
+**predefined** macros for this file, and `visibility_at` sees only the summary's own macro facts (the file's own
+`#define`s and what its direct includes bring in).
+
+The summary cannot hold the answer — it stores the question and is keyed without a compilation (`SummaryGuards`'
+own documentation) — so the fix is to pass the file's environment into the check: `Session` has it
+(`config_for_file(path)` gives the `-D`s, the toolchain discovery the predefined ones), and `CheckContext` would
+need to carry it to `visibility_at`. Measured consequence, so the next round can size it: two findings in 52
+files, both glibc-only headers.
+
+Test that pins the behaviour today: `an_include_behind_an_undecided_guard_is_still_reported` — `#ifdef
+NEVER_DEFINED_ANYWHERE` keeps the finding because "I could not tell" must not become "nothing to see".

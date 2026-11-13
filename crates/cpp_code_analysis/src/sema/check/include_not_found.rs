@@ -25,6 +25,31 @@
 //!
 //! The other two forms are literals. The resolver looked for `vectr` on the system path and for `helpr.h` next to
 //! the file, and did not find it. That is `Known::No`.
+//!
+//! # And the branches nobody compiles
+//!
+//! **An `#include` in a branch this configuration does not take is not a missing file.** neovim writes
+//!
+//! ```c
+//! #if defined(__linux__)
+//! # include <execinfo.h>
+//! #endif
+//! ```
+//!
+//! and a Windows build never opens that header, so a resolver that looked and failed has answered a question about
+//! a line that is not in the program. The file's summary stores its guards as **questions, never answers** (a
+//! compilation decides them, and a summary is keyed without one), so the answer is asked where it lives —
+//! [`ProjectIndex::the_guard_is_taken`] — and only a **decided** `Inactive` silences the finding: a guard this
+//! layer cannot decide keeps it, because "I could not tell" must not become "nothing to see". Measured on the
+//! neovim census: the four remaining include misses are glibc and sanitizer headers, and the platform-only ones
+//! behind `#if defined(__linux__)` are silent.
+//!
+//! # Severity
+//!
+//! A **warning**, and the reason is whose claim it is: the search is this analysis's, built from the compile
+//! database, the toolchain discovery and the project's own include graph. A build can pass `-I` paths through a
+//! generator, or have an SDK where discovery cannot see it — so "I did not find it" is a warning about our search
+//! rather than an error about the program. See [`DiagnosticCode::severity`].
 
 use crate::IncludeForm;
 
@@ -44,6 +69,16 @@ impl Check for IncludeNotFound {
     fn check(context: &mut CheckContext<'_>) {
         for include in &context.summary.includes {
             if include.resolved.is_some() || include.form == IncludeForm::Macro {
+                continue;
+            }
+            // **A directive in a branch nobody compiles names no file** — see the module documentation. Asked of
+            // the index, because that is where the guard's question is answered against the macros in force;
+            // `Unknown` answers true and keeps the finding.
+            if !context.model.index().the_guard_is_taken(
+                context.path,
+                include.guard,
+                include.range.start_offset,
+            ) {
                 continue;
             }
             let message = match include.form {

@@ -79,3 +79,44 @@ fn an_unresolved_include_in_another_file_is_not_this_files_finding() {
         "the missing header is written in `broken.h`, not here",
     );
 }
+
+/// **An `#include` in a branch this configuration does not take is not a missing file.**
+///
+/// neovim writes `#if defined(__linux__) / # include <execinfo.h> / #endif`, and no Windows build ever opens that
+/// header. The resolver looked and failed because it was asked about a line that is not in the program: the guard
+/// is decided `Inactive`, and the finding goes.
+#[test]
+fn an_include_in_a_branch_nobody_takes_is_not_reported() {
+    let codes = codes_of("#if 0\n#include <vectr>\n#endif\nint main() { return 0; }\n");
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::IncludeNotFound,
+        "`#if 0` is a branch no compiler reads",
+    );
+}
+
+/// **…and a branch that *is* taken still reports**, so the silence above is about the guard rather than about
+/// `#if` in general.
+#[test]
+fn an_include_in_a_branch_that_is_taken_is_still_reported() {
+    let codes = codes_of("#if 1\n#include <vectr>\n#endif\nint main() { return 0; }\n");
+    assert_reported(
+        &codes,
+        DiagnosticCode::IncludeNotFound,
+        "`#if 1` is compiled",
+    );
+}
+
+/// **A guard this layer cannot decide keeps the finding** — `Unknown` answers visible, the same rule the
+/// declaration lookup follows: "I could not tell" must not become "nothing to see".
+#[test]
+fn an_include_behind_an_undecided_guard_is_still_reported() {
+    let codes = codes_of(
+        "#ifdef NEVER_DEFINED_ANYWHERE\n#include <vectr>\n#endif\nint main() { return 0; }\n",
+    );
+    assert_reported(
+        &codes,
+        DiagnosticCode::IncludeNotFound,
+        "nothing defines that macro, but this layer cannot know it",
+    );
+}

@@ -454,3 +454,20 @@ the initializer's use.
   that is the next round.
 * **A parameter type in a multi-line signature** whose list holds a macro invocation — `Integer src_id` in
   `deprecated.c:220`, where `Dict(empty) *opts` sits later in the same list.
+
+**`include-not-found` is a warning, and a branch nobody compiles is not a finding.** Two changes from the
+editor report of 2026-11-13:
+
+* **Severity** is `Warning` rather than `Error` — the claim is about *this analysis's* search (the compile
+  database, the toolchain discovery, the include graph), and a build can pass `-I` paths through a generator or
+  have an SDK where discovery cannot see it.
+* **A directive in a branch this configuration does not take is silent.** neovim's `#if defined(__linux__) /
+  # include <execinfo.h> / #endif` names a file no Windows build opens, so "was not found" was a claim about a
+  search that should not have been made. The guard's question is answered by the index
+  (`ProjectIndex::the_guard_is_taken`) and only a **decided** `Inactive` silences the finding: `Unknown` keeps it,
+  the same rule the declaration lookup follows.
+
+Measured on the 52-file sample: `IncludeNotFound` **4 → 2** (the two sanitizer headers went; `execinfo.h` and
+`langinfo.h` stay because their guard is `defined(__linux__)`, which the *summary* cannot decide — it stores
+questions, not answers, and the compilation environment lives in the session rather than the index; see
+`docs/open-questions.md`).

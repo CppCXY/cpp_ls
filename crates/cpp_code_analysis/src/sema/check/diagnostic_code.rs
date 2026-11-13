@@ -243,10 +243,15 @@ impl DiagnosticCode {
             DiagnosticCode::SyntaxError => RuleSeverity::Error,
             // **A name that is not there, a call that cannot be made, a type that does not fit.** These are the
             // language's own complaints: the program will not build.
-            DiagnosticCode::IncludeNotFound => RuleSeverity::Error,
             // A judgement rather than a law: the file compiles while something upstream includes the header, and the
             // finding says the file should say so itself. The standard library is never named — see the module.
             DiagnosticCode::MissingInclude => RuleSeverity::Warning,
+            // **A header this analysis could not find is a warning rather than an error**, and the reason is
+            // that the *search* is ours, not the compiler's: a build system may pass `-I` paths through a
+            // generator, a platform SDK may be installed where the toolchain discovery cannot see it, and a
+            // directive in a branch this configuration does not take names no file at all. The language's own
+            // errors stay errors; "I looked and did not find it" is a claim about our search.
+            DiagnosticCode::IncludeNotFound => RuleSeverity::Warning,
             DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
             DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
             DiagnosticCode::UndefinedField => RuleSeverity::Error,

@@ -2305,6 +2305,18 @@ impl ProjectIndex {
         }
     }
 
+    /// **Is the branch this directive is written in one the configuration takes?** — the public form of
+    /// [`ProjectIndex::a_guard_is_taken`], for a caller that must not *complain* about a branch nobody compiles.
+    ///
+    /// [`crate::sema::check::include_not_found`] is that caller: an `#include` under `#if 0`, or under a feature test
+    /// this project's `-D`s decide against, names a file for a compiler that never reads the line — so "was not
+    /// found" would be a claim about a search that should not have been made. The answer is three-way underneath
+    /// (`visibility_at`), and `Unknown` comes back **true**: a guard this layer cannot decide must not silence a
+    /// finding, the same rule the declaration lookup follows.
+    pub fn the_guard_is_taken(&self, file: &Path, guard: crate::FactGuard, offset: usize) -> bool {
+        self.a_guard_is_taken(file, guard, offset)
+    }
+
     /// **Is the branch this declaration is written in the one the configuration takes?**
     ///
     /// `Unconditional` is a free yes, and a region is a macro walk (`visibility_at`) — so the verdict is memoized:
