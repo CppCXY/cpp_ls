@@ -130,7 +130,11 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                     ),
                 }
             }
-            if let Err(error) = context
+            // **`CPPLS_NO_WATCH` is an A/B switch, not a setting**: with it set no OS watcher runs, which is how a
+            // run can tell whether the watcher's own loop is what burns a core and grows the process.
+            if std::env::var_os("CPPLS_NO_WATCH").is_some() {
+                log::info!("the native watcher is off (CPPLS_NO_WATCH)");
+            } else if let Err(error) = context
                 .native_watcher()
                 .start(context.clone(), root.clone(), filter)
                 .await
@@ -356,7 +360,18 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         const PROGRESS_REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
         let mut last_report = std::time::Instant::now();
 
+        // **How fast the loop is going**, under the trace: a pump that waits shows ~8 rounds a second (the
+        // idle timeout); one that spins shows thousands, which is what the `containers.cpp` report measured.
+        let mut rounds = 0u64;
+        let rounds_started = std::time::Instant::now();
         loop {
+            rounds += 1;
+            if rounds % 1000 == 0 && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                eprintln!(
+                    "[rounds] {rounds} in {:?}",
+                    rounds_started.elapsed()
+                );
+            }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
             // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
             // the slice finds nothing to do. These five lines are the only way to tell "blocked on the workspace

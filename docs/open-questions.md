@@ -971,4 +971,30 @@ the check layer: it is in the server's pump path that the standalone tool does n
 therefore the pump's own, and the probe that answers it is one request order away: does the cook of that file
 land (`cooked_declarations` `Some`) or is it re-wanted every round? The in-process pump probe cannot see it — it
 does not cook at all (`cooking 67, cooked 0`), because cooking belongs to the server's `claim_cooking`/
-`render_cooks` path.
+`render_cooks` path.
+
+**Third round — two fixes landed, and the residue is now one request.**
+
+Fixed and measured:
+
+- **The pump's no-work round waits.** It used to `yield_now()` and continue, so a backlog it could not move spun at
+  thousands of rounds a second. With `CPPLS_NO_COOKS` set, that loop took private bytes 476 MB → 1 228 MB in eight
+  seconds **while every stage the pump measures allocated 0 MB**; with the wait the same scenario holds **flat at
+  422 MB for fifteen seconds**.
+- **A stored-refinement miss is remembered** by `(path, content hash)`. `prepare_wave` asked the disk cache for the
+  slice's files on every round — a whole-closure walk per file, and a miss that cannot change for a text (nothing
+  is storable). Measured: `wave 20 MB` on every round with `prepared 0`; now `wave 0 MB`.
+
+The residue, bisected to one request:
+
+```text
+idle, no request            flat at 422 MB for 15 s      (after the fix)
+one textDocument/diagnostic grows ~90 MB/s, one core at 100 %, 21 threads
+                            pump rounds < 100/s (not the pump), no watcher, no cooks,
+                            every pump stage 0 MB, session tables 66-73 MB
+```
+
+So the bytes are in the **request path** after the pull, not in the pump and not in the checks:
+`inspect diagnostics --index --cook` on the same file is 212 MB and instant. The next instrument is the same
+allocation counter around `AnalysisState::catch_up`, `AnalysisState::prepare` and `Session::diagnostics`, printing
+per request — that names the call in one run.
