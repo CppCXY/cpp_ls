@@ -58,6 +58,16 @@ fn finish(rendered: String, style: &Style) -> String {
     macros::align_escaped_newlines(&aligned_comments, style)
 }
 
+/// **Format `source` with clang-format's line layout** — a break before every logical line, then the same indentation
+/// and spacing [`format`] decides, so text that had no line structure (a macro's expansion) comes out as code.
+///
+/// The tokens are copied, never re-serialised: this is [`format`] on a source whose whitespace-only gaps have been
+/// given the breaks clang-format would choose. A file that was already laid out is returned unchanged by the second
+/// pass (`tests/layout_reflow.rs` pins the idempotence).
+pub fn reflow(source: &str, style: &Style) -> String {
+    format(&breaks::laid_out(source, style), style)
+}
+
 /// Format `source` as the file at `path`, which is what lets the include sorter put the file's own header first
 /// (`clang-format`'s main-header rule; see `includes.rs`).
 pub fn format_file(path: &std::path::Path, source: &str, style: &Style) -> String {

@@ -315,6 +315,71 @@ pub fn break_line(
     }
 }
 
+/// **The source with a line break before every logical line** — clang-format's layout, as text a formatter can then
+/// indent.
+///
+/// [`crate::format`] deliberately keeps the author's line structure: a statement written on the line of the one before
+/// it stays there. That is the right contract for a *formatting* request on a file someone is editing, and the wrong
+/// one for text with no line structure at all — a macro's expansion, a signature rebuilt from facts — where the reader
+/// wants the shape clang-format would give it.
+///
+/// The token bytes are untouched: the only regions rewritten are the whitespace-only gaps between two tokens, and a gap
+/// with a comment, a directive or a line already starting there is left exactly as it was. A newline inside a
+/// directive would break the macro it belongs to, which is why this scan tracks them the way `render` does.
+pub fn laid_out(source: &str, style: &crate::config::Style) -> String {
+    let stream = crate::tokens::stream(source);
+    let lines = logical_lines(&stream);
+    let mut starts: std::collections::HashSet<usize> =
+        lines.iter().skip(1).map(|line| line.start).collect();
+    let ending = crate::tokens::line_ending(source);
+    let mut out = String::with_capacity(source.len() + starts.len() * ending.len());
+    let mut in_directive = false;
+    // **The brace style is a decision of this pass**, and it is the one clang-format makes: `Attach` keeps `{` on the
+    // line of what it opens, `} else {` and `} while (0);` stay on the line of the `}` they follow, and every other
+    // style starts a line at the brace. `format` alone cannot do it — a file whose braces the author placed keeps
+    // them — which is why the layout step has to choose.
+    let attaches = style.text(crate::options::StyleOption::BreakBeforeBraces) == "Attach";
+    for index in 0..stream.tokens.len() {
+        let gap = &stream.gaps[index];
+        let text = source.get(gap.start..gap.end).unwrap_or("");
+        if stream.tokens[index].text == "#" && (index == 0 || gap.newlines > 0) {
+            in_directive = true;
+        }
+        let current = &stream.tokens[index];
+        let previous = stream.tokens.get(index.wrapping_sub(1));
+        let attaches_to_the_line_before = attaches
+            && (current.kind == cpp_parser::CppTokenKind::LeftBrace
+                || (previous.is_some_and(|previous| {
+                    previous.kind == cpp_parser::CppTokenKind::RightBrace
+                }) && matches!(current.text, "else" | "catch" | "while")));
+        let needs_a_break = index > 0
+            && !in_directive
+            && !attaches_to_the_line_before
+            && starts.remove(&index)
+            && gap.newlines == 0
+            && gap.comments.is_empty()
+            && !gap.at_end;
+        if needs_a_break {
+            out.push_str(ending);
+        } else {
+            out.push_str(text);
+        }
+        out.push_str(stream.tokens[index].text);
+        if in_directive
+            && stream
+                .gaps
+                .get(index + 1)
+                .is_some_and(|next| next.newlines > 0)
+        {
+            in_directive = false;
+        }
+    }
+    if let Some(trailing) = stream.gaps.last() {
+        out.push_str(source.get(trailing.start..trailing.end).unwrap_or(""));
+    }
+    out
+}
+
 /// May a break go before the token at `index`?
 pub fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;

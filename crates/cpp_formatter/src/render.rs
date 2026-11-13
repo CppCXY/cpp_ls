@@ -107,9 +107,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 None => columns.advance(column, gap_text),
             };
         } else if forced && index > 0 && !in_directive {
-            // **A break the column limit asked for**: the line continues at the continuation column.
-            let indent =
-                layout::continuation(&stack, statement_indent, stream.tokens[index].kind, style);
+            // **A break the column limit asked for**: the line continues `ContinuationIndentWidth` past the statement,
+            // which is the column `breaks::break_line` assumed when it chose the break. Aligning to the open bracket
+            // instead (what `layout::continuation` answers) let a deeply nested call decide a column *past* the limit:
+            // measured on a macro expansion, a line was continued at column 120 of an 80-column layout and every piece
+            // after it overflowed the width the search had promised. The author's own breaks still align — that is what
+            // keeps an already-formatted file unchanged.
+            let indent = statement_indent + style.count(StyleOption::ContinuationIndentWidth);
             out.push_str(line_ending);
             out.push_str(&" ".repeat(indent));
             column = indent;
