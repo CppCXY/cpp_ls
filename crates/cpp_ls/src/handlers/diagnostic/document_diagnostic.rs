@@ -21,6 +21,7 @@ pub async fn on_pull_document_diagnostic(
             message: format!("diagnostics require a file URI: {}", uri.as_str()),
         };
     };
+    let allocs_at_the_pull = cpp_code_analysis::alloc::bytes();
     let prepared = tokio::select! {
         _ = cancel_token.cancelled() => return RequestOutcome::Cancelled(CancelSource::Client),
         prepared = context.analysis().prepare_for_a_diagnostic(&path) => prepared,
@@ -32,9 +33,23 @@ pub async fn on_pull_document_diagnostic(
         };
     }
 
+    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        eprintln!(
+            "[pull] prepare done, {} MB",
+            (cpp_code_analysis::alloc::bytes() - allocs_at_the_pull) / (1024 * 1024)
+        );
+    }
+    let allocs_before_the_query = cpp_code_analysis::alloc::bytes();
     let for_the_query = path.clone();
     let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
+        let before = cpp_code_analysis::alloc::bytes();
         let answer = super::diagnose_file(session, &for_the_query).map(|(_, items)| items);
+        if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+            eprintln!(
+                "[pull] diagnose_file asked for {} MB",
+                (cpp_code_analysis::alloc::bytes() - before) / (1024 * 1024)
+            );
+        }
         // **A pull is where a session's tables are biggest**, so it is where the breakdown is worth printing: the
         // report is the session's own accounting, not the resident set, and the two differ by the allocator's slack —
         // which is the number a "memory keeps growing" report is about. `CPPLS_TRACE_MEMORY=1` in the server's
@@ -46,6 +61,12 @@ pub async fn on_pull_document_diagnostic(
     })
     .await;
 
+    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        eprintln!(
+            "[pull] query returned, {} MB after the prepare",
+            (cpp_code_analysis::alloc::bytes() - allocs_before_the_query) / (1024 * 1024)
+        );
+    }
     match outcome {
         RequestOutcome::Ready(items) => {
             log::debug!("pull: {} -> {} item(s)", path.display(), items.len());

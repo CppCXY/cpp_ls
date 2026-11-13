@@ -997,4 +997,18 @@ one textDocument/diagnostic grows ~90 MB/s, one core at 100 %, 21 threads
 So the bytes are in the **request path** after the pull, not in the pump and not in the checks:
 `inspect diagnostics --index --cook` on the same file is 212 MB and instant. The next instrument is the same
 allocation counter around `AnalysisState::catch_up`, `AnalysisState::prepare` and `Session::diagnostics`, printing
-per request — that names the call in one run.
+per request — that names the call in one run.
+
+**The pull path, split** (`CPPLS_TRACE_ALLOCS` prints `[pull]` and `[query]`):
+
+```text
+[pull] prepare done, 117 MB       ← prepare_for_a_diagnostic, per pull
+[pull] diagnose_file asked for 5 MB
+[pull] query returned, 8 MB after the prepare
+[pull] prepare done, 0 MB        ← the second pull, and then no further line
+```
+
+So a pull is not the 90 MB/s — it allocates 117 MB once, in `prepare_for_a_diagnostic` — and the growth after it
+is something that starts then and keeps going: with the pump waiting (the fix above) its rounds allocate 0 MB,
+`pending` stays 66, and no stage runs; `[query]` lines show every query it did run at 0–6 ms. The next question is
+what runs at 100 % of a core *outside* both: the trace to add is thread-level, not stage-level.
