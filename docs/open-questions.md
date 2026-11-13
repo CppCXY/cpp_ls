@@ -1024,3 +1024,36 @@ What is left is the **peak**, not a loop: with `pending` at zero the process sti
 pump's rounds at that point allocate nothing measurable — the last unexplained number is ~16 `query_blocking` calls
 a second with no request arriving, which is either `refresh_pull`/`schedule_open_files` re-running or a query's own
 work; the next instrument is those two calls with the counter.
+
+**Fourth round — the peak was the program reads, and the budget was never paid.**
+
+The instrument that named it was an experiment switch: `CPPLS_NO_PROGRAM_READ=1` made the twenty-open-file run
+**flat at 511 MB for 60 s** on the same tree that grew to 1 094 MB in 34 s without it. A whole-program read is the
+one operation that allocates hundreds of megabytes at once, and `PROGRAM_READ_BUDGET_BYTES` (512 MB) exists so that
+twenty open tabs do not cost twenty of them — but the charge lived in `Session::read_the_unit`, which is **not the
+path the pump takes**: the pump goes `AnalysisState::read_a_program` → `Session::commit_a_program`, and that path
+charged nothing, so every open file's program was read however much the previous ones had cost.
+
+Three changes, measured after a cold cache with a watchdog that samples private bytes every 200 ms and kills at
+1 GB or two minutes — the harness has a bound because the bug is unbounded:
+
+```text
+                                       before                     after
+twenty files open, no request    1 094 MB at 34 s (killed)    515-550 MB flat, 60 s
+one file + the editor's requests  604 MB peak at 1 s, exits in 6.5 s
+CPPLS_NO_PROGRAM_READ on that run   511 MB flat for 60 s
+```
+
+- **The budget is charged in `commit_a_program`**, the one place every path goes through. Test:
+  `session::tests::a_program_read_charges_the_budget_that_bounds_it` — 0 charged on the previous tree.
+- **A declined program read waits.** `read_a_program` answers `false` when the file it chose is over budget, and
+  such a file is *deliberately* re-considered on every drain; the pump used to `continue` with no wait, and
+  re-considering walks the closure of every open file to price it. Twenty tabs spun on twenty closure walks.
+- **A file is asked to be cooked once per text.** `want_the_closure_cooked` runs per open document per drain and
+  asked the index's *bounded* cooked map, so an evicted reading read as "nobody cooked this" and the file was
+  queued again: 486 cook commits for 179 distinct files in 33 s, before the fix. The ask-once set is cleared where
+  a file's text moves (`buffer_changed`) or its dependents are invalidated.
+
+Left open: the first programme read of a standard-heavy file still peaks around 600 MB, which is the feature's own
+cost (one parse of the whole program) rather than a leak; a project with twenty tabs open now pays for one such
+program and keeps its own reading for the rest.
