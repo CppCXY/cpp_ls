@@ -964,6 +964,37 @@ mod tests {
         );
     }
 
+    /// **No paired `.cpp`**: the definition goes to the file being edited, and the title says so — a file the session
+    /// does not hold is a file whose contents the client may not know.
+    #[test]
+    fn without_a_paired_file_the_definition_goes_to_this_file() {
+        let files = MemoryFiles::new().with_file(
+            "/p/shape.h",
+            "struct Shape {\n    double area();\n};\n",
+        );
+        let session = a_session(files, ["/p/shape.h"]);
+        let view = session.view("/p/shape.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("area").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        let action = fixes
+            .iter()
+            .find(|action| action.title.contains("Shape::area"))
+            .unwrap_or_else(|| panic!("no definition fix among {fixes:?}"));
+        assert!(action.title.contains("this file"), "{}", action.title);
+        let edit = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+            .expect("an edit");
+        let lsp_types::DocumentChanges::Edits(edits) = edit else {
+            panic!("one text edit");
+        };
+        assert_eq!(edits[0].text_document.uri.as_str(), "file:///p/shape.h");
+    }
+
     /// A session over a set of in-memory files, indexed.
     fn a_session(
         files: MemoryFiles,
