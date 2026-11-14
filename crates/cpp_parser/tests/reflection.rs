@@ -190,3 +190,13 @@ void f() {
         expansion.text().to_string()
     );
 }
+/// **`^^::` reflects the global namespace**, and it is the form libstdc++`s own `<meta>` writes:
+/// `access_context { ^^::, info {} }` (`meta:329`). Verified with GCC 16.2 (`-std=c++26 -freflection`:
+/// `static_assert(std::meta::is_namespace(^^::))`). Our parser read the `::` as the head of a name and reported
+/// `expected a name after `::``.
+#[test]
+fn a_reflection_of_the_global_scope_is_a_reflection() {
+    parses("constexpr auto g = ^^::;\n");
+    // …and a global name keeps working, because `::` followed by a name is that name.
+    parses("constexpr auto g = ^^::Widget;\n");
+}

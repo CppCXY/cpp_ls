@@ -3158,6 +3158,20 @@ fn parse_reflect_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ReflectExpr);
     p.bump(); // `^^`
 
+    // **`^^::` reflects the global namespace** — the form libstdc++'s own `<meta>` writes
+    // (`access_context { ^^::, info {} }`). A bare `::` is a *nested-name-specifier* with nothing after it, which is
+    // why both other readings fail on it: it begins no type-id and no expression. `::` followed by a name is that
+    // name's usual head, and stays with the readings below.
+    if p.current_token() == CppTokenKind::Scope
+        && !matches!(
+            p.peek_next_token(),
+            CppTokenKind::Identifier | CppTokenKind::TemplateKeyword | CppTokenKind::Tilde
+        )
+    {
+        p.bump(); // `::`
+        return Ok(m.complete(p));
+    }
+
     let read = if crate::grammar::cpp::types::starts_a_type_id(p) {
         crate::grammar::cpp::types::parse_type_id(p)
     } else {

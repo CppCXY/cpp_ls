@@ -284,7 +284,15 @@ use std::path::{Path, PathBuf};
 /// A cached reading holds that tree, and the cached parse errors with it: measured on `C:\Users\zc\Desktop\cpp`,
 /// `reflect.hpp` reported two `expected a type specifier` errors *after* the parser had learned the statement, because
 /// the reading was the one the old parser produced. The number moves so the tree is read again.
-pub const FORMAT_VERSION: u32 = 31;
+/// # Why this moved to 32
+///
+/// **`__cplusplus` and one new macro decide which half of a header exists.** `c++23` was answered `202311L` (a draft
+/// number; the compiler says `202302L`) and `c++26` was answered *nothing*, and `-freflection` now defines
+/// `__cpp_impl_reflection` — the macro libstdc++`s `<meta>` is gated on. Every `#if __cplusplus > 202302L` in every
+/// header therefore had an answer it did not have before, and the conditions are exactly what a cached summary
+/// records: measured on `C:\Users\zc\Desktop\cpp`, `std::meta` had **no fact at all** until this changed, so hover and
+/// go-to-definition answered nothing in a file that compiles.
+pub const FORMAT_VERSION: u32 = 32;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

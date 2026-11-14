@@ -190,6 +190,18 @@ pub struct CompilerConfig {
     /// between a fuzzy match and a closure of fourteen files. Measured on a real CMake project with no database, the
     /// fallback is what turns `#include "Session/StandardIOSession.h"` from an unresolved name into the header.
     pub fuzzy_includes: bool,
+
+    /// **Was the compilation given `-freflection`?** — GCC 16's switch for C++26 reflection.
+    ///
+    /// Recorded because it is the only thing that decides the **`__cpp_impl_reflection`** feature-test macro, and that
+    /// macro is the gate on libstdc++`s own `<meta>`: the header wraps its whole body in
+    /// `#if __glibcxx_reflection >= 202603L` (`bits/version.h`), which is false unless `__cpp_impl_reflection` is
+    /// defined. Measured on `C:\Users\zc\Desktop\cpp`: without this, `std::meta`, `define_static_array` and every
+    /// metafunction had **no fact at all**, so hover and go-to-definition answered nothing in a file that compiles —
+    /// the reader sees "the analysis cannot find std::meta", not "reflection is off".
+    ///
+    /// A flag rather than a [`Dialect`] variant: the same compiler reads the file, with one more feature on.
+    pub reflection: bool,
 }
 
 impl CompilerConfig {
@@ -745,6 +757,12 @@ pub fn config_from_arguments(
             }
         } else if let Some(rest) = argument.strip_prefix("-std=") {
             config.standard = Some(rest.into());
+        } else if argument == "-freflection" {
+            // **GCC 16`s reflection switch**, and the one flag this layer needs for `<meta>`: see
+            // [`CompilerConfig::reflection`].
+            config.reflection = true;
+        } else if argument == "-fno-reflection" {
+            config.reflection = false;
         } else if let Some(rest) = argument.strip_prefix("--target=") {
             config.target = Some(rest.into());
         } else if argument == "--target" {
@@ -1200,6 +1218,11 @@ pub fn predefined_macros_of(config: &CompilerConfig) -> Vec<CommandLineMacro> {
     if let Some(standard) = config.standard.as_deref() {
         if let Some(value) = cplusplus_value(standard) {
             macros.push(CommandLineMacro::with_value("__cplusplus", value));
+            // **`-freflection` decides one more macro**, and libstdc++`s `<meta>` is gated on it. GCC 16.2 defines
+            // `__cpp_impl_reflection 202603L` with the flag and nothing without it — measured with `-dM -E`.
+            if config.reflection {
+                macros.push(CommandLineMacro::with_value("__cpp_impl_reflection", "202603L"));
+            }
 
             // MSVC's own headers ask `_MSVC_LANG` for the same number, and its value is the language version
             // rather than the compiler's — so it is decided by the standard here too.
@@ -1226,8 +1249,13 @@ fn without_the_gnu_prefix(standard: &str) -> &str {
 
 /// `c++17` → `201703L`, `gnu++20` → `202002L`, and the older `c++2a`/`c++2b` spellings.
 ///
-/// `None` for anything this table does not know — an unset standard, a typo, or a draft whose number is not settled
-/// (`c++26`): a wrong `__cplusplus` is worse than an absent one, because absent is `Unknown`.
+/// `None` for anything this table does not know — an unset standard, a typo, or a draft whose number is not settled:
+/// a wrong `__cplusplus` is worse than an absent one, because absent is `Unknown`.
+///
+/// **`c++23` and `c++26` are settled now, and it matters.** GCC 16.2 says `202302L` and `202400L` (measured with
+/// `-dM -E`), and libstdc++`s `<meta>` is gated on `__cplusplus > 202302L`: while this table answered `202311L` for
+/// `c++23` and nothing for `c++26`, the reflection half of every header was a condition the analysis could not
+/// decide — so it kept the branch out, and `std::meta` had no declaration to hover.
 fn cplusplus_value(standard: &str) -> Option<&'static str> {
     // `-std=c++17` and `-std=gnu++17` differ only in whose extensions are on, and only the first writes the `c`.
     let rest = without_the_gnu_prefix(standard);
@@ -1242,6 +1270,9 @@ fn cplusplus_value(standard: &str) -> Option<&'static str> {
         "17" => "201703L",
         "20" | "2a" => "202002L",
         "23" | "2b" => "202302L",
+        // **C++26 is settled for this compiler**: `g++ 16.2 -std=c++26 -dM -E` says `202400L`, and libstdc++`s
+        // `<meta>` is gated on `__cplusplus > 202302L` — absent was a branch the analysis could not decide.
+        "26" | "2c" => "202400L",
         _ => return None,
     })
 }
@@ -1257,7 +1288,9 @@ fn c_version(standard: &str) -> Option<&'static str> {
         "99" => "199901L",
         "11" => "201112L",
         "17" | "18" => "201710L",
+        // C23 is `202311L` and C2y is `202500L` — measured with `gcc -std=c23 -dM -E` and `-std=c2y`.
         "23" | "2x" => "202311L",
+        "2y" => "202500L",
         _ => return None,
     })
 }
@@ -1331,6 +1364,7 @@ mod tests {
             ("gnu++20", "202002L"),
             ("c++2a", "202002L"),
             ("c++23", "202302L"),
+            ("c++26", "202400L"),
         ] {
             let config = CompilerConfig::default().with_standard(standard);
             let macros = predefined_macros_of(&config);
@@ -1344,8 +1378,9 @@ mod tests {
         }
 
         // A standard this table does not know, and no standard at all: **nothing** is said, which is `Unknown`
-        // rather than a wrong number. `c++26`'s value is not settled, so it is not guessed either.
-        for standard in ["c++26", "c++29", "c90", "nonsense"] {
+        // rather than a wrong number. `c++26` used to be in this list — it is settled now (`202400L`, measured on
+        // GCC 16.2), and the draft after it is not.
+        for standard in ["c++29", "c90", "nonsense"] {
             let config = CompilerConfig::default().with_standard(standard);
             assert!(
                 !predefined_macros_of(&config)

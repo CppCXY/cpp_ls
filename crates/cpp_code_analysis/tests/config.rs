@@ -5,6 +5,7 @@
 //! that is confidently wrong rather than loudly incomplete. Each flag is therefore pinned separately,
 //! including the two spellings of every option and the ones that are deliberately ignored.
 
+use cpp_code_analysis::include::config::predefined_macros_of;
 use cpp_code_analysis::{
     CommandLineMacro, CompilerConfig, IncludePath, parse_compile_commands, split_command_line,
 };
@@ -436,4 +437,74 @@ fn escaped_separators_in_a_path_are_unescaped() {
         "C:/proj",
         "the doubled separators are folded into the one spelling comparisons are made in"
     );
+}
+/// **The reflection switch decides one macro**, and that macro is what gates libstdc++`s `<meta>`.
+///
+/// Measured on the toolchain itself (`g++ 16.2.0 -std=c++26 -dM -E`): `__cplusplus` is `202400L`, and
+/// `__cpp_impl_reflection` is `202603L` **only** with `-freflection`. Without the second, `<meta>`'s whole body —
+/// `#if __glibcxx_reflection >= 202603L` — is a branch the analysis cannot decide, so it keeps it out and
+/// `std::meta` has no declaration to hover.
+#[test]
+fn the_reflection_flag_defines_the_feature_macro() {
+    let with = from_arguments(&["-std=c++26", "-freflection"]);
+    assert!(with.reflection, "the flag is read");
+    let macros = predefined_macros_of(&with);
+    let value = |name: &str| {
+        macros
+            .iter()
+            .find(|macro_| &*macro_.name == name)
+            .and_then(|macro_| macro_.value.as_deref())
+    };
+    assert_eq!(value("__cplusplus"), Some("202400L"), "GCC 16.2's own value");
+    assert_eq!(value("__cpp_impl_reflection"), Some("202603L"));
+
+    let without = from_arguments(&["-std=c++26"]);
+    assert!(!without.reflection);
+    let macros = predefined_macros_of(&without);
+    assert!(
+        !macros
+            .iter()
+            .any(|macro_| &*macro_.name == "__cpp_impl_reflection"),
+        "the macro is the compiler's switch, not the standard's"
+    );
+    assert_eq!(
+        macros
+            .iter()
+            .find(|macro_| &*macro_.name == "__cplusplus")
+            .and_then(|macro_| macro_.value.as_deref()),
+        Some("202400L"),
+        "C++26 is settled now: GCC 16.2 says 202400L"
+    );
+}
+
+/// **`-fno-reflection` turns it back off**, and the later flag wins — the order rule every other flag follows.
+#[test]
+fn the_reflection_flag_can_be_turned_off_again() {
+    let config = from_arguments(&["-freflection", "-fno-reflection"]);
+    assert!(!config.reflection);
+    let macros = predefined_macros_of(&config);
+    assert!(
+        !macros
+            .iter()
+            .any(|macro_| &*macro_.name == "__cpp_impl_reflection"),
+        "{macros:?}"
+    );
+}
+
+/// **C++23's settled value is `202302L`**, not the draft number this table used to answer: GCC 16.2 says so, and a
+/// wrong `__cplusplus` is the one kind of answer that must never be given.
+#[test]
+fn the_cxx23_and_cxx26_values_match_the_compiler() {
+    for (standard, expected) in [("c++23", "202302L"), ("gnu++23", "202302L"), ("c++26", "202400L")] {
+        let config = from_arguments(&[&format!("-std={standard}")]);
+        let macros = predefined_macros_of(&config);
+        assert_eq!(
+            macros
+                .iter()
+                .find(|macro_| &*macro_.name == "__cplusplus")
+                .and_then(|macro_| macro_.value.as_deref()),
+            Some(expected),
+            "{standard}"
+        );
+    }
 }
