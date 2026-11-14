@@ -463,6 +463,13 @@ fn hover_of_the_program(
         return None;
     }
 
+    // **A cursor on the `::` of a qualified name is asking about the segment it introduces.** Every name query below
+    // is keyed on an *identifier*, so at the operator itself all of them answer nothing and the fall-through was the
+    // expression card: hovering `std::meta::nonstatic_data_members_of` on its `::` said
+    // "`std::meta::nonstatic_data_members_of` — has type `vector<info>`" — the type of the *call*, offered as if it
+    // were the function. Moving the question one token right answers what the reader pointed at.
+    let offset = past_a_scope_operator(&view.root, offset);
+
     // **A header name before a declaration**, for the reason the jump asks it first: `#include <vector>` declares
     // nothing, so every question below answers "nothing to say" for a name whose answer is a file on disk. The
     // popup is the resolved path, which is the one thing a reader cannot see from the line they wrote — the header
@@ -2659,3 +2666,61 @@ fn an_unknown_command_stays_in_the_text() {
         "and a parameter's direction is kept beside its name: {rendered}"
     );
 }
+/// **The offset a `::` points at** — the segment after the operator, or the same offset when the cursor is elsewhere.
+///
+/// A hover is about a *name*, and a name is an identifier; `std::meta::f` has three of them and two operators between
+/// them. Without this, a cursor on an operator found no name at all and fell through to "the type of the expression
+/// around it", which for a call is the return type — a card about the function that never mentions the function (see
+/// the caller).
+fn past_a_scope_operator(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+) -> cpp_code_analysis::file::coordinates::ReadingOffset {
+    let Some(operator) = cpp_parser::token_at(root, offset.get()) else {
+        return offset;
+    };
+    if cpp_parser::CppTokenKind::from(operator.kind()) != cpp_parser::CppTokenKind::Scope {
+        return offset;
+    }
+    let mut token = operator.next_token();
+    while let Some(next) = token {
+        if !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(next.kind())) {
+            return cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(
+                next.text_range().start(),
+            ));
+        }
+        token = next.next_token();
+    }
+    offset
+}
+    /// **A cursor on `::` asks about the segment it introduces**, not about the expression around it.
+    #[test]
+    fn a_scope_operator_points_at_the_segment_it_introduces() {
+        let source = "void f() { std::meta::eval(); }\n";
+        let parsed = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        assert_eq!(parsed.get_errors(), [], "the fixture parses");
+        let root = parsed.get_red_root();
+        let at = |needle: &str| cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            source.find(needle).expect("the fixture writes it"),
+        );
+
+        // The first `::` introduces `meta`, the second `eval`.
+        let meta = past_a_scope_operator(&root, at("::meta"));
+        assert_eq!(
+            &source[meta.get()..meta.get() + 4],
+            "meta",
+            "the operator before `meta` points at `meta`"
+        );
+        let eval = past_a_scope_operator(&root, at("::eval"));
+        assert_eq!(
+            &source[eval.get()..eval.get() + 4],
+            "eval",
+            "the operator before `eval` points at `eval`"
+        );
+
+        // Everything else is left where it was, including the name itself.
+        let name = at("std");
+        assert_eq!(past_a_scope_operator(&root, name).get(), name.get());
+        let inside = at("eval");
+        assert_eq!(past_a_scope_operator(&root, inside).get(), inside.get());
+    }
