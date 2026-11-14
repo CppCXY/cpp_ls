@@ -292,7 +292,13 @@ use std::path::{Path, PathBuf};
 /// header therefore had an answer it did not have before, and the conditions are exactly what a cached summary
 /// records: measured on `C:\Users\zc\Desktop\cpp`, `std::meta` had **no fact at all** until this changed, so hover and
 /// go-to-definition answered nothing in a file that compiles.
-pub const FORMAT_VERSION: u32 = 32;
+/// # Why this moved to 33
+///
+/// **`consteval string_view f(info);` is a function, not a variable** — the "most vexing parse" is settled by lookup
+/// and this parser now asks the question the language asks. Every such declaration in libstdc++`s `<meta>` changed
+/// kind, and a fact`s *kind* is what hover, completion and the call checks read: a cached summary that still holds
+/// `identifier_of` as a variable answers with the type of the call instead of the declaration.
+pub const FORMAT_VERSION: u32 = 33;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
