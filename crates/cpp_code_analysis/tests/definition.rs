@@ -135,3 +135,38 @@ fn a_free_function_is_not_offered() {
         "`run` is not a member"
     );
 }
+/// **A template class's member is flagged**: its definition belongs in the header, and the edit says so.
+#[test]
+fn a_template_class_is_marked_as_one() {
+    let session = session_of(&[(
+        "/p/box.h",
+        "template <class T>\nstruct Box {\n    void put(T value);\n};\n",
+    )]);
+    let found = written(&session, "/p/box.h", "put").expect("`put` has no definition");
+    assert!(found.is_a_template, "the class has a template parameter");
+    assert_eq!(found.text(), "void Box::put(T value)\n{\n}");
+
+    let plain = session_of(&[("/p/plain.h", "struct Plain {\n    void put(int value);\n};\n")]);
+    let found = written(&plain, "/p/plain.h", "put").expect("`put` has no definition");
+    assert!(!found.is_a_template);
+}
+
+/// **The pure virtual functions a derived class still has to implement**, with the base's own spelling.
+#[test]
+fn the_pure_virtuals_of_a_class_are_listed() {
+    let session = session_of(&[(
+        "/p/shapes.h",
+        "struct Shape {\n    virtual void draw(int w) const = 0;\n    virtual double area() = 0;\n};\nstruct Circle : Shape {\n    void draw(int w) const override;\n};\n",
+    )]);
+    let view = session.view("/p/shapes.h").expect("the header is cooked");
+    let missing: Vec<String> = session
+        .pure_virtuals_of(&view, "Circle")
+        .into_iter()
+        .map(|found| found.text())
+        .collect();
+    assert_eq!(
+        missing,
+        ["double Circle::area()\n{\n}"],
+        "`draw` is overridden; `area` is not, and its parameters come from `Shape`"
+    );
+}

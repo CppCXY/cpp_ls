@@ -33,7 +33,7 @@
 //! declaration's own [`CppParamList`](cpp_parser::CppParamList) is that text.
 
 use crate::file::coordinates::{FileOffset, ReadingOffset};
-use crate::{DeclKind, DeclModifiers, FileProvider, FileView, Session};
+use crate::{DeclKind, DeclModifiers, FileProvider, FileView, Known, Session};
 
 /// **A definition a file does not have yet.**
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,10 @@ pub struct MissingDefinition {
     /// The qualifiers written after the parameter list: ` const`, ` &`, ` noexcept`. `override`, `final` and a
     /// contract specifier are not part of a definition and are not carried here.
     pub qualifiers: String,
+    /// **Is the class a template?** A template's members are defined in the header it is declared in — a `.cpp` cannot
+    /// compile `template <class T> void Box<T>::put(T value) { }` without an explicit instantiation — so an edit for
+    /// one goes into the file the cursor is in, whatever the pair says.
+    pub is_a_template: bool,
 }
 
 impl MissingDefinition {
@@ -124,6 +128,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The pieces the fact does not hold**, read from the declaration's own declarator.
         let (parameters, qualifiers) =
             written_parameters_and_qualifiers(view, fact.name_range.start_offset)?;
+        // **A template's members stay in the header**: the class fact carries the template parameters, and a `.cpp`
+        // definition would only compile with an explicit instantiation nobody wrote.
+        let is_a_template = self.index().summary(&view.path).is_some_and(|summary| {
+            summary.declarations.iter().any(|declared| {
+                declared.kind == DeclKind::Type
+                    && declared.name == class
+                    && !declared.parameters.is_empty()
+            })
+        });
         Some(MissingDefinition {
             qualified_name: format!("{class}::{name}"),
             class,
@@ -131,8 +144,83 @@ impl<F: FileProvider + Clone> Session<F> {
             returns: fact.returns.clone(),
             parameters,
             qualifiers,
+            is_a_template,
         })
     }
+
+    /// **The pure virtual functions of `class` that nothing overrides** — what a derived class has to implement.
+    ///
+    /// A member is missing when it is `= 0` and no member of the same name at a smaller depth is not. The signature
+    /// comes from the **declaration that wrote it** (the base's file), because the derived class has no text for a
+    /// function it never wrote; the qualified name is the class asked about, which is what an override's definition
+    /// looks like.
+    pub fn pure_virtuals_of(&self, view: &FileView, class: &str) -> Vec<MissingDefinition> {
+        let Known::Yes(list) = self.members_of(view, class) else {
+            return Vec::new();
+        };
+        let mut found: Vec<MissingDefinition> = Vec::new();
+        for member in &list.members {
+            if member.fact.kind != DeclKind::Function
+                || !member.fact.modifiers.contains(DeclModifiers::PURE)
+            {
+                continue;
+            }
+            let overridden = list.members.iter().any(|other| {
+                other.fact.kind == DeclKind::Function
+                    && other.fact.name == member.fact.name
+                    && other.depth < member.depth
+                    && !other.fact.modifiers.contains(DeclModifiers::PURE)
+            });
+            if overridden {
+                continue;
+            }
+            let Some((parameters, qualifiers)) = signature_of(self, &member.file, &member.fact) else {
+                continue;
+            };
+            found.push(MissingDefinition {
+                qualified_name: format!("{class}::{}", member.fact.name),
+                class: class.to_string(),
+                name: member.fact.name.clone(),
+                returns: member.fact.returns.clone(),
+                parameters,
+                qualifiers,
+                is_a_template: false,
+            });
+        }
+        found
+    }
+}
+
+/// **The signature a declaration wrote** — its parameter list and the qualifiers after it.
+///
+/// The parameter list comes from the fact itself (`DeclFact::parameter_list` keeps the text between the parentheses,
+/// names included), so this works for a declaration in a file the session has not cooked. The qualifiers come from the
+/// modifier bits, which record `const`, `&` and `&&`.
+fn signature_of<F: FileProvider + Clone>(
+    session: &Session<F>,
+    file: &std::path::Path,
+    fact: &crate::DeclFact,
+) -> Option<(String, String)> {
+    let parameters = match fact.parameter_list.clone() {
+        Some(parameters) => parameters,
+        None => {
+            let view = session
+                .view_of_the_file(file)
+                .or_else(|| session.view(file))?;
+            written_parameters_and_qualifiers(&view, fact.name_range.start_offset)?.0
+        }
+    };
+    let mut qualifiers = String::new();
+    if fact.modifiers.contains(DeclModifiers::CONST) {
+        qualifiers.push_str(" const");
+    }
+    if fact.modifiers.contains(DeclModifiers::LVALUE_REFERENCE) {
+        qualifiers.push_str(" &");
+    }
+    if fact.modifiers.contains(DeclModifiers::RVALUE_REFERENCE) {
+        qualifiers.push_str(" &&");
+    }
+    Some((parameters, qualifiers))
 }
 
 /// **The parameter list and the trailing qualifiers as written**, from the declaration whose name is at

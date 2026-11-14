@@ -129,7 +129,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
 | `textDocument/documentLink` | the path of an `#include`, as a link to the file |
 | `textDocument/inlayHint` | parameter names at call sites |
-| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp` (or of this file when there is no pair) |
+| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp`, or of this file when there is no pair (always this file for a template class, whose members cannot be defined in a `.cpp`); `source.implement-pure-virtuals`: a derived class that has not implemented all of its base`s pure virtuals → every missing `Ret Class::method(params) const { }` in one edit |
 | `textDocument/semanticTokens` | the standard types plus `decorator` (Doxygen commands) and the custom `variableTemplate`; inside string literals, `std::format`/`fmt`'s `{}` fields and the `printf` family (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
 | `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |
@@ -137,7 +137,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Forty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Forty-two rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -168,6 +168,7 @@ Forty-one rules, each with a fixed severity; `[diagnostics].disable` turns one o
 | `final-class-derived` | Error | a class deriving from a class declared `final` |
 | `override-of-final` | Error | an override of a function the base declares `final` |
 | `abstract-class-instantiated` | Error | a by-value object whose class still has an unoverridden `= 0` virtual function |
+| `pure-virtual-not-overridden` | Warning | a class that overrides some of its base's pure virtual functions and leaves the rest — it is still abstract |
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |

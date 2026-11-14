@@ -259,6 +259,7 @@ pub fn fixes_of_named<F: FileProvider + Clone>(
     let mut fixes = Vec::new();
     fixes.extend(include_fix(&context, wanted));
     fixes.extend(create_definition(&context));
+    fixes.extend(implement_pure_virtuals(&context));
     // The next provider is one line: `fixes.extend(expand_macro_fix(&context));`
     fixes
 }
@@ -280,14 +281,7 @@ pub fn fixes_of_named<F: FileProvider + Clone>(
 /// to a derived class. See [`cpp_code_analysis::definition`] for exactly what is and is not answered.
 fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option<CodeAction> {
     let missing = fix.session.missing_definition_at(fix.view, fix.offset)?;
-    // **Where the definition goes.** The pair's other half when the session holds it, this file when it does not — a
-    // `.cpp` nobody has read is a file the client does not know the contents of, and an edit into it would be an edit
-    // into a version that may not be the one on disk.
-    let here = fix.view.path.clone();
-    let paired = crate::handlers::switch_source_header::the_counterpart_of(fix.session, &here)
-        .filter(|candidate| *candidate != here)
-        .filter(|candidate| fix.session.files().held(candidate).is_some());
-    let target = paired.clone().unwrap_or_else(|| here.clone());
+    let (target, in_file) = the_file_of_a_definition(fix, missing.is_a_template)?;
     let held = fix.session.files().held(&target)?;
     let text = &held.text;
     let at = crate::util::position_in_file(held, text.len())?;
@@ -299,11 +293,6 @@ fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option
     };
     let new_text = format!("{separator}{}\n", missing.text());
     let uri: Uri = crate::util::path_to_uri(&target)?;
-    let in_file = paired
-        .as_ref()
-        .and_then(|paired| paired.file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("this file");
     Some(CodeAction {
         title: format!(
             "Create definition of `{}` in {in_file}",
@@ -334,6 +323,131 @@ fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option
     })
 }
 
+/// **Where a definition goes, and what a title calls it** — the other half of the pair when the session holds it, this
+/// file otherwise.
+///
+/// A **template's** member always goes to this file: a `.cpp` cannot compile
+/// `template <class T> void Box<T>::put(T value) { }` without an explicit instantiation nobody writes, so a `.cpp` for
+/// one is a file that will not link — and a language server that suggests it is teaching a mistake.
+fn the_file_of_a_definition<F: FileProvider + Clone>(
+    fix: &FixContext<'_, F>,
+    is_a_template: bool,
+) -> Option<(std::path::PathBuf, String)> {
+    let here = fix.view.path.clone();
+    if is_a_template {
+        return Some((
+            here,
+            "this file (a template's members are defined in the header)".to_string(),
+        ));
+    }
+    // **A `.cpp` nobody has read is not a target**: the client does not know its contents, so an edit into it would be
+    // an edit into a version that may not be the one on disk.
+    let paired = crate::handlers::switch_source_header::the_counterpart_of(fix.session, &here)
+        .filter(|candidate| *candidate != here)
+        .filter(|candidate| fix.session.files().held(candidate).is_some());
+    match paired {
+        Some(paired) => {
+            let name = paired
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("the paired file")
+                .to_string();
+            Some((paired, name))
+        }
+        None => Some((here, "this file".to_string())),
+    }
+}
+
+/// **`source.implement-pure-virtuals`** — a derived class gets the definitions of what it has not implemented.
+///
+/// ```text
+/// struct Shape { virtual void draw(int w) const = 0; virtual double area() = 0; };
+/// struct Circle : Shape { void draw(int w) const override; };      cursor on `Circle`
+/// ->  void Circle::draw(int w) const { }   (not: it is already written)
+///     double Circle::area() { }
+/// ```
+///
+/// The signatures come from the **base's declarations** (`DeclFact::parameter_list`, `returns`, and the `const`/`&`
+/// bits), because the derived class never wrote them; the qualified names are the derived class's, because that is what
+/// an override's definition is. A class whose pure virtuals are all overridden gets no action.
+fn implement_pure_virtuals<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option<CodeAction> {
+    let (class, is_a_template) = the_class_at_the_cursor(fix)?;
+    let missing = fix.session.pure_virtuals_of(fix.view, &class);
+    if missing.is_empty() {
+        return None;
+    }
+    let (target, in_file) = the_file_of_a_definition(fix, is_a_template)?;
+    let held = fix.session.files().held(&target)?;
+    let text = &held.text;
+    let at = crate::util::position_in_file(held, text.len())?;
+    let separator = if text.is_empty() || text.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    let body = missing
+        .iter()
+        .map(|one| one.text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let new_text = format!("{separator}{body}\n");
+    let uri: Uri = crate::util::path_to_uri(&target)?;
+    let count = missing.len();
+    let functions = if count == 1 {
+        "pure virtual function"
+    } else {
+        "pure virtual functions"
+    };
+    Some(CodeAction {
+        title: format!("Implement {count} {functions} of `{class}` in {in_file}"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: None,
+            document_changes: Some(lsp_types::DocumentChanges::Edits(vec![
+                lsp_types::TextDocumentEdit {
+                    text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                        uri,
+                        version: None,
+                    },
+                    edits: vec![lsp_types::OneOf3::Left(TextEdit {
+                        range: Range { start: at, end: at },
+                        new_text,
+                    })],
+                },
+            ])),
+            change_annotations: None,
+        }),
+        command: None,
+        is_preferred: Some(false),
+        disabled: None,
+        data: None,
+    })
+}
+
+/// **The class the cursor names** — its own name when the cursor is on a class, and the scope of the member it is on
+/// otherwise — with whether that class is a template.
+fn the_class_at_the_cursor<F: FileProvider + Clone>(
+    fix: &FixContext<'_, F>,
+) -> Option<(String, bool)> {
+    let in_the_file = fix.view.file_offset_of(fix.offset)?.get();
+    let summary = fix.session.index().summary(&fix.view.path)?;
+    let fact = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name_range.start_offset == in_the_file)?;
+    let class = match fact.kind {
+        cpp_code_analysis::DeclKind::Type => fact.name.clone(),
+        cpp_code_analysis::DeclKind::Function => fact.scope.clone()?,
+        _ => return None,
+    };
+    let is_a_template = summary.declarations.iter().any(|declared| {
+        declared.kind == cpp_code_analysis::DeclKind::Type
+            && declared.name == class
+            && !declared.parameters.is_empty()
+    });
+    Some((class, is_a_template))
+}
 /// **The name a diagnostic is about**, from the `data` this server attached to it.
 ///
 /// One rule owns this shape at the moment — `missing-include`, whose finding underlines a whole declaration and names
@@ -741,6 +855,112 @@ mod tests {
         assert!(
             !fixes.iter().any(|action| action.title.contains("Shape::area")),
             "`area` is defined: {fixes:?}"
+        );
+    }
+
+    /// **A template's member stays in the header** — a `.cpp` definition of a template member does not link, so the
+    /// edit goes to the file the cursor is in and the title says why.
+    #[test]
+    fn a_template_members_definition_goes_to_this_file() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/box.h",
+                "template <class T>\nstruct Box {\n    void put(T value);\n};\n",
+            )
+            .with_file("/p/box.cpp", "#include \"box.h\"\n");
+        let session = a_session(files, ["/p/box.h", "/p/box.cpp"]);
+        let view = session.view("/p/box.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("put").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        let action = fixes
+            .iter()
+            .find(|action| action.title.contains("Box::put"))
+            .unwrap_or_else(|| panic!("no definition fix among {fixes:?}"));
+        assert!(
+            action.title.contains("this file") && action.title.contains("template"),
+            "{}",
+            action.title
+        );
+        let edit = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+            .expect("an edit");
+        let lsp_types::DocumentChanges::Edits(edits) = edit else {
+            panic!("one text edit");
+        };
+        assert_eq!(
+            edits[0].text_document.uri.as_str(),
+            "file:///p/box.h",
+            "a template's member is defined where it is declared"
+        );
+    }
+
+    /// **A derived class that implements only some of the pure virtuals** gets the rest, written from the base's own
+    /// signatures.
+    #[test]
+    fn the_missing_pure_virtuals_are_implemented() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/shapes.h",
+                "struct Shape {\n    virtual void draw(int w) const = 0;\n    virtual double area() = 0;\n};\nstruct Circle : Shape {\n    void draw(int w) const override;\n};\n",
+            )
+            .with_file("/p/shapes.cpp", "#include \"shapes.h\"\n");
+        let session = a_session(files, ["/p/shapes.h", "/p/shapes.cpp"]);
+        let view = session.view("/p/shapes.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("Circle").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the class name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        let action = fixes
+            .iter()
+            .find(|action| action.title.contains("pure virtual"))
+            .unwrap_or_else(|| panic!("no pure-virtual fix among {fixes:?}"));
+        assert!(
+            action.title.contains("1 pure virtual function of `Circle`"),
+            "{}",
+            action.title
+        );
+        let edit = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+            .expect("an edit");
+        let lsp_types::DocumentChanges::Edits(edits) = edit else {
+            panic!("one text edit");
+        };
+        let lsp_types::OneOf3::Left(edit) = &edits[0].edits[0] else {
+            panic!("a plain text edit");
+        };
+        assert_eq!(
+            edit.new_text, "\ndouble Circle::area()\n{\n}\n",
+            "`draw` is already written, and `area`'s signature comes from `Shape`"
+        );
+    }
+
+    /// **A class whose pure virtuals are all implemented** offers nothing.
+    #[test]
+    fn a_concrete_class_offers_no_pure_virtuals() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/shapes.h",
+                "struct Shape {\n    virtual void draw() = 0;\n};\nstruct Circle : Shape {\n    void draw() override;\n};\n",
+            )
+            .with_file("/p/shapes.cpp", "#include \"shapes.h\"\n");
+        let session = a_session(files, ["/p/shapes.h", "/p/shapes.cpp"]);
+        let view = session.view("/p/shapes.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("Circle").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the class name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        assert!(
+            !fixes.iter().any(|action| action.title.contains("pure virtual")),
+            "`Circle` implements `draw`: {fixes:?}"
         );
     }
 
