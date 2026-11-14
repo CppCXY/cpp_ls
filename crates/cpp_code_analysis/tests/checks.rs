@@ -3230,6 +3230,8 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::ContractOnDefaultedFunction,
             DiagnosticCode::OverrideNonexistent,
             DiagnosticCode::FinalMisplaced,
+            DiagnosticCode::FinalClassDerived,
+            DiagnosticCode::OverrideOfFinal,
         ]
     );
 }

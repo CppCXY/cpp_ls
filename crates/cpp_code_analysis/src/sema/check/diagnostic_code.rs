@@ -141,6 +141,10 @@ pub enum DiagnosticCode {
     /// **`final` on a function that is neither virtual nor overriding** — `final` may only be applied to a virtual
     /// function — see [`super::final_misplaced`].
     FinalMisplaced,
+    /// **A class deriving from a `final` class** — the program does not build — see [`super::final_hierarchy`].
+    FinalClassDerived,
+    /// **A function overriding one its base declares `final`** — see [`super::final_hierarchy`].
+    OverrideOfFinal,
 }
 
 impl DiagnosticCode {
@@ -150,7 +154,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 39] = [
+    pub const ALL: [DiagnosticCode; 41] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -190,6 +194,8 @@ impl DiagnosticCode {
         DiagnosticCode::ContractOnDefaultedFunction,
         DiagnosticCode::OverrideNonexistent,
         DiagnosticCode::FinalMisplaced,
+        DiagnosticCode::FinalClassDerived,
+        DiagnosticCode::OverrideOfFinal,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -238,6 +244,8 @@ impl DiagnosticCode {
             DiagnosticCode::ContractOnDefaultedFunction => "contract-on-defaulted-function",
             DiagnosticCode::OverrideNonexistent => "override-nonexistent",
             DiagnosticCode::FinalMisplaced => "final-misplaced",
+            DiagnosticCode::FinalClassDerived => "final-class-derived",
+            DiagnosticCode::OverrideOfFinal => "override-of-final",
         }
     }
 
@@ -302,6 +310,8 @@ impl DiagnosticCode {
             // function that is not virtual is [class.mem.general]`s.
             DiagnosticCode::OverrideNonexistent => RuleSeverity::Error,
             DiagnosticCode::FinalMisplaced => RuleSeverity::Error,
+            DiagnosticCode::FinalClassDerived => RuleSeverity::Error,
+            DiagnosticCode::OverrideOfFinal => RuleSeverity::Error,
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
@@ -397,6 +407,8 @@ impl DiagnosticCode {
                 | DiagnosticCode::ContractOnDefaultedFunction
                 | DiagnosticCode::OverrideNonexistent
                 | DiagnosticCode::FinalMisplaced
+                | DiagnosticCode::FinalClassDerived
+                | DiagnosticCode::OverrideOfFinal
         )
     }
 

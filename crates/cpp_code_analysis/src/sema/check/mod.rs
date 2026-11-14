@@ -111,6 +111,7 @@ mod borrowed;
 mod braces_around_statements;
 pub mod concept_not_satisfied;
 pub mod contract_placement;
+pub mod final_hierarchy;
 pub mod final_misplaced;
 pub mod override_nonexistent;
 mod cstyle_cast;
@@ -184,15 +185,6 @@ pub trait Check {
 /// The skip is here rather than inside each check because the expensive part of a check is the walk over the tree,
 /// not the sentence it produces: a rule the user turned off should cost nothing at all.
 pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
-    let debug_contract = std::any::type_name::<T>().contains("Contract");
-    if debug_contract {
-        eprintln!(
-            "[contract] gates: is_c={} unreal={} enabled={:?}",
-            context.is_c(),
-            context.unreal,
-            T::CODES.iter().map(|code| context.config.is_enabled(*code)).collect::<Vec<_>>()
-        );
-    }
     // **A C++-only rule costs nothing in a C file.** The filter below is the same answer one level up: a check whose
     // every code is C++-only is not a question about this file at all, so it is skipped before it walks the tree. A
     // check that reports both kinds still runs, and the per-finding filter drops the half that does not apply.
@@ -208,13 +200,7 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
         // **Which rule costs what**, at `CPPLS_TRACE_DIAGNOSTICS=1`. A pull on the reader'"'"'s project takes seconds to
         // answer zero findings, and the table is the only way to say which rule spends them rather than guess.
         let started = std::time::Instant::now();
-        if debug_contract {
-            eprintln!("[contract] calling check");
-        }
         T::check(context);
-        if debug_contract {
-            eprintln!("[contract] check returned");
-        }
         let took = started.elapsed();
         if crate::probes::diagnostics() && took.as_millis() >= 2 {
             eprintln!(
@@ -1601,11 +1587,10 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<braces_around_statements::BracesAroundStatements>(&mut context);
     run_check::<use_nullptr::UseNullptr>(&mut context);
     run_check::<concept_not_satisfied::ConceptNotSatisfied>(&mut context);
-    eprintln!("[contract] about to run placement");
     run_check::<contract_placement::ContractPlacement>(&mut context);
     run_check::<override_nonexistent::OverrideNonexistent>(&mut context);
     run_check::<final_misplaced::FinalMisplaced>(&mut context);
-    eprintln!("[contract] ran placement");
+    run_check::<final_hierarchy::FinalHierarchy>(&mut context);
     run_check::<use_override::UseOverride>(&mut context);
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
     run_check::<else_after_return::ElseAfterReturn>(&mut context);

@@ -88,7 +88,6 @@ impl Check for ContractPlacement {
             contracted.push((name.text().to_string(), in_the_file));
         }
 
-        eprintln!("[contract] contracted: {contracted:?}");
 
         // **What the summary says about those declarations.** A fact is matched by its name range, which is the
         // identifier the tree just gave us.
@@ -108,13 +107,6 @@ impl Check for ContractPlacement {
                 })
                 .collect();
 
-        eprintln!(
-            "[contract] facts: {:?}",
-            declarations
-                .iter()
-                .map(|(name, modifiers, range, scope)| (name.clone(), modifiers.bits(), range.start_offset, scope.clone()))
-                .collect::<Vec<_>>()
-        );
         for (name, name_range) in &contracted {
             let Some((_, modifiers, _, scope)) = declarations
                 .iter()

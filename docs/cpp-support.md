@@ -137,7 +137,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Thirty-eight rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Forty rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -165,6 +165,8 @@ Thirty-eight rules, each with a fixed severity; `[diagnostics].disable` turns on
 | `contract-on-defaulted-function` | Error | a contract specifier on a function defaulted on its first declaration (C++26, P2900) |
 | `override-nonexistent` | Error | `override` on a function that no base class declares, or outside a class definition |
 | `final-misplaced` | Error | `final` on a function that is neither `virtual` nor overriding one — which the standard does not allow |
+| `final-class-derived` | Error | a class deriving from a class declared `final` |
+| `override-of-final` | Error | an override of a function the base declares `final` |
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |
