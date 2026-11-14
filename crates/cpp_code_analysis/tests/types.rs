@@ -3849,3 +3849,89 @@ fn a_deduced_type_does_not_carry_the_storage_specifiers() {
         Some("const int")
     );
 }
+/// **A function whose body returns a call or a member is typed by typing that expression** — the shape a summary
+/// cannot answer, because a summary is built without the index and a call has to be resolved.
+///
+/// `auto make() { return make_thing(); }` is how a great deal of C++14-and-later code writes a deduced return. The
+/// summary types the `return` expressions a spelling answers on its own (a literal, a name, a binary expression), so
+/// these four had no return type at all and every call to them was untyped. At query time the declaring file's own
+/// tree and scopes are in reach, so the expression is typed with the machinery a use in that file gets.
+#[test]
+fn a_function_whose_body_returns_a_call_is_typed_from_that_call() {
+    // The returned expression is a call.
+    let called = "\
+int g(int);
+auto via(int x) { return g(x); }
+auto result = via(3);
+";
+    assert_eq!(
+        type_of_use(called, "result").as_deref(),
+        Some("int"),
+        "`g(x)` is an `int`, so `via` returns one"
+    );
+
+    // The returned expression is a member of a parameter.
+    let member = "\
+struct Widget { int count; };
+auto count_of(Widget w) { return w.count; }
+auto result = count_of(Widget{1});
+";
+    assert_eq!(
+        type_of_use(member, "result").as_deref(),
+        Some("int"),
+        "`w.count` is an `int`, so `count_of` returns one"
+    );
+
+    // A chain: the returned expression is a call to *another* function deduced the same way.
+    let chained = "\
+int g(int);
+auto via(int x) { return g(x); }
+auto twice(int x) { return via(x) + via(x); }
+auto result = twice(4);
+";
+    assert_eq!(
+        type_of_use(chained, "result").as_deref(),
+        Some("int"),
+        "`via` is an `int` function, so `twice` is too"
+    );
+
+    // A bare `return;` is `void`, which is the language's rule for a deduced return type.
+    let bare = "\
+void note() { }
+auto nothing(bool b) { if (b) { return; } note(); }
+auto result = nothing(true);
+";
+    assert_eq!(
+        type_of_use(bare, "result").as_deref(),
+        Some("void"),
+        "a bare `return;` makes the deduced type `void`"
+    );
+}
+
+/// **What the body deduction refuses**, and why refusing is the answer rather than a guess.
+#[test]
+fn a_body_whose_returns_disagree_is_not_typed() {
+    // Two returns with two types is not a program.
+    let disagreeing = "\
+auto bad(bool b) { if (b) { return 1; } return 2.5; }
+auto result = bad(true);
+";
+    assert_eq!(
+        type_of_use(disagreeing, "result"),
+        None,
+        "`int` and `double` do not agree, so there is no deduced type to report"
+    );
+
+    // Two functions that return each other's calls are a cycle, and the walk has to end.
+    let mutual = "\
+auto f();
+auto g() { return f(); }
+auto f() { return g(); }
+auto result = f();
+";
+    assert_eq!(
+        type_of_use(mutual, "result"),
+        None,
+        "a cycle is refused at the recursion bound rather than walked forever"
+    );
+}

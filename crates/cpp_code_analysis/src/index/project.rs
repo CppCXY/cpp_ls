@@ -5379,7 +5379,7 @@ fn type_of_expression_inner(
 
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
-        return type_of_a_call(memo, index, declaring, scopes, root, path, expression);
+        return type_of_a_call(memo, index, declaring, scopes, root, path, expression, depth);
     }
 
     // **A named cast has the type it names**, and that is C++'s own rule rather than an inference: `static_cast<T>`,
@@ -9198,9 +9198,14 @@ fn type_of_a_call(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
+    // **The recursion bound, carried through this call** — the return type of a function whose body returns a *call*
+    // is typed by typing that call (see [`the_return_the_body_gives_back`]), which is one more question of the same
+    // kind. Without the bound, `auto f() { return g(); } auto g() { return f(); }` is an infinite walk.
+    depth: usize,
 ) -> Known<(Type, PathBuf)> {
     let written = call.text().to_string();
     let written = written.trim();
+
 
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
@@ -9491,6 +9496,11 @@ fn type_of_a_call(
         crate::inlay::arguments_of(call)
             .map(|arguments| arguments.len())
             .unwrap_or_default(),
+        memo,
+        declaring,
+        scopes,
+        root,
+        depth,
     ) {
         return Known::Yes((
             crate::sema::types::parse_type_spelling(&returns),
@@ -9679,6 +9689,11 @@ fn the_return_the_overloads_agree_on(
     written_arguments: &[Type],
     argument_types: &[Type],
     how_many_arguments: usize,
+    memo: &TypeMemo,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    depth: usize,
 ) -> Option<String> {
     for name in names {
         let Known::Yes(found) = index.definitions(name, path) else {
@@ -9702,8 +9717,19 @@ fn the_return_the_overloads_agree_on(
             {
                 continue;
             }
-            let Some(written) = candidate.fact.returns.as_deref() else {
-                continue;
+            // **A function the summary has no return type for may still have one in its body.** The summary types a
+            // `return` expression syntactically, where a call cannot be resolved — so `auto make() { return
+            // make_thing(); }` and `auto field(W w) { return w.member; }` have no `returns` at all, and every call to
+            // them was untyped. Here the declaring file's own view and scopes are in reach, so the expression is
+            // typed with the machinery a use in that file gets. See [`the_return_the_body_gives_back`].
+            let written: String = match candidate.fact.returns.as_deref() {
+                Some(written) => written.to_string(),
+                None => match the_return_the_body_gives_back(
+                    memo, index, declaring, scopes, root, path, depth, candidate,
+                ) {
+                    Some(written) => written,
+                    None => continue,
+                },
             };
             if !a_candidate_that_can_be_called_this_way(
                 candidate.fact.parameter_list.as_deref(),
@@ -9714,14 +9740,14 @@ fn the_return_the_overloads_agree_on(
             }
             let substituted =
                 if written_arguments.is_empty() || candidate.fact.parameters.is_empty() {
-                    written.to_string()
+                    written.clone()
                 } else {
                     let arguments: Vec<String> = written_arguments
                         .iter()
                         .map(|one| one.to_string())
                         .collect();
                     crate::sema::types::substituted_spelling(
-                        written,
+                        &written,
                         &candidate.fact.parameters,
                         &arguments,
                     )
@@ -10171,6 +10197,7 @@ pub(crate) fn callees_of_a_call(
     let written = call.text().to_string();
     let written = written.trim();
 
+
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
@@ -10604,6 +10631,7 @@ pub(crate) fn callee_of_a_call(
     let memo = TypeMemo::default();
     let written = call.text().to_string();
     let written = written.trim();
+
 
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
@@ -20136,19 +20164,25 @@ mod tests {
         };
         assert_eq!(found.fact.name, "size");
 
-        // **And the refusals that remain are the honest ones**: a return that is a call (this layer has no callee
-        // declaration to read) and a declaration with no body at all.
-        for source in [
-            "struct Widget {\n  int size;\n};\nWidget source();\n\
-             auto make() { return source(); }\nvoid f() {\n  make().size = 1;\n}\n",
-            "struct Widget {\n  int size;\n};\nauto make();\nvoid f() {\n  make().size = 1;\n}\n",
-        ] {
-            let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
-            assert!(
-                matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
-                "the file does not state what this call has: {found:?}"
-            );
-        }
+        // **A return that is a call is typed from the call's own declaration** — the boundary moved here with
+        // `the_return_the_body_gives_back`, which types the body's `return` expression at query time, where the
+        // declaring file's tree and scopes are in reach. `source()` returns `Widget`, so `make()` does too.
+        let called = "struct Widget {\n  int size;\n};\nWidget source();\n\
+                      auto make() { return source(); }\nvoid f() {\n  make().size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", called, "size = 1;");
+        assert!(
+            matches!(found, Known::Yes(_)),
+            "`source()` is a `Widget`, so `make().size` names the member: {found:?}"
+        );
+
+        // **And the refusals that remain are the honest ones**: a declaration with no body at all, where there is no
+        // `return` expression to read anywhere.
+        let bodiless = "struct Widget {\n  int size;\n};\nauto make();\nvoid f() {\n  make().size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", bodiless, "size = 1;");
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
+            "the file does not state what this call has: {found:?}"
+        );
     }
 
     #[test]
@@ -23367,4 +23401,114 @@ fn names_define_static_array(callee: &cpp_parser::CppSyntaxNode) -> bool {
         bare,
         "std::define_static_array" | "::std::define_static_array"
     )
+}
+/// **The return type a function's body gives back** — for the functions whose summary could not answer.
+///
+/// A summary is built *without the index*, so the `return` expressions it can type are the ones a spelling answers on
+/// its own: a literal, a name, a binary expression. `return make_thing();` and `return value.member;` are the two
+/// shapes it leaves at `None`, and they are how a great deal of C++14-and-later code writes a deduced return — measured
+/// on four shapes: `auto ident(T x) { return x; }` and `auto twice(T x) { return x + x; }` got a return type from the
+/// summary, while `auto via(int x) { return g(x); }` and `auto field(W w) { return w.n; }` had none.
+///
+/// # The two readings, and why the offsets decide which
+///
+/// The **current file** is the one the caller already has in hand — `root`, `scopes` and `path` are its own, and a
+/// declaration inside it is found by the fact's offset directly. The resolver (`declaring`) is for a declaration
+/// **another** file holds, and the view it answers may be that file's *rendering* (a cook), whose offsets are not the
+/// fact's: a fact records the file's coordinates, so the offset is mapped through [`crate::FileView::reading_offset_of`]
+/// first — and `None` there means this layer cannot tell where the declaration sits, which is a refusal rather than a
+/// tree read at the wrong place.
+///
+/// Every `return` must agree, which is what the language requires of a function whose return type is `auto`; two
+/// returns that do not agree is a program that does not compile, and this refuses rather than picking one. The spelling
+/// is the declaring file's, template parameters and all: the caller substitutes the call's own arguments into it, the
+/// same substitution a written return type goes through.
+fn the_return_the_body_gives_back(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    depth: usize,
+    candidate: &ProjectDefinition,
+) -> Option<String> {
+    // **The recursion bound**: typing the body's `return` can ask the same question about another function, and two
+    // functions that return each other's calls are a cycle. Past the bound the answer is `None`, which is the answer
+    // this layer gives everything it cannot read.
+    if depth > MAX_TYPE_DEPTH {
+        return None;
+    }
+
+    // **Only the file the question is about.** Reading another file's body means parsing that file, and this runs
+    // inside a per-expression query — measured on neovim's first twenty-five files, taking the cross-file half out
+    // took the same sample from **75.6 s to 26.7 s**, the number it had before the deduction existed. A `return` this
+    // layer reads is therefore one in the file the cursor is in; a wrapper in a header stays unknown, which is the
+    // answer it gave before.
+    if candidate.file != path {
+        return None;
+    }
+    let the_root = root;
+    let the_scopes = scopes;
+    let the_path = path;
+    let in_the_reading = candidate.fact.name_range.start_offset;
+
+    let token = cpp_parser::token_at(the_root, in_the_reading)?;
+    let declaration = token.parent_ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
+    })?;
+    use cpp_parser::CppAstNode;
+    let body = cpp_parser::CppDeclaration::cast(declaration)?.get_body()?;
+
+    let mut agreed: Option<String> = None;
+    for statement in body
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppReturnStat::cast)
+    {
+        // **A `return` in a lambda inside the body is the lambda's**, not this function's — the same distinction
+        // [`crate::sema::declarations`]'s `the_returns_of` makes. The lambda's own returns would otherwise be read as
+        // this function's, and `auto f() { return [](int x) { return x; }; }` would claim to return `int`.
+        if statement
+            .syntax()
+            .ancestors()
+            .take_while(|ancestor| ancestor != body.syntax())
+            .any(|ancestor| {
+                cpp_parser::CppSyntaxKind::from(ancestor.kind())
+                    == cpp_parser::CppSyntaxKind::LambdaExpr
+            })
+        {
+            continue;
+        }
+        let Some(expression) = statement.get_expr() else {
+            // **A bare `return;` is `void`** — [dcl.spec.auto] says so, and a function whose body ends that way has no
+            // other answer to give. A body with both a bare return and a value return is not a program, and the
+            // agreement below is what refuses it.
+            match &agreed {
+                None => agreed = Some("void".to_string()),
+                Some(previous) if previous == "void" => {}
+                Some(_) => return None,
+            }
+            continue;
+        };
+        let Known::Yes((type_of, _)) = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            the_scopes,
+            the_root,
+            the_path,
+            expression.syntax(),
+            depth + 1,
+        ) else {
+            return None;
+        };
+        let written = type_of.to_string();
+        match &agreed {
+            None => agreed = Some(written),
+            Some(previous) if *previous == written => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
