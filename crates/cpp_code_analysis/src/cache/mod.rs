@@ -276,7 +276,15 @@ use std::path::{Path, PathBuf};
 /// **Two modifier bits a fact did not have**: `DEFINED` (the declaration carries a body, or is `= default`/`= delete`)
 /// and `PURE` (`= 0`). They are written by the same walk that computes the other bits, so a summary on disk from
 /// before them says "not defined" about every function — which is the answer a "create the definition" edit acts on.
-pub const FORMAT_VERSION: u32 = 30;
+/// # Why this moved to 31
+///
+/// **Two C++26 forms parse that did not**: `typename [: r :]` in *expression* position (a temporary or a functional
+/// cast of a reflected type) and `template for (…)` — the expansion statement, which used to leave its `template`
+/// token flat in the enclosing block while the loop was read as an ordinary one, with **no error to show for it**.
+/// A cached reading holds that tree, and the cached parse errors with it: measured on `C:\Users\zc\Desktop\cpp`,
+/// `reflect.hpp` reported two `expected a type specifier` errors *after* the parser had learned the statement, because
+/// the reading was the one the old parser produced. The number moves so the tree is read again.
+pub const FORMAT_VERSION: u32 = 31;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

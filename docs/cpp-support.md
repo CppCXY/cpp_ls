@@ -46,6 +46,7 @@ meaning — a file that writes them is being read as C++26 whatever `-std=` says
 | `typename [: r :]{…}`, `typename [: r :](…)` | the same type splice in **expression** position — a temporary or a functional cast of the reflected type |
 | `typename [: r :]<int>` | a splice specialization: the type splice with template arguments |
 | `d.[: r :]`, `p->[: r :]` | a member splice; it has **no written name**, so member lookup and the undefined-field check ask nothing about it |
+| `template for (constexpr auto e : r) …` | the **expansion statement** (P1306): its node is `ExpansionStat`, and the loop inside it is the ordinary `RangeForStat` |
 | `^^` as a token | one token, not two `^`: the language has no unary `^` to pair them with, and `^` alone is still a Clang block literal |
 
 The type of every reflection expression is `std::meta::info`, whichever operand it takes — the one expression in the
@@ -70,6 +71,7 @@ own `<meta>`) accepts every form above, and this server's parser accepts the sam
 | `using B = typename [: r :]<int>;` | ok | 0 errors |
 | `Widget w; w.[: r :]` | ok | 0 errors |
 | `typename [: ^^Widget :]{5}` (a temporary) | ok | 0 errors — **added after this check found the parser rejecting it** |
+| `template for (constexpr auto e : enumerators) { … }` | ok | 0 errors — **added after this check found the `template` token left flat with no error reported** |
 | `^^3` | error: `^^` cannot be applied to this operand | 0 errors (the grammar has no opinion; the analysis does not check operands) |
 
 GCC also confirms the one type this analysis answers: `static_assert(std::is_same_v<decltype(^^Widget), std::meta::info>)`

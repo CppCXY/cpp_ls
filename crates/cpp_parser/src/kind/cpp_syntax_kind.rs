@@ -161,6 +161,11 @@ pub enum CppSyntaxKind {
     /// e.g.: for (init; condition; increment) statement
     ForStat,
 
+    /// **An expansion statement** (C++26, P1306): `template for (constexpr auto e : range) statement` — the body runs
+    /// once per element of a reflection range at compile time. Its inner loop is the ordinary `ForStat`, because the
+    /// header is the ordinary range-for header; this node is what says the loop is expanded rather than executed.
+    ExpansionStat,
+
     /// Range-based for loop (C++11)
     /// e.g.: for (auto& item : container) statement
     RangeForStat,

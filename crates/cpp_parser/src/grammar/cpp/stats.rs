@@ -395,6 +395,14 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         CppTokenKind::WhileKeyword => parse_while_statement(p),
         CppTokenKind::DoKeyword => parse_do_while_statement(p),
         CppTokenKind::ForKeyword => parse_for_statement(p),
+        // **An expansion statement** (C++26, P1306): `template for (constexpr auto e : range) statement`. The
+        // leading `template` is what tells it from the `template <…>` declaration that also starts with that keyword,
+        // and a one-token lookahead is the whole test — `template` is never followed by `for` in a template
+        // declaration. Verified against GCC 16.2, which accepts the statement; without this arm the keyword was left
+        // flat in the enclosing block and the loop read as an ordinary one, with no error to show for it.
+        CppTokenKind::TemplateKeyword if p.peek_next_token() == CppTokenKind::ForKeyword => {
+            parse_expansion_statement(p)
+        }
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
         CppTokenKind::TryKeyword => parse_try_statement(p),
 
@@ -1529,6 +1537,22 @@ fn parse_statement_body(p: &mut CppParser) -> ParseResult {
 
     // A dangling `;` is an empty statement, which is a valid body.
     parse_stat(p)
+}
+/// **An expansion statement** (C++26, P1306): `template for (constexpr auto e : range) statement`.
+///
+/// The header is the ordinary range-`for` header, so the loop inside the node is the ordinary [`parse_for_statement`] —
+/// a second copy of the same grammar would be a second thing to keep in step. What this node adds is the one fact a
+/// reader needs: the loop is **expanded at compile time** (its body is instantiated once per element of a reflection
+/// range), not executed at run time.
+pub fn parse_expansion_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ExpansionStat);
+    expect_token(p, CppTokenKind::TemplateKeyword)?;
+    if let Err(err) = parse_for_statement(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    Ok(m.complete(p))
 }
 
 fn parse_for_statement(p: &mut CppParser) -> ParseResult {

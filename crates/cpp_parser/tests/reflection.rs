@@ -156,3 +156,37 @@ auto u = typename [: r :](1);
 ";
     parses(source);
 }
+/// **`template for` — the expansion statement** (P1306, C++26), which every reflection program uses to walk a list of
+/// reflections at compile time.
+///
+/// ```cpp
+/// template for (constexpr auto e : enumerators) { … }
+/// ```
+///
+/// Verified against GCC 16.2 (`-std=c++26 -freflection`), which accepts it — and this parser used to leave the
+/// `template` token flat in the enclosing block while reading the `for` as an ordinary loop, with **no error reported**:
+/// a silent misparse, which is the shape this project treats as a defect. The node is `ExpansionStat`, and the loop
+/// inside it is the ordinary `ForStat` because the header is the ordinary range-for header.
+#[test]
+fn an_expansion_statement_is_a_statement_of_its_own() {
+    let source = "\
+void f() {
+    static constexpr auto enumerators = g();
+    template for (constexpr auto e : enumerators) {
+        use([:e:]);
+    }
+}
+";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    assert_eq!(tree.get_errors(), [], "the expansion statement parses cleanly");
+    let expansion = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ExpansionStat)
+        .expect("the expansion statement has a node of its own");
+    assert!(
+        expansion.text().to_string().starts_with("template for"),
+        "the node covers the whole statement: {:?}",
+        expansion.text().to_string()
+    );
+}
