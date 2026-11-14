@@ -3803,3 +3803,49 @@ void f(const std::vector<Other> &diagnostics) {
         "the declaration inside the body is not the loop variable"
     );
 }
+/// **`std::define_static_array(r)` is the static array of the range's elements** — C++26's facility whose return type
+/// no fact can answer.
+///
+/// libstdc++ declares it `template<ranges::input_range R> consteval auto define_static_array(R&& r)` with a body built
+/// out of reflection intrinsics, so the fact has no return type at all and every use of it was untyped: in
+/// `C:\Users\zc\Desktop\cpp\src\reflect.hpp`, `auto members = std::define_static_array(…);` had no type, no inlay hint
+/// and a hover that could only say "not known". The standard fixes the *shape* — `const T(&)[N]` — and everything but
+/// the bound is answerable from the argument's own type.
+#[test]
+fn a_define_static_array_call_is_the_static_array_of_its_range() {
+    let source = "\
+namespace std {
+  namespace meta { struct info {}; }
+  template <class T> struct vector {};
+  std::vector<std::meta::info> nonstatic_data_members_of(int);
+  template <class R> consteval auto define_static_array(R&& r);
+}
+auto members = std::define_static_array(std::nonstatic_data_members_of(1));
+";
+    assert_eq!(
+        type_of_use(source, "members").as_deref(),
+        Some("std::meta::info[]"),
+        "the range is a `vector<std::meta::info>`, so the array's element is `std::meta::info`"
+    );
+}
+
+/// **A storage specifier is not part of the deduced type.** `static constexpr auto members = …` is declared with the
+/// type of its initializer; keeping the words in front of `auto` made the answer `static constexpr info[]`, which the
+/// hover card printed beside its own `static constexpr` (`static constexpr static constexpr info[]`) and the inlay
+/// hint drew after `auto`.
+#[test]
+fn a_deduced_type_does_not_carry_the_storage_specifiers() {
+    assert_eq!(
+        type_of_use("static constexpr auto count = 1;\n", "count").as_deref(),
+        Some("int")
+    );
+    assert_eq!(
+        type_of_use("inline constexpr auto ratio = 0.5;\n", "ratio").as_deref(),
+        Some("double")
+    );
+    // **`const` stays**, because it is part of the type: `const auto fixed = 2;` is a `const int`.
+    assert_eq!(
+        type_of_use("static const auto fixed = 2;\n", "fixed").as_deref(),
+        Some("const int")
+    );
+}

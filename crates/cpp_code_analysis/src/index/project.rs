@@ -8335,7 +8335,30 @@ fn auto_substituted(
     }
 
     let (start, end) = found?;
-    let prefix = written[..start].trim();
+    // **A storage or function specifier is not part of the type.** `static constexpr auto members = …` is declared
+    // with the *type* of its initializer, and this function keeps what was written before `auto` — so the answer came
+    // out `static constexpr info[]`, which the hover card printed beside its own `static constexpr` (twice) and the
+    // inlay hint drew after `auto`. Measured on a C++26 reflection example. `const` and `volatile` stay: a
+    // cv-qualifier *is* part of the type, which is why they were kept in the first place.
+    let prefix: String = written[..start]
+        .split_whitespace()
+        .filter(|word| {
+            !matches!(
+                *word,
+                "static"
+                    | "inline"
+                    | "constexpr"
+                    | "consteval"
+                    | "constinit"
+                    | "extern"
+                    | "thread_local"
+                    | "mutable"
+                    | "register"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let prefix = prefix.as_str();
     let suffix = written[end..].trim();
 
     let mut base = deduced.trim().to_string();
@@ -9333,6 +9356,51 @@ fn type_of_a_call(
     {
         return Known::Yes((
             crate::sema::types::parse_type_spelling(&format!("{pointer}<{argument}>")),
+            path.to_path_buf(),
+        ));
+    }
+
+    // **`std::define_static_array(r)`** (C++26, P2996): the elements of a range as a static array — the standard says
+    // `const T(&)[N]`, where `T` is the range's element type. libstdc++'s declaration is
+    // `template<ranges::input_range R> consteval auto define_static_array(R&& r)` with a body built out of reflection
+    // intrinsics, so **no fact can answer** this one: the return type is `auto` and the returns are arrays made by
+    // machinery this layer does not model. Measured on `C:\Users\zc\Desktop\cpp\src\reflect.hpp`, where
+    // `auto members = std::define_static_array(…);` had no type at all — and so no inlay hint and a hover that could
+    // only say "not known".
+    //
+    // The **bound** is the number of elements, which is a value this layer does not compute, so the array is the
+    // unknown-bound one — `const T(&)[]`. That is a type C++ spells, and it is exactly what is known here: a reference
+    // to an array of `T`.
+    // **The argument is typed first, and that is the whole difference**: the range helper below deliberately answers
+    // only for *values*, and the argument here is a call (`std::meta::nonstatic_data_members_of(…)`), whose type the
+    // ordinary expression typer does know. `vector<std::meta::info>` yields the element `std::meta::info`.
+    if names_define_static_array(&callee)
+        && let Some(first) = crate::inlay::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
+        && let Known::Yes((argument, _)) = type_of_expression_memoed(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &first,
+            0,
+        )
+        && let Some(element) = range_element_of(as_a_range(&argument))
+    {
+        let element = crate::sema::types::parse_type_spelling(&element);
+        let element = Arc::new(Type::Qualified {
+            of: Arc::new(element),
+        });
+        let array = Arc::new(Type::Array {
+            of: element,
+            extent: None,
+        });
+        return Known::Yes((
+            Type::Reference {
+                to: array,
+                rvalue: false,
+            },
             path.to_path_buf(),
         ));
     }
@@ -23281,4 +23349,22 @@ impl TableCost {
             + self.condition_bytes
             + self.path_bytes
     }
+}
+/// **Does the callee name `std::define_static_array`?** — the C++26 facility whose return type the standard fixes.
+///
+/// The **qualified** spelling only, for the reason [`names_the_identity_function`] gives: an unqualified
+/// `define_static_array(x)` may be a project`s own function, and treating it as the standard`s would be a guess about a
+/// name this layer can see declared elsewhere. The standard`s spelling is `std::define_static_array`, and that is what a
+/// file writes.
+fn names_define_static_array(callee: &cpp_parser::CppSyntaxNode) -> bool {
+    let spelled = callee.text().to_string();
+    let spelled = spelled.trim();
+    let bare = match spelled.find('<') {
+        Some(at) => spelled[..at].trim(),
+        None => spelled,
+    };
+    matches!(
+        bare,
+        "std::define_static_array" | "::std::define_static_array"
+    )
 }
