@@ -97,6 +97,7 @@ use crate::file::view::FileView;
 use crate::{FileSummary, ProjectIndex};
 
 pub mod access_invisible;
+pub mod abstract_class_instantiated;
 pub mod argument_count;
 pub mod assign_type_check;
 pub mod assignment_in_condition;
@@ -1591,6 +1592,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<override_nonexistent::OverrideNonexistent>(&mut context);
     run_check::<final_misplaced::FinalMisplaced>(&mut context);
     run_check::<final_hierarchy::FinalHierarchy>(&mut context);
+    run_check::<abstract_class_instantiated::AbstractClassInstantiated>(&mut context);
     run_check::<use_override::UseOverride>(&mut context);
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
     run_check::<else_after_return::ElseAfterReturn>(&mut context);

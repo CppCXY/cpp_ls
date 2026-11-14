@@ -34,7 +34,7 @@ fn the_style_codes_are_named_and_round_trip() {
     }
     assert_eq!(
         DiagnosticCode::ALL.len(),
-        41,
+        42,
         "every code is in the list, `redefinition` and `missing-include` included"
     );
 }

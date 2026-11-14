@@ -3232,6 +3232,7 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::FinalMisplaced,
             DiagnosticCode::FinalClassDerived,
             DiagnosticCode::OverrideOfFinal,
+            DiagnosticCode::AbstractClassInstantiated,
         ]
     );
 }

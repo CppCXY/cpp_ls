@@ -137,7 +137,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Forty rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Forty-one rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -167,6 +167,7 @@ Forty rules, each with a fixed severity; `[diagnostics].disable` turns one off b
 | `final-misplaced` | Error | `final` on a function that is neither `virtual` nor overriding one — which the standard does not allow |
 | `final-class-derived` | Error | a class deriving from a class declared `final` |
 | `override-of-final` | Error | an override of a function the base declares `final` |
+| `abstract-class-instantiated` | Error | a by-value object whose class still has an unoverridden `= 0` virtual function |
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |
