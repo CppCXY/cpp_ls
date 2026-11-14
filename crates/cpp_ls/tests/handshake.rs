@@ -6989,3 +6989,92 @@ int f() { return grow(1) + grow(2); }
         "`grow` has two calls and neither its definition nor the header's declaration is counted: {titles:?}"
     );
 }
+/// **The type hierarchy over the wire**: the capability a client looks for, then prepare → supertypes → subtypes.
+///
+/// The capability is the part worth a protocol test rather than a unit one: `typeHierarchyProvider` is LSP 3.17 and
+/// the `lsp_types` fork this server links against has no `ServerCapabilities` field for it, so the server writes it
+/// into the `initialize` JSON by hand. A unit test of the handlers cannot see that field at all — a client that does
+/// not, never asks, and the handlers are dead code however correct they are.
+#[test]
+fn a_client_can_walk_the_class_hierarchy() {
+    let project = Project::new("type-hierarchy");
+    let base = "struct Base {\n    virtual void run();\n};\n";
+    let derived = "#include \"base.h\"\nstruct Derived : Base {\n    void run() override;\n};\n";
+    project.write("base.h", base);
+    project.write("derived.h", derived);
+
+    let mut server = Server::start(project.root());
+    let derived_uri = uri_of(&project.root().join("derived.h"));
+
+    let initialized = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "textDocument": { "typeHierarchy": { "dynamicRegistration": false } },
+                "workspace": { "configuration": true },
+            },
+        }),
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["typeHierarchyProvider"],
+        json!(true),
+        "a client only asks if the server advertises it: {initialized}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": derived_uri, "languageId": "cpp", "version": 1, "text": derived }
+        }),
+    );
+
+    // `Derived` is on line 1 (`struct Derived : Base`), at the name.
+    let prepared = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/prepareTypeHierarchy",
+            "params": {
+                "textDocument": { "uri": derived_uri },
+                "position": { "line": 1, "character": 7 },
+            },
+        })
+    });
+    let items = prepared["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("prepare answers an array of items: {prepared}"));
+    assert_eq!(items.len(), 1, "one class under the cursor: {prepared}");
+    let item = &items[0];
+    assert_eq!(item["name"], json!("Derived"));
+    assert_eq!(item["kind"], json!(5), "`SymbolKind::CLASS` is 5");
+    assert!(
+        item["data"]["file"].as_str().is_some(),
+        "the item remembers where its class is: {prepared}"
+    );
+
+    let supertypes = server.request(
+        200,
+        "typeHierarchy/supertypes",
+        json!({ "item": item }),
+    );
+    let bases = supertypes["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("supertypes answers an array: {supertypes}"));
+    assert_eq!(bases.len(), 1, "{supertypes}");
+    assert_eq!(bases[0]["name"], json!("Base"));
+
+    let subtypes = server.request(
+        300,
+        "typeHierarchy/subtypes",
+        json!({ "item": bases[0] }),
+    );
+    let classes = subtypes["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("subtypes answers an array: {subtypes}"));
+    assert!(
+        classes.iter().any(|class| class["name"] == json!("Derived")),
+        "`Base`'s subtypes name the class that derives from it: {subtypes}"
+    );
+}

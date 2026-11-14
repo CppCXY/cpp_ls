@@ -35,6 +35,7 @@ mod format;
 mod formatting;
 pub mod hover;
 pub mod implementation;
+pub mod type_hierarchy;
 mod initialized;
 mod inlay_hint;
 mod notification_handler;
@@ -186,6 +187,7 @@ capabilities!(modules: {
     formatting => FormattingCapabilities,
     folding_range => FoldingRangeCapabilities,
     implementation => ImplementationCapabilities,
+    type_hierarchy => TypeHierarchyCapabilities,
     type_definition => TypeDefinitionCapabilities,
     inlay_hint => InlayHintCapabilities,
     references => ReferencesCapabilities,

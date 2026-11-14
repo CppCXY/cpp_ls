@@ -40,7 +40,8 @@ use lsp_types::request::{
     Formatting, GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, RangeFormatting, References, Rename,
     Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
-    SignatureHelpRequest, WillSaveWaitUntil, WorkspaceSymbolRequest,
+    SignatureHelpRequest, TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes,
+    WillSaveWaitUntil, WorkspaceSymbolRequest,
 };
 
 use crate::context::ServerContext;
@@ -67,6 +68,9 @@ use super::{
     signature_help::on_signature_help,
     switch_source_header::{SwitchSourceHeader, on_switch_source_header},
     type_definition::on_goto_type_definition,
+    type_hierarchy::{
+        on_prepare_type_hierarchy, on_subtypes, on_supertypes,
+    },
     workspace_symbol::on_workspace_symbol,
 };
 
@@ -155,6 +159,9 @@ pub async fn on_request_handler(
     GotoDefinition => on_goto_definition_handler,
     GotoImplementation => on_goto_implementation,
     GotoTypeDefinition => on_goto_type_definition,
+    TypeHierarchyPrepare => on_prepare_type_hierarchy,
+    TypeHierarchySupertypes => on_supertypes,
+    TypeHierarchySubtypes => on_subtypes,
     HoverRequest => on_hover,
     CallHierarchyPrepare => on_prepare_call_hierarchy,
     CallHierarchyIncomingCalls => on_incoming_calls,

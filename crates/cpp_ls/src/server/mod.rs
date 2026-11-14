@@ -57,7 +57,20 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
             return Ok(());
         }
     };
-    let server_capabilities = server_capabilities(&initialization_params.capabilities);
+    // **The type hierarchy capability is written into the JSON by hand.** The protocol's field is
+    // `typeHierarchyProvider` (LSP 3.17, `textDocument/prepareTypeHierarchy`), and the `lsp_types` fork this server
+    // links against predates it: its `ServerCapabilities` has no such field, so the typed value cannot carry it. A
+    // client reads the raw JSON, so this is the one place the capability can be stated — and the handlers behind it
+    // are real (`handlers::type_hierarchy`). `tests/handshake.rs` asserts it crosses the wire, because a client that
+    // does not see it never asks and the handlers would be dead code however correct they are.
+    let mut server_capabilities =
+        serde_json::to_value(server_capabilities(&initialization_params.capabilities))?;
+    if let Some(object) = server_capabilities.as_object_mut() {
+        object.insert(
+            "typeHierarchyProvider".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     let initialize_data = serde_json::json!({
         "capabilities": server_capabilities,
         "serverInfo": {
