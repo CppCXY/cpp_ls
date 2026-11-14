@@ -27,9 +27,9 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
     // The line each trailing comment sits on, and where its code ends.
     let mut found: Vec<(usize, usize, usize)> = Vec::new(); // (line, gap index, code end column)
     let mut line = 0usize;
-    for index in 0..stream.gaps.len() {
-        line += stream.gaps[index].newlines;
-        let Some(comment) = stream.gaps[index].comments.last() else {
+    for (index, gap) in stream.gaps.iter().enumerate() {
+        line += gap.newlines;
+        let Some(comment) = gap.comments.last() else {
             continue;
         };
         if comment.own_line {

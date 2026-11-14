@@ -462,11 +462,11 @@ mod break_tests {
         let mut start = line.start;
         for at in breaks.iter().copied().chain(std::iter::once(line.end)) {
             let mut text = String::new();
-            for index in start..at {
-                if index > start {
+            for (offset, token) in stream.tokens[start..at].iter().enumerate() {
+                if offset > 0 {
                     text.push(' ');
                 }
-                text.push_str(stream.tokens[index].text);
+                text.push_str(token.text);
             }
             pieces.push(text);
             start = at;

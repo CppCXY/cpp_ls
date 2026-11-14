@@ -167,11 +167,6 @@ fn background_waves_defer_open_files_without_starving_other_work() {
     let wave = session.prepare_background_wave(2);
     assert!(wave.prepared.iter().all(|(path, _)| path != &open));
     let (done, _) = session.commit_a_wave(wave, 2);
-    // **The commit no longer stalls on that deferred file.** It used to break out of its loop when the head was an
-    // open document the wave had deferred — and `prepare_wave` defers open documents, so the head was never popped
-    // and the pump prepared the same wave for ever (`d344ba0e`: 17 rounds a second, one core, ~90 MB/s on
-    // `containers.cpp`). `index_one` builds the summary itself, so the queue moves; what must not happen is the wave
-    // *parsing* the open file's rendering, and the assertion above pins that.
     assert!(
         done.iter().any(|step| step.path == open),
         "the deferred open file is worked by the commit rather than left at the head: {done:?}"

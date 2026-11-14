@@ -343,13 +343,13 @@ fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
         return Option::None;
     }
     let mut depth = 0isize;
-    for cursor in open..stream.tokens.len() {
-        match stream.tokens[cursor].kind {
+    for (offset, token) in stream.tokens[open..].iter().enumerate() {
+        match token.kind {
             Less => depth += 1,
             Greater => {
                 depth -= 1;
                 if depth == 0 {
-                    return Option::Some(cursor);
+                    return Option::Some(open + offset);
                 }
             }
             Semicolon | LeftBrace | RightBrace | RightParen => return Option::None,

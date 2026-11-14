@@ -867,7 +867,8 @@ is why MinGW's guards are `Unknown`. That is the next change, and it would let `
 machine — and with it the two findings.
 
 Tests pinning today's behaviour: `an_include_behind_an_undecided_guard_is_still_reported` and
-`a_header_borrows_the_include_directories_of_a_source_beside_it`.
+`a_header_borrows_the_include_directories_of_a_source_beside_it`.
+
 
 ## `containers.cpp` grows private bytes to gigabytes with no request at all — measured
 
@@ -913,7 +914,8 @@ the growth is still the pump's.
 on every drain, and each drain pays a wave preparation over the closure. Refuse an ask that has been taken and
 served without `is_refined` becoming true (per content, cleared on edit — the rule `cooking_refused` already
 follows), so `pending_work()` can reach zero; and call `mi_collect(true)` after a closure cook burst, since the
-peaks are what is being kept.
+peaks are what is being kept.
+
 
 **Second round, measured** — the holder is outside every table the session reports, and the growth scales with
 the closure:
@@ -939,7 +941,8 @@ Tried and measured as **not** the cause, and reverted rather than kept:
 
 Next: a heap profile outside the session (mimalloc's own stats, or a sampling profiler) to name the allocation
 site, and a bisect of the seventeen includes (a file including only `<map>`, only `<variant>`, …) to find whether
-one header triggers the loop.
+one header triggers the loop.
+
 
 **The trigger, bisected to one statement** (temp files under `test_cpp/src`, deleted afterwards; the server opened
 one file and asked nothing for 15 s):
@@ -971,7 +974,8 @@ the check layer: it is in the server's pump path that the standalone tool does n
 therefore the pump's own, and the probe that answers it is one request order away: does the cook of that file
 land (`cooked_declarations` `Some`) or is it re-wanted every round? The in-process pump probe cannot see it — it
 does not cook at all (`cooking 67, cooked 0`), because cooking belongs to the server's `claim_cooking`/
-`render_cooks` path.
+`render_cooks` path.
+
 
 **Third round — two fixes landed, and the residue is now one request.**
 
@@ -997,7 +1001,8 @@ one textDocument/diagnostic grows ~90 MB/s, one core at 100 %, 21 threads
 So the bytes are in the **request path** after the pull, not in the pump and not in the checks:
 `inspect diagnostics --index --cook` on the same file is 212 MB and instant. The next instrument is the same
 allocation counter around `AnalysisState::catch_up`, `AnalysisState::prepare` and `Session::diagnostics`, printing
-per request — that names the call in one run.
+per request — that names the call in one run.
+
 
 **The pull path, split** (`CPPLS_TRACE_ALLOCS` prints `[pull]` and `[query]`):
 
@@ -1011,7 +1016,8 @@ per request — that names the call in one run.
 So a pull is not the 90 MB/s — it allocates 117 MB once, in `prepare_for_a_diagnostic` — and the growth after it
 is something that starts then and keeps going: with the pump waiting (the fix above) its rounds allocate 0 MB,
 `pending` stays 66, and no stage runs; `[query]` lines show every query it did run at 0–6 ms. The next question is
-what runs at 100 % of a core *outside* both: the trace to add is thread-level, not stage-level.
+what runs at 100 % of a core *outside* both: the trace to add is thread-level, not stage-level.
+
 
 **The livelock, found and fixed.** `commit_a_wave` broke out of its commit loop when the head of the queue was an
 open document with no prepared reading — and `prepare_wave` *defers* open documents, so it never has one. Nothing

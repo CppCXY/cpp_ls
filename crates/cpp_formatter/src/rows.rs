@@ -136,8 +136,9 @@ fn align_run(
         }
         let mut cells: Vec<Vec<usize>> = vec![Vec::new()];
         let mut depth = 0isize;
-        for index in row.open + 1..row.close {
-            match stream.tokens[index].kind {
+        for (offset, token) in stream.tokens[row.open + 1..row.close].iter().enumerate() {
+            let index = row.open + 1 + offset;
+            match token.kind {
                 CppTokenKind::LeftBrace | CppTokenKind::LeftParen | CppTokenKind::LeftBracket => {
                     depth += 1
                 }
