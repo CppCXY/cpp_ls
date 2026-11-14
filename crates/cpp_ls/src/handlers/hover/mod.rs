@@ -1493,6 +1493,31 @@ fn declaration_markdown(
     };
 
     let mut corrected = found.fact.clone();
+    // **A binding is a place to jump to, and the card is about the declaration.** `definitions` answers a *binding*
+    // while the file's summary is still being built — the first hover after a file is opened — and a binding records
+    // no return type and no parameter list, so the card printed `name_of(…)`: a signature with the two things a
+    // signature is made of missing, and no `constexpr`. Measured on `C:\Users\zc\Desktop\cpp\src\reflect.hpp` with a
+    // cold cache: the **first** hover answered `name_of(…)`, the second `constexpr std::string_view name_of(E value)`,
+    // because by then the summary existed. The file's own view is here either way, and its facts are the same facts
+    // the summary would hold — read synchronously, so the first hover is not worse than the second.
+    if corrected.type_of.is_none()
+        && corrected.returns.is_none()
+        && corrected.parameter_list.is_none()
+        && let Some(the_view) = if found.file == view.path {
+            Some(view.clone())
+        } else {
+            session.view_of_the_file(&found.file)
+        }
+        && let Some(complete) = session
+            .facts_of_the_view(&the_view)
+            .into_iter()
+            .find(|fact| {
+                fact.name == corrected.name
+                    && fact.name_range.start_offset == corrected.name_range.start_offset
+            })
+    {
+        corrected = complete;
+    }
     // **A deduced type is shown as the type it deduced to.** The fact records what the file *wrote* — `auto&` — which
     // is the spelling a lookup wants and no answer at all to "what is this". The engine has the answer (`type_at`, the
     // same one the inlay hint draws), so the card shows it: measured on a user's file,
