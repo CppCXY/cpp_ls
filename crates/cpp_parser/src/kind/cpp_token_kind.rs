@@ -146,6 +146,10 @@ pub enum CppTokenKind {
     NullptrKeyword,
     /// static_assert - static assertion (C++11)
     StaticAssertKeyword,
+    /// **`contract_assert` — a C++26 contract assertion statement** (P2900). A full keyword rather than a
+    /// context-sensitive one, because `assert` is a macro and the committee chose a spelling that cannot collide with
+    /// it; `pre` and `post` are context-sensitive and stay identifiers.
+    ContractAssertKeyword,
     /// **`static_cast` — one of the four named casts.**
     ///
     /// A keyword of its own rather than an identifier, because `static_cast<int>(x)` and `a < b > (c)` are the same
@@ -477,6 +481,7 @@ impl fmt::Display for CppTokenKind {
             Self::NoexceptKeyword => write!(f, "noexcept"),
             Self::NullptrKeyword => write!(f, "nullptr"),
             Self::StaticAssertKeyword => write!(f, "static_assert"),
+            Self::ContractAssertKeyword => write!(f, "contract_assert"),
             Self::StaticCastKeyword => write!(f, "static_cast"),
             Self::DynamicCastKeyword => write!(f, "dynamic_cast"),
             Self::ConstCastKeyword => write!(f, "const_cast"),

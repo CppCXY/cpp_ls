@@ -241,6 +241,10 @@ impl<'a> CppLexer<'a> {
             {
                 CppTokenKind::StaticAssertKeyword
             }
+            // **C++26's contract assertion** (P2900). Unconditional, like the reflection operators: no earlier
+            // standard gives the name a meaning, and a file that writes it is being read as C++26 whatever `-std=`
+            // said. `pre` and `post` are *not* here — they are context-sensitive and stay identifiers.
+            "contract_assert" => CppTokenKind::ContractAssertKeyword,
             "template" => CppTokenKind::TemplateKeyword,
             "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => {
                 CppTokenKind::ThreadLocalKeyword

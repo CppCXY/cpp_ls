@@ -894,6 +894,16 @@ pub enum CppSyntaxKind {
     /// e.g.: the `-> T*` in `auto begin() -> T*`
     TrailingReturnType,
 
+    // ========== Contracts (C++26, P2900) ==========
+    /// **A contract specifier sequence**: the `pre(…)`/`post(…)` written after a function's parameter list and
+    /// before its body — `int f(int x) pre(x > 0) post(r: r > 0) { … }`.
+    ContractSpecifierSeq,
+    /// **One contract specifier**: `pre(cond)`, `post(cond)`, or `post(r: cond)` — the last introduces `r` as a
+    /// name for the return value.
+    ContractSpecifier,
+    /// **A contract assertion statement**: `contract_assert(cond);` inside a body.
+    ContractAssertStat,
+
     // ========== Error Recovery ==========
     /// Error node - for error recovery in parsing
     /// Used when the parser encounters unrecognized syntax

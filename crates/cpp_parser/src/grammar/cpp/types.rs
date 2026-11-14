@@ -6070,6 +6070,11 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             CppTokenKind::Identifier if matches!(p.current_token_text(), "override" | "final") => {
                 p.bump()
             }
+            // A **contract specifier** is not a macro: `int f(int x) pre(x > 0)` writes one after the parameter
+            // list, which is exactly where this arm would take `pre(...)` for an invocation of a macro named `pre`.
+            // C++26 (P2900) makes that position a contract, so the arm stands aside and the declarator's own rule
+            // reads it — see [`super::decls::parse_contract_specifiers`].
+            CppTokenKind::Identifier if super::decls::at_a_contract_specifier(p) => return,
             // A **macro** among the suffixes, which is where libstdc++ puts one: `void f() _GLIBCXX_NOEXCEPT`,
             // `T* addressof(T&) _GLIBCXX_NOEXCEPT`, `… const _GLIBCXX_NOEXCEPT`. A name here has no other
             // reading — the two contextual keywords are the arm above, and `requires` is refused inside — so the

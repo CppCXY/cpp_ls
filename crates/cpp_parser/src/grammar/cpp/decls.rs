@@ -1759,6 +1759,15 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     // attributes and before the initializer question below, because the token *after* it is what decides whether
     // there is an initializer at all — `int x MACRO = 1;` has one and `int x MACRO;` does not. See
     // [`eat_a_macro_suffix`] for why a name here costs nothing.
+    // **Contract specifiers** (C++26, P2900) sit exactly here: after the declarator and its attributes, before any
+    // initializer, constructor initializer list or body. Read *before* the macro suffix below, because `pre` and
+    // `post` are ordinary identifiers and a macro of that name would otherwise be eaten as a suffix — what makes
+    // them contracts is the parenthesis that follows, not the spelling.
+    if let Err(err) = parse_contract_specifiers(p) {
+        m.undo(p);
+        return Err(err);
+    }
+
     while eat_a_macro_suffix(p) {}
 
     // **An initializer needs something to initialise.** Without this the declaration reading accepts a
@@ -2742,11 +2751,19 @@ pub fn parse_function_suffix_or_initializer(
             if a_trailing_return_type_follows
                 || qualifiers_follow_the_parameter_list
                 || p.current_token() == CppTokenKind::LeftBrace
+                // **A contract specifier can only follow a function declarator**, so seeing one settles the reading
+                // the same way a body does.
+                || at_a_contract_specifier(p)
             {
                 // Kept — so the flag is set *after* the decision, not inside the speculative part: the flag is
                 // not part of a checkpoint, and a rollback would leave it saying "function" about a declarator
                 // this rule decided was a variable.
                 p.set_last_declarator_is_function(true);
+                // **The contract specifiers of a function declarator** (C++26, P2900): `pre(…)`/`post(…)` sit after
+                // the parameter list and its qualifiers, and before any body or initializer. Read here because this
+                // is where the declarator ends — the rules below take a `pre(…)` for a macro invocation, which is
+                // what it looked like before contracts existed.
+                parse_contract_specifiers(p)?;
                 return Ok(CompleteMarker::empty());
             }
         }
@@ -2769,6 +2786,7 @@ pub fn parse_function_suffix_or_initializer(
         // one leaves no node for a later event-stream check to find.
         p.set_last_declarator_is_function(true);
         types::eat_function_qualifiers(p);
+        parse_contract_specifiers(p)?;
         return Ok(CompleteMarker::empty());
     }
 
@@ -5819,6 +5837,157 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
             break;
         }
         p.bump();
+    }
+
+    if let Err(err) = expect_semicolon(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Contracts (C++26, P2900)
+// ---------------------------------------------------------------------------------------------------------------
+//
+// ```cpp
+// int safe_division(int numerator, int denominator)
+//     pre(denominator != 0)
+//     post(result: result * denominator == numerator)
+// {
+//     contract_assert(numerator >= 0);
+//     return numerator / denominator;
+// }
+// ```
+//
+// Three things are contracts and they live in three places:
+//
+// ```text
+// pre(cond)            after the parameter list, before the body — the caller's obligation
+// post(cond)           the same place — the function's guarantee; `post(name: cond)` introduces the result name
+// contract_assert(c)   a statement in the body — a full keyword, unlike `pre`/`post`
+// ```
+//
+// **`pre` and `post` are context-sensitive**, so they stay identifiers: `int pre = 42;` and `void post() {}` are
+// ordinary C++ and must keep parsing. What makes them specifiers is the *position* — after a function declarator,
+// where nothing but attributes, an initializer or a body can follow — and the `(` after the name.
+
+/// Is the cursor on a **contract specifier** — `pre(…)` or `post(…)` — rather than on a name?
+///
+/// The name is matched by its text, because both are context-sensitive keywords ([dcl.spec.general]): the same
+/// spelling is an ordinary identifier everywhere else. The `(` that follows is what separates a specifier from the
+/// last declarator's own name, since a declarator at this position has already been read.
+pub(super) fn at_a_contract_specifier(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+    let spelling = p.current_token_text();
+    if spelling != "pre" && spelling != "post" {
+        return false;
+    }
+    // An **attribute** may sit between the keyword and the parenthesis — `pre [[likely]] (x > 0)` — so a `[` is
+    // accepted here too, and the attribute is read by the rule itself.
+    matches!(
+        p.peek_next_token(),
+        CppTokenKind::LeftParen | CppTokenKind::LeftBracket
+    )
+}
+
+/// **The contract specifiers after a function declarator**, in the order the file writes them.
+///
+/// Returns `Ok(false)` when there was none, which is the ordinary case for every other declaration — the caller keeps
+/// whatever it was about to read next.
+pub(super) fn parse_contract_specifiers(p: &mut CppParser) -> Result<bool, CppParseError> {
+    if !at_a_contract_specifier(p) {
+        return Ok(false);
+    }
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ContractSpecifierSeq);
+    while at_a_contract_specifier(p) {
+        if let Err(err) = parse_one_contract_specifier(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    }
+    m.complete(p);
+    Ok(true)
+}
+
+/// One `pre(…)` or `post(…)`, with the optional result-name introducer and the attributes the standard allows on
+/// either side of the parenthesis.
+fn parse_one_contract_specifier(p: &mut CppParser) -> Result<(), CppParseError> {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ContractSpecifier);
+    let is_a_postcondition = p.current_token_text() == "post";
+    p.bump(); // `pre` or `post`
+
+    let _ = types::parse_attribute_specifiers(p);
+
+    if let Err(err) = expect_token(p, CppTokenKind::LeftParen) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // **The result name** (postconditions only): `post(r: r > 0)` names the return value, and the name is an
+    // ordinary declaration in the predicate's scope. `post(x)` has no introducer — a `void` function has no result to
+    // name — so the `:` is what decides, and the name is put back when it does not follow.
+    if is_a_postcondition && p.current_token() == CppTokenKind::Identifier {
+        let before_the_name = p.checkpoint();
+        p.bump();
+        let _ = types::parse_attribute_specifiers(p);
+        if p.current_token() == CppTokenKind::Colon {
+            p.bump();
+        } else {
+            p.rollback(before_the_name);
+        }
+    }
+
+    if p.current_token() == CppTokenKind::RightParen {
+        // `pre()` is not valid C++, and the predicate is what a reader comes to the construct for — report the
+        // absence rather than a specifier with nothing in it.
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            &t!("expected a contract condition"),
+            p.current_token_range(),
+        ));
+    }
+
+    if let Err(err) = parse_expr(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    m.complete(p);
+    Ok(())
+}
+
+/// **`contract_assert(condition);`** — the assertion statement, which lives inside a body.
+///
+/// A full keyword rather than a context-sensitive one (unlike `pre`/`post`): `assert` is a macro, and a statement
+/// spelled the same way as one would be the one name a program cannot disambiguate. An optional message is *not*
+/// part of the spelling — a contract's message is the predicate's own text, which the implementation reports.
+pub fn parse_contract_assert(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ContractAssertStat);
+
+    expect_token(p, CppTokenKind::ContractAssertKeyword)?;
+
+    if p.current_token() == CppTokenKind::LeftParen {
+        p.bump();
+        let _ = types::parse_attribute_specifiers(p);
+        if let Err(err) = parse_expr(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     if let Err(err) = expect_semicolon(p) {

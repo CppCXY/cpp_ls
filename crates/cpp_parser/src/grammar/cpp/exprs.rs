@@ -3611,6 +3611,13 @@ fn parse_lambda(p: &mut CppParser) -> ParseResult {
     // `mutable`, `constexpr`, `consteval`, `noexcept`, `-> type`, and the attributes that may appear among them.
     types::eat_function_qualifiers(p);
 
+    // **A lambda can carry contract specifiers too** (C++26, P2900): `[](int x) pre(x > 0) { … }`. Same rule as a
+    // function's, and the same position — after the parameter list and its qualifiers, before the body.
+    if let Err(err) = decls::parse_contract_specifiers(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     // The body. A lambda's body is a compound statement like any other, so it is parsed by the statement rule —
     // which is also what keeps `return` and every other statement inside it working.
     if let Err(err) = stats::parse_compound_stat(p) {

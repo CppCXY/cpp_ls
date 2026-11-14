@@ -265,7 +265,13 @@ use std::path::{Path, PathBuf};
 /// summary holds for such a file (and for every declaration after the first error) are not the ones the reader gets
 /// now. Nothing about a *non*-reflection file changes, and the number moves anyway because a summary is keyed by
 /// content: a file edited to use reflection would otherwise keep a summary read before it did.
-pub const FORMAT_VERSION: u32 = 28;
+/// # Why this moved to 29
+///
+/// **C++26 contracts parse.** `pre(…)`/`post(…)` after a parameter list and `contract_assert(…)` in a body were
+/// syntax errors before this — a `pre(…)` was read as a macro invocation *inside the declarator*, so the function it
+/// decorated was filed with the wrong shape (and a `contract_assert` ended the statement it was in). A summary for
+/// such a file holds facts read from a tree that ended at the first contract, so the number moves.
+pub const FORMAT_VERSION: u32 = 29;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

@@ -416,6 +416,8 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         CppTokenKind::ContinueKeyword => parse_keyword_statement(p, CppSyntaxKind::ContinueStat),
         CppTokenKind::GotoKeyword => parse_goto_statement(p),
         CppTokenKind::ThrowKeyword => parse_throw_statement(p),
+        // **A contract assertion** (C++26, P2900): `contract_assert(cond);` — a statement, and a full keyword.
+        CppTokenKind::ContractAssertKeyword => decls::parse_contract_assert(p),
 
         // Compound statement
         CppTokenKind::LeftBrace => parse_compound_stat(p),
