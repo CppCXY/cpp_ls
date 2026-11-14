@@ -135,6 +135,12 @@ pub enum DiagnosticCode {
     /// **A contract specifier on a function defaulted on its first declaration** — ill-formed in C++26 (P2900) — see
     /// [`super::contract_placement`].
     ContractOnDefaultedFunction,
+    /// **`override` on a function no base declares** — the program does not build — see
+    /// [`super::override_nonexistent`].
+    OverrideNonexistent,
+    /// **`final` on a function that is neither virtual nor overriding** — `final` may only be applied to a virtual
+    /// function — see [`super::final_misplaced`].
+    FinalMisplaced,
 }
 
 impl DiagnosticCode {
@@ -144,7 +150,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 37] = [
+    pub const ALL: [DiagnosticCode; 39] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -182,6 +188,8 @@ impl DiagnosticCode {
         DiagnosticCode::UeSpecifier,
         DiagnosticCode::ContractOnVirtualFunction,
         DiagnosticCode::ContractOnDefaultedFunction,
+        DiagnosticCode::OverrideNonexistent,
+        DiagnosticCode::FinalMisplaced,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -228,6 +236,8 @@ impl DiagnosticCode {
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
             DiagnosticCode::ContractOnVirtualFunction => "contract-on-virtual-function",
             DiagnosticCode::ContractOnDefaultedFunction => "contract-on-defaulted-function",
+            DiagnosticCode::OverrideNonexistent => "override-nonexistent",
+            DiagnosticCode::FinalMisplaced => "final-misplaced",
         }
     }
 
@@ -288,6 +298,10 @@ impl DiagnosticCode {
             // are the language refusing the text, not a judgement about style.
             DiagnosticCode::ContractOnVirtualFunction => RuleSeverity::Error,
             DiagnosticCode::ContractOnDefaultedFunction => RuleSeverity::Error,
+            // **The language refusing the text.** `override` on nothing is [class.virtual]`s error, and `final` on a
+            // function that is not virtual is [class.mem.general]`s.
+            DiagnosticCode::OverrideNonexistent => RuleSeverity::Error,
+            DiagnosticCode::FinalMisplaced => RuleSeverity::Error,
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
@@ -381,6 +395,8 @@ impl DiagnosticCode {
                 | DiagnosticCode::UeSpecifier
                 | DiagnosticCode::ContractOnVirtualFunction
                 | DiagnosticCode::ContractOnDefaultedFunction
+                | DiagnosticCode::OverrideNonexistent
+                | DiagnosticCode::FinalMisplaced
         )
     }
 

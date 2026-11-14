@@ -111,6 +111,8 @@ mod borrowed;
 mod braces_around_statements;
 pub mod concept_not_satisfied;
 pub mod contract_placement;
+pub mod final_misplaced;
+pub mod override_nonexistent;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;
@@ -1601,6 +1603,8 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<concept_not_satisfied::ConceptNotSatisfied>(&mut context);
     eprintln!("[contract] about to run placement");
     run_check::<contract_placement::ContractPlacement>(&mut context);
+    run_check::<override_nonexistent::OverrideNonexistent>(&mut context);
+    run_check::<final_misplaced::FinalMisplaced>(&mut context);
     eprintln!("[contract] ran placement");
     run_check::<use_override::UseOverride>(&mut context);
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);

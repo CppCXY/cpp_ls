@@ -114,6 +114,8 @@ mod assignment_in_condition;
 mod braces_around_statements;
 mod concept_not_satisfied;
 mod contract_placement;
+mod final_misplaced;
+mod override_nonexistent;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;

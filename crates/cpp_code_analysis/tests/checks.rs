@@ -3228,6 +3228,8 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::UeSpecifier,
             DiagnosticCode::ContractOnVirtualFunction,
             DiagnosticCode::ContractOnDefaultedFunction,
+            DiagnosticCode::OverrideNonexistent,
+            DiagnosticCode::FinalMisplaced,
         ]
     );
 }
