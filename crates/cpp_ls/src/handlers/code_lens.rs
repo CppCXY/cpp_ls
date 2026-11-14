@@ -108,7 +108,22 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
 
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
-        if fact.kind != DeclKind::Function || fact.local {
+        // **Two kinds of function get no lens**, for reasons that end in the same place: a number nobody can check.
+        //
+        // A **destructor** has no spelling at a use — `~Widget` is written where it is declared, and a call is implied
+        // by a scope ending — so the reference query answers `0 references` for it, which reads as "nobody destroys
+        // this" and is not a claim about anything.
+        //
+        // An **operator overload**'s uses are spelled (`a + b`), but attributing one to *this* overload needs
+        // overload resolution, and [`super::references::places_of`] answers from the name: every `+` in every file that
+        // can see the class is a candidate, so the count is wrong in the direction a reader trusts — too high — and
+        // the click lists places that have nothing to do with the operator. Measured on the fixture below: an
+        // `operator+` lens and a destructor lens, both `0 references`, beside a member function that had one.
+        if fact.kind != DeclKind::Function
+            || fact.local
+            || fact.is_a_destructor()
+            || fact.is_an_operator()
+        {
             continue;
         }
         let (Some(start), Some(end)) = (
@@ -518,5 +533,53 @@ int use(Format &f, Builder &b) { return f.NameStyleCheck(b, 1); }
             "a client with no command for this shows the count alone"
         );
         assert!(other.arguments.is_none());
+    }
+
+    /// **A destructor and an operator overload get no lens**, and a plain member function on the same class does.
+    ///
+    /// Two different reasons reach the same answer. A destructor has no spelling at a *use* — `~Widget` is written where
+    /// it is declared, and a call is implied by a scope ending — so its count would be a number about nothing.
+    /// An operator's uses *are* spelled (`a + b`), but attributing one to this overload needs overload resolution, and
+    /// the reference query answers from the name: every `+` in every file that can see the class is a candidate, which
+    /// is the whole project, and the count is wrong in the direction a reader trusts — too high.
+    ///
+    /// Measured with `tests/code_lens_probe.rs`'s fixture shape: the reported file showed `0 references` over an
+    /// `operator=` and a number over a destructor, and neither is a number a reader can click and verify.
+    #[test]
+    fn a_destructor_and_an_operator_have_no_lens() {
+        let source = "\
+struct Widget {
+    ~Widget();
+    Widget operator+(const Widget& other) const;
+    void grow(int by);
+};
+void f(Widget a, Widget b) { a.grow(1); (void)(a + b); }
+";
+        let session = session_of(&[("/p/a.cpp", source)]);
+        let uri: Uri = "file:///p/a.cpp".parse().expect("a uri");
+        let view = session
+            .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+            .expect("a view");
+        let lenses = lenses_of(&session, &view, &uri, ClientId::VSCode);
+        let named: Vec<(String, String)> = lenses
+            .iter()
+            .map(|lens| {
+                (
+                    lens_name(&view, lens),
+                    lens.command
+                        .as_ref()
+                        .map(|command| command.title.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("grow".to_string(), "1 reference".to_string()),
+                ("f".to_string(), "0 references".to_string()),
+            ],
+            "only the two ordinary functions are counted: {named:?}"
+        );
     }
 }

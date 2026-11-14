@@ -754,6 +754,41 @@ impl DeclFact {
 
         segments
     }
+
+    /// **Is this declaration a destructor?** — `~Widget`.
+    ///
+    /// A destructor has no spelling at a *use*: `~Widget` is written where it is declared, and a call is implied by a
+    /// scope ending. A consumer that counts uses of a name therefore has nothing to count, and one that offers an
+    /// action on every function in a file should leave it out.
+    pub fn is_a_destructor(&self) -> bool {
+        is_a_destructor_name(&self.name)
+    }
+
+    /// **Is this declaration an overloaded operator?** — `operator+`, `operator()`, `operator bool`, `operator new`.
+    ///
+    /// The test is the character after `operator`: an operator's spelling continues with a symbol or a space, while an
+    /// ordinary name that merely begins with those eight letters (`operator_helper`) continues with a letter, a digit
+    /// or an underscore — and is a plain function, which this must not hide.
+    ///
+    /// What a consumer does with it is that consumer's decision. A *reference query* cannot attribute a use to an
+    /// operator without overload resolution — `a + b` is spelled with a symbol and says nothing about which `+` it
+    /// reaches — so a count of "the places this operator is used" is the whole project's every `+`, which is a number
+    /// wrong in the direction a reader trusts.
+    pub fn is_an_operator(&self) -> bool {
+        is_an_operator_name(&self.name)
+    }
+}
+
+/// See [`DeclFact::is_a_destructor`].
+pub fn is_a_destructor_name(name: &str) -> bool {
+    name.starts_with('~')
+}
+
+/// See [`DeclFact::is_an_operator`].
+pub fn is_an_operator_name(name: &str) -> bool {
+    name.strip_prefix("operator").is_some_and(|rest| {
+        rest.is_empty() || rest.starts_with(|first: char| !first.is_alphanumeric() && first != '_')
+    })
 }
 
 /// What kind of declaration a [`DeclFact`] is.
@@ -5523,3 +5558,42 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+
+#[cfg(test)]
+mod tests {
+
+
+
+    /// **A destructor is recognised by the tilde**, which is the only spelling it has.
+    #[test]
+    fn a_destructor_is_a_name_that_starts_with_a_tilde() {
+        assert!(super::is_a_destructor_name("~Widget"));
+        assert!(super::is_a_destructor_name("~"), "the spelling is the test, not the identifier");
+        assert!(!super::is_a_destructor_name("Widget"));
+        assert!(!super::is_a_destructor_name("operator~"), "a bitwise-not overload is not a destructor");
+    }
+
+    /// **An operator is `operator` followed by a symbol or a space**, not by another identifier character.
+    #[test]
+    fn an_operator_is_recognised_without_hiding_a_name_that_begins_with_the_same_letters() {
+        for operator in [
+            "operator+",
+            "operator()",
+            "operator[]",
+            "operator=",
+            "operator<=>",
+            "operator bool",
+            "operator new",
+            "operator Widget",
+        ] {
+            assert!(super::is_an_operator_name(operator), "`{operator}` is an operator");
+        }
+        for plain in ["grow", "operate", "operator_helper", "operators", "Widget"] {
+            assert!(
+                !super::is_an_operator_name(plain),
+                "`{plain}` is an ordinary function, not an operator"
+            );
+        }
+    }
+}
