@@ -7078,3 +7078,87 @@ fn a_client_can_walk_the_class_hierarchy() {
         "`Base`'s subtypes name the class that derives from it: {subtypes}"
     );
 }
+/// **A function declared in a header hovers as its declaration, not as the type of the call.**
+///
+/// The chain this pins is the one a reader lives in: a header declares
+/// `consteval string_view identifier_of(info);` — a **typedef return type** and one argument that names a type — and
+/// the `.cpp` that includes it calls it. Two defects met here and both were measured on a real project:
+///
+/// * the parser read `string_view f(info);` as a *variable* with a direct-initialiser (the most vexing parse is settled
+///   by lookup, and it only asked whether the declaration's own type was a keyword), so the header's fact said
+///   `variable`, and hover on the call fell through to the expression's type — "`std::meta::identifier_of` — has type
+///   `string_view`", which is the card that was reported as "并非对应的函数";
+/// * and the card for a declaration the summary had not yet reached printed `name_of(…)` with no return type and no
+///   parameter list.
+///
+/// The test is a full handshake — initialize, didOpen, `textDocument/hover` — so it reads what an editor reads, on the
+/// written text, with the header reached through the index rather than through a rendering.
+#[test]
+fn a_hover_on_a_header_declared_function_shows_the_declaration() {
+    const TYPES_H: &str = "\
+namespace lib {
+using string_view = const char *;
+struct info {};
+consteval string_view identifier_of(info);
+constexpr int count_of(info, int);
+}
+";
+    const MAIN_CPP: &str = "\
+#include \"types.h\"
+
+int main() {
+    auto name = lib::identifier_of(lib::info{});
+    auto count = lib::count_of(lib::info{}, 1);
+    return 0;
+}
+";
+
+    let project = Project::new("hover-header-declaration");
+    project.write("types.h", TYPES_H);
+    project.write("main.cpp", MAIN_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    let answer = hover_over(&mut server, 100, &main_uri, MAIN_CPP, "identifier_of");
+    let text = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {answer}"));
+    assert!(
+        text.contains("consteval string_view identifier_of(info)"),
+        "the declaration, with its return type and parameter list: {text}"
+    );
+    assert!(
+        !text.contains("has type"),
+        "a function's card is never the type of the call: {text}"
+    );
+
+    // **A parameter list with more than one element** — the shape a caller-argument count could confuse.
+    let answer = hover_over(&mut server, 200, &main_uri, MAIN_CPP, "count_of");
+    let text = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {answer}"));
+    assert!(
+        text.contains("constexpr int count_of(info, int)"),
+        "both parameters, spelled as the header writes them: {text}"
+    );
+}
