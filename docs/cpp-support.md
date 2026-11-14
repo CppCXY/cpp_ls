@@ -95,6 +95,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/documentSymbol` | the file's own declaration tree (including what `#if 0` removes), namespaces and classes nested; a range for the declaration and one for the name |
 | `workspace/symbol` | the declarations the project index holds, by name |
 | `callHierarchy` | incoming and outgoing calls of a function (member functions by the object's type) |
+| `textDocument/prepareTypeHierarchy` + `typeHierarchy/supertypes`/`subtypes` | the class hierarchy: the class under the cursor, its bases (resolved through the index, by whole spelling and last segment), and the classes whose `bases` name it |
 | `textDocument/selectionRange` | the chain of syntax nodes around the cursor |
 | `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
 | `textDocument/documentLink` | the path of an `#include`, as a link to the file |
