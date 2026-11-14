@@ -77,6 +77,11 @@ impl DeclModifiers {
     /// the `&`/`&&` of a *parameter type* are not this — see `function_suffix_in`.
     pub const LVALUE_REFERENCE: Self = Self(1 << 16);
     pub const RVALUE_REFERENCE: Self = Self(1 << 17);
+    /// **The declaration is a definition** — it carries a function body, or it is `= default`/`= delete`. A
+    /// declaration without the bit only declares; the distinction is what a "create the definition" edit needs.
+    pub const DEFINED: Self = Self(1 << 18);
+    /// **`= 0`** — a pure virtual function, whose body a derived class must supply.
+    pub const PURE: Self = Self(1 << 19);
 
     pub const fn bits(self) -> u32 {
         self.0

@@ -129,7 +129,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
 | `textDocument/documentLink` | the path of an `#include`, as a link to the file |
 | `textDocument/inlayHint` | parameter names at call sites |
-| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule |
+| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp` (or of this file when there is no pair) |
 | `textDocument/semanticTokens` | the standard types plus `decorator` (Doxygen commands) and the custom `variableTemplate`; inside string literals, `std::format`/`fmt`'s `{}` fields and the `printf` family (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
 | `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |

@@ -68,6 +68,7 @@ pub mod alloc;
 pub mod cache;
 pub mod completion;
 pub mod cuda;
+pub mod definition;
 pub mod doc;
 pub mod effect;
 pub mod file;

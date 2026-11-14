@@ -258,8 +258,80 @@ pub fn fixes_of_named<F: FileProvider + Clone>(
     };
     let mut fixes = Vec::new();
     fixes.extend(include_fix(&context, wanted));
+    fixes.extend(create_definition(&context));
     // The next provider is one line: `fixes.extend(expand_macro_fix(&context));`
     fixes
+}
+
+/// **`source.create-definition`** — a declared member function with no definition gets one written.
+///
+/// ```text
+/// struct Shape { double area() const; };   ->   double Shape::area() const
+///                                               {
+///                                               }
+/// ```
+///
+/// The target is the **other half of the pair** (`switchSourceHeader`'s rule) when the session holds it, and this file
+/// otherwise — the two places a reader would look. The edit is an insertion at the end of the file, which is where a
+/// definition goes in the shape this server is willing to produce: it does not know the project's ordering
+/// conventions, and guessing them writes code into the middle of somebody's file.
+///
+/// Nothing is offered for a member already defined anywhere the index holds, or for a pure virtual, whose body belongs
+/// to a derived class. See [`cpp_code_analysis::definition`] for exactly what is and is not answered.
+fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option<CodeAction> {
+    let missing = fix.session.missing_definition_at(fix.view, fix.offset)?;
+    // **Where the definition goes.** The pair's other half when the session holds it, this file when it does not — a
+    // `.cpp` nobody has read is a file the client does not know the contents of, and an edit into it would be an edit
+    // into a version that may not be the one on disk.
+    let here = fix.view.path.clone();
+    let paired = crate::handlers::switch_source_header::the_counterpart_of(fix.session, &here)
+        .filter(|candidate| *candidate != here)
+        .filter(|candidate| fix.session.files().held(candidate).is_some());
+    let target = paired.clone().unwrap_or_else(|| here.clone());
+    let held = fix.session.files().held(&target)?;
+    let text = &held.text;
+    let at = crate::util::position_in_file(held, text.len())?;
+    // A definition wants its own lines: one blank line before it, and a newline after it.
+    let separator = if text.is_empty() || text.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    let new_text = format!("{separator}{}\n", missing.text());
+    let uri: Uri = crate::util::path_to_uri(&target)?;
+    let in_file = paired
+        .as_ref()
+        .and_then(|paired| paired.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("this file");
+    Some(CodeAction {
+        title: format!(
+            "Create definition of `{}` in {in_file}",
+            missing.qualified_name
+        ),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: None,
+            document_changes: Some(lsp_types::DocumentChanges::Edits(vec![
+                lsp_types::TextDocumentEdit {
+                    text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                        uri,
+                        version: None,
+                    },
+                    edits: vec![lsp_types::OneOf3::Left(TextEdit {
+                        range: Range { start: at, end: at },
+                        new_text,
+                    })],
+                },
+            ])),
+            change_annotations: None,
+        }),
+        command: None,
+        is_preferred: Some(false),
+        disabled: None,
+        data: None,
+    })
 }
 
 /// **The name a diagnostic is about**, from the `data` this server attached to it.
@@ -609,5 +681,88 @@ mod tests {
             insert.range
         );
         assert!(insert.new_text.contains("import report;"), "{insert:?}");
+    }
+
+    /// **A declared member with no definition** offers the definition, written into the paired `.cpp`.
+    #[test]
+    fn a_missing_definition_is_offered_into_the_paired_file() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/shape.h",
+                "struct Shape {\n    double area(int w, int h) const;\n};\n",
+            )
+            .with_file("/p/shape.cpp", "#include \"shape.h\"\n");
+        let session = a_session(files, ["/p/shape.h", "/p/shape.cpp"]);
+        let view = session.view("/p/shape.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("area").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        let action = fixes
+            .iter()
+            .find(|action| action.title.contains("Shape::area"))
+            .unwrap_or_else(|| panic!("no definition fix among {fixes:?}"));
+        assert!(action.title.contains("shape.cpp"), "{}", action.title);
+        let edit = action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.document_changes.as_ref())
+            .expect("an edit");
+        let lsp_types::DocumentChanges::Edits(edits) = edit else {
+            panic!("one text edit");
+        };
+        let lsp_types::OneOf3::Left(edit) = &edits[0].edits[0] else {
+            panic!("a plain text edit");
+        };
+        assert_eq!(
+            edit.new_text,
+            "\ndouble Shape::area(int w, int h) const\n{\n}\n"
+        );
+        assert_eq!(edits[0].text_document.uri.as_str(), "file:///p/shape.cpp");
+    }
+
+    /// **A member the index sees defined** is not offered again.
+    #[test]
+    fn a_defined_member_offers_nothing() {
+        let files = MemoryFiles::new()
+            .with_file("/p/shape.h", "struct Shape {\n    double area();\n};\n")
+            .with_file(
+                "/p/shape.cpp",
+                "#include \"shape.h\"\ndouble Shape::area() { return 0; }\n",
+            );
+        let session = a_session(files, ["/p/shape.h", "/p/shape.cpp"]);
+        let view = session.view("/p/shape.h").expect("the header is cooked");
+        let at = view.written_text().unwrap().find("area").unwrap();
+        let reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+            .expect("the name is in the rendering");
+        let fixes = fixes_of(&session, &view, reading);
+        assert!(
+            !fixes.iter().any(|action| action.title.contains("Shape::area")),
+            "`area` is defined: {fixes:?}"
+        );
+    }
+
+    /// A session over a set of in-memory files, indexed.
+    fn a_session(
+        files: MemoryFiles,
+        paths: impl IntoIterator<Item = &'static str>,
+    ) -> Session<MemoryFiles> {
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        session.add_project_files(paths.clone());
+        for path in &paths {
+            session.load(path);
+            session.want_cooked_reading(path);
+        }
+        session.index_everything();
+        session
     }
 }

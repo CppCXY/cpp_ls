@@ -437,6 +437,38 @@ pub(crate) fn declared_modifiers_with(
         found = found.union(crate::DeclModifiers::MAYBE_UNUSED);
     }
 
+    // **Is it a definition, and is it pure?** Two questions a *declaration* cannot answer from its own words, so both are
+    // asked of the shape: a body is a `CompoundStat` beside the declarator (or, for `= default`/`= delete`, already a bit
+    // above — both are definitions in C++), and `= 0` is the initializer of a pure virtual.
+    {
+        use cpp_parser::CppAstNode;
+        if let Some(declarator) = declarator.as_ref() {
+        if found.contains(crate::DeclModifiers::DEFAULTED)
+            || found.contains(crate::DeclModifiers::DELETED)
+            || declarator
+                .parent()
+                .and_then(|init| init.parent())
+                .is_some_and(|declaration| {
+                    declaration.children().any(|child| {
+                        cpp_parser::CppCompoundStat::can_cast(child.kind().into())
+                    })
+                })
+        {
+            found = found.union(crate::DeclModifiers::DEFINED);
+        }
+        // **`= 0` is the initializer of a pure virtual, and only of a function**: `int x = 0;` is an ordinary variable,
+        // so the parameter list is what says the `0` is a pure specifier rather than a value.
+        if is_a_function_declarator(declarator)
+            && declarator
+                .parent()
+                .and_then(|init| init.children().find_map(cpp_parser::CppInitializer::cast))
+                .is_some_and(is_zero)
+        {
+            found = found.union(crate::DeclModifiers::PURE);
+        }
+        }
+    }
+
     found
 }
 
@@ -6440,4 +6472,18 @@ fn an_annotation_after_a_multi_byte_character_is_read() {
         Some("UCLASS"),
         "the annotation is found past a two-byte character"
     );
+}
+/// **Is this initializer `= 0`?** — the `0` of a pure virtual function, read from the initializer's own tokens.
+///
+/// A `= 0` initializer is a `0` literal and nothing else; `= 0.0`, `= {}` and `= f()` are not, and the token walk is
+/// what tells them apart without reading text.
+fn is_zero(initializer: cpp_parser::CppInitializer) -> bool {
+    use cpp_parser::CppAstNode;
+    let tokens: Vec<String> = initializer
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| token.text().to_string())
+        .collect();
+    matches!(tokens.as_slice(), [zero] if zero == "0")
 }

@@ -206,7 +206,7 @@ impl Kind {
 }
 
 /// **The file that pairs with this one**, in the order the module documentation gives.
-fn the_counterpart_of<F>(
+pub(crate) fn the_counterpart_of<F>(
     session: &cpp_code_analysis::Session<F>,
     path: &std::path::Path,
 ) -> Option<std::path::PathBuf>

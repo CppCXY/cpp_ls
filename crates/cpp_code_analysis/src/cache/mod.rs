@@ -271,7 +271,12 @@ use std::path::{Path, PathBuf};
 /// syntax errors before this — a `pre(…)` was read as a macro invocation *inside the declarator*, so the function it
 /// decorated was filed with the wrong shape (and a `contract_assert` ended the statement it was in). A summary for
 /// such a file holds facts read from a tree that ended at the first contract, so the number moves.
-pub const FORMAT_VERSION: u32 = 29;
+/// # Why this moved to 30
+///
+/// **Two modifier bits a fact did not have**: `DEFINED` (the declaration carries a body, or is `= default`/`= delete`)
+/// and `PURE` (`= 0`). They are written by the same walk that computes the other bits, so a summary on disk from
+/// before them says "not defined" about every function — which is the answer a "create the definition" edit acts on.
+pub const FORMAT_VERSION: u32 = 30;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
