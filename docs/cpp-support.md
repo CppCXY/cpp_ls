@@ -137,7 +137,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Thirty-four rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Thirty-six rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -161,6 +161,8 @@ Thirty-four rules, each with a fixed severity; `[diagnostics].disable` turns one
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |
 | `concept-not-satisfied` | Error | a constraint is not met |
+| `contract-on-virtual-function` | Error | a contract specifier on a `virtual` function (C++26, P2900; C++29 allows it) |
+| `contract-on-defaulted-function` | Error | a contract specifier on a function defaulted on its first declaration (C++26, P2900) |
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |

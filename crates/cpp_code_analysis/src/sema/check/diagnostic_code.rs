@@ -129,6 +129,12 @@ pub enum DiagnosticCode {
     /// A reflection specifier the engine does not know, which the build tool silently ignores — see
     /// [`super::ue_specifier`].
     UeSpecifier,
+    /// **A contract specifier on a `virtual` function** — C++26 makes it ill-formed (P2900; allowed from C++29) —
+    /// see [`super::contract_placement`].
+    ContractOnVirtualFunction,
+    /// **A contract specifier on a function defaulted on its first declaration** — ill-formed in C++26 (P2900) — see
+    /// [`super::contract_placement`].
+    ContractOnDefaultedFunction,
 }
 
 impl DiagnosticCode {
@@ -138,7 +144,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 35] = [
+    pub const ALL: [DiagnosticCode; 37] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -174,6 +180,8 @@ impl DiagnosticCode {
         DiagnosticCode::UeGeneratedHeader,
         DiagnosticCode::UeMacroScope,
         DiagnosticCode::UeSpecifier,
+        DiagnosticCode::ContractOnVirtualFunction,
+        DiagnosticCode::ContractOnDefaultedFunction,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -218,6 +226,8 @@ impl DiagnosticCode {
             DiagnosticCode::UeMacroScope => "ue-macro-scope",
             DiagnosticCode::UeSpecifier => "ue-specifier",
             DiagnosticCode::ConceptNotSatisfied => "concept-not-satisfied",
+            DiagnosticCode::ContractOnVirtualFunction => "contract-on-virtual-function",
+            DiagnosticCode::ContractOnDefaultedFunction => "contract-on-defaulted-function",
         }
     }
 
@@ -273,6 +283,11 @@ impl DiagnosticCode {
             // complaints about a program that will not build.
             DiagnosticCode::AccessInvisible => RuleSeverity::Error,
             DiagnosticCode::MissingReturn => RuleSeverity::Error,
+            // **The program will not build.** C++26 says a `virtual` function shall not carry a contract specifier
+            // (P2900; C++29 lifts it), and that a function defaulted on its first declaration shall not either — both
+            // are the language refusing the text, not a judgement about style.
+            DiagnosticCode::ContractOnVirtualFunction => RuleSeverity::Error,
+            DiagnosticCode::ContractOnDefaultedFunction => RuleSeverity::Error,
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
@@ -364,6 +379,8 @@ impl DiagnosticCode {
                 | DiagnosticCode::UeGeneratedHeader
                 | DiagnosticCode::UeMacroScope
                 | DiagnosticCode::UeSpecifier
+                | DiagnosticCode::ContractOnVirtualFunction
+                | DiagnosticCode::ContractOnDefaultedFunction
         )
     }
 

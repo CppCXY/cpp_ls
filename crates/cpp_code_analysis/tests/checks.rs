@@ -3200,7 +3200,7 @@ int f(void) {
     );
 }
 
-/// **The twelve C++-only rules are the twelve the documentation lists.** The list is a claim about the language, and a
+/// **The C++-only rules are the ones the documentation lists.** The list is a claim about the language, and a
 /// rule added to it (or dropped from it) without the documentation moving is the kind of drift this test exists for.
 #[test]
 fn the_cpp_only_rules_are_known_by_name() {
@@ -3226,6 +3226,8 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::UeGeneratedHeader,
             DiagnosticCode::UeMacroScope,
             DiagnosticCode::UeSpecifier,
+            DiagnosticCode::ContractOnVirtualFunction,
+            DiagnosticCode::ContractOnDefaultedFunction,
         ]
     );
 }

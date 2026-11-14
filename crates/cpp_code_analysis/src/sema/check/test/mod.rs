@@ -113,6 +113,7 @@ mod argument_count;
 mod assignment_in_condition;
 mod braces_around_statements;
 mod concept_not_satisfied;
+mod contract_placement;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;
