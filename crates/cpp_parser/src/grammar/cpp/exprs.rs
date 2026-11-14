@@ -1919,6 +1919,17 @@ fn parse_postfix_suffixes(
                     p.current_token_range().start_offset,
                 ) == 0;
 
+                // **A member splice** (C++26, P2996): `d.[: r :]` — the member the reflection `r` represents. The
+                // `[:` is what tells it from a subscript: a subscript cannot follow a `.` or an `->`, so the two
+                // tokens are the whole test, and the operand is the ordinary splice rule.
+                if p.current_token() == CppTokenKind::LeftBracket
+                    && p.peek_next_token() == CppTokenKind::Colon
+                {
+                    parse_splice_expression(p)?;
+                    expr = m.complete(p);
+                    continue;
+                }
+
                 // `decltype(t)::template rebind<U>` and `x.template rebind<U>` are the same disambiguator as the
                 // one in the qualified-name loop below: `template` marks the `<` after the name as the start of
                 // template arguments. It is accepted in both positions or neither, because which of the two a
@@ -2885,6 +2896,17 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // qualifier, while an index has an expression in front of it and an operator after.
         CppTokenKind::LeftBracket if starts_a_lambda(p) => parse_lambda(p),
 
+        // **A splice** (C++26, P2996): `[: r :]`, where `r` is a reflection. It stands where an expression stands,
+        // and it is how a reflection becomes the entity it represents — `typename [: r :]` in a type, and
+        // `d.[: ^^Widget::x :]` after a member access.
+        CppTokenKind::LeftBracket if starts_a_splice(p) => parse_splice_expression(p),
+
+        // **A reflection** (C++26, P2996): `^^T` is a value of type `std::meta::info` that represents `T`. The
+        // operand is a *type-id*, a template or concept name, or an id-expression — which is one *type-or-name* to a
+        // parser: the standard decides by lookup, and this grammar keeps the tokens and lets the analysis look them
+        // up. The token is `^^` rather than two `^`s because the language has no unary `^` to pair them with.
+        CppTokenKind::CaretCaret => parse_reflect_expression(p),
+
         // **A Clang block literal**: `^(int n) { … }` — the closure syntax Apple's APIs are written with.
         //
         // A `^` in *operand* position can only be this: the XOR operator has a left operand, so a caret where an
@@ -3111,6 +3133,65 @@ fn parse_block_literal(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// **A reflection** (C++26, P2996): `^^T` — a value of type `std::meta::info` that represents `T`.
+///
+/// The operand is a *type-id*, a template or concept name, or an id-expression, and which of the three it is is a
+/// **lookup**, not a shape: `^^Widget` is a type and `^^Widget::x` is a member, and both are written the same way.
+/// So the type-id rule is tried for the tokens that can only begin a type (a builtin, an elaborated specifier, a
+/// cv-qualifier — [`crate::grammar::cpp::types::starts_a_type_id`]), and everything else is an expression: a name,
+/// a qualified name, or a template-id. A parser that guessed the other way would refuse `^^std::array` and `^^int`
+/// in the same breath.
+fn parse_reflect_expression(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::ReflectExpr);
+    p.bump(); // `^^`
+
+    let read = if crate::grammar::cpp::types::starts_a_type_id(p) {
+        crate::grammar::cpp::types::parse_type_id(p)
+    } else {
+        parse_unary_expr(p, false)
+    };
+    if let Err(err) = read {
+        m.undo(p);
+        return Err(err);
+    }
+    Ok(m.complete(p))
+}
+
+/// **A splice** (C++26, P2996): `[: r :]` — where a reflection stands, the entity it represents stands.
+///
+/// The `:` on both sides is the standard's, not a typo: `[:` and `:]` are the delimiters, and they are what makes
+/// the construct distinguishable from an array index or a lambda's capture list.
+pub(super) fn parse_splice_expression(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::SpliceExpr);
+    if let Err(err) = expect_token(p, CppTokenKind::LeftBracket) {
+        m.undo(p);
+        return Err(err);
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::Colon) {
+        m.undo(p);
+        return Err(err);
+    }
+    if let Err(err) = parse_expr_up_to(p, Level::Full, true) {
+        m.undo(p);
+        return Err(err);
+    }
+    // `[: r :]` and `[: r]` are both accepted: clang's own spelling drops the second colon when the reflection is
+    // the whole operand, and refusing that would be refusing text a compiler takes.
+    if p.current_token() == CppTokenKind::Colon {
+        p.bump();
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
+        m.undo(p);
+        return Err(err);
+    }
+    Ok(m.complete(p))
+}
+
+/// Is the `[` at the cursor the start of a **splice** (`[:`) rather than a lambda or an index?
+fn starts_a_splice(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::LeftBracket && p.peek_next_token() == CppTokenKind::Colon
 }
 
 /// Keywords that look like a name start to the dispatch above but are their own expression forms.

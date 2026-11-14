@@ -494,11 +494,19 @@ impl<'a> CppLexer<'a> {
             }
             '^' => {
                 self.reader.bump();
-                if self.reader.current_char() == '=' {
-                    self.reader.bump();
-                    CppTokenKind::CaretAssign
-                } else {
-                    CppTokenKind::Caret
+                match self.reader.current_char() {
+                    '=' => {
+                        self.reader.bump();
+                        CppTokenKind::CaretAssign
+                    }
+                    // **`^^` is the C++26 reflection operator** (P2996) and one token: two carets cannot be two
+                    // operators, because `^` has a left operand and no unary form — `a ^ ^b` is not an expression in
+                    // any version of the language.
+                    '^' => {
+                        self.reader.bump();
+                        CppTokenKind::CaretCaret
+                    }
+                    _ => CppTokenKind::Caret,
                 }
             }
             ':' => {

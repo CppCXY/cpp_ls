@@ -903,6 +903,29 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
         .iter()
         .find_map(|element| element.as_node().cloned())?;
 
+    // **A spliced member is not a name.** `d.[: r :]` names its member with a reflection, so there is no spelling
+    // here to look up — the same state as `d.` with the name still to be written, which every consumer below already
+    // handles by asking nothing. Without this the first identifier *inside* the splice was read as the member: on
+    // `w.[: ^^Widget::x :]` the member became `Widget`, and the undefined-field check reported that `w` has no member
+    // `Widget` — a claim about a spelling the file never wrote after the dot.
+    if elements[operator + 1..]
+        .iter()
+        .find_map(|element| element.as_node())
+        .is_some_and(|node| {
+            cpp_parser::CppSpliceExpr::can_cast(node.kind().into())
+                || node.descendants().any(|inside| {
+                    cpp_parser::CppSpliceExpr::can_cast(inside.kind().into())
+                })
+        })
+    {
+        return Some(MemberAccess {
+            object,
+            member: String::new(),
+            member_range: SourceRange::new(usize::from(operator_range.end()), 0),
+            arrow,
+        });
+    }
+
     // The member is the identifier **immediately after** the operator — the *first* one in text order, and the
     // distinction is not cosmetic.
     //

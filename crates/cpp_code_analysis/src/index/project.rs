@@ -5028,6 +5028,19 @@ fn type_of_expression_inner(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     }
 
+    // **`^^T` is a `std::meta::info`**, whatever it reflects: the one expression in C++ whose type does not depend on
+    // its operand. The operand may be a type, a member, a template or a concept — the standard tells them apart by
+    // lookup, and this layer does not have to for this answer. Without the arm the reflection fell through to the
+    // name case (the `^^` is not an expression it knew) and answered nothing, which is what a reader asking "what is
+    // this" over the operand saw.
+    //
+    // The spelling is the standard's, and the header that declares it (`<meta>`) is not one this machine has: the
+    // answer names the type rather than resolving it, exactly as it would for a type from a header nobody read.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ReflectExpr {
+        let info = crate::sema::types::parse_type_spelling("std::meta::info");
+        return Known::Yes((info, path.to_path_buf()));
+    }
+
     // **A literal's type is the one thing about it nobody has to look up.**
     //
     // `auto x = 1;` is a declaration whose type the file spells in a form no name can carry, and the reader had

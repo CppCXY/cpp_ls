@@ -258,7 +258,14 @@ use std::path::{Path, PathBuf};
 /// declaration fact for `println` in scope `std` was filed from it, while the statement itself had no `CallExpr`
 /// for a hover to resolve the overload with. Measured on `test_module`: four `std::println` declarations listed,
 /// with the card saying the arguments would decide. Summaries on disk hold the bogus fact, so the number moves.
-pub const FORMAT_VERSION: u32 = 27;
+/// # Why this moved to 28
+///
+/// **C++26 static reflection parses.** `^^T`, `[: r :]`, `typename [: r :]`, `d.[: r :]` and `typename [: r :]<…>`
+/// were syntax errors before this — a file that uses them had no tree at all past the first `^^`, so the facts a
+/// summary holds for such a file (and for every declaration after the first error) are not the ones the reader gets
+/// now. Nothing about a *non*-reflection file changes, and the number moves anyway because a summary is keyed by
+/// content: a file edited to use reflection would otherwise keep a summary read before it did.
+pub const FORMAT_VERSION: u32 = 28;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

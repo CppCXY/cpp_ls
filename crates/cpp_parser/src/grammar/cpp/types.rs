@@ -32,7 +32,7 @@ use super::expect_token;
 ///
 /// Only the tokens that *cannot* begin an expression: a builtin type specifier, an elaborated specifier, or a
 /// cv-qualifier. A name, a literal and a `(` all begin expressions and are left to the expression rule.
-fn starts_a_type_id(p: &CppParser) -> bool {
+pub(super) fn starts_a_type_id(p: &CppParser) -> bool {
     // **`nullptr` is a value, not a type.** The kind table lists it with the type specifiers because
     // `decltype(nullptr)` exists — that is C++'s spelling of a *value*'s type — so `typeof(nullptr)` is the
     // expression reading, and taking it for a type-id reported `expected primary expression` at the `nullptr`
@@ -1692,6 +1692,28 @@ fn parse_one_decl_specifier_inner(
         CppTokenKind::TypenameKeyword => {
             let m = p.mark(CppSyntaxKind::TypenameType);
             p.bump();
+            // **A type splice** (C++26, P2996): `typename [: r :]` — the type the reflection `r` represents. The
+            // colon after the bracket is what tells it from every other `[` after `typename` (an array bound, a
+            // lambda, an attribute), so it is a two-token test and nothing is guessed.
+            if p.current_token() == CppTokenKind::LeftBracket
+                && p.peek_next_token() == CppTokenKind::Colon
+            {
+                *name_allowed = false;
+                if let Err(err) = crate::grammar::cpp::exprs::parse_splice_expression(p) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                // **A splice specialization** (C++26, P2996): `typename [: r :] <int>` — the reflection `r`, with
+                // template arguments applied to it. No ambiguity is possible here, unlike `Name <`: a type cannot be
+                // followed by a comparison operator, so a `<` after the `:]` is always the argument list.
+                if p.current_token() == CppTokenKind::Less
+                    && let Err(err) = parse_template_argument_list(p)
+                {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                return Ok(m.complete(p));
+            }
             if !definitely_ends_a_type(p.current_token()) {
                 // The name after `typename` is part of this specifier, so a further name is the
                 // declarator, as in `typename T::value_type v;`.

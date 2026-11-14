@@ -53,6 +53,10 @@ pub enum CppExpr {
     PackExpansionExpr(CppPackExpansionExpr),
     /// A requires-expression: a question about a type.
     RequiresExpr(CppRequiresExpr),
+    /// **A reflection** (C++26, P2996): `^^T` — a `std::meta::info` representing `T`.
+    ReflectExpr(CppReflectExpr),
+    /// **A splice** (C++26, P2996): `[: r :]` — where a reflection stands, what it represents stands.
+    SpliceExpr(CppSpliceExpr),
     /// An expression the parser could not classify, kept so the tree stays lossless.
     ErrorNode(CppUnknownExpr),
 }
@@ -83,6 +87,8 @@ impl CppAstNode for CppExpr {
             CppExpr::FoldExpr(node) => node.syntax(),
             CppExpr::PackExpansionExpr(node) => node.syntax(),
             CppExpr::RequiresExpr(node) => node.syntax(),
+            CppExpr::ReflectExpr(node) => node.syntax(),
+            CppExpr::SpliceExpr(node) => node.syntax(),
         }
     }
 
@@ -114,6 +120,8 @@ impl CppAstNode for CppExpr {
                 | CppSyntaxKind::FoldExpr
                 | CppSyntaxKind::PackExpansionExpr
                 | CppSyntaxKind::RequiresExpr
+                | CppSyntaxKind::ReflectExpr
+                | CppSyntaxKind::SpliceExpr
                 | CppSyntaxKind::ErrorNode
         )
     }
@@ -154,6 +162,8 @@ impl CppAstNode for CppExpr {
                 CppPackExpansionExpr::cast(syntax).map(CppExpr::PackExpansionExpr)
             }
             CppSyntaxKind::RequiresExpr => CppRequiresExpr::cast(syntax).map(CppExpr::RequiresExpr),
+            CppSyntaxKind::ReflectExpr => CppReflectExpr::cast(syntax).map(CppExpr::ReflectExpr),
+            CppSyntaxKind::SpliceExpr => CppSpliceExpr::cast(syntax).map(CppExpr::SpliceExpr),
             CppSyntaxKind::ErrorNode => CppUnknownExpr::cast(syntax).map(CppExpr::ErrorNode),
             _ => None,
         }
@@ -1233,3 +1243,62 @@ impl CppAstNode for CppUnknownExpr {
 /// A `declarator` seen through an expression: the parser reuses `Declarator` inside expressions in a
 /// few places (parenthesized declarators), and this lets callers reach it.
 pub type CppExprDeclarator = CppDeclarator;
+
+/// **A reflection** (C++26, P2996): `^^T` — a value of type `std::meta::info` that represents `T`.
+///
+/// The operand is a type-id, a template or concept name, or an id-expression; the standard decides which by lookup,
+/// and this node keeps whichever the parser read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppReflectExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppReflectExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::ReflectExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppReflectExpr {
+    /// What is reflected: a type-id, a name, or a template-id.
+    pub fn get_operand(&self) -> Option<CppSyntaxNode> {
+        self.syntax.children().next()
+    }
+}
+
+/// **A splice** (C++26, P2996): `[: r :]` — where the reflection `r` stands, the entity it represents stands.
+///
+/// Written as an expression (`[: r :]`), after `typename` in a type, and after a member access (`d.[: r :]`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppSpliceExpr {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppSpliceExpr {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::SpliceExpr
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppSpliceExpr {
+    /// The reflection the splice applies.
+    pub fn get_operand(&self) -> Option<CppSyntaxNode> {
+        self.syntax.children().next()
+    }
+}

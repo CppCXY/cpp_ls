@@ -238,6 +238,9 @@ pub enum CppTokenKind {
     Pipe,
     /// ^ bitwise xor
     Caret,
+    /// ^^ the reflection operator (C++26, P2996) — one token, because `a ^ ^b` is not an expression in any version of
+    /// the language: `^` has a left operand and no unary form, so two adjacent carets can only be this.
+    CaretCaret,
     /// ~ bitwise not
     Tilde,
     /// << left shift
@@ -513,6 +516,7 @@ impl fmt::Display for CppTokenKind {
             Self::Ampersand => write!(f, "&"),
             Self::Pipe => write!(f, "|"),
             Self::Caret => write!(f, "^"),
+            Self::CaretCaret => write!(f, "^^"),
             Self::Tilde => write!(f, "~"),
             Self::LeftShift => write!(f, "<<"),
             Self::RightShift => write!(f, ">>"),

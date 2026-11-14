@@ -297,6 +297,19 @@ pub enum CppSyntaxKind {
     /// e.g.: [capture](params) -> return_type { body }
     LambdaExpr,
 
+    /// **A reflection** (C++26, P2996): `^^T`, an expression of type `std::meta::info` that represents `T`.
+    ///
+    /// The operand is a type-id, a template or concept name, or an id-expression — the standard decides which by
+    /// lookup, and the tree keeps its tokens. `^^` is one token, because the language has no unary `^` to pair two
+    /// carets with.
+    ReflectExpr,
+
+    /// **A splice** (C++26, P2996): `[: r :]`, where a reflection stands, the entity it represents stands.
+    ///
+    /// It is written in three positions and this node is all three: as an expression (`[: r :]`), after `typename` in
+    /// a type (`typename [: r :]`, which the `TypenameType` node holds), and after a member access (`d.[: r :]`).
+    SpliceExpr,
+
     /// A lambda's capture list: the `[` … `]` of a lambda expression.
     /// e.g.: the `[&x, y = 1]` of `[&x, y = 1](int z) { return x + y + z; }`
     ///

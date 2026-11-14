@@ -31,7 +31,24 @@ Each construct is a **feature bit** opened by `-std=` or `[compile].standard`.
 | MSVC extensions | `__declspec(...)`, `__int64`, `__try`/`__except`/`__finally`, `__cdecl`/`__stdcall`, macro prefixes such as `_STD_BEGIN`/`_STD_END` |
 | CUDA | `__global__`/`__device__`/`__host__`, the `<<<…>>>` launch syntax, built-in vector types such as `float4` and `dim3` |
 
-**Not supported**: C++26 (contracts, reflection, `#embed`) has no feature bits yet; that syntax is read as C++23.
+**Not supported**: C++26 (contracts, `#embed`) has no feature bits yet; that syntax is read as C++23 — with one
+exception, **static reflection** (P2996), whose operators are parsed unconditionally because no earlier C++ has a
+meaning for them:
+
+| Reflection form | What is read |
+| --- | --- |
+| `^^T`, `^^Widget::x`, `^^std::array` | a `ReflectExpr`: a value of type `std::meta::info` representing the operand (a type-id, a template or concept name, or an id-expression) |
+| `[: r :]` | a `SpliceExpr` in expression position |
+| `typename [: r :]` | a type splice, in the `TypenameType` node a dependent type-name uses |
+| `typename [: r :]<int>` | a splice specialization: the type splice with template arguments |
+| `d.[: r :]`, `p->[: r :]` | a member splice; it has **no written name**, so member lookup and the undefined-field check ask nothing about it |
+| `^^` as a token | one token, not two `^`: the language has no unary `^` to pair them with, and `^` alone is still a Clang block literal |
+
+What is **not** there is the library: `std::meta`'s metafunctions (`members_of`, `type_of`, …) are ordinary
+undeclared names unless a project supplies a `<meta>` header, and a splice's *type* is the entity the reflection
+names, which this layer does not evaluate — so `auto x = [: r :];` leaves `x`'s type unknown rather than guessing.
+The syntax is checked without a compiler (no GCC 16 exists here); [`crates/cpp_parser/tests/reflection.rs`](../crates/cpp_parser/tests/reflection.rs)
+pins it.
 
 ## 3. Preprocessing
 
