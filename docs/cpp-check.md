@@ -91,9 +91,18 @@ Three things this measurement changed:
   `cook` instead. Measured on the same 60 files: **55.3 s with `did_open`** (44.2 s of it in `catch_up`) against
   **51.9 s with `load`** (43.1 s in `cook`). The batch now `load`s its files — the stage attribution is honest, and no
   unit is built twice — but the render is ~85 % of the run either way.
-* **The disk unit cache does not hit across runs.** Three identical 20-file runs took 10.5 s each, with
-  `.cppls/cache.redb` at 24 MB — every run re-renders every closure. That is the largest single opportunity in this
-  tool, and it is an engine question (unit keys, and what invalidates them), not a tool one.
+* **The disk unit cache never serves the batch, and the reason is now known.** `unit_stats` on two identical 20-file
+  runs: `from memory 0, from disk 0, walked 20` — every file is walked, every run, with `.cppls/cache.redb` at 24 MB.
+  The cache is consulted only by `gather_a_unit_read`, which is reached by the **program-read** path
+  (`prepare_a_unit_reading` → `commit_a_program`, the pump's own three phases) and only for an *open document*, after
+  a quiet period (`a_unit_may_be_read_now`). The batch calls `cook`, and `cook` builds its rendering from a
+  `translation_unit_of` walk — it never looks at the cache.
+
+  Tried, and it works but does not fit: driving the program path directly (`prepare_a_unit_reading` after `catch_up`,
+  since it needs a summary) makes the second run **7.3 s against 33.0 s** for the same 20 files — the cache does hit
+  and the render drops from 26.0 s to 0.3 s. But the answers change: **13 findings and 13 parse errors against 4 and
+  1**, because the program reading is the whole translation unit and its errors include the headers'. Publishing that
+  needs the file's own ranges only, which is the mapping `unplaced` exists for — an engine change, not a flag.
 * **Parallel sessions change the answers, and were withdrawn.** Each session indexes only the files it reads, and a
   check reads the index — the same 20 files gave **4, 5 and 34 findings** at `--jobs=1`, `4` and `8`. A report that
   depends on the split is not a report.

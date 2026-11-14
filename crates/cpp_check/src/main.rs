@@ -219,7 +219,7 @@ fn main() {
     // finish: measured on neovim, seventeen seconds of CPU in sixteen minutes with the session making no progress).
     // Parallel sessions were tried and **withdrawn**: each one indexes only what it reads, so the same 20 files gave
     // 4, 5 and 34 findings at `--jobs=1/4/8` — a report that depends on the split is not a report.
-    let runs = vec![check_files(
+    let mut runs = vec![check_files(
         &root,
         &files,
         args.min_severity,
@@ -233,10 +233,15 @@ fn main() {
     let mut no_reading: Vec<PathBuf> = Vec::new();
     let mut tally = Tally::default();
     let mut stages = Stages::default();
-    for run in runs {
-        findings.extend(run.findings);
-        unreadable.extend(run.unreadable);
-        no_reading.extend(run.no_reading);
+    let mut stats = cpp_code_analysis::session::UnitStats {
+        from_memory: 0,
+        from_disk: 0,
+        walked: 0,
+    };
+    for run in &mut runs {
+        findings.append(&mut run.findings);
+        unreadable.append(&mut run.unreadable);
+        no_reading.append(&mut run.no_reading);
         tally.checked += run.tally.checked;
         tally.withheld += run.tally.withheld;
         tally.parse_errors += run.tally.parse_errors;
@@ -247,6 +252,9 @@ fn main() {
         stages.diagnostics += run.stages.diagnostics;
         stages.view += run.stages.view;
         stages.pump_rounds += run.stages.pump_rounds;
+        stats.from_memory += run.stats.from_memory;
+        stats.from_disk += run.stats.from_disk;
+        stats.walked += run.stats.walked;
     }
     findings.sort_by(|left, right| {
         left.file
@@ -258,6 +266,10 @@ fn main() {
 
     let seconds = started.elapsed().as_secs_f64();
     if args.time && !args.json {
+        eprintln!(
+            "cpp_check: units from memory {}, from disk {}, walked {}",
+            stats.from_memory, stats.from_disk, stats.walked
+        );
         eprintln!(
             "cpp_check: {:.1} s = text {:.1} + catch_up {:.1} + cook {:.1} + pump {:.1} ({stages} rounds) + diagnostics {:.1} + view {:.1}",
             seconds,
@@ -461,6 +473,7 @@ fn check_files(
             });
         }
     }
+    run.stats = session.unit_stats();
     run
 }
 
@@ -473,6 +486,7 @@ struct Run {
     no_reading: Vec<PathBuf>,
     tally: Tally,
     stages: Stages,
+    stats: cpp_code_analysis::session::UnitStats,
 }
 /// What became of the files that produced no findings of their own.
 struct Fate {
