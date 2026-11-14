@@ -281,11 +281,7 @@ fn report_if_it_does_not_convert(
     // `op_queue` and `object_pool` on a real project, every one of them valid C++.
     // **A literal node, not a trimmed string.** `0` is the null pointer constant, and the parser has a node for a literal —
     // its text is its token, so this cannot see a `0` inside a comment or a `"0"` string, which the text form could.
-    if cpp_parser::CppLiteralExpr::cast(expression.clone()).is_some_and(|literal| {
-        literal
-            .get_literal_token()
-            .is_some_and(|token| token.get_literal_text() == "0")
-    }) {
+    if super::a_literal_zero(expression) {
         return;
     }
     let known_from = context.type_of(expression);

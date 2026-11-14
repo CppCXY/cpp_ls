@@ -1653,3 +1653,20 @@ pub fn member_access_above(
     }
     None
 }
+/// **Is this expression the literal `0`** — the null pointer constant, which converts to every pointer type?
+///
+/// `return 0;` in a function declared to return `int *`, `int *p = 0;`, `f(0)` for a pointer parameter: all three are
+/// programs every compiler accepts, and the conversion relation cannot say so because it is handed a *type* and `0`
+/// is a fact about the value. This is the one place that fact is read, so the rules that judge conversions ask it
+/// rather than each growing its own spelling test.
+///
+/// A **literal node**, not a trimmed string: the parser has a node for a literal, and its text is its token, so this
+/// cannot see a `0` inside a comment or a `"0"` string, which a text test could.
+pub fn a_literal_zero(expression: &cpp_parser::CppSyntaxNode) -> bool {
+    use cpp_parser::CppAstNode;
+    cpp_parser::CppLiteralExpr::cast(expression.clone()).is_some_and(|literal| {
+        literal
+            .get_literal_token()
+            .is_some_and(|token| token.get_literal_text() == "0")
+    })
+}

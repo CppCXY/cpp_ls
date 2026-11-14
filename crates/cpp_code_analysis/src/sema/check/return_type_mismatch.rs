@@ -77,6 +77,15 @@ impl Check for ReturnTypeMismatch {
                         // the common shape `return f();` — and this layer does not distinguish them.
                     }
                     Some(expression) => {
+                        // **`0` is the null pointer constant**, and `return 0;` from a function declared to return a
+                        // pointer is a program every compiler accepts. The conversion question below cannot see that:
+                        // it lives in the type algebra, which is handed the *type* `int` and a pointer and has no
+                        // value to look at. Measured on neovim's `indent.c:585`, where a macro's `0` was reported as
+                        // "``0`` returns a value that does not convert to `int *`", and pinned by
+                        // `the_null_pointer_constant_returns_from_a_pointer_function`.
+                        if super::a_literal_zero(expression.syntax()) {
+                            continue;
+                        }
                         let crate::Known::Yes((from, _)) = context.type_of(expression.syntax())
                         else {
                             // The model could not tell what the expression is: a name from a header nobody read, an

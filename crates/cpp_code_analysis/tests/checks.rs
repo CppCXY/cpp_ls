@@ -4237,3 +4237,85 @@ fn a_c_file_may_name_things_cpp_reserves() {
         "the same text in C++ is the keyword, and the declaration is not one"
     );
 }
+/// **A dereference in a call argument is not a redeclaration.**
+///
+/// `xfree(*matches);` has two readings: a call of `xfree` with `*matches` for its argument, and a declaration of
+/// `matches` as a pointer to `xfree` — the classic ambiguous shape, which only *lookup* settles (`xfree` is a
+/// function, so it cannot be the type). The grammar takes the declaration reading, the scope walk binds `matches` a
+/// second time from it, and this rule reported the repeat. Measured on neovim's `cmdexpand.c:3389`, in
+/// `xfree(*matches);` — real code, reported as a redefinition.
+#[test]
+fn a_dereference_in_a_call_argument_is_not_a_redeclaration() {
+    let dereference = "\
+void xfree(void *p);
+void f(char **matches) { xfree(*matches); }
+";
+    assert_eq!(
+        codes_of_a_file("/p/a.c", dereference),
+        Vec::new(),
+        "a call's argument declares nothing"
+    );
+
+    // **A pointer-to-type declaration keeps its reading**, because its first name is a type and not a function.
+    let declaration = "\
+struct T { int n; };
+void f(void) {
+    T (*p);
+    (void)p;
+}
+";
+    assert_eq!(
+        codes_of_a_file("/p/a.c", declaration),
+        Vec::new(),
+        "`T (*p);` declares `p` and nothing repeats"
+    );
+
+    // **And a repeat that really is one still reports** — the fix must not silence the rule.
+    let repeated = "\
+void f(void) {
+    int count = 1;
+    int count = 2;
+    (void)count;
+}
+";
+    assert_eq!(
+        codes_of_a_file("/p/a.c", repeated),
+        [DiagnosticCode::Redefinition],
+        "two variables of one name in one scope is what the rule is for"
+    );
+}
+
+/// **`return 0;` from a function declared to return a pointer is legal** — `0` is the null pointer constant, and the
+/// conversion relation cannot see a value.
+///
+/// Measured on neovim's `indent.c:585`: a macro expanded to a `0` in the body of a function returning `int *`, and the
+/// rule reported "``0`` returns a value that does not convert to `int *`". `assign-type-check` has had this exemption
+/// since its census; this rule did not.
+#[test]
+fn the_null_pointer_constant_returns_from_a_pointer_function() {
+    let null_constant = "\
+int *find(int n) {
+    if (n > 0) {
+        return 0;
+    }
+    return 0;
+}
+";
+    assert_eq!(
+        codes_of_a_file("/p/a.c", null_constant),
+        Vec::new(),
+        "`return 0;` is a null pointer, not a type error"
+    );
+
+    // **A value that is not the constant still reports** — `n` is an `int`, and `int *` is not what it converts to.
+    let mismatched = "\
+int *find(int n) {
+    return n;
+}
+";
+    assert_eq!(
+        codes_of_a_file("/p/a.c", mismatched),
+        [DiagnosticCode::ReturnTypeMismatch],
+        "`int` does not convert to `int *`"
+    );
+}

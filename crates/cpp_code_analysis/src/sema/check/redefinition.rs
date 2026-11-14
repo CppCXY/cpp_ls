@@ -64,6 +64,15 @@ impl Check for Redefinition {
                 if !a_kind_that_cannot_be_repeated(binding.kind) {
                     continue;
                 }
+                // **A call this parser read as a declaration.** `xfree(*matches);` is a call, and the grammar also
+                // reads it as a declaration of `matches` — `xfree (*matches)` is the classic ambiguous shape, and only
+                // *lookup* resolves it. The scope walk binds `matches` a second time from that reading, and this rule
+                // reported it: measured on neovim's `cmdexpand.c:3389` (`xfree(*matches);`, reported as "`matches` is
+                // already declared in this scope"). A declaration's first name cannot be a function, so the index
+                // decides it — see [`the_declaration_is_really_a_call`].
+                if the_declaration_is_really_a_call(context, binding.range) {
+                    continue;
+                }
                 // A declaration a macro wrote is not this file's text: its range is inside the directive, and a
                 // finding there would underline one line for a name the reader typed somewhere else.
                 if binding.origin.is_some() {
@@ -128,4 +137,43 @@ impl Check for Redefinition {
 /// judged those would report code every compiler accepts.
 fn a_kind_that_cannot_be_repeated(kind: crate::BindingKind) -> bool {
     matches!(kind, crate::BindingKind::Variable)
+}
+/// **Is the declaration this binding belongs to really a call?**
+///
+/// `xfree(*matches);` is two readings of one line: a call of `xfree` with a dereference for its argument, and a
+/// declaration of `matches` as a pointer to `xfree`. The grammar takes the second — it is the shape
+/// [`the_arguments_look_like_declarators`] exists for — and only lookup can say which one the program has: a
+/// declaration's first name is a type, and `xfree` is a function.
+///
+/// Asked only of a binding that repeats a name, so the cost is one index lookup per finding rather than per
+/// declaration.
+fn the_declaration_is_really_a_call(
+    context: &CheckContext<'_>,
+    range: cpp_parser::SourceRange,
+) -> bool {
+    let Some(token) = cpp_parser::token_at(context.model.tree(), range.start_offset) else {
+        return false;
+    };
+    let Some(declaration) = token.parent_ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
+    }) else {
+        return false;
+    };
+    // **The statement's first name** — the spelling the call would use, and the one a declaration would treat as its
+    // type.
+    let Some(first) = declaration
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+    else {
+        return false;
+    };
+    if cpp_parser::CppTokenKind::from(first.kind()) != cpp_parser::CppTokenKind::Identifier {
+        return false;
+    }
+    let name = first.text().to_string();
+    matches!(
+        context.model.index().definition(name.as_str(), context.path),
+        crate::Known::Yes(found) if found.fact.kind == crate::DeclKind::Function
+    )
 }
