@@ -91,6 +91,11 @@ struct Args {
     /// A path substring to skip, repeatable — `--exclude=third_party`.
     #[arg(long)]
     exclude: Vec<String>,
+
+    /// Print where the time went, stage by stage.
+    #[arg(long)]
+    time: bool,
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -208,124 +213,41 @@ fn main() {
     };
 
     let started = Instant::now();
-    let mut session = Session::open(
+    // **One session, one pass.** Files are checked in path order, and a check reads the index — so the answer to a
+    // file early in the run is built from less than the answer to a file late in it. That is the price of not
+    // indexing the whole project first (`index_everything` is the call that would, and on a real project it does not
+    // finish: measured on neovim, seventeen seconds of CPU in sixteen minutes with the session making no progress).
+    // Parallel sessions were tried and **withdrawn**: each one indexes only what it reads, so the same 20 files gave
+    // 4, 5 and 34 findings at `--jobs=1/4/8` — a report that depends on the split is not a report.
+    let runs = vec![check_files(
         &root,
-        SessionFiles::new(OpenDocuments::new(), DiskFiles),
-        WatchFilter::new(&root),
-    );
-    session.add_project_files(files.clone());
-
+        &files,
+        args.min_severity,
+        only.as_ref(),
+        skipped.as_ref(),
+        args.time || (!args.quiet && !args.json),
+        args.quiet || args.json,
+    )];
     let mut findings: Vec<Report> = Vec::new();
     let mut unreadable: Vec<PathBuf> = Vec::new();
     let mut no_reading: Vec<PathBuf> = Vec::new();
     let mut tally = Tally::default();
-
-    for (at, file) in files.iter().enumerate() {
-        if !args.quiet && !args.json && at > 0 && at % 25 == 0 {
-            eprintln!(
-                "cpp_check: {} / {} files, {} finding(s), {:.1} s",
-                at,
-                files.len(),
-                findings.len(),
-                started.elapsed().as_secs_f64()
-            );
-        }
-
-        // **Open the file, read it in, then read it the way a compiler reads it** — the three steps a client's
-        // `didOpen` takes on the server, in the same order. `catch_up` reads the file's summary; `cook` renders its
-        // include closure and files the cooked reading that `diagnostics` answers from.
-        let text = match std::fs::read_to_string(file) {
-            Ok(text) => text,
-            Err(_) => {
-                unreadable.push(file.clone());
-                tally.unreadable += 1;
-                continue;
-            }
-        };
-        session.did_open(file, &text);
-        session.catch_up(file);
-        if session.cook(file).is_none() {
-            // A file whose closure cannot be rendered is a file the checks have nothing trustworthy to say about. Its
-            // parse errors are still the reader's business, and `diagnostics` answers from the raw reading when there
-            // is no cooked one — so the file is not dropped here.
-            no_reading.push(file.clone());
-            tally.no_reading += 1;
-        }
-        // **The checks' own gate, and what it takes to open it.** A check reads *absence* out of the index — "nothing
-        // declares this member" — so it may only be asked once every header this file includes unconditionally has
-        // been read: otherwise an empty index would be reported as a missing declaration. `cook` renders the closure
-        // but does not read every include's summary, so the pump is run here until the gate opens (bounded, because a
-        // header that cannot be read at all must not stall the run).
-        let mut rounds = 0usize;
-        while !session.is_closure_ready(file) && rounds < 64 {
-            if session.advance(256).is_empty() {
-                break;
-            }
-            rounds += 1;
-        }
-        let Some(diagnostics) = session.diagnostics(file) else {
-            no_reading.push(file.clone());
-            tally.no_reading += 1;
-            continue;
-        };
-        tally.checked += 1;
-        tally.parse_errors += diagnostics.errors.len();
-        if diagnostics.checks_withheld {
-            tally.withheld += 1;
-        }
-
-        // **The file's own text, for line numbers.** A diagnostic's range is in the *rendering's* coordinates — the
-        // text with macros expanded — so it is mapped back through the rendering's spans before a line is counted.
-        // Measured on a file with a macro on its first line: the unmapped number was off by more than a hundred lines.
-        let rendered = session.view(file);
-        let in_the_file = |offset: usize| -> usize {
-            rendered
-                .as_ref()
-                .and_then(|view| view.file_offset_of(ReadingOffset::new(offset)))
-                .map(|offset| offset.get())
-                .unwrap_or(offset)
-        };
-
-        for error in &diagnostics.errors {
-            let start = in_the_file(error.start);
-            let (line, column) = position_of(&text, start);
-            findings.push(Report {
-                file: file.clone(),
-                line,
-                column,
-                level: Level::Error,
-                code: "syntax-error",
-                message: error.message.clone(),
-            });
-        }
-        for finding in &diagnostics.checks {
-            let level = Level::of(finding.code.severity());
-            if level.rank() < args.min_severity.rank() {
-                continue;
-            }
-            if let Some(only) = &only
-                && !only.contains(finding.code.name())
-            {
-                continue;
-            }
-            if let Some(skipped) = &skipped
-                && skipped.contains(finding.code.name())
-            {
-                continue;
-            }
-            let start = in_the_file(finding.range.start_offset);
-            let (line, column) = position_of(&text, start);
-            findings.push(Report {
-                file: file.clone(),
-                line,
-                column,
-                level,
-                code: finding.code.name(),
-                message: finding.message.clone(),
-            });
-        }
+    let mut stages = Stages::default();
+    for run in runs {
+        findings.extend(run.findings);
+        unreadable.extend(run.unreadable);
+        no_reading.extend(run.no_reading);
+        tally.checked += run.tally.checked;
+        tally.withheld += run.tally.withheld;
+        tally.parse_errors += run.tally.parse_errors;
+        stages.text += run.stages.text;
+        stages.catch_up += run.stages.catch_up;
+        stages.cook += run.stages.cook;
+        stages.pump += run.stages.pump;
+        stages.diagnostics += run.stages.diagnostics;
+        stages.view += run.stages.view;
+        stages.pump_rounds += run.stages.pump_rounds;
     }
-
     findings.sort_by(|left, right| {
         left.file
             .cmp(&right.file)
@@ -335,6 +257,21 @@ fn main() {
     });
 
     let seconds = started.elapsed().as_secs_f64();
+    if args.time && !args.json {
+        eprintln!(
+            "cpp_check: {:.1} s = text {:.1} + catch_up {:.1} + cook {:.1} + pump {:.1} ({stages} rounds) + diagnostics {:.1} + view {:.1}",
+            seconds,
+            stages.text.as_secs_f64(),
+            stages.catch_up.as_secs_f64(),
+            stages.cook.as_secs_f64(),
+            stages.pump.as_secs_f64(),
+            stages.diagnostics.as_secs_f64(),
+            stages.view.as_secs_f64(),
+            stages = stages.pump_rounds,
+        );
+        let (asks, reads) = cpp_code_analysis::probes::summary_read_counts();
+        eprintln!("cpp_check: summary asks {asks}, summary reads {reads}");
+    }
     let told = Fate {
         unreadable,
         no_reading,
@@ -358,6 +295,185 @@ fn main() {
     std::process::exit(if fatal == 0 { 0 } else { 1 });
 }
 
+/// **One session's share of the files** — the pipeline a client's `didOpen` starts, per file, without the client.
+///
+/// # What each step is for, and what it costs
+///
+/// ```text
+/// load(file)         the file's text into the VFS — no document, because nobody has it open
+/// catch_up(file)     its summary in the index (and up to eight includes the index has never read)
+/// cook(file)         its include closure rendered the way a compiler reads it, and the cooked reading filed
+/// pump               the summaries the checks' gate needs, asked for by file rather than popped off the queue
+/// diagnostics(file)  the rules, against that reading
+/// ```
+///
+/// **Measured on neovim (228 sources, release, this machine):** the render is the cost — 44 s of a 60-file run's 52 s,
+/// which is one closure render per file either way. Opening each file (`did_open`) only moved that work into
+/// `catch_up`, where it built the translation unit the render then used: 55.3 s against 51.9 s, the same machine and
+/// the same files. A batch therefore `load`s its files — the attribution is honest and the unit is not built twice —
+/// but the render is what it is.
+#[allow(clippy::too_many_arguments)]
+fn check_files(
+    root: &Path,
+    files: &[PathBuf],
+    min: Level,
+    only: Option<&BTreeSet<&'static str>>,
+    skipped: Option<&BTreeSet<&'static str>>,
+    tracing: bool,
+    quiet: bool,
+) -> Run {
+    let mut session = Session::open(
+        root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(root),
+    );
+    session.add_project_files(files.to_vec());
+
+    let mut run = Run::default();
+    for (at, file) in files.iter().enumerate() {
+        if !quiet && at > 0 && at % 25 == 0 {
+            eprintln!(
+                "cpp_check: {} / {} files, {} finding(s)",
+                at,
+                files.len(),
+                run.findings.len()
+            );
+        }
+
+        let text_started = Instant::now();
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(_) => {
+                run.unreadable.push(file.clone());
+                run.tally.unreadable += 1;
+                continue;
+            }
+        };
+        run.stages.text += text_started.elapsed();
+        // **`load`, not `did_open`** — see the note above: a document is a file the reader has open, and the session
+        // answers that by building it a translation unit.
+        session.load(file);
+        let caught = Instant::now();
+        session.catch_up(file);
+        let catch_up_time = caught.elapsed();
+        run.stages.catch_up += catch_up_time;
+        let cooked_at = Instant::now();
+        let cooked = session.cook(file);
+        let cook_time = cooked_at.elapsed();
+        run.stages.cook += cook_time;
+        if cooked.is_none() {
+            // A file whose closure cannot be rendered is a file the checks have nothing trustworthy to say about. Its
+            // parse errors are still the reader's business, and `diagnostics` answers from the raw reading when there
+            // is no cooked one — so the file is not dropped here.
+            run.no_reading.push(file.clone());
+            run.tally.no_reading += 1;
+        }
+        // **The checks' own gate.** A check reads *absence* out of the index — "nothing declares this member" — so it
+        // may only be asked once every header this file includes unconditionally has been read; otherwise an empty
+        // index is reported as a missing declaration. `cook` renders the closure but does not read every include's
+        // summary, so the pump is run until the gate opens (bounded, because a header that cannot be read at all must
+        // not stall the run), and asked for by file: a blind `advance` pops the *project* queue and read hundreds of
+        // files this one cannot see before reaching the headers it can — six batches of 256 for six files.
+        let pumped = Instant::now();
+        session.want_the_closure_cooked(file);
+        let mut rounds = 0usize;
+        while !session.is_closure_ready(file) && rounds < 64 {
+            if session.advance(256).is_empty() {
+                break;
+            }
+            rounds += 1;
+        }
+        run.stages.pump += pumped.elapsed();
+        run.stages.pump_rounds += rounds;
+        let diagnosed = Instant::now();
+        let Some(diagnostics) = session.diagnostics(file) else {
+            run.no_reading.push(file.clone());
+            run.tally.no_reading += 1;
+            continue;
+        };
+        run.stages.diagnostics += diagnosed.elapsed();
+        if tracing {
+            eprintln!(
+                "  {}  catch_up {:.0}  cook {:.0}  pump {:.0} ({rounds} round(s))  diagnostics {:.0} ms",
+                relative(root, file),
+                catch_up_time.as_secs_f64() * 1000.0,
+                cook_time.as_secs_f64() * 1000.0,
+                pumped.elapsed().as_secs_f64() * 1000.0,
+                diagnosed.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        run.tally.checked += 1;
+        run.tally.parse_errors += diagnostics.errors.len();
+        if diagnostics.checks_withheld {
+            run.tally.withheld += 1;
+        }
+
+        // **The file's own text, for line numbers.** A diagnostic's range is in the *rendering's* coordinates — the
+        // text with macros expanded — so it is mapped back through the rendering's spans before a line is counted.
+        // Measured on a file with a macro on its first line: the unmapped number was off by more than a hundred lines.
+        let viewed = Instant::now();
+        let rendered = session.view(file);
+        run.stages.view += viewed.elapsed();
+        let in_the_file = |offset: usize| -> usize {
+            rendered
+                .as_ref()
+                .and_then(|view| view.file_offset_of(ReadingOffset::new(offset)))
+                .map(|offset| offset.get())
+                .unwrap_or(offset)
+        };
+
+        for error in &diagnostics.errors {
+            let start = in_the_file(error.start);
+            let (line, column) = position_of(&text, start);
+            run.findings.push(Report {
+                file: file.clone(),
+                line,
+                column,
+                level: Level::Error,
+                code: "syntax-error",
+                message: error.message.clone(),
+            });
+        }
+        for finding in &diagnostics.checks {
+            let level = Level::of(finding.code.severity());
+            if level.rank() < min.rank() {
+                continue;
+            }
+            if let Some(only) = only
+                && !only.contains(finding.code.name())
+            {
+                continue;
+            }
+            if let Some(skipped) = skipped
+                && skipped.contains(finding.code.name())
+            {
+                continue;
+            }
+            let start = in_the_file(finding.range.start_offset);
+            let (line, column) = position_of(&text, start);
+            run.findings.push(Report {
+                file: file.clone(),
+                line,
+                column,
+                level,
+                code: finding.code.name(),
+                message: finding.message.clone(),
+            });
+        }
+    }
+    run
+}
+
+/// **What one session's share came to** — merged by the caller, which sorts the findings so the report does not
+/// depend on which thread found what.
+#[derive(Default)]
+struct Run {
+    findings: Vec<Report>,
+    unreadable: Vec<PathBuf>,
+    no_reading: Vec<PathBuf>,
+    tally: Tally,
+    stages: Stages,
+}
 /// What became of the files that produced no findings of their own.
 struct Fate {
     unreadable: Vec<PathBuf>,
@@ -631,6 +747,7 @@ mod tests {
                 json: false,
                 quiet: true,
                 exclude: Vec::new(),
+                time: false,
             },
         );
         let named: Vec<String> = sources
@@ -657,6 +774,7 @@ mod tests {
                 json: false,
                 quiet: true,
                 exclude: Vec::new(),
+                time: false,
             },
         );
         let named: Vec<String> = with_headers
@@ -682,6 +800,7 @@ mod tests {
                 json: false,
                 quiet: true,
                 exclude: vec!["src".to_string()],
+                time: false,
             },
         );
         assert!(excluded.is_empty(), "everything under `src` was excluded");
@@ -711,4 +830,16 @@ mod tests {
             "the name nobody has is named back"
         );
     }
+}
+/// Where the run's time went — the tool's own instrument, because a batch check's cost is a *policy* question
+/// ("read the closure of every translation unit") and only a breakdown can say which part of the policy it is.
+#[derive(Default)]
+struct Stages {
+    text: std::time::Duration,
+    catch_up: std::time::Duration,
+    cook: std::time::Duration,
+    pump: std::time::Duration,
+    diagnostics: std::time::Duration,
+    view: std::time::Duration,
+    pump_rounds: usize,
 }

@@ -61,6 +61,59 @@ read (`Session::is_closure_ready`), because a check reads absence out of the ind
 opens, bounded so a header that cannot be read at all cannot stall the run; a file that never opens it is counted in
 the summary as *withheld* rather than reported as clean.
 
+## Where the time goes, measured
+
+`cpp_check E:\neovim --time` prints the stages; on this machine (release) a **60-file** run is:
+
+The whole project, `cpp_check E:\neovim --min-severity=hint --time`, 228 sources:
+
+```text
+252.3 s = text 0.0 + catch_up 0.0 + cook 179.0 + pump 11.0 (6 rounds) + diagnostics 61.9 + view 0.0
+446 finding(s), 4 parse error(s)
+```
+
+| stage | time | share | what it is |
+|---|---:|---:|---|
+| `cook` | 179.0 s | **71 %** | each file's include closure rendered the way a compiler reads it |
+| `diagnostics` | 61.9 s | **25 %** | the rules, against that reading |
+| `pump` | 11.0 s | 4 % | the summaries the checks' gate needs |
+| `catch_up` | 0.0 s | — | nothing to read: the files are on disk and the render reads what it needs |
+| per file | 1.1 s | | of which the render is ~0.8 s |
+
+The render is not a per-file constant: 5 ms for a file with no includes, 490 ms for `src/cjson/lua_cjson.c`
+(LuaJIT's headers), 2.6 s for `src/nvim/api/buffer.c`, in proportion to the closure. **The same 228-file run before the
+two fixes below took 393.7 s** — a 36 % reduction with the findings unchanged (446 both times).
+
+Three things this measurement changed:
+
+* **`did_open` per file only moves the cost.** Opening a file tells the session it is *the reader's*, and `catch_up`
+  then builds its translation unit; the render that follows uses it. Without the document the same unit is built by
+  `cook` instead. Measured on the same 60 files: **55.3 s with `did_open`** (44.2 s of it in `catch_up`) against
+  **51.9 s with `load`** (43.1 s in `cook`). The batch now `load`s its files — the stage attribution is honest, and no
+  unit is built twice — but the render is ~85 % of the run either way.
+* **The disk unit cache does not hit across runs.** Three identical 20-file runs took 10.5 s each, with
+  `.cppls/cache.redb` at 24 MB — every run re-renders every closure. That is the largest single opportunity in this
+  tool, and it is an engine question (unit keys, and what invalidates them), not a tool one.
+* **Parallel sessions change the answers, and were withdrawn.** Each session indexes only the files it reads, and a
+  check reads the index — the same 20 files gave **4, 5 and 34 findings** at `--jobs=1`, `4` and `8`. A report that
+  depends on the split is not a report.
+
+The checks themselves are the small half: 6.2 s of the 53.1 s above, `undefined-field` the largest rule at ~90 ms per
+file with member accesses.
+
+### What would make it fast, in order
+
+1. **A unit cache that hits**: the render is a pure function of (text, closure, flags) and is already stored on disk;
+   the second run of a project should be seconds. This is worth more than every other item together.
+2. **Index once, then ask**: findings currently depend on how much of the project an earlier file happened to read.
+   `index_everything` is the call that would make them deterministic, and on a real project it does not finish —
+   measured on neovim, **seventeen seconds of CPU in sixteen minutes** with the session making no progress. Until it
+   does, a batch check is order-dependent and cannot be parallelised.
+3. **A checks-only reading**: most rules do not need macro expansion, and those that do are the minority. A mode that
+   runs the rules against the file's own parse plus the headers' summaries would cost the parse (~10–30 ms) instead of
+   the render, at the price of the macro-written declarations the render exists for. Measured: without a reading at
+   all, `diagnostics` refuses (no cooked reading, no view), so this needs an engine answer too.
+
 ## Measured
 
 Release build, this machine, `cpp_check E:\neovim --min-severity=hint --quiet`, 2026-11-14:
