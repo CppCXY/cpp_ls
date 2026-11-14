@@ -27,29 +27,58 @@ Each construct is a **feature bit** opened by `-std=` or `[compile].standard`.
 | C++17 | structured bindings, `if constexpr`, fold expressions, `inline` variables, class template argument deduction (CTAD), nested namespaces `a::b::c`, `[[maybe_unused]]`/`[[nodiscard]]`/`[[fallthrough]]` |
 | C++20 | concepts and `requires`, modules (`module`/`import`/`export`), coroutines (`co_await`/`co_yield`/`co_return`, `operator co_await`), designated initialisers, the three-way comparison `<=>`, `using enum`, `char8_t`, `consteval`, `constinit` |
 | C++23 | deducing `this` (explicit object parameters), `if consteval`, multidimensional subscript `a[i, j]`, static `operator()`/`operator[]`, `#elifdef`/`#elifndef` |
+| C++26 | static reflection (`^^T`, `[: r :]`, the three splice positions), contracts (`pre(…)`, `post(…)`, `contract_assert(…)`) — below |
 | GNU extensions | statement expressions, `__typeof__`, `__attribute__`, `__builtin_*`, `asm`, `__restrict__` |
 | MSVC extensions | `__declspec(...)`, `__int64`, `__try`/`__except`/`__finally`, `__cdecl`/`__stdcall`, macro prefixes such as `_STD_BEGIN`/`_STD_END` |
 | CUDA | `__global__`/`__device__`/`__host__`, the `<<<…>>>` launch syntax, built-in vector types such as `float4` and `dim3` |
 
-**Not supported**: C++26 (contracts, `#embed`) has no feature bits yet; that syntax is read as C++23 — with one
-exception, **static reflection** (P2996), whose operators are parsed unconditionally because no earlier C++ has a
-meaning for them:
+`#embed` and the C++26 library facilities are **not** supported; both are read as C++23 text. The two C++26 language
+features this server does read are parsed **unconditionally**, because no earlier standard gives their tokens a
+meaning — a file that writes them is being read as C++26 whatever `-std=` says.
 
-| Reflection form | What is read |
+### C++26 static reflection (P2996)
+
+| Form | What is read |
 | --- | --- |
-| `^^T`, `^^Widget::x`, `^^std::array` | a `ReflectExpr`: a value of type `std::meta::info` representing the operand (a type-id, a template or concept name, or an id-expression) |
+| `^^T`, `^^Widget::x`, `^^std::array` | a `ReflectExpr` — a value of type `std::meta::info` representing the operand (a type-id, a template or concept name, or an id-expression) |
 | `[: r :]` | a `SpliceExpr` in expression position |
 | `typename [: r :]` | a type splice, in the `TypenameType` node a dependent type-name uses |
 | `typename [: r :]<int>` | a splice specialization: the type splice with template arguments |
 | `d.[: r :]`, `p->[: r :]` | a member splice; it has **no written name**, so member lookup and the undefined-field check ask nothing about it |
 | `^^` as a token | one token, not two `^`: the language has no unary `^` to pair them with, and `^` alone is still a Clang block literal |
 
-What is **not** there is the library: `std::meta`'s metafunctions (`members_of`, `type_of`, …) are ordinary
-undeclared names unless a project supplies a `<meta>` header, and a splice's *type* is the entity the reflection
-names, which this layer does not evaluate — so `auto x = [: r :];` leaves `x`'s type unknown rather than guessing.
-The syntax is checked without a compiler (no GCC 16 exists here); [`crates/cpp_parser/tests/reflection.rs`](../crates/cpp_parser/tests/reflection.rs)
-pins it.
+The type of every reflection expression is `std::meta::info`, whichever operand it takes — the one expression in the
+language whose type does not depend on what it names. What is **not** there is the library and the evaluation:
+`std::meta`'s metafunctions (`members_of`, `type_of`, …) are ordinary undeclared names unless a project supplies a
+`<meta>` header, and a splice's *type* is the entity the reflection names, which this layer does not compute — so
+`auto x = [: r :];` leaves `x`'s type unknown rather than guessing. [`crates/cpp_parser/tests/reflection.rs`](../crates/cpp_parser/tests/reflection.rs)
+pins the syntax and [`crates/cpp_code_analysis/tests/reflection.rs`](../crates/cpp_code_analysis/tests/reflection.rs)
+pins the absence of false diagnostics.
 
+### C++26 contracts (P2900)
+
+| Form | Where | What is read |
+| --- | --- | --- |
+| `pre(cond)` | after a function's parameter list and qualifiers, before the body | a `ContractSpecifier` — the caller's obligation |
+| `post(cond)` | the same place | a `ContractSpecifier` — the function's guarantee |
+| `post(name: cond)` | the same place | a postcondition that **names the return value**; the introducer is optional (a `void` function has no result to name) |
+| `contract_assert(cond);` | a statement in a body | a `ContractAssertStatement` — a full keyword |
+
+Both positions are accepted on function declarations, function definitions, constructors (before the
+member-initializer list: `X(int v) pre(v > 0) : i(v) {}`) and lambdas (`[](int x) pre(x > 0) { … }`). Attributes are
+read where the standard allows them, on either side of the parenthesis: `pre [[likely]] (x >= 0)`,
+`post(r [[maybe_unused]] : r >= 0)`. The predicate is an ordinary expression, so a call, a comparison, a conditional
+or a fold all parse.
+
+`pre` and `post` are **context-sensitive keywords**, so `int pre = 42;`, `void post() {}` and a member named `post`
+keep parsing; `contract_assert` is a full keyword (unlike them), because `assert` is a macro and the standard needed
+a spelling that could not collide with one.
+
+What is **not** there is the semantics: no contract is evaluated, no violation mode is modelled, and the standard's
+ill-formed cases — a contract on a virtual function, or on the first declaration of a `= default`ed function — are
+not diagnosed. The result name in `post(r: …)` is read as syntax and is not bound as a variable, so the predicate's
+type is not checked against it. [`crates/cpp_parser/tests/contracts.rs`](../crates/cpp_parser/tests/contracts.rs)
+pins the syntax.
 ## 3. Preprocessing
 
 | Ability | What it does |
