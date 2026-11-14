@@ -2708,6 +2708,14 @@ pub fn parse_function_suffix_or_initializer(
     if a_definition_is_legal_here {
         let before_the_function_reading = p.checkpoint();
 
+        // **Are the arguments type names?** — asked *before* the list is consumed, and it is the rule the language
+        // uses: `T f(U);` declares a function when `U` names a type and a variable when the argument is a value.
+        // The evidence below (a body, a trailing return, a qualifier) is not the only kind there is, and requiring
+        // one of them made every `string_view f(info);` a variable — measured on libstdc++'s `<meta>`, whose
+        // metafunctions are all `consteval string_view identifier_of(info);`, so every one of them was filed as a
+        // *variable* and hovered as the type of the call instead of the declaration.
+        let the_arguments_are_types = the_arguments_are_types(p);
+
         if parse_parameter_list(p).is_ok() {
             // **A trailing return type is the same evidence one token along**: `-> T` belongs to a function
             // declarator and to nothing else — a variable's initializer cannot be followed by one — so a
@@ -2751,6 +2759,9 @@ pub fn parse_function_suffix_or_initializer(
             if a_trailing_return_type_follows
                 || qualifiers_follow_the_parameter_list
                 || p.current_token() == CppTokenKind::LeftBrace
+                // **A parameter list whose arguments are type names** — see above: this is the ordinary C++ rule and
+                // the reason `std::meta`'s metafunctions were variables.
+                || the_arguments_are_types
                 // **A contract specifier can only follow a function declarator**, so seeing one settles the reading
                 // the same way a body does.
                 || at_a_contract_specifier(p)
@@ -6412,4 +6423,79 @@ fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+/// **Are the parenthesised arguments type names?** — the question that tells `T f(U);` from `T x(y);`.
+///
+/// The language settles it by lookup: `T f(U);` declares a **function** when `U` names a type, and a variable
+/// initialised with the value `y` otherwise. Only the first significant token of each argument is asked about — a
+/// parameter's name, a default argument and the `*`/`&` after the type cannot change what the argument *starts* with —
+/// and a name this parser's table does not know as a type is treated as a value, which is the reading that keeps
+/// `Widget w(count);` a variable.
+///
+/// Measured on libstdc++'s `<meta>`: every metafunction is `consteval string_view identifier_of(info);`, and without
+/// this a typedef return type plus one type argument was read as a variable, so `identifier_of` was a *variable* in the
+/// index and hover showed the type of the call instead of the declaration.
+fn the_arguments_are_types(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+    let mut index = p.current_token_index() + 1;
+    let mut depth = 0usize;
+    let mut saw_one = false;
+    let mut expect_an_element = true;
+
+    while index < p.token_count() {
+        let kind = p.token_kind_at(index);
+        if is_declaration_trivia(kind) {
+            index += 1;
+            continue;
+        }
+        match kind {
+            CppTokenKind::RightParen if depth == 0 => return saw_one && !expect_an_element,
+            CppTokenKind::RightParen => depth -= 1,
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::Comma if depth == 0 => {
+                if expect_an_element {
+                    return false;
+                }
+                expect_an_element = true;
+            }
+            // **Every other token at the top level belongs to the element that started here**: a name, its
+            // qualifiers, its declarator. The element's *first* token is the one that had to be a type, and it was
+            // checked when it was read.
+            _ if depth > 0 => {}
+            _ if expect_an_element => {
+                if !starts_a_type_in_a_parameter(p, index) {
+                    return false;
+                }
+                saw_one = true;
+                expect_an_element = false;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    false
+}
+
+/// **Does the token at `index` begin a type?** — the first significant token of a parameter.
+///
+/// A keyword type does, a name this parser knows as a type does, and a `const`/`volatile`/`unsigned`/`signed` prefix
+/// does not answer by itself (the type follows it) — everything else is a value, or a shape a parameter cannot start
+/// with.
+fn starts_a_type_in_a_parameter(p: &CppParser, index: usize) -> bool {
+    match p.token_kind_at(index) {
+        CppTokenKind::ConstKeyword
+        | CppTokenKind::VolatileKeyword
+        | CppTokenKind::UnsignedKeyword
+        | CppTokenKind::SignedKeyword => true,
+        CppTokenKind::Identifier => p.is_a_known_type_name(p.token_text_at(index)),
+        // The built-in type keywords, and `decltype`/`auto`/`typename`/`class`/`struct`/`enum`, which begin a type
+        // in a parameter list too. An ellipsis is a variadic parameter, which is a parameter.
+        CppTokenKind::Ellipsis => true,
+        // `nullptr` is a value — see `starts_a_type_id` — so it is not one of them.
+        CppTokenKind::NullptrKeyword => false,
+        kind => crate::grammar::cpp::types::is_type_specifier_keyword(kind),
+    }
 }

@@ -7680,3 +7680,45 @@ fn a_templated_base_is_one_base_specifier() {
         assert_eq!(bases, expected, "{source}");
     }
 }
+/// **`T f(U);` is a function when `U` is a type** — even when `T` is a typedef rather than a keyword.
+///
+/// The language settles the "most vexing parse" by lookup: `string_view identifier_of(info);` declares a *function*
+/// when `info` names a type, and a variable initialised with the value `info` otherwise. This parser asked only
+/// whether the declaration's own type was a **keyword**, so `int f(info);` was a function while a typedef return type
+/// fell to the initialiser reading — measured on libstdc++'s `<meta>`, where every metafunction is
+/// `consteval string_view identifier_of(info);` and all of them were filed as *variables*, so hover showed the type of
+/// the call instead of the declaration.
+#[test]
+fn a_parameter_whose_name_is_a_type_makes_the_declaration_a_function() {
+    let source = "\
+struct info {};
+typedef int string_view;
+string_view identifier_of(info);
+int count = 1;
+string_view held(count);
+";
+    let parsed = CppParser::parse(source, ParserConfig::default());
+    assert_eq!(parsed.get_errors(), [], "the fixture parses cleanly");
+    let root = parsed.get_red_root();
+    let shapes = |needle: &str| -> Vec<CppSyntaxKind> {
+        root.descendants()
+            .find(|node| node.text().to_string().trim() == needle)
+            .map(|node| {
+                node.descendants()
+                    .map(|inside| CppSyntaxKind::from(inside.kind()))
+                    .collect()
+            })
+            .unwrap_or_else(|| panic!("no node spells `{needle}`"))
+    };
+
+    // A **function**: its declarator holds the parameter list.
+    assert!(
+        shapes("string_view identifier_of(info);").contains(&CppSyntaxKind::ParameterList),
+        "`info` is a type, so the parentheses are a parameter list"
+    );
+    // A **variable**: the same shape with a value for an argument keeps the initialiser reading.
+    assert!(
+        !shapes("string_view held(count);").contains(&CppSyntaxKind::ParameterList),
+        "`count` is a value, so the parentheses initialise the object"
+    );
+}
