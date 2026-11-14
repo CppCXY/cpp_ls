@@ -148,6 +148,9 @@ pub enum DiagnosticCode {
     /// **A by-value object whose class is abstract** — a pure virtual nothing overrides — see
     /// [`super::abstract_class_instantiated`].
     AbstractClassInstantiated,
+    /// **A class that implements some of its base`s pure virtual functions but not all**, and is still abstract — see
+    /// [`super::pure_virtual_not_overridden`].
+    PureVirtualNotOverridden,
 }
 
 impl DiagnosticCode {
@@ -157,7 +160,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 42] = [
+    pub const ALL: [DiagnosticCode; 43] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -200,6 +203,7 @@ impl DiagnosticCode {
         DiagnosticCode::FinalClassDerived,
         DiagnosticCode::OverrideOfFinal,
         DiagnosticCode::AbstractClassInstantiated,
+        DiagnosticCode::PureVirtualNotOverridden,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -251,6 +255,7 @@ impl DiagnosticCode {
             DiagnosticCode::FinalClassDerived => "final-class-derived",
             DiagnosticCode::OverrideOfFinal => "override-of-final",
             DiagnosticCode::AbstractClassInstantiated => "abstract-class-instantiated",
+            DiagnosticCode::PureVirtualNotOverridden => "pure-virtual-not-overridden",
         }
     }
 
@@ -319,6 +324,9 @@ impl DiagnosticCode {
             DiagnosticCode::OverrideOfFinal => RuleSeverity::Error,
             // A pure virtual nothing overrides means there is no object to construct — [class.abstract]`s error.
             DiagnosticCode::AbstractClassInstantiated => RuleSeverity::Error,
+            // **A warning, not an error**: being abstract is legal, and what this reports is the shape that reads as an
+            // oversight — some overrides written, the rest forgotten.
+            DiagnosticCode::PureVirtualNotOverridden => RuleSeverity::Warning,
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
@@ -417,6 +425,7 @@ impl DiagnosticCode {
                 | DiagnosticCode::FinalClassDerived
                 | DiagnosticCode::OverrideOfFinal
                 | DiagnosticCode::AbstractClassInstantiated
+                | DiagnosticCode::PureVirtualNotOverridden
         )
     }
 

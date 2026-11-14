@@ -110,6 +110,7 @@ fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
 
 mod access_invisible;
 mod abstract_class_instantiated;
+mod pure_virtual_not_overridden;
 mod argument_count;
 mod assignment_in_condition;
 mod braces_around_statements;

@@ -126,6 +126,7 @@ pub mod macro_redefined;
 mod missing_include;
 pub mod missing_return;
 pub mod param_type_check;
+pub mod pure_virtual_not_overridden;
 pub mod redefinition;
 pub mod return_type_mismatch;
 mod simplify_boolean_expr;
@@ -1593,6 +1594,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<final_misplaced::FinalMisplaced>(&mut context);
     run_check::<final_hierarchy::FinalHierarchy>(&mut context);
     run_check::<abstract_class_instantiated::AbstractClassInstantiated>(&mut context);
+    run_check::<pure_virtual_not_overridden::PureVirtualNotOverridden>(&mut context);
     run_check::<use_override::UseOverride>(&mut context);
     run_check::<simplify_boolean_expr::SimplifyBooleanExpr>(&mut context);
     run_check::<else_after_return::ElseAfterReturn>(&mut context);
