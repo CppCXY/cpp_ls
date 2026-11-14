@@ -1,0 +1,20 @@
+[package]
+name = "cpp_check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Run the analysis's checks over a whole workspace, from the command line."
+
+# **Why this crate exists.** The checks live in `cpp_code_analysis` and reach a reader through the language server,
+# one open file at a time. A workspace wants the same answers as a batch: CI, a pre-commit hook, a before/after number
+# for a refactor. This is that batch — the same session, the same rules, the same `Session::diagnostics` the server
+# calls, walked over the project's translation units.
+#
+# It is a **front end**, not a second analysis. Nothing here decides what is wrong with a program; every finding comes
+# from `sema::check`, so a rule fixed in the server is fixed here too, and a rule that is wrong is wrong in both.
+
+[dependencies]
+cpp_code_analysis.workspace = true
+
+clap.workspace = true
+serde_json.workspace = true
