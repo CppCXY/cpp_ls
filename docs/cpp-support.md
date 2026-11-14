@@ -62,7 +62,7 @@ pins the absence of false diagnostics.
 | `pre(cond)` | after a function's parameter list and qualifiers, before the body | a `ContractSpecifier` — the caller's obligation |
 | `post(cond)` | the same place | a `ContractSpecifier` — the function's guarantee |
 | `post(name: cond)` | the same place | a postcondition that **names the return value**; the introducer is optional (a `void` function has no result to name) |
-| `contract_assert(cond);` | a statement in a body | a `ContractAssertStatement` — a full keyword |
+| `contract_assert(cond);` | a statement in a body | a `ContractAssertStat` — and it is a full keyword |
 
 Both positions are accepted on function declarations, function definitions, constructors (before the
 member-initializer list: `X(int v) pre(v > 0) : i(v) {}`) and lambdas (`[](int x) pre(x > 0) { … }`). Attributes are
