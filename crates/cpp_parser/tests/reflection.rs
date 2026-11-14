@@ -141,3 +141,18 @@ fn a_single_caret_is_still_a_block_literal() {
         "one caret is not a reflection"
     );
 }
+/// **A type splice stands in expression position too** — a functional cast or a temporary, which is how a reflected
+/// type is given a value: `typename [: ^^Widget :]{5}` and `typename [: r :](1)`.
+///
+/// Verified against GCC 16.2 (`-std=c++26 -freflection`), which accepts both; our parser read `typename` there as a
+/// type specifier only, so the statement failed at the `{`.
+#[test]
+fn a_type_splice_stands_in_expression_position() {
+    let source = "\
+struct Widget { int x; };
+constexpr auto r = ^^Widget;
+auto t = typename [: ^^Widget :]{5};
+auto u = typename [: r :](1);
+";
+    parses(source);
+}

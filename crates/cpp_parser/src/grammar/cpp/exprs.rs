@@ -2907,6 +2907,17 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // up. The token is `^^` rather than two `^`s because the language has no unary `^` to pair them with.
         CppTokenKind::CaretCaret => parse_reflect_expression(p),
 
+        // **A type splice in expression position** (C++26, P2996): `typename [: r :]{…}` and
+        // `typename [: r :](…)` — a temporary or a functional cast of the type the reflection represents. Verified
+        // against GCC 16.2 with `-std=c++26 -freflection`, which accepts both; the declaration path already reads the
+        // same two tokens, and this is the second place the language allows them.
+        CppTokenKind::TypenameKeyword
+            if p.peek_next_token() == CppTokenKind::LeftBracket
+                && p.peek_token_kind_at(2..3).first() == Some(&CppTokenKind::Colon) =>
+        {
+            super::types::parse_a_typename_splice(p)
+        }
+
         // **A Clang block literal**: `^(int n) { … }` — the closure syntax Apple's APIs are written with.
         //
         // A `^` in *operand* position can only be this: the XOR operator has a left operand, so a caret where an

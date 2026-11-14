@@ -43,6 +43,7 @@ meaning — a file that writes them is being read as C++26 whatever `-std=` says
 | `^^T`, `^^Widget::x`, `^^std::array` | a `ReflectExpr` — a value of type `std::meta::info` representing the operand (a type-id, a template or concept name, or an id-expression) |
 | `[: r :]` | a `SpliceExpr` in expression position |
 | `typename [: r :]` | a type splice, in the `TypenameType` node a dependent type-name uses |
+| `typename [: r :]{…}`, `typename [: r :](…)` | the same type splice in **expression** position — a temporary or a functional cast of the reflected type |
 | `typename [: r :]<int>` | a splice specialization: the type splice with template arguments |
 | `d.[: r :]`, `p->[: r :]` | a member splice; it has **no written name**, so member lookup and the undefined-field check ask nothing about it |
 | `^^` as a token | one token, not two `^`: the language has no unary `^` to pair them with, and `^` alone is still a Clang block literal |
@@ -54,6 +55,26 @@ language whose type does not depend on what it names. What is **not** there is t
 `auto x = [: r :];` leaves `x`'s type unknown rather than guessing. [`crates/cpp_parser/tests/reflection.rs`](../crates/cpp_parser/tests/reflection.rs)
 pins the syntax and [`crates/cpp_code_analysis/tests/reflection.rs`](../crates/cpp_code_analysis/tests/reflection.rs)
 pins the absence of false diagnostics.
+
+**Verified against a compiler.** GCC 16.2 (`C:\Users\zc\Desktop\mingw\w64devkit`, `-std=c++26 -freflection`, libstdc++'s
+own `<meta>`) accepts every form above, and this server's parser accepts the same files with no syntax error:
+
+| Fixture | GCC 16.2 | this parser |
+| --- | --- | --- |
+| `constexpr auto r = ^^Widget;` | ok | 0 errors |
+| `constexpr auto r = ^^Widget::x;` | ok | 0 errors |
+| `constexpr auto r = ^^Box<int>;` | ok | 0 errors |
+| `constexpr auto r = ^^decltype(x);` | ok | 0 errors |
+| `constexpr auto r = ^^::Widget;` | ok | 0 errors |
+| `using W = typename [: r :];` | ok | 0 errors |
+| `using B = typename [: r :]<int>;` | ok | 0 errors |
+| `Widget w; w.[: r :]` | ok | 0 errors |
+| `typename [: ^^Widget :]{5}` (a temporary) | ok | 0 errors — **added after this check found the parser rejecting it** |
+| `^^3` | error: `^^` cannot be applied to this operand | 0 errors (the grammar has no opinion; the analysis does not check operands) |
+
+GCC also confirms the one type this analysis answers: `static_assert(std::is_same_v<decltype(^^Widget), std::meta::info>)`
+compiles, so "a reflection has type `std::meta::info`" is the implementation's own statement and not a reading of the
+proposal.
 
 ### C++26 contracts (P2900)
 

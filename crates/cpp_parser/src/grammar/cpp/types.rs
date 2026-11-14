@@ -93,6 +93,37 @@ pub(super) fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyn
     })
 }
 
+/// **`typename [: r :]` in expression position** — the type a functional cast or a temporary names.
+///
+/// The type half of the same construct, and a second entry point rather than one shared rule because the caller's
+/// answer differs: in a declaration the specifier loop also has to say whether a *name* may follow, while in an
+/// expression the splice **is** the expression and what follows it is a postfix.
+///
+/// ```cpp
+/// auto t = typename [: ^^Widget :]{5};      // a temporary of the reflected type
+/// auto u = typename [: r :](1);             // a functional cast to it
+/// auto v = typename [: ^^Box :]<int>{};     // …of its specialization
+/// ```
+///
+/// Verified against GCC 16.2 (`-std=c++26 -freflection`): all three are accepted there, and this parser read
+/// `typename` in expression position as a type specifier only — the statement failed at the `{`.
+pub(super) fn parse_a_typename_splice(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::TypenameType);
+    expect_token(p, CppTokenKind::TypenameKeyword)?;
+    if let Err(err) = super::exprs::parse_splice_expression(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    // A **splice specialization**: `typename [: r :]<int>` — the reflection, with template arguments applied.
+    if p.current_token() == CppTokenKind::Less
+        && let Err(err) = parse_template_argument_list(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    Ok(m.complete(p))
+}
 /// Is this name written the way an **unexpanded macro that stands for a type** is written?
 ///
 /// `__int64`, `_Float16`, `__m128h`, `HUGEP`, `MY_API` — the MinGW and libstdc++ spellings, and it is the
