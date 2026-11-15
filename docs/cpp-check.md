@@ -10,7 +10,15 @@ $ cpp_check --skip-code=braces-around-statements
 $ cpp_check --headers                # headers on their own, not only translation units
 $ cpp_check --max-files=25           # a smoke run
 $ cpp_check --exclude=third_party    # a path substring to keep out of the walk
+$ cpp_check E:\neovim --file src/nvim/cursor.c --file src/nvim/api/vim.c
+$ cpp_check E:\neovim --files-from changed.txt
 ```
+
+**A named file set is the practical mode.** Every file checked pays for its own include closure (measured on neovim:
+~0.8 s of render), so checking the four files a change touched costs seconds while checking the 228 translation units
+costs four minutes. `--file` is repeatable; `--files-from` reads one path per line, ignoring blank lines and `#`
+comments, and resolves a relative path against the current directory. `ROOT` still names the **project** — its compile
+database, flags and `.cppls.toml` — so a named file is read the way the build reads it, not as a loose file.
 
 Exit code: `1` when at least one finding is at or above `--min-severity`, `0` when none is, `2` for a run that could
 not start (no such directory, no sources, an unknown rule name).
