@@ -480,6 +480,18 @@ auto r = c(1);           // Unknown today; `view` when the member's type is read
 so what the body reader needs is what `member_fact` + `TypeBindings::applied_to` already do for a member *outside* a
 body: the enclosing class **and** the arguments the call was made with.
 
+**And the reason the merge did nothing is now known:** the body reader has no `CallExpr` arm at all. Its match
+(`sema/declarations.rs`, `type_a_return_states_with`) covers `ParenExpr`, `NameExpr`, `BinaryExpr`, `CastExpr`,
+`InitListExpr` and `LiteralExpr` — a `return _Fn(_Range);` matches none of them and answers `None` before any
+substitution is consulted. A name arm would read `_Fn` correctly (it asks `a_data_member_type` among its four sources
+and substitutes), which is why the fix is not in the substitution lists but in this match.
+
+The arm cannot be written there, though: `type_a_return_states_with` is **index-free** by design (syntax and
+substitutions only), and typing `_Fn(_Range)` needs `adaptor::operator()` from the index. So the call belongs one
+level up, in `deduced_returns_of_the_member`, which has the index, the `declaring` closure and the class's bindings:
+recognise a body that is a single `return <call>;`, type its callee as a member/parameter spelling with the class's
+arguments substituted, and ask that class for the operator's return. That is the remaining work for this stage.
+
 ## Where the objective stands
 
 | stage | state |
