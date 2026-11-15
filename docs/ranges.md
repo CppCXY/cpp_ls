@@ -170,9 +170,38 @@ So it is the **constraint** of the converting constructor — specifically its t
 file. A minimal input built from that shape alone (`requires c2<V, holder<R>> && c2<P, holder<holder<R>>>`) does not
 reproduce, so the class head's own `requires` clause and the base clause are part of the trigger as well.
 
-The next step is the parser fix: the constrained declaration that ends with a template-id whose `>>`/`>>>` closes
-both the template-id and the outer constraint must end at its `;`. This is the last thing between the niebloid and a
-typed pipeline.
+Delta-debugging the fixture (deleting a phrase, re-testing, keeping every deletion the bug survives) brings it to
+**450 bytes**, and the tree at the class's own closing brace says what happens:
+
+```text
+tree at 21:80                       (inside the constructor's member-initializer list)
+  Syntax(CallExpr)      "views::single(::std::move(_Elem))"
+  Syntax(ArgumentList)  "(views::single(::std::move(_Elem)))"
+  Syntax(Initializer)   "(views::single(::std::move(_Elem)))"
+  Syntax(Declarator)    "_Pattern(views::single(::std::move(_Elem)))"     ← a *declarator*
+  Syntax(Declaration)   "template <input_range _Rng> requires constructible_f…"
+  Syntax(ClassBody)     "{ constexpr lazy_split_view(…) …"
+```
+
+**The member-initializer list is being read as a second declarator.** The conversion's `: _Range(…), _Pattern(…)` is
+parsed as `_Pattern(…)` — a declarator like the `b` of `int a, b;` — and since it is followed by `{}` it becomes a
+function definition whose body is the rest of the class. That is why the class's `};` closes the *constructor* and
+every later `}` closes one scope too few.
+
+Which parts are needed, by deletion and replacement:
+
+| change | verdict |
+| --- | --- |
+| `::std::forward<_Rng>(_Range_)` → unqualified `fwd(_Range_)` | **global** (the qualification is part of it) |
+| `noexcept(noexcept(…))` → `noexcept(true)` | **global** |
+| the member-initializer's content → `_Range(0), _Pattern(0)` | nested (content does not matter) |
+| the class-level `requires` clause, the base clause, the first constructor | nested (all deletable) |
+| the second constructor's `requires` clause | global |
+
+So the shape is a constructor with a **`requires` clause followed by a nested `noexcept` whose operand is a
+functional cast of a qualified call**, and then a member-initializer list. The `:` of that list is not recognised,
+and the list becomes declarators. The next step is in `decls.rs`: how a class member's declaration decides whether
+it has a member-initializer list, and why the constrained form loses that decision.
 
 ## What it answers today
 
