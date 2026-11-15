@@ -376,9 +376,22 @@ view disagree about the same header: the cook runs with the project's C++20 stan
 is built without it. So the name resolution that hover uses (`_Filter_fn`, from the *cooked summary*) succeeds, and
 the body the deduction tries to read is 12 bytes long — `#pragma once` and nothing else.
 
-**That is the next fix and it is the last one in this stage:** make the view of a header use the same configuration
-the cook used (the session's, with the standard the build states), instead of asking the file for its own — a system
-header has no compile-database entry and therefore no standard of its own. There the callee is `std::views::filter`, and
+**The two readings differ in *which unit* they came from, and that is the last thing in this stage.**
+
+One correction to the numbers above, made in a later round and worth writing down: the 12 bytes and the 217 875 bytes
+were produced by **different walks**. The big one is the reading the *program* walk makes — it is what the cooked
+*summary* holds, and the `std::ranges::views` scopes in the facts are its evidence (`_STD_BEGIN` was expanded). The
+12-byte one is what a **per-file** walk produces for a header: a unit rooted at the header itself, an environment
+without the includer's defines, `_HAS_CXX20` false, and MSVC's `#else` body — `#pragma once` and a `static_assert`.
+
+A query's view is built from that per-file reading (`Session::view` reads the rendering cache, and
+`fact_from_the_rendering`/the cook fill it from `rendering_of`), which is why a name resolves from the program's
+summary while the body is 12 bytes. Stopping the one writer that could put a self-included rendering into the cache
+was tried and measured: the view still read 12 bytes, so the per-file cook puts it there too.
+
+**That is the next fix:** a header's rendering must be made from a unit that **includes** it — the program's — not
+from a unit rooted at the header. Every step after this depends on it: the adaptor's body, `operator|`, and the
+lambda's parameter types. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
