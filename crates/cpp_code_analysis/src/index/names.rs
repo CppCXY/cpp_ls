@@ -43,7 +43,7 @@ use crate::summary::{DeclFact, MacroFact};
 /// under different macros file different declarations for it, and a posting that did not say which reading it came
 /// from would point a lookup at another translation unit's list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct Posting {
+pub(crate) struct Posting {
     pub file: u32,
     pub reading: u32,
     slot: u32,
