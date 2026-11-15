@@ -60,16 +60,27 @@ t+1.0s  std::    1.1 ms,    8 item(s), incomplete=False
 t+2.0s  std::   15.2 ms, 1000 item(s), incomplete=True     ← the real list, capped
 ```
 
-Two defects, one fixed and one recorded:
+Two files that both `import std;`, asked in the same seconds (`modules_two_files.py`), show the list *growing* rather
+than two different constants:
 
-1. **An `isIncomplete: false` list of eight names**, while the module's closure is still being read and cooked. The
-   handler's flag is now also set when `session.pending_work() > 0`, so the client is told to ask again rather than
-   cache the eight — that closes the t+0.0–0.2 window.
-2. **t+0.5 s to t+2 s is still wrong**, and the counters are zero there: `pending_work` is 0 while the answer is
-   eight names. What changes at t+2 s is the file's **rendering**, which was built (and cached by text hash) before
-   the module's names were in its environment; the rendering for unchanged text is reused, so a query answers from a
-   stale splice until something re-cooks it. That is the defect to chase next — a rendering has to be keyed by the
-   environment it was built in, not only by the text, or invalidated when a module it imports lands.
+```text
+t+0.5s  main.cpp    8 item(s) | test.cpp  26 item(s)
+t+1.0s  main.cpp    8 item(s) | test.cpp  26 item(s)
+t+1.5s  main.cpp 1000 item(s) | test.cpp 121 item(s)
+```
+
+So the answers are **live queries over an index that is still being filled**: each file reflects however much of the
+module's closure had been read and cooked at that moment. Two conclusions follow.
+
+1. **`isIncomplete` must be true while that work exists** — and it now is set when `session.pending_work() > 0`,
+   which is measured at t+0.2 s (`incomplete=True` where it used to be `false`). A client that caches a final list
+   no longer caches eight names.
+2. **`pending_work()` reads 0 at t+0.5–1.0 s while the closure is still landing** — the counters do not see the work
+   that fills the index in that window, so the flag is `false` there and the eight-name answer looks final. The
+   next step is to find which queue that work is in (the module unit's read is driven by `programs_wanted`, which is
+   not part of `pending_work`'s three terms) and count it, rather than to invalidate renderings: a generation-keyed
+   rendering cache was implemented and measured for this window and **moved no number at all**, which is what says
+   the answers are not stale renderings but partially filled index.
 
 **The first request after `didOpen`** costs 85–235 ms (completion) and 20 ms (pull) — the cook of the file plus the
 module's unit, the same cost `diagnostics-performance.md` §4 records for any first request.
