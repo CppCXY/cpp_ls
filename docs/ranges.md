@@ -318,7 +318,25 @@ The member's return is now read through one function, `the_members_return`, shar
 the arity-matched path, so the two cannot disagree. The test `an_overloaded_adaptor_deduces_the_operator_that_the_
 arguments_fit` asserts the one-argument call's closure rather than the first overload's `view`, and it passed.
 
-**What is still open in this stage:** the `<ranges>` fixture itself, plus this overload selection. There the callee is `std::views::filter`, and
+**A test for the combination, and what the live server says now.** The two halves above are covered separately; the
+combination `<ranges>` writes — an alias template in the return *and* a lambda argument — is now
+`an_alias_in_the_return_survives_a_lambda_argument`, and it passes.
+
+The live server's own trace finally became readable, and not through `CPPLS_TRACE_TYPES`: that probe produced
+nothing there while `CPPLS_TRACE_COOKING` printed, so the instrumentation was re-gated on `cooking()` to be seen at
+all. Two measurements from it:
+
+* `commit_a_cooked: 0 declaration(s)` is **not** a statement that the summary is empty — in one run almost every
+  header reported 0 (`xstring`, `xutility`, `new`, …) while `arm64_neon.h` reported 3 041, and the live hover of
+  `std::views::filter` resolves. What the number counts is narrower than "declarations in the summary".
+* with the deduction instrumented, the live answer was `[member-auto] no binding for "operator()" at 80164` — the
+  member fact is found, its offset is a *file* offset, and `definition_at` finds no declaration named `operator()`
+  there. Translating that offset into the tree's coordinates (the change the `Indexed` arm already makes) removed
+  even that message: the deduction is then **not reached at all**, which moves the question one step earlier — to
+  whether `members_of`/`member_fact` answer for `_Filter_fn` in the live session, and with what parameter counts.
+
+**What is still open in this stage:** the `<ranges>` fixture itself — the next measurement is `members_of` for
+`_Filter_fn` in the live session, printed the same way. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for

@@ -1180,3 +1180,40 @@ pub(crate) fn an_overloaded_adaptor_deduces_the_operator_that_the_arguments_fit(
         typed.type_of
     );
 }
+
+/// **The exact combination `<ranges>` writes**: an alias template in the return *and* a lambda argument.
+///
+/// Either half alone is covered and passes — `decay_t` with an `int` argument, and a lambda with a return that names
+/// the parameter directly. Together they are the real adaptor, and this is the shape that still fails end to end.
+#[test]
+pub(crate) fn an_alias_in_the_return_survives_a_lambda_argument() {
+    let text = "template <class T> struct remove_reference { using type = T; };\n\
+                template <class T> using decay_t = typename remove_reference<T>::type;\n\
+                template <class F, class P> struct range_closure { };\n\
+                struct _Filter_fn {\n\
+                \x20   template <class Pred>\n\
+                \x20   auto operator()(Pred&& pred) const { return range_closure<_Filter_fn, decay_t<Pred>>{}; }\n\
+                };\n\
+                inline constexpr _Filter_fn filter;\n\
+                void use() {\n\
+                \x20   auto c = filter([](int v) { return v > 0; });\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-alias-in-the-return-and-a-lambda", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("filter([]").expect("the fixture") + "filter".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`filter(lambda)` must answer something: {typed:?}");
+    };
+    assert!(
+        typed.type_of.starts_with("range_closure<"),
+        "the body's spelling is the answer: {:?}",
+        typed.type_of
+    );
+}
