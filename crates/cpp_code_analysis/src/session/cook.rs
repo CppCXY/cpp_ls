@@ -139,8 +139,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // root the index names is in memory its timeline is used, and otherwise the environment is composed from
         // the index (the same reading the second pass builds a summary from) — a weaker rendering, and the honest
         // one, rather than a stronger rendering of a program this header is not part of.
+        // **The file whose unit answers for this one**, from the include graph — computed before the search because
+        // the walk below needs it too: a *header* is read through the unit that includes it, and a unit rooted at the
+        // header is a different program (its _HAS_CXX20 is false, its body is the #else branch).
+        let designated_root = self.the_unit_that_reads(&path);
         let held = {
-            let designated = self.the_unit_that_reads(&path).map(|root| queue_key(&root));
+            let designated = designated_root.as_deref().map(queue_key);
             let held_units = self.held_units();
             match designated {
                 Some(designated) => held_units
@@ -192,8 +196,17 @@ impl<F: FileProvider + Clone> Session<F> {
                     )
                 })
         };
-        let walked = if held.is_none() && can_be_a_root {
-            self.unit_and_state_of(&path).map(|(unit, _)| unit)
+        // **Walk the unit that reads this file** — the designated root when the index names one, and the file itself
+        // only when it is a root of its own. Walking the *header* was the bug: a unit rooted at it has no includer, so
+        // _HAS_CXX20 is false and MSVC's <ranges> renders as its #else branch (12 bytes) where the unit that
+        // includes it renders 217 875. Nothing is walked when the designated root's timeline is already in hand
+        // (held), which is the case the fast path above exists for.
+        let walked = if held.is_none() {
+            match designated_root.as_deref() {
+                Some(root) => self.unit_and_state_of(root).map(|(unit, _)| unit),
+                None if can_be_a_root => self.unit_and_state_of(&path).map(|(unit, _)| unit),
+                None => None,
+            }
         } else {
             None
         };

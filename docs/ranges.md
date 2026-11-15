@@ -410,9 +410,36 @@ closure backwards and takes each `#define` the summaries recorded, with no seed 
 compiler's predefined macros are exactly the ones no file in the closure defines: `__cplusplus`, `_MSVC_LANG`, and
 with them `_HAS_CXX20`. So the composed rendering of `<ranges>` is its `#else` branch — the 12 bytes.
 
-**That is the fix, and it is one function:** seed the composed environment with the compilation's predefined macros
-(the table `compilation_environment` builds, which the walk already starts from), keeping the closure's own
-definitions as the overrides they are. Everything after this stage depends on it. There the callee is `std::views::filter`, and
+Seeding the composed table with the compilation's predefined macros was tried: the seed is applied (measured —
+`[seed] 88 definition(s), interesting ["_MSVC_LANG", "__cplusplus"]`) and the header still renders as its `#else`
+branch, because that table's macro *bodies* are not what the guard needs. That is a dead end worth recording as one.
+
+**The fix that works is one match arm.** `cooking_materials` walks `self.unit_and_state_of(&path)` — a unit rooted at
+the *header* — whenever the designated root's timeline is not held. It now walks **the designated root**
+(`the_unit_that_reads`) instead, and falls back to a self-unit only for a file that is a root of its own:
+
+```rust
+let walked = if held.is_none() {
+    match designated_root.as_deref() {
+        Some(root) => self.unit_and_state_of(root).map(|(unit, _)| unit),
+        None if can_be_a_root => self.unit_and_state_of(&path).map(|(unit, _)| unit),
+        None => None,
+    }
+} else { None };
+```
+
+Measured in the live server, same fixture, cold cache:
+
+```text
+hover std::views::filter(1)   -> `_Range_closure<_Filter_fn, decay_t<int>> a_closure_int`
+```
+
+**The adaptor call has a type now** — the one-argument overload selected by arity, its placeholder return deduced
+from the body, the class template named, the argument substituted. `decay_t<int>` is the alias template the deduced
+spelling still leaves unresolved, which is the separate item recorded above.
+
+**What is left in the objective:** `operator|` (the pipeline `items | std::views::filter(…)`), then the lambda's
+`auto` parameters. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
