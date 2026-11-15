@@ -204,14 +204,16 @@ struct Box {
     );
 }
 
-/// **A template-id is not a class this layer can size** — its size is the size of the instantiation.
+/// **A template-id whose member cannot be sized is unknown** — the instantiation is attempted, and a member written
+/// in a parameter whose argument names nothing is where it stops. (`Holder<int>` itself is sized: see
+/// `a_member_whose_type_is_an_instantiation_is_sized`.)
 #[test]
 fn a_member_whose_type_is_a_template_id_is_unknown() {
     let layout = layout(
         "\
 template <class T> struct Holder { T value; };
 struct Outer {
-    Holder<int> first;
+    Holder<NoSuchType> first;
     int second;
 };
 ",
@@ -225,5 +227,150 @@ struct Outer {
             .map(|field| field.name.as_str())
             .collect::<Vec<_>>(),
         ["second"]
+    );
+}
+
+/// **A class template instance is sized from its members with the arguments substituted** — `Holder<double>` is
+/// whatever `T value` is for `double`, plus its own `count`.
+#[test]
+fn a_member_whose_type_is_an_instantiation_is_sized() {
+    let layout = layout(
+        "\
+template <class T>
+struct Holder {
+    T value;
+    int count;
+};
+struct Outer {
+    Holder<double> holder;
+    int tail;
+};
+",
+        "Outer",
+    );
+    assert_eq!(
+        layout
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.offset, field.size))
+            .collect::<Vec<_>>(),
+        [("holder", 0, 16), ("tail", 16, 4)]
+    );
+    assert_eq!(layout.size, 24);
+}
+
+/// **A member alias of the instantiation is followed** — `using I = Inner<T>` inside `Outer2<T>` is `Inner<double>` at
+/// the use, not the alias's own unsized spelling.
+#[test]
+fn a_member_whose_type_is_an_alias_of_an_instantiation_is_sized() {
+    let layout = layout(
+        "\
+template <class T>
+struct Inner {
+    T a;
+    T b;
+};
+template <class T>
+struct Outer2 {
+    using I = Inner<T>;
+    I inner;
+    int tail;
+};
+struct Use {
+    Outer2<double> o;
+};
+",
+        "Use",
+    );
+    assert_eq!(
+        layout.size, 24,
+        "inner is 16 bytes and the tail lands at 16"
+    );
+    assert_eq!(layout.alignment, 8);
+}
+
+/// **A pointer member of a template is eight bytes whatever the parameter is** — the substitution makes `T*` a
+/// pointer, and a pointer's size does not depend on the pointee.
+#[test]
+fn a_pointer_member_of_a_template_is_a_word() {
+    let layout = layout(
+        "\
+template <class T>
+struct Vec {
+    T* first;
+    T* last;
+};
+struct Use2 {
+    Vec<int> v;
+};
+",
+        "Use2",
+    );
+    assert_eq!(layout.size, 16);
+    assert_eq!(layout.alignment, 8);
+}
+
+/// **An empty base costs nothing** — the empty-base optimization, which is why `_Compressed_pair`'s `_Ty1` does not
+/// make `std::vector` nine bytes.
+#[test]
+fn an_empty_base_of_a_template_costs_nothing() {
+    let layout = layout(
+        "\
+struct Empty {};
+template <class T>
+struct WithBase : Empty {
+    T value;
+};
+struct Use3 {
+    WithBase<double> w;
+};
+",
+        "Use3",
+    );
+    assert_eq!(layout.size, 8);
+    assert_eq!(layout.alignment, 8);
+}
+
+/// **A base that is a template *parameter* costs nothing when the argument is empty** — the `_Compressed_pair<_Ty1,
+/// _Ty2>` shape, which is what a standard container is built on.
+#[test]
+fn a_parameter_base_bound_to_an_empty_class_costs_nothing() {
+    let layout = layout(
+        "\
+struct Empty {};
+template <class B, class T>
+struct Pair : private B {
+    T second;
+};
+struct Use5 {
+    Pair<Empty, double> p;
+};
+",
+        "Use5",
+    );
+    assert_eq!(layout.size, 8);
+    assert_eq!(layout.alignment, 8);
+}
+
+/// **A base with data is withheld, not guessed** — it would have to be laid at offset zero ahead of the members, and a
+/// layout that ignored it would be too small.
+#[test]
+fn a_base_with_data_withholds_the_layout() {
+    let layout = layout(
+        "\
+struct HasData {
+    int x;
+};
+template <class T>
+struct WithDataBase : HasData {
+    T value;
+};
+",
+        "WithDataBase<double>",
+    );
+    assert!(
+        layout.unknown.iter().any(|name| name.contains("base")),
+        "the base is named as unsized: {:?}",
+        layout.unknown
     );
 }

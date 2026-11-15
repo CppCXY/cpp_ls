@@ -1725,8 +1725,8 @@ fn declaration_markdown(
                 .map(|name| format!("`{name}`"))
                 .collect();
             out.push_str(&format!(
-                "\n\n**Layout** — not computed: {} cannot be sized here (a bitfield, or a type the index does not \
-                 hold).\n",
+                "\n\n**Layout** — not computed: {} cannot be sized here (a bitfield, a dependent type such as \
+                 `_Rebind_alloc_t<_Alloc, _Ty>`, or one the index does not hold).\n",
                 named.join(", ")
             ));
         }

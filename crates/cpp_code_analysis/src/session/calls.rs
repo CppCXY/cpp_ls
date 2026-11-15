@@ -268,16 +268,51 @@ impl<F: FileProvider + Clone> Session<F> {
         written_type: &str,
         depth: usize,
     ) -> Known<crate::sema::layout::ClassLayout> {
-        if depth > 4 {
+        self.the_layout_of_a_class_with(view, written_type, &[], depth)
+    }
+
+    /// [`Session::the_layout_of_a_class`] for a class **template applied to arguments** — `std::vector<int>`.
+    ///
+    /// `arguments` are the ones the *use* wrote. An empty slice with a template-id spelling
+    /// (`std::vector<int>` passed whole) splits it here; an empty slice with a plain name is the ordinary class.
+    ///
+    /// # Why the members are sized through a substitution
+    ///
+    /// A class template's data members are written in its parameters — `T value;` — and their sizes are the sizes of
+    /// whatever the arguments make them. The member *facts* keep the declaration's spelling (`vector`'s `_Mypair` is
+    /// `_Compressed_pair<_Alty, _Scary_val>`), so every member type is read with the parameters replaced by the
+    /// arguments first, and a member whose type is a **member alias** of this class (`_Alty`) is followed to its
+    /// target with the same substitution. The recursion is bounded by `depth`, and a member that is still written in
+    /// a parameter after substitution is **unknown** rather than looked up by bare name — the mistake that made
+    /// `std::vector<widget::Widget>`'s card say "size 9 byte(s), alignment 1" (see `docs/diagnostics-performance.md`
+    /// and the note in `the_size_of_a_type_in`).
+    pub(crate) fn the_layout_of_a_class_with(
+        &self,
+        view: &FileView,
+        written_type: &str,
+        arguments: &[String],
+        depth: usize,
+    ) -> Known<crate::sema::layout::ClassLayout> {
+        if depth > 6 {
             return Known::No;
         }
-        let Known::Yes(list) = self.members_of(view, written_type) else {
+        let (head, arguments) = match crate::index::project::split_template_arguments(written_type)
+        {
+            Some((head, written)) if arguments.is_empty() => (head, written),
+            _ => (written_type.to_string(), arguments.to_vec()),
+        };
+        let full = if arguments.is_empty() {
+            head.clone()
+        } else {
+            format!("{head}<{}>", arguments.join(", "))
+        };
+        let Known::Yes(list) = self.members_of(view, &full) else {
             return Known::No;
         };
         // **The class and its members as their file wrote them** — the text a union's keyword and a bitfield's `:` are
         // read out of, at file offsets. `None` when the index cannot place the class: the layout is still computed for
         // a class the asking file declares, and reported without the two spelling facts it cannot read.
-        let as_written = self.the_class_as_its_file_wrote_it(written_type, &view.path);
+        let as_written = self.the_class_as_its_file_wrote_it(&head, &view.path);
         // **A hover is a request, and a layout is a visibility walk per member.** A class with more than this many
         // data members is a registry — a header's `struct file_buffer` has eighty — and pricing every member costs
         // seconds for a card the reader scrolls past. Measured on neovim: `file_buffer`'s card took **7.2 s** with
@@ -303,6 +338,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 .max_by_key(|(at, _)| *at)
                 .is_some_and(|(_, keyword)| keyword == "union")
         });
+        // **The environment a member's type is read in** — the class's parameters, the arguments the use wrote (or
+        // the declaration's own defaults), and the class's own members, which is where a member alias lives.
+        let no_names: Vec<String> = Vec::new();
+        let instantiation = Instantiation {
+            parameters: as_written
+                .as_ref()
+                .map_or(&no_names, |written| &written.parameters),
+            defaults: as_written
+                .as_ref()
+                .map_or(&no_names, |written| &written.parameter_defaults),
+            arguments: &arguments,
+            members: &list.members,
+        };
         let mut sized: Vec<(String, usize, usize)> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
         // **Declaration order**, which is what decides the offsets: `members_of` answers in the index's own order
@@ -330,18 +378,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 unknown.push(fact.name.clone());
                 continue;
             };
-            // **A member written in one of the class's own template parameters has no size here.** `_Ty2 _Mysecond;`
-            // is as large as the instantiation makes it, and the lookup below resolves the bare spelling against the
-            // *asking* file — where some other class may well be called `_Ty2`. Measured on
-            // `std::vector<widget::Widget>`: the card said "size 9 byte(s), alignment 1", built from `_Mypair`'s 9,
-            // which was `_Alty`'s 1 plus `_Scary_val`'s 4 plus a pointer, each of them another class's layout.
-            if as_written
-                .as_ref()
-                .is_some_and(|written| mentions_a_parameter(type_of, &written.parameters))
-            {
-                unknown.push(fact.name.clone());
-                continue;
-            }
             // **A bitfield has no width in a fact**, and a layout computed without it puts the next member at the
             // wrong offset — so the class is not answered rather than answered plausibly. The `:` is found at the
             // member's **file** offset, which is why the class was read out of its summary above: a member fact that
@@ -355,12 +391,50 @@ impl<F: FileProvider + Clone> Session<F> {
                 unknown.push(fact.name.clone());
                 continue;
             }
-            match self.the_size_of_a_type(view, type_of, depth) {
+            match self.the_size_of_a_type_in(view, type_of, depth, Some(&instantiation)) {
                 Some((size, alignment)) => sized.push((fact.name.clone(), size, alignment)),
                 None => unknown.push(fact.name.clone()),
             }
         }
+        // **A base class takes bytes too, and this layer places none of them.** An *empty* base costs nothing — the
+        // language's empty-base optimization is what every compiler does — while a non-empty one would have to be
+        // laid at offset zero, with its own alignment, ahead of the members. That is a layout rule this layer does
+        // not implement, so a class whose base is not empty is **withheld** rather than reported too small: the same
+        // direction `sema::layout`'s note states, and the one a `size` that reads plausibly must not break.
+        if let Some(written) = &as_written {
+            for base in &written.bases {
+                let empty = self
+                    .the_layout_of_a_base(view, base, depth + 1, &instantiation)
+                    .is_some_and(|layout| layout.fields.is_empty() && layout.size == 1);
+                if !empty {
+                    unknown.push(format!("base {base}"));
+                }
+            }
+        }
         Known::Yes(crate::sema::layout::ClassLayout::of(&sized, union, unknown))
+    }
+
+    /// The layout of one of a class's **bases**, read in the class's own instantiation.
+    fn the_layout_of_a_base(
+        &self,
+        view: &FileView,
+        base: &str,
+        depth: usize,
+        instantiation: &Instantiation<'_>,
+    ) -> Option<crate::sema::layout::ClassLayout> {
+        let spelled = crate::sema::types::substituted_spelling_with_defaults(
+            base,
+            instantiation.parameters,
+            instantiation.defaults,
+            instantiation.arguments,
+        );
+        if mentions_a_parameter(&spelled, instantiation.parameters) {
+            return None;
+        }
+        match self.the_layout_of_a_class_with(view, &spelled, &[], depth) {
+            Known::Yes(layout) => Some(layout),
+            _ => None,
+        }
     }
 
     /// **The class as its own file wrote it** — the text, the offset of the class's name, and where each data member's
@@ -406,6 +480,8 @@ impl<F: FileProvider + Clone> Session<F> {
             class_at: class.name_range.start_offset,
             members,
             parameters: class.parameters.clone(),
+            parameter_defaults: class.parameter_defaults.clone(),
+            bases: class.bases.clone(),
         })
     }
 
@@ -417,35 +493,82 @@ impl<F: FileProvider + Clone> Session<F> {
         after[..end].trim_start().starts_with(':')
     }
 
-    /// The size and alignment of a member's written type, following a class the index holds.
-    pub(crate) fn the_size_of_a_type(
+    /// The size and alignment of a member's written type, **in the instantiation the member is written in**.
+    ///
+    /// `instantiation` is `None` for a class that is not a template — the ordinary member — and the class's own
+    /// parameters/arguments/members otherwise. The steps, in the order that keeps each one from answering the next
+    /// one's question:
+    ///
+    /// 1. **Substitute** the parameters, with the declaration's own defaults for the arguments a use did not write.
+    ///    A spelling that still mentions a parameter afterwards is **unknown** — looking it up by bare name is what
+    ///    found an unrelated `_Ty2` in another header and reported `std::vector<widget::Widget>` as 9 bytes.
+    /// 2. **A builtin** — the scalars, a pointer, an array of one of them — is the answer.
+    /// 3. **A member alias** of the class being laid out (`_Alty`, `_Scary_val`, `Ptr`) is followed to its target,
+    ///    substituted in the same environment.
+    /// 4. **A class template applied to arguments** is the instantiation: its own layout, computed from *its*
+    ///    members with *its* parameters bound to these arguments.
+    /// 5. **A typedef** is the type it names, and everything else is an ordinary class.
+    pub(crate) fn the_size_of_a_type_in(
         &self,
         view: &FileView,
         spelling: &str,
         depth: usize,
+        instantiation: Option<&Instantiation<'_>>,
     ) -> Option<(usize, usize)> {
-        if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelling) {
+        if depth > 8 {
+            return None;
+        }
+        let spelled = match instantiation {
+            Some(environment) => crate::sema::types::substituted_spelling_with_defaults(
+                spelling,
+                environment.parameters,
+                environment.defaults,
+                environment.arguments,
+            ),
+            None => spelling.to_string(),
+        };
+        let spelled = spelled.trim();
+        if let Some(environment) = instantiation
+            && mentions_a_parameter(spelled, environment.parameters)
+        {
+            return None;
+        }
+        if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelled) {
             return Some(builtin);
         }
-        // **A template-id is not a class this layer can size.** _Compressed_pair<_Alty, _Scary_val> is a class
-        // *template applied to arguments*, and its size is the size of the instantiation — substituting the arguments
-        // and evaluating the layout again, which is a compiler's job. Resolving the bare name instead reports the
-        // template's own layout, which is a different object: measured on std::vector<widget::Widget>, whose card
-        // said "size 9 byte(s), alignment 1". None withholds the layout, the direction the module documents.
-        if spelling.contains('<') {
-            return None;
+        if let Some(environment) = instantiation
+            && let Some(alias) = environment.members.iter().find(|member| {
+                member.fact.kind == crate::DeclKind::Type
+                    && member.fact.name == spelled
+                    && member.fact.parameter_list.is_none()
+            })
+            && let Some(target) = alias.fact.type_of.clone()
+        {
+            return self.the_size_of_a_type_in(view, &target, depth + 1, instantiation);
+        }
+        if let Some((head, arguments)) = crate::index::project::split_template_arguments(spelled) {
+            let Known::Yes(layout) =
+                self.the_layout_of_a_class_with(view, &head, &arguments, depth + 1)
+            else {
+                return None;
+            };
+            return layout
+                .unknown
+                .is_empty()
+                .then_some((layout.size, layout.alignment));
         }
         // **A typedef is the type it names.** Real C decides its members through one — neovim's `file_buffer` has
         // `pos_T b_op_start`, `handle_T handle`, `memline_T b_ml` — so without this the layout of most real structs
         // is "not computed". The alias's own fact holds the spelling it expands to.
-        if let Known::Yes(aliased) = self.store.index().definition(spelling, &view.path)
+        if let Known::Yes(aliased) = self.store.index().definition(spelled, &view.path)
             && let Some(target) = aliased.fact.type_of.as_deref()
-            && target != spelling
+            && target != spelled
             && depth <= 8
         {
-            return self.the_size_of_a_type(view, target, depth + 1);
+            return self.the_size_of_a_type_in(view, target, depth + 1, instantiation);
         }
-        let Known::Yes(nested) = self.the_layout_of_a_class(view, spelling, depth + 1) else {
+        let Known::Yes(nested) = self.the_layout_of_a_class_with(view, spelled, &[], depth + 1)
+        else {
             return None;
         };
         if nested.unknown.is_empty() {
@@ -685,6 +808,17 @@ pub(crate) struct TheClassAsWritten {
     pub class_at: usize,
     pub members: std::collections::HashMap<String, usize>,
     pub parameters: Vec<String>,
+    pub parameter_defaults: Vec<String>,
+    pub bases: Vec<String>,
+}
+
+/// **The instantiation a class's members are read in** — its parameters, the arguments a use wrote (or the
+/// declaration's own defaults), and the class's members, which is where a *member alias* such as `_Alty` lives.
+pub(crate) struct Instantiation<'a> {
+    pub parameters: &'a [String],
+    pub defaults: &'a [String],
+    pub arguments: &'a [String],
+    pub members: &'a [crate::index::ProjectMember],
 }
 
 /// Does a type spelling use one of these names as a **word**? _Ty2 matches _Ty2* and ector<_Ty2>; _Ty20 does
