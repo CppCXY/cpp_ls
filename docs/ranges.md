@@ -439,7 +439,29 @@ from the body, the class template named, the argument substituted. `decay_t<int>
 spelling still leaves unresolved, which is the separate item recorded above.
 
 **What is left in the objective:** `operator|` (the pipeline `items | std::views::filter(…)`), then the lambda's
-`auto` parameters. There the callee is `std::views::filter`, and
+`auto` parameters.
+
+### `operator|`: what was tried, and the one step it needs
+
+The pipe's rule is C++'s own: `v | closure` calls `closure(v)` (the free `operator|` in `<ranges>` is
+`operator|(_Rng&&, _Closure&&)` whose body is `_Closure_{forward<_Rng>(_Range)}`). An arm was written on exactly that
+reading — when the left operand is a class and the right one is a class, ask the right's `operator()` with the left as
+its argument, which is the deduction the niebloid call already goes through.
+
+Measured: `auto ids = items | std::views::filter(…)` came back **`void`** — a *wrong* type rather than none. The
+reason is one level deeper than the arm could see: `_Range_closure<_Filter_fn, decay_t<_Pr>>`'s `operator()` is
+
+```cpp
+template <viewable_range _Rng> constexpr auto operator()(_Rng&& _Range) const { return _Fn(_Range); }
+```
+
+— its body calls `_Fn`, a **member variable whose type is the closure's template argument** (`_Filter_fn`). Nothing in
+this layer substitutes a member variable's type from the class template's arguments, so `_Fn(_Range)` has no type,
+the deduction answers `void`, and a wrong type is worse than a refusal: the arm was removed.
+
+**So the next step for this stage is that substitution**, not another operator rule: when a member's body names
+`this`-member variables, their types come from the class's template arguments the call was made on — the same pairing
+`member_bindings`/`TypeBindings` already performs for members, applied inside the body deduction. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
