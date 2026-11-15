@@ -50,6 +50,10 @@ auto by_auto(A auto a) {
     a.
 }
 
+auto by_result(A auto a) {
+    a.foo().
+}
+
 template <Both T>
 auto by_both(T t) {
     t.
@@ -138,6 +142,16 @@ fn a_constrained_template_parameter_offers_the_same() {
 #[test]
 fn an_unconstrained_parameter_offers_nothing() {
     assert!(offered_after("auto unconstrained(U u) {\n    u.").is_empty());
+}
+
+/// **The result of a call a concept constrains has the members the result's concept requires** —
+/// { a.foo() } -> B is the only statement anywhere of what oo returns, so .foo(). lists B's names.
+#[test]
+fn the_result_of_a_required_call_offers_the_result_concept() {
+    assert_eq!(
+        offered_after("auto by_result(A auto a) {\n    a.foo()."),
+        [("bar".to_string(), ItemKind::Method)]
+    );
 }
 
 /// **A requires-clause is the same constraint beside the head** — `template <class T> requires HasFoo<T>` says what

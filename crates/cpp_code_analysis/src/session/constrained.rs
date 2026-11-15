@@ -49,7 +49,25 @@ impl<F: FileProvider + Clone> Session<F> {
         else {
             return Vec::new();
         };
-        let concepts = the_concepts_constraining(&view.root, binding.name_range.start_offset);
+        // **The object may be a call whose result a concept constrains** — `{ a.foo() } -> B` says the value `foo`
+        // returns satisfies `B`, so `a.foo().` has the members `B` requires. The requirement is matched by the
+        // **member name** (`foo`), not by the whole expression: the concept writes its own parameter's name
+        // (`{ t.foo() }`), and the reader's object is called whatever they called it.
+        let mut concepts: Vec<String> = Vec::new();
+        let mut of_the_result: Vec<String> = Vec::new();
+        if cpp_parser::CppSyntaxKind::from(access.object.kind())
+            == cpp_parser::CppSyntaxKind::CallExpr
+            && let Some(member) = the_member_a_call_names(&access.object)
+        {
+            for concept in the_concepts_constraining(&view.root, binding.name_range.start_offset) {
+                for result in self.the_result_concepts_of(&concept, &view.path, &member) {
+                    of_the_result.push(result);
+                }
+            }
+        } else {
+            concepts = the_concepts_constraining(&view.root, binding.name_range.start_offset);
+        }
+        concepts.extend(of_the_result);
         let mut items: Vec<crate::CompletionItem> = Vec::new();
         for concept in &concepts {
             let Some(required) = self.the_members_the_concept_names(concept, &view.path) else {
@@ -75,6 +93,54 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
         items
+    }
+
+    /// **The concepts a requirement's result is constrained by** — `B` for `{ a.foo() } -> B`, when the call is a
+    /// `foo`.
+    ///
+    /// A concept's requires-body can state what a *call* returns (`{ x.make() } -> Widget`), and that constraint is
+    /// the only statement of the result's members anywhere in the program. The requirement is matched by the member
+    /// the call names — the concept's parameter is its own (`{ t.foo() }`), so the expression's text cannot be
+    /// compared with the reader's.
+    fn the_result_concepts_of(&self, concept: &str, path: &Path, member: &str) -> Vec<String> {
+        let Some(found) = self.store.index().definition(concept, path).value() else {
+            return Vec::new();
+        };
+        let Some(view) = self.view_of_the_file(&found.file) else {
+            return Vec::new();
+        };
+        let Some(token) = cpp_parser::token_at(&view.root, found.fact.name_range.start_offset)
+        else {
+            return Vec::new();
+        };
+        let Some(concept_node) = token.parent_ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ConceptDecl
+        }) else {
+            return Vec::new();
+        };
+        let mut concepts: Vec<String> = Vec::new();
+        for requirement in concept_node.descendants().filter(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Requirement
+        }) {
+            let text = requirement.text().to_string();
+            let Some(arrow) = text.find("->") else {
+                continue;
+            };
+            let expression = text[..arrow].trim();
+            // `{ a.foo() }` names the member; `a.foo() == 42` does not constrain its result and is not matched.
+            if !expression.contains(&format!(".{member}("))
+                && !expression.contains(&format!("->{member}("))
+            {
+                continue;
+            }
+            let constraint = text[arrow + 2..].trim().trim_end_matches(';').trim();
+            for concept in the_concepts_a_constraint_names(constraint) {
+                if !concepts.contains(&concept) {
+                    concepts.push(concept);
+                }
+            }
+        }
+        concepts
     }
 
     /// The member names a concept's `requires` expressions write on its parameter, as `(name, called)`.
@@ -306,6 +372,13 @@ fn the_concepts_a_constraint_names(text: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// **The member a call names** — `foo` for `a.foo()`.
+fn the_member_a_call_names(call: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let callee = call.children().next()?;
+    let access = crate::sema::resolve::member_access_of(&callee)?;
+    (!access.member.is_empty()).then_some(access.member.clone())
 }
 
 /// The identifier-shaped words of a spelling, in order.
