@@ -98,9 +98,24 @@ fact is `std::ranges::views` with target `ranges::views`, so the qualified name 
 adaptors cannot be reached through the alias. Completion after `std::views::` still works because it follows the alias
 fact's *target* rather than its qualified name — which is why the two questions disagree about the same spelling.
 
-So the next step is not the niebloid at all: it is **where the cooked rendering of `<ranges>` loses a closing brace**
-before line 7666, so that `namespace ranges` is still open when the alias is declared. That is a rendering/parser
-question about one header's tail, and it blocks everything in step (3).
+**Where the extra scope comes from: a `template … requires …` declaration that never closes.** The rendering's own
+text is **balanced** — a comment/string-aware scan of the 204 KB `<ranges>` body ends at depth 0, and every
+`namespace views {` block sits at the depth `std` + `ranges` asks for. What is wrong is the *parse*: the ancestor
+chain of a `namespace views {` token near the end of the header is
+
+```text
+NamespaceDecl "namespace views { struct _Slide_fn …"
+Declaration    "template <input_range _Vw, forward_range _Pat> requires (vie…"
+Declaration    "template <input_range _Vw, forward_range _Pat> requires view…"
+CompoundStat    (the body of `namespace ranges`)
+```
+
+— the namespace is nested **inside two declarations**, so a `template … requires …` written before it never closed
+and swallowed the rest of the file, including the alias at 7666. The last 7 141 bytes of the rendering (the `_Zip_fn`
+block to EOF) parse correctly on their own, with the alias in `std`, which is what says the swallowing starts earlier.
+
+So the next step is a parser bug and not a ranges one: **which `template … requires …` in the tail of `<ranges>` is
+left open**, and why. It is the last thing between the niebloid and a typed pipeline.
 
 ## What it answers today
 
