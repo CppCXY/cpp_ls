@@ -216,21 +216,30 @@ Two smaller findings came out of the same measurement and are fixed here:
   `declared_parameter_defaults_of` calls inside `what_a_call_has` are now the `_with` forms; those were
   the other 1 000 builds.
 
+**And the semantic-token pass, which was the same bug in a different loop.** `kind_of_binding` — asked
+once per declaration, 1 100 of them in the 901-line file — called `declared_template_parameters_of` and
+`declared_type_of`, whose wrappers build a table each, and `member_kinds` called `member_across_files`
+once per member access with a fresh `TypeMemo` and a fresh table. `classified_names` now owns the table
+(and a `TypeMemo`) for the whole file and hands both to `member_kinds` and `kind_of_binding`; the two
+`member_across_files` callers are split into a `_with` form. That is 1 100 tables down to one.
+
 Measured, same machine, same files as §2:
 
 | | before | after | |
 | --- | ---: | ---: | ---: |
-| pull after an edit, 901-line file | 3 321 ms | **116 ms** | 29× |
+| pull after an edit, 901-line file | 3 321 ms | **115 ms** | 29× |
 | `cpp_check`, 901-line file | 7 222 ms | **277 ms** | 26× |
 | `cpp_check`, 2 701-line file | 49 561 ms | **1 479 ms** | 33× |
-| Neovim per keystroke, 901-line file | 4 427 ms | **1 141 ms** | 3.9× |
+| semantic tokens, 901-line file | 1 150 ms | **8.8 ms** | 130× |
+| Neovim per keystroke, 901-line file | 4 427 ms | **127 ms** | 35× |
+| Neovim per keystroke, 2 801-line file | 302 ms | **101 ms** | 3× |
 | table builds in one pull, 901-line file | 1 801 | **2** (the indexer's own) | |
 
-The Neovim row now lags the raw pull for a reason that is no longer diagnostics: the server log for
-one of those keystrokes says `request textDocument/diagnostic waited 991 ms for events and took 113 ms`
-— the pull itself is 113 ms and it spent a second in the update queue behind the **semantic tokens**
-request Neovim sends 200 ms after every change (the same inference, a different answer). The next
-lever for typing latency is that request, not this one.
+The Neovim row was the point of the exercise: the pull was already 113 ms once the table was shared,
+and the other 1 s was the update queue waiting for the semantic-token request the editor sends 200 ms
+after every change — the same per-declaration table builds, on the same analysis thread. With that gone
+a keystroke on the 901-line file costs ~127 ms end to end, and the 2 801-line file (2 000-line bodies,
+100 diagnostics) ~101 ms.
 
 ### What is left, in order of expected gain
 
@@ -239,9 +248,7 @@ lever for typing latency is that request, not this one.
 2. **Make `commit_a_cooked` proportional to what changed.** 279 ms for a 35-line file means the commit
    is paying for the whole cooked rendering (the standard headers it expands), every keystroke — and
    the log above still shows a `commit` of 1.09 s on the first pull after `didOpen`.
-3. **The semantic-tokens request**, which is now the largest single item on a keystroke's critical path:
-   it runs on the same analysis thread as the pull, so the pull waits for it (§3.3).
-4. **Only then consider a pull-side debounce.** A 100 ms coalescing window on `textDocument/diagnostic`
+3. **Only then consider a pull-side debounce.** A 100 ms coalescing window on `textDocument/diagnostic`
    would cut the number of passes during fast typing, but it adds latency to every edit and hides the
    real cost rather than fixing it. The push path's 300 ms delay exists because push has no
    cancellation; pull has cancellation and does not need the same delay.

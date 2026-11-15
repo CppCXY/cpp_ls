@@ -40,7 +40,35 @@ pub fn member_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
-    let memo = TypeMemo::default();
+    // One request's worth of memo and table for this single question — see [member_across_files_with] for the
+    // callers that ask it many times over one file (the semantic-token pass asks it once per member access).
+    member_across_files_with(
+        &TypeMemo::default(),
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        offset,
+    )
+}
+
+/// [member_across_files] with the memo and the declaration table threaded in.
+///
+/// A pass over one file asks this question **once per member access**, and each ask used to pay for its own
+/// TypeMemo and its own DeclarationShapes — the second is a walk of the whole file, so the semantic-token
+/// pass on a 901-line file spent 1 150 ms here (docs/diagnostics-performance.md §3.3).
+pub(crate) fn member_across_files_with(
+    memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<ProjectDefinition> {
     let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -55,8 +83,8 @@ pub fn member_across_files(
 
     // The type of the object, which is what decides which class the member is looked for in.
     let Known::Yes((written, _)) = type_of_expression_memoed(
-        &memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        memo,
+        shapes,
         index,
         declaring,
         scopes,
@@ -66,8 +94,8 @@ pub fn member_across_files(
         0,
     ) else {
         let Known::Unknown(reason) = type_of_expression_memoed(
-            &memo,
-            &crate::sema::declarations::ShapeTable::new(),
+            memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -91,7 +119,7 @@ pub fn member_across_files(
     // it here as well would have to rewrite the fact's own spelling, which is what
     // `DeclFact::type_of` is documented to be *as the file wrote it*.
     let found = member_fact(
-        &crate::sema::declarations::ShapeTable::new(),
+        shapes,
         index,
         scopes,
         root,

@@ -232,11 +232,24 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // "how much does a colour cost" is a question the probe in `examples/semantic_probe.rs` answers from here
     // rather than from a second implementation of the pass.
 
+    // **The declaration shape table, built at most once for the whole file.** Reading a declaration's `const`-ness
+    // is a question about the specifiers in front of it, and the table that answers it is a walk of the file — so
+    // asking it per name is a walk per name. Measured on the standard library's `<algorithm>` (7 966 identifiers,
+    // 1 638 of them declarations): **11.3 s**, and the table was rebuilt 1 638 times. Now built on the first name
+    // that needs it (a file whose colouring reaches no value declaration never builds one) and shared by the rest.
+    //
+    // **And shared with the member pass**, which used to build one per member access: `w.id` asks for a member
+    // declaration, that answer is read from the same table, and a file with a hundred accesses built a hundred of
+    // them — 1 150 ms of a 1 151 ms semantic-token request on a 901-line file (§3.3 of
+    // `docs/diagnostics-performance.md`).
+    let shapes: crate::sema::declarations::ShapeTable =
+        crate::sema::declarations::ShapeTable::new();
+    let types = crate::index::project::TypeMemo::default();
     let declared = declarations_by_offset(view);
     let parameters = parameter_offsets(view);
     let macros = macro_names(view);
     let defined = definitions_of(view);
-    let members = member_kinds(index, view);
+    let members = member_kinds(index, view, &types, &shapes);
     let qualified = qualified_names(view);
 
     // **Both layers are asked once per spelling.** Neither question depends on *where* in the file the name is
@@ -258,14 +271,6 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         std::cell::OnceCell::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     let mut out: Vec<Name> = Vec::new();
-
-    // **The declaration shape table, built at most once for the whole file.** Reading a declaration's `const`-ness
-    // is a question about the specifiers in front of it, and the table that answers it is a walk of the file — so
-    // asking it per name is a walk per name. Measured on the standard library's `<algorithm>` (7 966 identifiers,
-    // 1 638 of them declarations): **11.3 s**, and the table was rebuilt 1 638 times. Now built on the first name
-    // that needs it (a file whose colouring reaches no value declaration never builds one) and shared by the rest.
-    let shapes: std::cell::OnceCell<crate::sema::declarations::DeclarationShapes> =
-        std::cell::OnceCell::new();
 
     // **The identifiers a qualified name is spelled with, from the *tree*.** `X::Y` is a node —
     // `CppNameExpr { X, ::, Y }` — so which tokens are nested-name-specifiers is a question about its children, not
@@ -314,6 +319,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 binding,
                 view,
                 parameters.contains(&binding.name_range.start_offset),
+                &shapes,
             )
         {
             out.push(Name {
@@ -368,6 +374,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                     &binding,
                     view,
                     parameters.contains(&binding.name_range.start_offset),
+                    &shapes,
                 ),
                 Held::NotHere => None,
             });
@@ -608,7 +615,12 @@ fn modifiers_of(
 /// The answer is the one the note above has always named: ask the **type**. [`member_across_files`] is the query
 /// that does it — the same one a jump to a member's declaration uses, so a member that can be jumped to is a member
 /// that is coloured — and its answer carries the declaration's kind, which is what a colour is chosen from.
-fn member_kinds(index: &ProjectIndex, view: &FileView) -> HashMap<usize, NameKind> {
+fn member_kinds(
+    index: &ProjectIndex,
+    view: &FileView,
+    memo: &crate::index::project::TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
+) -> HashMap<usize, NameKind> {
     fn writes_the_operator(node: &cpp_parser::CppSyntaxNode) -> bool {
         node.children_with_tokens()
             .filter_map(|element| element.into_token())
@@ -640,7 +652,9 @@ fn member_kinds(index: &ProjectIndex, view: &FileView) -> HashMap<usize, NameKin
         // object's type comes from this file. `None` for the view means a query that needs another file's text
         // answers nothing, which is this layer's ordinary way of declining rather than guessing — and it costs one
         // `Option` rather than a parse of a header per member.
-        let found = crate::index::project::member_across_files(
+        let found = crate::index::project::member_across_files_with(
+            memo,
+            shapes,
             index,
             &mut |_: &Path| None,
             &view.scopes,
@@ -867,6 +881,7 @@ fn kind_of_binding(
     binding: &Binding,
     view: &FileView,
     is_a_parameter: bool,
+    shapes: &crate::sema::declarations::ShapeTable,
 ) -> Option<NameKind> {
     Some(match binding.kind {
         BindingKind::Namespace => NameKind::Namespace,
@@ -912,8 +927,9 @@ fn kind_of_binding(
                 .is_some_and(|scope| scope.kind == crate::ScopeKind::Class)
             {
                 NameKind::Property
-            } else if !crate::sema::declarations::declared_template_parameters_of(
-                &view.root, binding,
+            } else if !crate::sema::declarations::declared_template_parameters_with(
+                crate::sema::declarations::shapes_from(shapes, &view.root),
+                binding,
             )
             .is_empty()
             {
@@ -921,8 +937,11 @@ fn kind_of_binding(
                 // while the scope model records a variable because that is all a binding can say. The template head
                 // is in the tree, and this is what asks it.
                 NameKind::VariableTemplate
-            } else if crate::sema::declarations::declared_type_of(&view.root, binding)
-                .is_some_and(|written| denotes_a_function_pointer(index, &view.path, &written))
+            } else if crate::sema::declarations::declared_type_of_with(
+                crate::sema::declarations::shapes_from(shapes, &view.root),
+                binding,
+            )
+            .is_some_and(|written| denotes_a_function_pointer(index, &view.path, &written))
             {
                 // **A function pointer is drawn as a function.** `binary_op operation = add;` declares a *variable* —
                 // the fact says so and hover says so — but a reader scanning `operation(1, 2)` reads a call, and a
