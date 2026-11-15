@@ -455,7 +455,11 @@ fn the_reflection_flag_defines_the_feature_macro() {
             .find(|macro_| &*macro_.name == name)
             .and_then(|macro_| macro_.value.as_deref())
     };
-    assert_eq!(value("__cplusplus"), Some("202400L"), "GCC 16.2's own value");
+    assert_eq!(
+        value("__cplusplus"),
+        Some("202400L"),
+        "GCC 16.2's own value"
+    );
     assert_eq!(value("__cpp_impl_reflection"), Some("202603L"));
 
     let without = from_arguments(&["-std=c++26"]);
@@ -495,7 +499,11 @@ fn the_reflection_flag_can_be_turned_off_again() {
 /// wrong `__cplusplus` is the one kind of answer that must never be given.
 #[test]
 fn the_cxx23_and_cxx26_values_match_the_compiler() {
-    for (standard, expected) in [("c++23", "202302L"), ("gnu++23", "202302L"), ("c++26", "202400L")] {
+    for (standard, expected) in [
+        ("c++23", "202302L"),
+        ("gnu++23", "202302L"),
+        ("c++26", "202400L"),
+    ] {
         let config = from_arguments(&[&format!("-std={standard}")]);
         let macros = predefined_macros_of(&config);
         assert_eq!(

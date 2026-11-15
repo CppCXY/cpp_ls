@@ -174,7 +174,8 @@ impl<F: FileProvider + Clone> Session<F> {
             if overridden {
                 continue;
             }
-            let Some((parameters, qualifiers)) = signature_of(self, &member.file, &member.fact) else {
+            let Some((parameters, qualifiers)) = signature_of(self, &member.file, &member.fact)
+            else {
                 continue;
             };
             found.push(MissingDefinition {
@@ -232,9 +233,10 @@ fn written_parameters_and_qualifiers(
     use cpp_parser::CppAstNode;
     let reading = view.reading_offset_of(FileOffset::new(in_the_file))?;
     let token = cpp_parser::token_at(&view.root, reading.get())?;
-    let declarator = token.parent()?.ancestors().find(|node| {
-        cpp_parser::CppDeclarator::can_cast(node.kind().into())
-    })?;
+    let declarator = token
+        .parent()?
+        .ancestors()
+        .find(|node| cpp_parser::CppDeclarator::can_cast(node.kind().into()))?;
     let parameters = declarator
         .children()
         .find_map(cpp_parser::CppParamList::cast)?;
@@ -244,9 +246,9 @@ fn written_parameters_and_qualifiers(
     // **The qualifiers written after the parameter list**: `const`, `&`, `&&` and `noexcept`, in the declaration that
     // holds the declarator. `override` and `final` are not part of a definition, a contract specifier is not either,
     // and an operand of `noexcept(…)` is dropped because a definition may write the plain spelling.
-    let declaration = declarator.ancestors().find(|node| {
-        cpp_parser::CppDeclaration::can_cast(node.kind().into())
-    })?;
+    let declaration = declarator
+        .ancestors()
+        .find(|node| cpp_parser::CppDeclaration::can_cast(node.kind().into()))?;
     let mut words: Vec<String> = Vec::new();
     for element in declaration.descendants_with_tokens() {
         let Some(token) = element.as_token() else {

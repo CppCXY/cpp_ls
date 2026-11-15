@@ -5564,19 +5564,22 @@ impl DeclKind {
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
 
-
 #[cfg(test)]
 mod tests {
-
-
 
     /// **A destructor is recognised by the tilde**, which is the only spelling it has.
     #[test]
     fn a_destructor_is_a_name_that_starts_with_a_tilde() {
         assert!(super::is_a_destructor_name("~Widget"));
-        assert!(super::is_a_destructor_name("~"), "the spelling is the test, not the identifier");
+        assert!(
+            super::is_a_destructor_name("~"),
+            "the spelling is the test, not the identifier"
+        );
         assert!(!super::is_a_destructor_name("Widget"));
-        assert!(!super::is_a_destructor_name("operator~"), "a bitwise-not overload is not a destructor");
+        assert!(
+            !super::is_a_destructor_name("operator~"),
+            "a bitwise-not overload is not a destructor"
+        );
     }
 
     /// **An operator is `operator` followed by a symbol or a space**, not by another identifier character.
@@ -5592,7 +5595,10 @@ mod tests {
             "operator new",
             "operator Widget",
         ] {
-            assert!(super::is_an_operator_name(operator), "`{operator}` is an operator");
+            assert!(
+                super::is_an_operator_name(operator),
+                "`{operator}` is an operator"
+            );
         }
         for plain in ["grow", "operate", "operator_helper", "operators", "Widget"] {
             assert!(

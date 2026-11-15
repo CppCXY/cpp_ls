@@ -853,7 +853,9 @@ mod tests {
             .expect("the name is in the rendering");
         let fixes = fixes_of(&session, &view, reading);
         assert!(
-            !fixes.iter().any(|action| action.title.contains("Shape::area")),
+            !fixes
+                .iter()
+                .any(|action| action.title.contains("Shape::area")),
             "`area` is defined: {fixes:?}"
         );
     }
@@ -959,7 +961,9 @@ mod tests {
             .expect("the class name is in the rendering");
         let fixes = fixes_of(&session, &view, reading);
         assert!(
-            !fixes.iter().any(|action| action.title.contains("pure virtual")),
+            !fixes
+                .iter()
+                .any(|action| action.title.contains("pure virtual")),
             "`Circle` implements `draw`: {fixes:?}"
         );
     }
@@ -968,10 +972,8 @@ mod tests {
     /// does not hold is a file whose contents the client may not know.
     #[test]
     fn without_a_paired_file_the_definition_goes_to_this_file() {
-        let files = MemoryFiles::new().with_file(
-            "/p/shape.h",
-            "struct Shape {\n    double area();\n};\n",
-        );
+        let files =
+            MemoryFiles::new().with_file("/p/shape.h", "struct Shape {\n    double area();\n};\n");
         let session = a_session(files, ["/p/shape.h"]);
         let view = session.view("/p/shape.h").expect("the header is cooked");
         let at = view.written_text().unwrap().find("area").unwrap();

@@ -2718,34 +2718,36 @@ fn past_a_scope_operator(
     }
     offset
 }
-    /// **A cursor on `::` asks about the segment it introduces**, not about the expression around it.
-    #[test]
-    fn a_scope_operator_points_at_the_segment_it_introduces() {
-        let source = "void f() { std::meta::eval(); }\n";
-        let parsed = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-        assert_eq!(parsed.get_errors(), [], "the fixture parses");
-        let root = parsed.get_red_root();
-        let at = |needle: &str| cpp_code_analysis::file::coordinates::ReadingOffset::new(
+/// **A cursor on `::` asks about the segment it introduces**, not about the expression around it.
+#[test]
+fn a_scope_operator_points_at_the_segment_it_introduces() {
+    let source = "void f() { std::meta::eval(); }\n";
+    let parsed = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+    assert_eq!(parsed.get_errors(), [], "the fixture parses");
+    let root = parsed.get_red_root();
+    let at = |needle: &str| {
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(
             source.find(needle).expect("the fixture writes it"),
-        );
+        )
+    };
 
-        // The first `::` introduces `meta`, the second `eval`.
-        let meta = past_a_scope_operator(&root, at("::meta"));
-        assert_eq!(
-            &source[meta.get()..meta.get() + 4],
-            "meta",
-            "the operator before `meta` points at `meta`"
-        );
-        let eval = past_a_scope_operator(&root, at("::eval"));
-        assert_eq!(
-            &source[eval.get()..eval.get() + 4],
-            "eval",
-            "the operator before `eval` points at `eval`"
-        );
+    // The first `::` introduces `meta`, the second `eval`.
+    let meta = past_a_scope_operator(&root, at("::meta"));
+    assert_eq!(
+        &source[meta.get()..meta.get() + 4],
+        "meta",
+        "the operator before `meta` points at `meta`"
+    );
+    let eval = past_a_scope_operator(&root, at("::eval"));
+    assert_eq!(
+        &source[eval.get()..eval.get() + 4],
+        "eval",
+        "the operator before `eval` points at `eval`"
+    );
 
-        // Everything else is left where it was, including the name itself.
-        let name = at("std");
-        assert_eq!(past_a_scope_operator(&root, name).get(), name.get());
-        let inside = at("eval");
-        assert_eq!(past_a_scope_operator(&root, inside).get(), inside.get());
-    }
+    // Everything else is left where it was, including the name itself.
+    let name = at("std");
+    assert_eq!(past_a_scope_operator(&root, name).get(), name.get());
+    let inside = at("eval");
+    assert_eq!(past_a_scope_operator(&root, inside).get(), inside.get());
+}

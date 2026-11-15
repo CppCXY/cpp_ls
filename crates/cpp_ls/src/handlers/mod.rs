@@ -35,7 +35,6 @@ mod format;
 mod formatting;
 pub mod hover;
 pub mod implementation;
-pub mod type_hierarchy;
 mod initialized;
 mod inlay_hint;
 mod notification_handler;
@@ -49,6 +48,7 @@ mod signature_help;
 mod switch_source_header;
 mod text_document;
 mod type_definition;
+pub mod type_hierarchy;
 mod workspace_symbol;
 
 use crate::context::ServerContextSnapshot;

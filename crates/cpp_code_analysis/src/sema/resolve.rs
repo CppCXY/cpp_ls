@@ -913,9 +913,9 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
         .find_map(|element| element.as_node())
         .is_some_and(|node| {
             cpp_parser::CppSpliceExpr::can_cast(node.kind().into())
-                || node.descendants().any(|inside| {
-                    cpp_parser::CppSpliceExpr::can_cast(inside.kind().into())
-                })
+                || node
+                    .descendants()
+                    .any(|inside| cpp_parser::CppSpliceExpr::can_cast(inside.kind().into()))
         })
     {
         return Some(MemberAccess {

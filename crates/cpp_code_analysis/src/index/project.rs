@@ -5036,7 +5036,8 @@ fn type_of_expression_inner(
     //
     // The spelling is the standard's, and the header that declares it (`<meta>`) is not one this machine has: the
     // answer names the type rather than resolving it, exactly as it would for a type from a header nobody read.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ReflectExpr {
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ReflectExpr
+    {
         let info = crate::sema::types::parse_type_spelling("std::meta::info");
         return Known::Yes((info, path.to_path_buf()));
     }
@@ -5379,7 +5380,9 @@ fn type_of_expression_inner(
 
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
-        return type_of_a_call(memo, index, declaring, scopes, root, path, expression, depth);
+        return type_of_a_call(
+            memo, index, declaring, scopes, root, path, expression, depth,
+        );
     }
 
     // **A named cast has the type it names**, and that is C++'s own rule rather than an inference: `static_cast<T>`,
@@ -9206,7 +9209,6 @@ fn type_of_a_call(
     let written = call.text().to_string();
     let written = written.trim();
 
-
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
@@ -9380,17 +9382,10 @@ fn type_of_a_call(
     // only for *values*, and the argument here is a call (`std::meta::nonstatic_data_members_of(…)`), whose type the
     // ordinary expression typer does know. `vector<std::meta::info>` yields the element `std::meta::info`.
     if names_define_static_array(&callee)
-        && let Some(first) = crate::inlay::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
-        && let Known::Yes((argument, _)) = type_of_expression_memoed(
-            memo,
-            index,
-            declaring,
-            scopes,
-            root,
-            path,
-            &first,
-            0,
-        )
+        && let Some(first) =
+            crate::inlay::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
+        && let Known::Yes((argument, _)) =
+            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &first, 0)
         && let Some(element) = range_element_of(as_a_range(&argument))
     {
         let element = crate::sema::types::parse_type_spelling(&element);
@@ -10197,7 +10192,6 @@ pub(crate) fn callees_of_a_call(
     let written = call.text().to_string();
     let written = written.trim();
 
-
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
@@ -10631,7 +10625,6 @@ pub(crate) fn callee_of_a_call(
     let memo = TypeMemo::default();
     let written = call.text().to_string();
     let written = written.trim();
-
 
     let Some(callee) = call.children().next() else {
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
@@ -20177,7 +20170,8 @@ mod tests {
 
         // **And the refusals that remain are the honest ones**: a declaration with no body at all, where there is no
         // `return` expression to read anywhere.
-        let bodiless = "struct Widget {\n  int size;\n};\nauto make();\nvoid f() {\n  make().size = 1;\n}\n";
+        let bodiless =
+            "struct Widget {\n  int size;\n};\nauto make();\nvoid f() {\n  make().size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", bodiless, "size = 1;");
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),

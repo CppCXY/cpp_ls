@@ -51,9 +51,11 @@ impl Check for PureVirtualNotOverridden {
             let Some(class) = fact.scope.as_deref() else {
                 continue;
             };
-            let Some(class_fact) = context.summary.declarations.iter().find(|declared| {
-                declared.kind == crate::DeclKind::Type && declared.name == class
-            }) else {
+            let Some(class_fact) =
+                context.summary.declarations.iter().find(|declared| {
+                    declared.kind == crate::DeclKind::Type && declared.name == class
+                })
+            else {
                 continue;
             };
             if !tried.iter().any(|(name, _)| name == class) {
@@ -69,10 +71,7 @@ impl Check for PureVirtualNotOverridden {
             let mut missing: Vec<String> = Vec::new();
             for member in &list.members {
                 if member.fact.kind != crate::DeclKind::Function
-                    || !member
-                        .fact
-                        .modifiers
-                        .contains(crate::DeclModifiers::PURE)
+                    || !member.fact.modifiers.contains(crate::DeclModifiers::PURE)
                 {
                     continue;
                 }

@@ -1334,8 +1334,10 @@ fn parse_decl_specifier_seq_with(
         let a_known_type_ends_the_type = has_type_specifier
             && p.token_kind_at(p.current_token_index()) == CppTokenKind::Identifier
             && p.is_a_known_type_name(p.current_token_text())
-            && p.token_kind_at(super::decls::next_significant_index(p, p.current_token_index()))
-                == CppTokenKind::Identifier;
+            && p.token_kind_at(super::decls::next_significant_index(
+                p,
+                p.current_token_index(),
+            )) == CppTokenKind::Identifier;
 
         if let Err(err) = parse_one_decl_specifier(
             p,

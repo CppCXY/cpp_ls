@@ -9712,7 +9712,8 @@ impl<F: FileProvider + Clone> Session<F> {
                     let Some(body_range) = defined.body_range else {
                         continue;
                     };
-                    let Some(body) = written.get(body_range.start_offset..body_range.end_offset()) else {
+                    let Some(body) = written.get(body_range.start_offset..body_range.end_offset())
+                    else {
                         continue;
                     };
                     // The parameter list is the text between the name and the body — the one piece a macro fact does
@@ -9749,16 +9750,24 @@ impl<F: FileProvider + Clone> Session<F> {
                 .parsed_definitions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            crate::preprocess::cooked::configuration_from_environment_and(&environment, true, &mut parsed)
+            crate::preprocess::cooked::configuration_from_environment_and(
+                &environment,
+                true,
+                &mut parsed,
+            )
         };
         let start_state = crate::preprocess::cooked::Over::new(&configuration.table, &seed);
         let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
-        let rendered = crate::preprocess::cooked::cook_with(&source, &tokens, &start_state).render();
+        let rendered =
+            crate::preprocess::cooked::cook_with(&source, &tokens, &start_state).render();
         let text = rendered.text.trim().to_string();
         if text.is_empty() {
             return None;
         }
-        Some(cpp_formatter::reflow(&text, &cpp_formatter::Style::fallback_style()))
+        Some(cpp_formatter::reflow(
+            &text,
+            &cpp_formatter::Style::fallback_style(),
+        ))
     }
 
     /// The index of the `)` that closes the `(` at `open`, counting nesting and skipping literals.
@@ -9801,7 +9810,6 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         None
     }
-
 
     /// **Every `import m;` this file writes, with the file each one reaches** — the module's answer to what
     /// [`crate::IncludeFact`] is for `#include`.
@@ -11326,10 +11334,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .own()
             .filter(|member| {
                 member.fact.kind == crate::DeclKind::Variable
-                    && !member
-                        .fact
-                        .modifiers
-                        .contains(crate::DeclModifiers::STATIC)
+                    && !member.fact.modifiers.contains(crate::DeclModifiers::STATIC)
             })
             .count();
         if data_members > LAYOUT_MEMBER_BUDGET {
@@ -11352,18 +11357,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // different class. A member's own declaration offset is the only thing that says where it was written.
         let mut own: Vec<&crate::index::ProjectMember> = list.own().collect();
         own.sort_by(|left, right| {
-            left.file
-                .cmp(&right.file)
-                .then(left.fact.range.start_offset.cmp(&right.fact.range.start_offset))
+            left.file.cmp(&right.file).then(
+                left.fact
+                    .range
+                    .start_offset
+                    .cmp(&right.fact.range.start_offset),
+            )
         });
         for member in own {
             let fact = &member.fact;
             // **Data members only**: a member function, a nested type, a `static` — none of them take a byte in the
             // object, and `sizeof` does not count them.
             if fact.kind != crate::DeclKind::Variable
-                || fact
-                    .modifiers
-                    .contains(crate::DeclModifiers::STATIC)
+                || fact.modifiers.contains(crate::DeclModifiers::STATIC)
             {
                 continue;
             }
@@ -11402,7 +11408,11 @@ impl<F: FileProvider + Clone> Session<F> {
         written_type: &str,
         asked_from: &std::path::Path,
     ) -> Option<(String, usize, std::collections::HashMap<String, usize>)> {
-        let found = self.store.index().definition(written_type, asked_from).value()?;
+        let found = self
+            .store
+            .index()
+            .definition(written_type, asked_from)
+            .value()?;
         let text = self.view_of_the_file(&found.file)?.source;
         let summary = self.store.index().summary(&found.file)?;
         let simple = written_type.rsplit("::").next().unwrap_or(written_type);
@@ -11437,7 +11447,12 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// The size and alignment of a member's written type, following a class the index holds.
-    fn the_size_of_a_type(&self, view: &FileView, spelling: &str, depth: usize) -> Option<(usize, usize)> {
+    fn the_size_of_a_type(
+        &self,
+        view: &FileView,
+        spelling: &str,
+        depth: usize,
+    ) -> Option<(usize, usize)> {
         if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelling) {
             return Some(builtin);
         }

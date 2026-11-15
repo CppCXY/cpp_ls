@@ -1221,7 +1221,10 @@ pub fn predefined_macros_of(config: &CompilerConfig) -> Vec<CommandLineMacro> {
             // **`-freflection` decides one more macro**, and libstdc++`s `<meta>` is gated on it. GCC 16.2 defines
             // `__cpp_impl_reflection 202603L` with the flag and nothing without it — measured with `-dM -E`.
             if config.reflection {
-                macros.push(CommandLineMacro::with_value("__cpp_impl_reflection", "202603L"));
+                macros.push(CommandLineMacro::with_value(
+                    "__cpp_impl_reflection",
+                    "202603L",
+                ));
             }
 
             // MSVC's own headers ask `_MSVC_LANG` for the same number, and its value is the language version

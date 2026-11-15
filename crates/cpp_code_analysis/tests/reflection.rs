@@ -53,7 +53,11 @@ fn a_reflection_file_has_no_diagnostics() {
         .diagnostics("/p/a.cpp")
         .expect("the file has a reading");
     assert_eq!(found.errors.len(), 0, "{:?}", found.errors);
-    assert!(found.checks.is_empty(), "no check findings: {:?}", found.checks);
+    assert!(
+        found.checks.is_empty(),
+        "no check findings: {:?}",
+        found.checks
+    );
 }
 
 /// **`^^T` is a `std::meta::info`**, whatever it reflects — the one expression whose type does not depend on its

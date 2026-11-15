@@ -147,7 +147,14 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
         return Some((size.saturating_mul(count), alignment));
     }
     // A qualifier is not part of the type's size.
-    for qualifier in ["const", "volatile", "static", "extern", "mutable", "thread_local"] {
+    for qualifier in [
+        "const",
+        "volatile",
+        "static",
+        "extern",
+        "mutable",
+        "thread_local",
+    ] {
         if let Some(rest) = word.strip_prefix(qualifier)
             && rest.starts_with(char::is_whitespace)
         {

@@ -81,7 +81,8 @@ fn the_parameters_are_copied_as_written() {
 #[test]
 fn a_constructor_definition_has_no_return_type() {
     let session = session_of(&[("/p/shape.h", SHAPE)]);
-    let found = written(&session, "/p/shape.h", "Shape(int").expect("the constructor has no definition");
+    let found =
+        written(&session, "/p/shape.h", "Shape(int").expect("the constructor has no definition");
     assert_eq!(found.returns, None);
     assert_eq!(found.qualified_name, "Shape::Shape");
     assert_eq!(found.text(), "Shape::Shape(int x)\n{\n}");
@@ -146,7 +147,10 @@ fn a_template_class_is_marked_as_one() {
     assert!(found.is_a_template, "the class has a template parameter");
     assert_eq!(found.text(), "void Box::put(T value)\n{\n}");
 
-    let plain = session_of(&[("/p/plain.h", "struct Plain {\n    void put(int value);\n};\n")]);
+    let plain = session_of(&[(
+        "/p/plain.h",
+        "struct Plain {\n    void put(int value);\n};\n",
+    )]);
     let found = written(&plain, "/p/plain.h", "put").expect("`put` has no definition");
     assert!(!found.is_a_template);
 }

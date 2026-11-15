@@ -49,7 +49,11 @@ fn a_file_with_contracts_has_no_diagnostics() {
         .diagnostics("/p/a.cpp")
         .expect("the file has a reading");
     assert_eq!(found.errors.len(), 0, "{:?}", found.errors);
-    assert!(found.checks.is_empty(), "no check findings: {:?}", found.checks);
+    assert!(
+        found.checks.is_empty(),
+        "no check findings: {:?}",
+        found.checks
+    );
 }
 
 /// **The contracted function keeps its name and its type**, which is what a contract must not cost: the declarator

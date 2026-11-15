@@ -50,23 +50,22 @@ impl Check for FinalHierarchy {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type)
-            .map(|fact| {
-                (
-                    fact.name.clone(),
-                    fact.bases.clone(),
-                    fact.name_range,
-                )
-            })
+            .map(|fact| (fact.name.clone(), fact.bases.clone(), fact.name_range))
             .collect();
 
         for (class, bases, name_range) in &classes {
             for base in bases {
                 // **The base's own fact**, through the index: the class may be declared in a header this file
                 // includes. A base nobody read is silence — "not read" is not "not final".
-                let crate::Known::Yes(declared) = context.index().definition(base, context.path) else {
+                let crate::Known::Yes(declared) = context.index().definition(base, context.path)
+                else {
                     continue;
                 };
-                if !declared.fact.modifiers.contains(crate::DeclModifiers::FINAL) {
+                if !declared
+                    .fact
+                    .modifiers
+                    .contains(crate::DeclModifiers::FINAL)
+                {
                     continue;
                 }
                 context.add_in_the_file(
@@ -92,17 +91,12 @@ impl Check for FinalHierarchy {
                     && fact.modifiers.contains(crate::DeclModifiers::OVERRIDE)
                     && !fact.is_a_destructor()
             })
-            .filter_map(|fact| {
-                Some((
-                    fact.scope.clone()?,
-                    fact.name.clone(),
-                    fact.name_range,
-                ))
-            })
+            .filter_map(|fact| Some((fact.scope.clone()?, fact.name.clone(), fact.name_range)))
             .collect();
 
         for (class, name, name_range) in &overriders {
-            let Some((_, bases, _)) = classes.iter().find(|(declared, _, _)| declared == class) else {
+            let Some((_, bases, _)) = classes.iter().find(|(declared, _, _)| declared == class)
+            else {
                 continue;
             };
             let mut any_overridable = false;

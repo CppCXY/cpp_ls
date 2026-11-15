@@ -11,9 +11,8 @@ use crate::DiagnosticCode;
 /// **A local of an abstract class** is the plain case.
 #[test]
 fn a_local_of_an_abstract_class_is_reported() {
-    let codes = codes_of(
-        "struct Shape {\n    virtual void draw() = 0;\n};\nvoid f() {\n    Shape s;\n}\n",
-    );
+    let codes =
+        codes_of("struct Shape {\n    virtual void draw() = 0;\n};\nvoid f() {\n    Shape s;\n}\n");
     assert_reported(
         &codes,
         DiagnosticCode::AbstractClassInstantiated,

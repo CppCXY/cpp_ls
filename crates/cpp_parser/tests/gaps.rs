@@ -7736,7 +7736,11 @@ EXTERN int Rows INIT( = 24);
 int after_this;
 ";
     let parsed = CppParser::parse(source, ParserConfig::default());
-    assert_eq!(parsed.get_errors(), [], "the fixture parses without a recovery");
+    assert_eq!(
+        parsed.get_errors(),
+        [],
+        "the fixture parses without a recovery"
+    );
     let root = parsed.get_red_root();
     let declared = |name: &str| {
         root.descendants().any(|node| {

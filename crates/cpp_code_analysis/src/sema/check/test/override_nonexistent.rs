@@ -94,9 +94,7 @@ fn a_member_defined_in_a_cpp_is_not_judged_by_the_cpp() {
 /// match — a name comparison would report every such destructor in a class with a base.
 #[test]
 fn an_overriding_destructor_is_silent() {
-    let codes = codes_of(
-        "struct A { virtual ~A(); };\nstruct B : A { ~B() override; };\n",
-    );
+    let codes = codes_of("struct A { virtual ~A(); };\nstruct B : A { ~B() override; };\n");
     assert_silent_about(
         &codes,
         DiagnosticCode::OverrideNonexistent,

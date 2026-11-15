@@ -7054,27 +7054,21 @@ fn a_client_can_walk_the_class_hierarchy() {
         "the item remembers where its class is: {prepared}"
     );
 
-    let supertypes = server.request(
-        200,
-        "typeHierarchy/supertypes",
-        json!({ "item": item }),
-    );
+    let supertypes = server.request(200, "typeHierarchy/supertypes", json!({ "item": item }));
     let bases = supertypes["result"]
         .as_array()
         .unwrap_or_else(|| panic!("supertypes answers an array: {supertypes}"));
     assert_eq!(bases.len(), 1, "{supertypes}");
     assert_eq!(bases[0]["name"], json!("Base"));
 
-    let subtypes = server.request(
-        300,
-        "typeHierarchy/subtypes",
-        json!({ "item": bases[0] }),
-    );
+    let subtypes = server.request(300, "typeHierarchy/subtypes", json!({ "item": bases[0] }));
     let classes = subtypes["result"]
         .as_array()
         .unwrap_or_else(|| panic!("subtypes answers an array: {subtypes}"));
     assert!(
-        classes.iter().any(|class| class["name"] == json!("Derived")),
+        classes
+            .iter()
+            .any(|class| class["name"] == json!("Derived")),
         "`Base`'s subtypes name the class that derives from it: {subtypes}"
     );
 }

@@ -10,10 +10,8 @@ use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFi
 
 /// The card for the declaration `needle` names, from a one-file project.
 fn the_card(source: &str, needle: &str) -> String {
-    let root: PathBuf = std::env::temp_dir().join(format!(
-        "cppls-hover-layout-{}",
-        std::process::id()
-    ));
+    let root: PathBuf =
+        std::env::temp_dir().join(format!("cppls-hover-layout-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a project directory");
     let file = root.join("a.cpp");
@@ -57,7 +55,10 @@ fn a_structs_card_has_its_size_alignment_and_offsets() {
         "struct Widget {\n    int x;\n    double y;\n};\n",
         "struct Widget",
     );
-    assert!(card.contains("**Layout**"), "the block is on the card: {card}");
+    assert!(
+        card.contains("**Layout**"),
+        "the block is on the card: {card}"
+    );
     assert!(
         card.contains("size 16 byte(s), alignment 8"),
         "the two numbers `sizeof` and `alignof` give: {card}"
@@ -79,7 +80,10 @@ fn a_unions_card_says_so_and_puts_every_member_at_zero() {
         "union Value {\n    int i;\n    double d;\n};\n",
         "union Value",
     );
-    assert!(card.contains("size 8 byte(s), alignment 8, a union"), "{card}");
+    assert!(
+        card.contains("size 8 byte(s), alignment 8, a union"),
+        "{card}"
+    );
     assert!(
         card.contains("offset   0, 4 byte(s)") && card.contains("offset   0, 8 byte(s)"),
         "both members start at the object's first byte: {card}"

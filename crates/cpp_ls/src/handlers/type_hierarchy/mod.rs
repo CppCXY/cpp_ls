@@ -226,7 +226,9 @@ impl RegisterCapabilities for TypeHierarchyCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use cpp_code_analysis::{CompilerConfig, MemoryFiles, OpenDocuments, SessionFiles, WatchFilter};
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, SessionFiles, WatchFilter,
+    };
 
     use super::*;
 
@@ -302,14 +304,11 @@ mod tests {
     #[test]
     fn supertypes_are_the_bases_the_class_names() {
         let session = family();
-        let bases: Vec<String> = supertypes_of(
-            &session,
-            std::path::Path::new("/p/derived.h"),
-            "Derived",
-        )
-        .into_iter()
-        .map(|item| item.name)
-        .collect();
+        let bases: Vec<String> =
+            supertypes_of(&session, std::path::Path::new("/p/derived.h"), "Derived")
+                .into_iter()
+                .map(|item| item.name)
+                .collect();
         assert_eq!(bases, ["Base"]);
 
         assert!(
@@ -350,16 +349,16 @@ mod tests {
     fn a_qualified_base_resolves_to_the_class_it_names() {
         let session = session_of(&[
             ("/p/base.h", "namespace ns {\nstruct Base {};\n}\n"),
-            ("/p/derived.h", "#include \"base.h\"\nstruct Derived : ns::Base {};\n"),
+            (
+                "/p/derived.h",
+                "#include \"base.h\"\nstruct Derived : ns::Base {};\n",
+            ),
         ]);
-        let bases: Vec<String> = supertypes_of(
-            &session,
-            std::path::Path::new("/p/derived.h"),
-            "Derived",
-        )
-        .into_iter()
-        .map(|item| item.name)
-        .collect();
+        let bases: Vec<String> =
+            supertypes_of(&session, std::path::Path::new("/p/derived.h"), "Derived")
+                .into_iter()
+                .map(|item| item.name)
+                .collect();
         assert_eq!(bases, ["Base"], "`ns::Base` resolves to the class `Base`");
     }
 }

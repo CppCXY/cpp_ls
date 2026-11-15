@@ -108,27 +108,27 @@ fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
     session
 }
 
-mod access_invisible;
 mod abstract_class_instantiated;
-mod pure_virtual_not_overridden;
+mod access_invisible;
 mod argument_count;
 mod assignment_in_condition;
 mod braces_around_statements;
 mod concept_not_satisfied;
 mod contract_placement;
-mod final_hierarchy;
-mod final_misplaced;
-mod override_nonexistent;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;
 mod else_after_return;
+mod final_hierarchy;
+mod final_misplaced;
 mod implicit_bool_conversion;
 mod include_not_found;
 mod macro_parentheses;
 mod macro_redefined;
 mod missing_include;
 mod missing_return;
+mod override_nonexistent;
+mod pure_virtual_not_overridden;
 mod redefinition;
 mod return_type_mismatch;
 mod simplify_boolean_expr;

@@ -47,4 +47,3 @@ pub fn bytes() -> usize {
 pub fn counting() -> bool {
     COUNTING.load(Ordering::Relaxed)
 }
-

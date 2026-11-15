@@ -52,7 +52,11 @@ impl Check for ContractPlacement {
     ];
 
     fn check(context: &mut CheckContext<'_>) {
-        std::fs::write("E:/cpp_ls/target/check-ran.txt", format!("ran with c={}", context.is_c())).ok();
+        std::fs::write(
+            "E:/cpp_ls/target/check-ran.txt",
+            format!("ran with c={}", context.is_c()),
+        )
+        .ok();
         // **The declarations that carry a contract**, by the name they declare and where that name is written in the
         // *file* — the same coordinates `DeclFact::name_range` uses.
         let mut contracted: Vec<(String, cpp_parser::SourceRange)> = Vec::new();
@@ -80,37 +84,40 @@ impl Check for ContractPlacement {
             else {
                 continue;
             };
-            let Some(in_the_file) =
-                context.view.file_range_of(cpp_parser::source_range(name.text_range()))
+            let Some(in_the_file) = context
+                .view
+                .file_range_of(cpp_parser::source_range(name.text_range()))
             else {
                 continue;
             };
             contracted.push((name.text().to_string(), in_the_file));
         }
 
-
         // **What the summary says about those declarations.** A fact is matched by its name range, which is the
         // identifier the tree just gave us.
-        let declarations: Vec<(String, crate::DeclModifiers, cpp_parser::SourceRange, Option<String>)> =
-            context
-                .summary
-                .declarations
-                .iter()
-                .filter(|fact| fact.kind == crate::DeclKind::Function)
-                .map(|fact| {
-                    (
-                        fact.name.clone(),
-                        fact.modifiers,
-                        fact.name_range,
-                        fact.scope.clone(),
-                    )
-                })
-                .collect();
+        let declarations: Vec<(
+            String,
+            crate::DeclModifiers,
+            cpp_parser::SourceRange,
+            Option<String>,
+        )> = context
+            .summary
+            .declarations
+            .iter()
+            .filter(|fact| fact.kind == crate::DeclKind::Function)
+            .map(|fact| {
+                (
+                    fact.name.clone(),
+                    fact.modifiers,
+                    fact.name_range,
+                    fact.scope.clone(),
+                )
+            })
+            .collect();
 
         for (name, name_range) in &contracted {
-            let Some((_, modifiers, _, scope)) = declarations
-                .iter()
-                .find(|(declared, _, range, _)| {
+            let Some((_, modifiers, _, scope)) =
+                declarations.iter().find(|(declared, _, range, _)| {
                     declared == name && range.start_offset == name_range.start_offset
                 })
             else {
@@ -139,9 +146,8 @@ impl Check for ContractPlacement {
                     declared == name && declared_scope == scope
                 })
                 .min_by_key(|(_, _, range, _)| range.start_offset);
-            let is_first = first.is_some_and(|(_, _, range, _)| {
-                range.start_offset == name_range.start_offset
-            });
+            let is_first =
+                first.is_some_and(|(_, _, range, _)| range.start_offset == name_range.start_offset);
             if is_first {
                 context.add(
                     DiagnosticCode::ContractOnDefaultedFunction,

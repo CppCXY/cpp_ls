@@ -68,9 +68,7 @@ use super::{
     signature_help::on_signature_help,
     switch_source_header::{SwitchSourceHeader, on_switch_source_header},
     type_definition::on_goto_type_definition,
-    type_hierarchy::{
-        on_prepare_type_hierarchy, on_subtypes, on_supertypes,
-    },
+    type_hierarchy::{on_prepare_type_hierarchy, on_subtypes, on_supertypes},
     workspace_symbol::on_workspace_symbol,
 };
 

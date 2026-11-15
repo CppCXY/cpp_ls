@@ -58,7 +58,10 @@ fn session_of(files: &[(&str, &str)], args: &[&str]) -> Session<MemoryFiles> {
 fn a_declaration_a_macro_unlocks_in_a_header_is_visible_from_the_unit_that_included_it() {
     let session = session_of(
         &[
-            ("/p/include/macros.h", "#define EXTERN extern\n#define INIT(...)\n"),
+            (
+                "/p/include/macros.h",
+                "#define EXTERN extern\n#define INIT(...)\n",
+            ),
             (
                 "/p/include/globals.h",
                 "#include \"include/macros.h\"\n\
@@ -74,7 +77,9 @@ fn a_declaration_a_macro_unlocks_in_a_header_is_visible_from_the_unit_that_inclu
         &["-I/p"],
     );
 
-    let found = session.index().definition("dollar_vcol", std::path::Path::new("/p/a.c"));
+    let found = session
+        .index()
+        .definition("dollar_vcol", std::path::Path::new("/p/a.c"));
     let Known::Yes(found) = &found else {
         panic!("`dollar_vcol` is declared in `globals.h`: {found:?}");
     };
@@ -92,7 +97,10 @@ fn a_declaration_a_macro_unlocks_in_a_header_is_visible_from_the_unit_that_inclu
 fn the_unlocked_declaration_is_not_visible_from_a_file_that_does_not_include_the_header() {
     let session = session_of(
         &[
-            ("/p/include/macros.h", "#define EXTERN extern\n#define INIT(...)\n"),
+            (
+                "/p/include/macros.h",
+                "#define EXTERN extern\n#define INIT(...)\n",
+            ),
             (
                 "/p/include/globals.h",
                 "#include \"include/macros.h\"\n\
@@ -109,7 +117,9 @@ fn the_unlocked_declaration_is_not_visible_from_a_file_that_does_not_include_the
         &["-I/p"],
     );
 
-    let found = session.index().definition("dollar_vcol", std::path::Path::new("/p/b.c"));
+    let found = session
+        .index()
+        .definition("dollar_vcol", std::path::Path::new("/p/b.c"));
     assert!(
         !matches!(found, Known::Yes(_)),
         "`b.c` neither includes the header nor shares a program with the file that does: {found:?}"

@@ -17,8 +17,7 @@ fn a_one_line_function_is_laid_out_as_a_block() {
     let source = "void f() { if (x) { g(1); } }";
     let laid_out = reflow(source, &style());
     assert_eq!(
-        laid_out,
-        "void f() {\n    if (x) {\n        g(1);\n    }\n}",
+        laid_out, "void f() {\n    if (x) {\n        g(1);\n    }\n}",
         "each logical line starts at its own indent: {laid_out:?}"
     );
 }
@@ -28,7 +27,11 @@ fn a_one_line_function_is_laid_out_as_a_block() {
 #[test]
 fn a_second_statement_is_moved_to_its_own_line() {
     let source = "int a = 1; int b = 2;";
-    assert_eq!(format(source, &style()).trim(), source, "`format` keeps the line");
+    assert_eq!(
+        format(source, &style()).trim(),
+        source,
+        "`format` keeps the line"
+    );
     assert_eq!(
         reflow(source, &style()),
         "int a = 1;\nint b = 2;",
@@ -47,7 +50,10 @@ fn a_long_statement_is_broken_at_a_comma() {
             "no line runs past the column limit: {line:?} in\n{laid_out}"
         );
     }
-    assert!(laid_out.lines().count() > 3, "the call is broken: {laid_out}");
+    assert!(
+        laid_out.lines().count() > 3,
+        "the call is broken: {laid_out}"
+    );
 }
 
 /// **A directive is never broken**: a newline inside a `#define` body would end the macro, and the continuation lines
@@ -71,7 +77,8 @@ fn a_directive_keeps_its_lines() {
 /// apply to a card that is rebuilt on every hover.
 #[test]
 fn the_layout_is_idempotent() {
-    let source = "struct Widget { int x; double y; }; void f() { for (int i = 0; i < 10; i++) { g(i); } }";
+    let source =
+        "struct Widget { int x; double y; }; void f() { for (int i = 0; i < 10; i++) { g(i); } }";
     let once = reflow(source, &style());
     let twice = reflow(&once, &style());
     assert_eq!(once, twice, "the second pass is a no-op");

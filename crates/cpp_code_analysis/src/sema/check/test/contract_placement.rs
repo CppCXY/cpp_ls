@@ -10,9 +10,7 @@ use crate::DiagnosticCode;
 /// **A virtual function that writes a contract** is reported — P2900 says it shall not.
 #[test]
 fn a_contract_on_a_virtual_function_is_reported() {
-    let codes = codes_of(
-        "struct Base {\n    virtual int compute(int x) pre(x > 0);\n};\n",
-    );
+    let codes = codes_of("struct Base {\n    virtual int compute(int x) pre(x > 0);\n};\n");
     assert_reported(
         &codes,
         DiagnosticCode::ContractOnVirtualFunction,
@@ -23,9 +21,7 @@ fn a_contract_on_a_virtual_function_is_reported() {
 /// **A pure virtual function writing one** is the same rule — the `= 0` does not make it a different placement.
 #[test]
 fn a_contract_on_a_pure_virtual_function_is_reported() {
-    let codes = codes_of(
-        "struct Base {\n    virtual int compute(int x) pre(x > 0) = 0;\n};\n",
-    );
+    let codes = codes_of("struct Base {\n    virtual int compute(int x) pre(x > 0) = 0;\n};\n");
     assert_reported(
         &codes,
         DiagnosticCode::ContractOnVirtualFunction,
@@ -88,9 +84,8 @@ fn a_defaulted_function_without_a_contract_is_silent() {
 /// rule that reported it would underline correct code.
 #[test]
 fn a_contract_on_a_later_defaulted_declaration_is_silent() {
-    let codes = codes_of(
-        "struct Widget {\n    Widget();\n};\nWidget::Widget() pre(true) = default;\n",
-    );
+    let codes =
+        codes_of("struct Widget {\n    Widget();\n};\nWidget::Widget() pre(true) = default;\n");
     assert_silent_about(
         &codes,
         DiagnosticCode::ContractOnDefaultedFunction,

@@ -71,10 +71,7 @@ impl Check for AbstractClassInstantiated {
                 let mut every_pure_is_overridden = true;
                 for member in list.members.iter().filter(|member| {
                     member.fact.kind == crate::DeclKind::Function
-                        && member
-                            .fact
-                            .modifiers
-                            .contains(crate::DeclModifiers::PURE)
+                        && member.fact.modifiers.contains(crate::DeclModifiers::PURE)
                 }) {
                     let overridden = list.members.iter().any(|other| {
                         other.fact.kind == crate::DeclKind::Function
@@ -88,7 +85,8 @@ impl Check for AbstractClassInstantiated {
                     }
                 }
                 Some(!every_pure_is_overridden)
-            });            if is_abstract == Some(true) {
+            });
+            if is_abstract == Some(true) {
                 context.add_in_the_file(
                     DiagnosticCode::AbstractClassInstantiated,
                     name_range,
@@ -110,13 +108,13 @@ impl Check for AbstractClassInstantiated {
 /// each is either legal for an abstract class (a pointer, a reference) or not a class this rule can be sure of.
 fn a_class_name(spelling: &str) -> Option<String> {
     let spelling = spelling.trim();
-    if spelling.is_empty()
-        || spelling.contains(['*', '&', '[', '(', ')', '<', '>', ',', '.'])
-    {
+    if spelling.is_empty() || spelling.contains(['*', '&', '[', '(', ')', '<', '>', ',', '.']) {
         return None;
     }
     let name = spelling.rsplit("::").next()?.trim();
-    if name.is_empty() || !name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_') {
+    if name.is_empty()
+        || !name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+    {
         return None;
     }
     (!spelling.contains(' ')).then(|| name.to_string())

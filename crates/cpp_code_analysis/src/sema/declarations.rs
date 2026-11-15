@@ -443,29 +443,29 @@ pub(crate) fn declared_modifiers_with(
     {
         use cpp_parser::CppAstNode;
         if let Some(declarator) = declarator.as_ref() {
-        if found.contains(crate::DeclModifiers::DEFAULTED)
-            || found.contains(crate::DeclModifiers::DELETED)
-            || declarator
-                .parent()
-                .and_then(|init| init.parent())
-                .is_some_and(|declaration| {
-                    declaration.children().any(|child| {
-                        cpp_parser::CppCompoundStat::can_cast(child.kind().into())
+            if found.contains(crate::DeclModifiers::DEFAULTED)
+                || found.contains(crate::DeclModifiers::DELETED)
+                || declarator
+                    .parent()
+                    .and_then(|init| init.parent())
+                    .is_some_and(|declaration| {
+                        declaration
+                            .children()
+                            .any(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
                     })
-                })
-        {
-            found = found.union(crate::DeclModifiers::DEFINED);
-        }
-        // **`= 0` is the initializer of a pure virtual, and only of a function**: `int x = 0;` is an ordinary variable,
-        // so the parameter list is what says the `0` is a pure specifier rather than a value.
-        if is_a_function_declarator(declarator)
-            && declarator
-                .parent()
-                .and_then(|init| init.children().find_map(cpp_parser::CppInitializer::cast))
-                .is_some_and(is_zero)
-        {
-            found = found.union(crate::DeclModifiers::PURE);
-        }
+            {
+                found = found.union(crate::DeclModifiers::DEFINED);
+            }
+            // **`= 0` is the initializer of a pure virtual, and only of a function**: `int x = 0;` is an ordinary variable,
+            // so the parameter list is what says the `0` is a pure specifier rather than a value.
+            if is_a_function_declarator(declarator)
+                && declarator
+                    .parent()
+                    .and_then(|init| init.children().find_map(cpp_parser::CppInitializer::cast))
+                    .is_some_and(is_zero)
+            {
+                found = found.union(crate::DeclModifiers::PURE);
+            }
         }
     }
 

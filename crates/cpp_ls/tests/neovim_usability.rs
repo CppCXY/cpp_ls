@@ -53,7 +53,11 @@ fn sources_under(root: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if name.starts_with('.') || name == "build" || name == "test" {
                 continue;
             }
@@ -75,14 +79,22 @@ fn sources_under(root: &Path) -> Vec<PathBuf> {
 }
 
 fn uri_of(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+    let text = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
     format!("file:///{}", text.trim_start_matches('/'))
 }
 
 fn position_of(source: &str, offset: usize) -> (u32, u32) {
     let before = &source[..offset];
     let line = before.matches('\n').count();
-    let character = before.rsplit('\n').next().unwrap_or_default().chars().count();
+    let character = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count();
     (line as u32, character as u32)
 }
 
@@ -266,7 +278,10 @@ fn questions_in(source: &str, per_file: usize) -> Vec<Question> {
             continue;
         };
         // **Not a number**: `1.5` reads as a `.` before `5`, and a float is not a member.
-        if source[start..end].chars().all(|character| character.is_ascii_digit()) {
+        if source[start..end]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        {
             continue;
         }
         // A keyword is not a name: `return (`, `sizeof (`.
@@ -309,7 +324,11 @@ fn questions_in(source: &str, per_file: usize) -> Vec<Question> {
         return found;
     }
     let step = found.len() / per_file;
-    found.into_iter().step_by(step.max(1)).take(per_file).collect()
+    found
+        .into_iter()
+        .step_by(step.max(1))
+        .take(per_file)
+        .collect()
 }
 
 /// Clicks a reader makes on a receiver and the list that follows — `ptr->` and `object.` are the two places a
@@ -375,7 +394,8 @@ fn main_report(hover: &mut Tally, definition: &mut Tally) {
             percent(*answered, *asked)
         );
     }
-    let (definition_p50, definition_p95) = (definition.percentile(0.5), definition.percentile(0.95));
+    let (definition_p50, definition_p95) =
+        (definition.percentile(0.5), definition.percentile(0.95));
     println!(
         "definition: {}/{} answered ({:.0} %), p50 {} ms, p95 {} ms",
         definition.answered,
@@ -433,7 +453,12 @@ fn the_server_on_neovim() {
         .unwrap_or(12);
 
     let all = sources_under(&root.join("src"));
-    let files: Vec<PathBuf> = all.iter().step_by(every.max(1)).take(files_wanted).cloned().collect();
+    let files: Vec<PathBuf> = all
+        .iter()
+        .step_by(every.max(1))
+        .take(files_wanted)
+        .cloned()
+        .collect();
     println!(
         "[usability] {} of {} source file(s), up to {per_file} position(s) each",
         files.len(),
@@ -517,9 +542,11 @@ fn the_server_on_neovim() {
                 json!({ "textDocument": { "uri": uri }, "position": position }),
             );
             let answered = !answer["result"].is_null()
-                && answer["result"]["contents"].as_object().is_some_and(|contents| {
-                    contents.get("value").is_some_and(|value| !value.is_null())
-                });
+                && answer["result"]["contents"]
+                    .as_object()
+                    .is_some_and(|contents| {
+                        contents.get("value").is_some_and(|value| !value.is_null())
+                    });
             hover.record(&question, answered, began.elapsed().as_micros(), &where_at);
 
             let began = Instant::now();
@@ -559,7 +586,9 @@ fn the_server_on_neovim() {
                 if count > 0 {
                     completion.answered += 1;
                 } else if completion.misses.len() < 12 {
-                    completion.misses.push(format!("{where_at}  {}", question.spelling));
+                    completion
+                        .misses
+                        .push(format!("{where_at}  {}", question.spelling));
                 }
                 let _ = began;
             }

@@ -42,11 +42,7 @@ fn parses(source: &str) {
         "{source:?} must parse cleanly, got {:?}",
         parsed.get_errors()
     );
-    assert_eq!(
-        parsed.to_source_text(),
-        source,
-        "{source:?} stays lossless"
-    );
+    assert_eq!(parsed.to_source_text(), source, "{source:?} stays lossless");
 }
 
 /// **`^^` is the reflection operator and a node of its own**, over a type, a qualified member, and a template name.
@@ -178,7 +174,11 @@ void f() {
 }
 ";
     let tree = CppParser::parse(source, ParserConfig::default());
-    assert_eq!(tree.get_errors(), [], "the expansion statement parses cleanly");
+    assert_eq!(
+        tree.get_errors(),
+        [],
+        "the expansion statement parses cleanly"
+    );
     let expansion = tree
         .get_red_root()
         .descendants()

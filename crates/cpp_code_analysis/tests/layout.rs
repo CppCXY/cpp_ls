@@ -2,7 +2,7 @@
 //! member — the question rust-analyzer answers on a struct and C++ readers ask constantly.
 
 use cpp_code_analysis::{
-    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter, Known,
+    CompilerConfig, Known, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
 
 /// The layout of `name` in a one-file fixture.

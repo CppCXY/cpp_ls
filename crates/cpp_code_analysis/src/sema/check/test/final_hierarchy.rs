@@ -4,7 +4,7 @@
 //! declares `final`. The silences are the interesting half: a base nobody read, an override of a name the base does not
 //! declare `final`, and the overload case — `f(int) final` beside `f(double)` leaves `f(double) override` legal.
 
-use super::{assert_reported, assert_silent_about, codes_of, codes_in};
+use super::{assert_reported, assert_silent_about, codes_in, codes_of};
 use crate::DiagnosticCode;
 
 /// **Deriving from a `final` class** is reported at the deriving class.
@@ -26,7 +26,10 @@ fn a_final_base_from_another_file_is_reported() {
     let codes = codes_in(
         &[
             ("/p/widget.h", "struct Widget final {};\n"),
-            ("/p/gadget.cpp", "#include \"widget.h\"\nstruct Gadget : Widget {};\n"),
+            (
+                "/p/gadget.cpp",
+                "#include \"widget.h\"\nstruct Gadget : Widget {};\n",
+            ),
         ],
         "/p/gadget.cpp",
     );
@@ -40,7 +43,8 @@ fn a_final_base_from_another_file_is_reported() {
 /// **A base that is not final** is silence — the negative that keeps the rule from firing on every derivation.
 #[test]
 fn a_class_deriving_from_a_plain_class_is_silent() {
-    let codes = codes_of("struct Widget {\n    virtual void draw();\n};\nstruct Gadget : Widget {};\n");
+    let codes =
+        codes_of("struct Widget {\n    virtual void draw();\n};\nstruct Gadget : Widget {};\n");
     assert_silent_about(
         &codes,
         DiagnosticCode::FinalClassDerived,
@@ -84,5 +88,3 @@ fn an_override_beside_a_final_overload_is_silent() {
         "`draw(double)` is not the final overload",
     );
 }
-
-
