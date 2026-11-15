@@ -948,3 +948,39 @@ pub(crate) fn a_member_through_an_operator_arrow_is_the_pointees() {
         .collect();
     assert_eq!(names, ["Generate"], "and not the handle's own list");
 }
+
+/// **A call of an object whose `operator()` returns `auto`** — the shape every range adaptor is written in.
+///
+/// MSVC and libc++ spell a niebloid as a struct whose `operator()` is `constexpr auto operator()(…)` with the
+/// answer in the body, and that keyword is what a fact records. `std::views::filter(pred)` therefore had no type at
+/// all, and with it no range pipeline: `items | std::views::filter(…)` could not be typed and the inlay hint was
+/// silent. The return has to be *deduced* from the operator's body, the way a function whose fact carries no usable
+/// return type already is (see `deduced_returns_of_substituted`).
+#[test]
+pub(crate) fn a_call_of_an_object_deduces_an_auto_returning_operator() {
+    let text = "struct closure { int value; };\n\
+                struct functor {\n\
+                \x20   auto operator()(int x) const { return closure{x}; }\n\
+                };\n\
+                functor make_one;\n\
+                void use() {\n\
+                \x20   auto c = make_one(1);\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-auto-returning-operator", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("make_one(1)").expect("the fixture") + "make_one".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`make_one(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "closure",
+        "the operator's body returns `closure`, and `auto` is not a type"
+    );
+}

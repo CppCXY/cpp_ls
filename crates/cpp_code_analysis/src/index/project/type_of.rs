@@ -1725,7 +1725,7 @@ pub(crate) fn operator_returns_of(
     // that `auto &` bound and both queries below were spelled with it.
     let class_spelling = the_class_spelling(class_type);
     for spelling in [wanted.as_str(), symbol] {
-        if let Known::Yes((fact, _)) = member_fact(
+        if let Known::Yes((fact, member_file)) = member_fact(
             &crate::sema::declarations::ShapeTable::new(),
             index,
             scopes,
@@ -1751,7 +1751,25 @@ pub(crate) fn operator_returns_of(
             // alias template's application). Measured on `EmmyLuaCodeStyle`'s `Mark.cpp`: `events[Pos]` answers
             // `_Tp_alloc_type&` — a spelling no reader can use — where `std::string`'s own `reference`, which is
             // written `_CharT&`, resolves to `char&` and works.
-            let returns = fact.returns.clone().or(fact.returns_in_the_class.clone())?;
+            // **A return type of `auto` is a body to read, not a spelling to substitute.** MSVC's and libc++'s range
+            // adaptors are structs whose `operator()` is written `constexpr auto operator()(…)` with the answer in
+            // the body — `return _Range_closure<_Filter_fn, decay_t<_Pr>>{…};` — so this arm used to answer the
+            // *keyword* (or nothing at all when the fact recorded no return type), and every call of a niebloid
+            // (`std::views::filter(pred)`, `transform(f)`) came back `UnknownType`. Measured on a fixture with the
+            // same shape: `auto c = make_one(1);` had no type. See [`deduced_returns_of_the_member`].
+            let returns = fact.returns.clone().or(fact.returns_in_the_class.clone());
+            if returns.as_deref().is_none_or(is_a_placeholder)
+                && let Some(deduced) = deduced_returns_of_the_member(
+                    declaring,
+                    &fact,
+                    member_file.as_path(),
+                    parameter_names,
+                    &written_arguments,
+                )
+            {
+                return Some(deduced);
+            }
+            let returns = returns?;
             return Some(crate::sema::types::substituted_spelling(
                 &returns,
                 parameter_names,
@@ -1818,6 +1836,102 @@ pub(crate) fn operator_returns_of(
         parameter_names,
         &written_arguments,
     ))
+}
+
+/// **What a member whose return type is `auto` returns**, read from its body.
+///
+/// MSVC's and libc++'s range adaptors are structs whose `operator()` is written `constexpr auto operator()(…)` with
+/// the answer in the body:
+///
+/// ```cpp
+/// template <class _Pr>
+/// constexpr auto operator()(_Pr&& _Pred) const noexcept(…)
+/// { return _Range_closure<_Filter_fn, decay_t<_Pr>>{::std::forward<_Pr>(_Pred)}; }
+/// ```
+///
+/// so a call of one has a type the declaration never spells. The fact answers the keyword `auto` — or, for a
+/// declaration whose reader could not spell it, nothing — and neither is a type. This is the same deduction a
+/// *function* whose fact carries no usable return type goes through
+/// ([`crate::sema::declarations::deduced_returns_of_substituted`], whose other caller is the `Indexed` arm of
+/// [`what_a_call_has_in`]), applied to a member found through [`member_fact`].
+///
+/// The class's own template parameters are substituted from the type the call was made on. The operator's own
+/// template parameters — `_Pr` above — are left as written: this layer has no call-site argument types at this
+/// point, and a spelling that names them is still a class a reader can hover, which is what the stages after this
+/// one build on.
+fn deduced_returns_of_the_member(
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    fact: &crate::DeclFact,
+    file: &Path,
+    parameter_names: &[String],
+    written_arguments: &[String],
+) -> Option<String> {
+    // **The fact's offset is a *file* offset; the tree speaks the *reading*.** The same translation the `Indexed`
+    // arm of `what_a_call_has_in` makes, for the same reason: `name_range` comes from the index and counts the
+    // file's own bytes, while `definition_at` walks a tree whose offsets count the rendered text (the file with its
+    // includes expanded). For a file with no include the two agree, which is why this looked right; through a header
+    // they do not. The reading offset is tried first and the raw one after it, because a region the rendering does
+    // not contain still has to be looked at the way it was written.
+    let declared_in = declaring(file)?;
+    let offset = fact.name_range.start_offset;
+    let found = [
+        declared_in.reading_offset_of(crate::file::coordinates::FileOffset::new(offset)),
+        Some(crate::file::coordinates::ReadingOffset::new(offset)),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|in_the_reading| {
+        match crate::sema::resolve::definition_at(
+            &declared_in.scopes,
+            &declared_in.root,
+            in_the_reading.get(),
+        ) {
+            // **The name has to be the one the fact named.** A matched offset in the wrong coordinates lands on a
+            // neighbouring declaration, and deducing *its* body would be a wrong answer that reads like a right one.
+            Known::Yes(found) if found.name.identifier_text() == Some(fact.name.as_str()) => {
+                Some(found)
+            }
+            _ => None,
+        }
+    });
+    // **An operator's binding is not where a name's is.** `definition_at` answers for a *name*, and `operator()` is
+    // a keyword and a pair of parentheses — the scope walker records the binding, but a probe on the keyword finds
+    // nothing (measured: no binding in the ten bytes of `operator()`). What the deduction needs from a binding is
+    // only the **name range it starts a search from** (`declaration_of` reads the token there and walks up to the
+    // declaration) and the kind, so the nearest bindings are asked for one and the answer is re-pointed at this
+    // declaration. The name is the fact's, which is the one thing that must not be guessed.
+    let binding = match found {
+        Some(binding) => binding,
+        None => {
+            let mut borrowed = None;
+            for probe in (offset.saturating_sub(96)..=(offset + 96)).rev() {
+                if let Known::Yes(found) = crate::sema::resolve::definition_at(
+                    &declared_in.scopes,
+                    &declared_in.root,
+                    probe,
+                ) {
+                    borrowed = Some(found);
+                }
+            }
+            let mut borrowed = borrowed?;
+            borrowed.name = crate::symbol::Name::identifier(&fact.name);
+            borrowed.kind = crate::BindingKind::Function;
+            borrowed.range = fact.range;
+            borrowed.name_range = fact.name_range;
+            borrowed
+        }
+    };
+    let arguments: Vec<crate::sema::types::Type> = written_arguments
+        .iter()
+        .map(|argument| crate::sema::types::parse_type_spelling(argument))
+        .collect();
+    let substitutions = crate::sema::types::TypeSubstitutions::new(parameter_names, &arguments);
+    crate::sema::declarations::deduced_returns_of_substituted(
+        &declared_in.root,
+        binding,
+        &substitutions,
+        &arguments,
+    )
 }
 
 /// **The operand of a `co_await`, when this node is one.**

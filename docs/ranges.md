@@ -244,10 +244,36 @@ So the next change has a fixed shape, and the machinery to copy is in the same f
 | the body's return with the call's arguments substituted | `deduced_returns_of_substituted` (`declarations.rs:1485`) |
 | a worked example of both, for a *function* callee | the `NamedDeclaration::Indexed` arm of `what_a_call_has_in` (`type_of.rs:2338`) |
 
-The work is to give `operator_returns_of` the call's argument types (it has three call sites) and, when the member's
-return is `auto`, read the class's file through the `declaring` closure it already receives, find the operator's
-declaration there, and deduce the body's return with the arguments substituted — exactly what the `Indexed` arm does
-for an ordinary function whose fact carries no usable return type.
+**Done, and pinned by a unit test that needs no header at all** —
+
+```cpp
+struct closure { int value; };
+struct functor { auto operator()(int x) const { return closure{x}; } };
+functor make_one;
+void use() { auto c = make_one(1); }        // `c` was Unknown, and is `closure` now
+```
+
+`operator_returns_of` (in `type_of.rs`) now treats a member whose recorded return is the placeholder `auto` — or no
+return at all — as a body to read: `deduced_returns_of_the_member` reads the declaring file through the `declaring`
+closure, finds the operator's declaration and calls `deduced_returns_of_substituted`. Two details cost the most:
+
+* **A fact's offset is a *file* offset and the tree speaks the *reading*.** The translation
+  (`reading_offset_of`) and the fallback to the raw offset are the ones the `Indexed` arm of `what_a_call_has_in`
+  already makes; `definition_at` at the un-translated offset finds nothing.
+* **An operator's binding is not where a name's is.** `definition_at` answers for a *name*, and `operator()` is a
+  keyword and a pair of parentheses, so a probe on its ten bytes finds no binding at all. What the deduction needs
+  from a binding is only the offset `declaration_of` starts its walk from and the kind, so the nearest binding is
+  borrowed and re-pointed at this declaration — with the fact's own name, which is the one thing that must not be
+  guessed.
+
+The test is `a_call_of_an_object_deduces_an_auto_returning_operator` in `session/tests/types.rs`; it failed with
+`Unknown(UnknownType("make_one(1)"))` before this change and asserts `closure` after it.
+
+**What is still open in this stage:** the `<ranges>` fixture itself. There the callee is `std::views::filter`, and
+whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
+live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
+disk was built by the previous parser. So the next measurement is the live server's own answer for
+`items | std::views::filter(…)` after a cache-clear, and after that `operator|`.
 
 ## What it answers today
 
