@@ -256,11 +256,20 @@ didChange itself — the cook of a translation unit that expands four standard h
 
 ### What is left, in order of expected gain
 
+**The profile after all of the above**, so the next person starts from the numbers rather than the
+story. On the 901-line file a pull is `prepare` 17 ms + checks ~95 ms; the checks' own table
+(`CPPLS_TRACE_DIAGNOSTICS=1`) is spread out: `return-type-mismatch` 43 ms, `access-invisible` 27 ms,
+`assign-type-check` 15 ms, `undefined-field` 11 ms, and the rest under 10 ms each. On the realistic TU
+the pull is 5–10 ms and the keystroke's remaining ~150 ms is the **`didChange`** — the cook of a
+translation unit that expands four standard headers, paid again on every edit.
+
 1. **Memoise type inference per view.** The inference engine now shares the table but still re-answers
    `type_of` for the same declarations across rules; the `TypeMemo` is the place, and it already exists.
-2. **Make `commit_a_cooked` proportional to what changed.** 279 ms for a 35-line file means the commit
-   is paying for the whole cooked rendering (the standard headers it expands), every keystroke — and
-   the log above still shows a `commit` of 1.09 s on the first pull after `didOpen`.
+   This is what the check table above is made of.
+2. **Make `commit_a_cooked` proportional to what changed, or cook incrementally.** 279 ms for a 35-line
+   file is the commit paying for the whole cooked rendering, every keystroke — and the log still shows
+   a `commit` of 1.09 s on the first pull after `didOpen` of the 901-line file. This is the largest
+   remaining item for real translation units, and the largest one to design.
 3. **Only then consider a pull-side debounce.** A 100 ms coalescing window on `textDocument/diagnostic`
    would cut the number of passes during fast typing, but it adds latency to every edit and hides the
    real cost rather than fixing it. The push path's 300 ms delay exists because push has no
