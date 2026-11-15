@@ -43,31 +43,11 @@ impl<F: FileProvider + Clone> Session<F> {
         if !access.member.is_empty() {
             return Vec::new();
         }
-        let object_at = usize::from(access.object.text_range().start());
-        let Known::Yes(binding) =
-            crate::sema::resolve::definition_at(&view.scopes, &view.root, object_at)
-        else {
-            return Vec::new();
-        };
         // **The object may be a call whose result a concept constrains** — `{ a.foo() } -> B` says the value `foo`
-        // returns satisfies `B`, so `a.foo().` has the members `B` requires. The requirement is matched by the
-        // **member name** (`foo`), not by the whole expression: the concept writes its own parameter's name
-        // (`{ t.foo() }`), and the reader's object is called whatever they called it.
-        let mut concepts: Vec<String> = Vec::new();
-        let mut of_the_result: Vec<String> = Vec::new();
-        if cpp_parser::CppSyntaxKind::from(access.object.kind())
-            == cpp_parser::CppSyntaxKind::CallExpr
-            && let Some(member) = the_member_a_call_names(&access.object)
-        {
-            for concept in the_concepts_constraining(&view.root, binding.name_range.start_offset) {
-                for result in self.the_result_concepts_of(&concept, &view.path, &member) {
-                    of_the_result.push(result);
-                }
-            }
-        } else {
-            concepts = the_concepts_constraining(&view.root, binding.name_range.start_offset);
-        }
-        concepts.extend(of_the_result);
+        // returns satisfies `B`, so `a.foo().` has the members `B` requires, and `a.foo().get().` the ones `B`'s own
+        // result constraint requires. The chain is walked from the inside out, one call at a time, so a program that
+        // states its types in requirements rather than in classes gets as many hops as it wrote.
+        let concepts = self.the_concepts_of_an_expression(view, &access.object, 0);
         let mut items: Vec<crate::CompletionItem> = Vec::new();
         for concept in &concepts {
             let Some(required) = self.the_members_the_concept_names(concept, &view.path) else {
@@ -93,6 +73,46 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
         items
+    }
+
+    /// **The concepts that constrain what an expression's value satisfies** — the walk a chain of required calls
+    /// needs.
+    ///
+    /// A name answers with the concepts its declaration is constrained by (`A auto a`); a call answers with the
+    /// concepts its *receiver's* concepts say the call's result satisfies (`{ a.foo() } -> B`), which is the only
+    /// statement of that result's members anywhere in the program. Recursion is on the receiver, so
+    /// `a.foo().get()` is `get` applied to what `B` says `foo` returns, and the depth is bounded because a program
+    /// may state the chain in a circle.
+    fn the_concepts_of_an_expression(
+        &self,
+        view: &FileView,
+        expression: &cpp_parser::CppSyntaxNode,
+        depth: usize,
+    ) -> Vec<String> {
+        if depth > 8 {
+            return Vec::new();
+        }
+        if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+            && let Some(member) = the_member_a_call_names(expression)
+            && let Some(callee) = expression.children().next()
+            && let Some(receiver) = callee.children().next()
+        {
+            let mut found: Vec<String> = Vec::new();
+            for concept in self.the_concepts_of_an_expression(view, &receiver, depth + 1) {
+                for result in self.the_result_concepts_of(&concept, &view.path, &member) {
+                    if !found.contains(&result) {
+                        found.push(result);
+                    }
+                }
+            }
+            return found;
+        }
+        let at = usize::from(expression.text_range().start());
+        let Known::Yes(binding) = crate::sema::resolve::definition_at(&view.scopes, &view.root, at)
+        else {
+            return Vec::new();
+        };
+        the_concepts_constraining(&view.root, binding.name_range.start_offset)
     }
 
     /// **The concepts a requirement's result is constrained by** — `B` for `{ a.foo() } -> B`, when the call is a

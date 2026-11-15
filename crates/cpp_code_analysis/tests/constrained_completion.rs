@@ -70,6 +70,25 @@ auto by_loop(T t) {
     t.
 }
 
+template <class T>
+concept Shiny = requires(T s) {
+    s.shine;
+};
+
+template <class T>
+concept HasGet = requires(T b) {
+    { b.get() } -> Shiny;
+};
+
+template <class T>
+concept HasChain = requires(T a) {
+    { a.foo() } -> HasGet;
+};
+
+auto by_chain(HasChain auto a) {
+    a.foo().get().
+}
+
 template <class U>
 auto unconstrained(U u) {
     u.
@@ -151,6 +170,17 @@ fn the_result_of_a_required_call_offers_the_result_concept() {
     assert_eq!(
         offered_after("auto by_result(A auto a) {\n    a.foo()."),
         [("bar".to_string(), ItemKind::Method)]
+    );
+}
+
+/// **A chain of required calls is walked to its end** — `{ a.foo() } -> HasGet` and `{ b.get() } -> Shiny` say what
+/// each hop returns, so `a.foo().get().` lists `Shiny`'s names. One hop was the first version; the walk is recursive
+/// on the receiver, which is what makes the second one answer.
+#[test]
+fn a_chain_of_required_calls_is_followed() {
+    assert_eq!(
+        offered_after("auto by_chain(HasChain auto a) {\n    a.foo().get()."),
+        [("shine".to_string(), ItemKind::Field)]
     );
 }
 
