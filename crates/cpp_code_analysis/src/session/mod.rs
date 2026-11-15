@@ -1842,6 +1842,7 @@ impl<F: FileProvider> crate::effect::Reads for SessionReads<'_, F> {
 
 mod calls;
 mod completion;
+mod constrained;
 mod cook;
 mod diagnostics;
 mod edits;

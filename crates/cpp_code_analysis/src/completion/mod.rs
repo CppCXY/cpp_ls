@@ -246,7 +246,7 @@ impl CompletionItem {
         }
     }
 
-    fn word(label: &str, kind: ItemKind, detail: &str) -> CompletionItem {
+    pub(crate) fn word(label: &str, kind: ItemKind, detail: &str) -> CompletionItem {
         CompletionItem {
             label: label.to_string(),
             kind,

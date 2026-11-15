@@ -411,7 +411,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|headers| headers.clone())
             .unwrap_or_default();
 
-        crate::completion::completion_at(
+        let mut set = crate::completion::completion_at(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -421,7 +421,18 @@ impl<F: FileProvider + Clone> Session<F> {
             self.config.cuda(),
             self.the_completion_budget(),
             &unincluded,
-        )
+        );
+        // **A member access on a constrained template parameter** — `auto f(A auto a) { a. }`. There is no class to
+        // list members of: what the language gives `a` is what the concept's `requires` body names on it, so that is
+        // the list. Asked only when the ordinary answer is empty, which is what makes it free for every other
+        // completion — see [`Session::the_members_a_concept_requires`].
+        if set.items.is_empty() {
+            let required = self.the_members_a_concept_requires(view, offset.get(), set.replace);
+            if !required.is_empty() {
+                set.items = required;
+            }
+        }
+        set
     }
 
     /// **The headers the search path can name** — what a `#include` is completed from.
