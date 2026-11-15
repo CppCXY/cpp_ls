@@ -73,8 +73,8 @@ server knows; the detector around it still requires a parenthesised width follow
 | `textDocument/definition` | the declaration of a macro, type, function or variable, across files through the index |
 | `textDocument/implementation` | a function declaration → its definition, across files |
 | `textDocument/typeDefinition` | a `typedef`/`struct` name → the definition of its type |
-| `textDocument/references` | **exact references for macros**, including the ones reached under a conditional `#include` or `#if` (marked as uncertain); an ordinary name is not answered |
-| `textDocument/rename` + `prepareRename` | **macros only**; an ordinary name is refused with the protocol's `null`, because editing half of a name's uses is a broken build written into the user's files |
+| `textDocument/references` | a macro's uses **exactly** — the macro environment decides each one, including those reached under a conditional `#include` or `#if` (shown, and refused by rename); an ordinary name through the same query the code lens counts, so the number a lens shows and the places a click reveals cannot disagree |
+| `textDocument/rename` + `prepareRename` | a macro's uses, or an ordinary name's — written as one `WorkspaceEdit` over the list Find References answers; refused with the protocol's `null` while the index still has work (half a rename is a broken build) or when the new spelling is not one identifier |
 | `textDocument/documentHighlight` | occurrences of the same name in the current file |
 | `textDocument/documentSymbol` | the file's own declaration tree, **including what `#if 0` removes** (the reader is editing it), with a range for the whole declaration and one for the name |
 | `workspace/symbol` | the declarations the project index holds, by name |
@@ -88,3 +88,36 @@ server knows; the detector around it still requires a parenthesised width follow
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
 | `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` |
 | `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
+
+## 6. Diagnostics
+
+The registry is the one [`cpp-support.md`](cpp-support.md) §6 lists. A rule that only means something in C++ — access
+control, `override`/`final`, concepts, contracts, `auto`, the Unreal rules — is **skipped** for a C file rather than
+run and silenced, so it costs nothing and cannot fire. Twenty-one codes can fire in C:
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| `syntax-error` | Error | the text does not parse |
+| `param-type-check` | Error | an argument's type cannot go to the parameter |
+| `assign-type-check` | Error | an assignment or initialisation does not fit the type |
+| `undefined-field` | Error | the member is not in the `struct`/`union` |
+| `undefined-name` | Error | the name is not declared |
+| `redefinition` | Error | the same entity is defined twice in one scope |
+| `argument-count` | Error | the call passes the wrong number of arguments |
+| `return-type-mismatch` | Error | a `return` does not fit the declared type |
+| `missing-return` | Error | a function that promises a value can reach its end |
+| `dangling-return` | Error | a pointer to something that dies when the function returns — a local, or a pointer a local handed out |
+| `use-after-free` | Error | a pointer read after the memory it refers to was released — by `free`/`realloc`, or by a call to a function whose fact says it frees that argument |
+| `macro-redefined` | Warning | the same macro is redefined with a different body |
+| `include-not-found` | Warning | the `#include` was not found — a warning, because the search is ours rather than the compiler's |
+| `missing-include` | Warning | a type is used and no include in this file declares it |
+| `unnecessary-branch` | Warning | a branch that cannot run |
+| `assignment-in-condition` | Warning | an assignment inside a condition |
+| `macro-parentheses` | Warning | a macro body without parentheses of its own |
+| `unused` | Hint | a local nothing reads (`[[maybe_unused]]` and RAII-shaped declarations are not reported) |
+| `braces-around-statements` | Hint | a single-statement branch without braces |
+| `simplify-boolean-expr` | Hint | a boolean expression that can be simplified |
+| `else-after-return` | Hint | an `else` after a `return` |
+
+`[diagnostics].disable` turns one off by name, and the severities are the registry's own — a client that shows only
+errors shows exactly the rows marked Error here.

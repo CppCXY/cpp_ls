@@ -47,7 +47,7 @@ meaning — a file that writes them is being read as C++26 whatever `-std=` says
 | `typename [: r :]<int>` | a splice specialization: the type splice with template arguments |
 | `d.[: r :]`, `p->[: r :]` | a member splice; it has **no written name**, so member lookup and the undefined-field check ask nothing about it |
 | `template for (constexpr auto e : r) …` | the **expansion statement** (P1306): its node is `ExpansionStat`, and the loop inside it is the ordinary `RangeForStat` |
-| `^^::` | a reflection of the global namespace — the form libstdc++`s own `<meta>` writes |
+| `^^::` | a reflection of the global namespace — the form libstdc++'s own `<meta>` writes |
 | `^^` as a token | one token, not two `^`: the language has no unary `^` to pair them with, and `^` alone is still a Clang block literal |
 
 The type of every reflection expression is `std::meta::info`, whichever operand it takes — the one expression in the
@@ -58,8 +58,8 @@ language whose type does not depend on what it names. What is **not** there is t
 pins the syntax and [`crates/cpp_code_analysis/tests/reflection.rs`](../crates/cpp_code_analysis/tests/reflection.rs)
 pins the absence of false diagnostics.
 
-**Verified against a compiler.** GCC 16.2 (`C:\Users\zc\Desktop\mingw\w64devkit`, `-std=c++26 -freflection`, libstdc++'s
-own `<meta>`) accepts every form above, and this server's parser accepts the same files with no syntax error:
+**Verified against a compiler.** A MinGW-w64 GCC 16.2 toolchain (`-std=c++26 -freflection`, with libstdc++'s own
+`<meta>`) accepts every form above, and this server's parser accepts the same files with no syntax error:
 
 | Fixture | GCC 16.2 | this parser |
 | --- | --- | --- |
@@ -75,13 +75,12 @@ own `<meta>`) accepts every form above, and this server's parser accepts the sam
 | `template for (constexpr auto e : enumerators) { … }` | ok | 0 errors — **added after this check found the `template` token left flat with no error reported** |
 | `^^3` | error: `^^` cannot be applied to this operand | 0 errors (the grammar has no opinion; the analysis does not check operands) |
 
-**The compiler`'s own `<meta>` is read only when the configuration says `-freflection`.** libstdc++ wraps the whole
+**The compiler's own `<meta>` is read only when the configuration says `-freflection`.** libstdc++ wraps the whole
 header in `#if __glibcxx_reflection >= 202603L`, which `bits/version.h` computes from `__cplusplus > 202302L &&
-__cpp_impl_reflection >= 202603L`; a compile database that carries `-freflection` (CMake does, see
-`C:\Users\zc\Desktop\cpp`) makes this layer define `__cpp_impl_reflection 202603L`, and the metafunctions become
-resolvable. Without the flag the header`'s body is a condition the analysis cannot decide, so it is kept out —
-`std::meta` then has no declaration to hover, which reads as "the analysis cannot find std::meta" rather than
-"reflection is off".
+__cpp_impl_reflection >= 202603L`; a compile database that carries `-freflection` (a CMake build can) makes this
+layer define `__cpp_impl_reflection 202603L`, and the metafunctions become resolvable. Without the flag the header's
+body is a condition the analysis cannot decide, so it is kept out — `std::meta` then has no declaration to hover,
+which reads as "the analysis cannot find std::meta" rather than "reflection is off".
 
 GCC also confirms the one type this analysis answers: `static_assert(std::is_same_v<decltype(^^Widget), std::meta::info>)`
 compiles, so "a reflection has type `std::meta::info`" is the implementation's own statement and not a reading of the
@@ -118,7 +117,7 @@ pins the syntax.
 | `#include` | angle and quote forms; search paths from the database, the configuration or the toolchain; a header is resolved against the C++ list, with tail matching as the fallback |
 | `#define` / `#undef` | object-like and function-like, variadic, `#`, `##`, `__VA_OPT__`; `#undef` is part of the history |
 | Conditionals | `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, C++23's `#elifdef`/`#elifndef`; expressions are evaluated as integer constants |
-| Modules | `module`, `import`, `export` and `export module` are parsed and indexed as declarations |
+| Modules | `module`, `import`, `export` and `export module` are parsed and indexed as declarations; a unit is identified by the `export module` a file declares, and `import std;` is resolved to the implementation's own module source — libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`, and libc++'s `std.cppm` as named by its `libc++.modules.json` manifest |
 | Predefined macros | `__cplusplus` follows the selected standard; the toolchain's markers (`_MSC_VER`, `_WIN32`, `__GNUC__`, `__clang__`) follow the compiler |
 | Macro environment | the set of macros visible at each position is recorded, and hover, completion, references and rename ask it rather than searching the text |
 
@@ -150,8 +149,8 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/definition` | the declaration of a macro, type, function, variable, member or enumerator, across files through the index |
 | `textDocument/implementation` | a virtual function's declaration → its overriders; a function declaration → its definition |
 | `textDocument/typeDefinition` | a variable or `auto` name → the definition of its type (classes, alias templates) |
-| `textDocument/references` | **exact references for macros**, including the ones reached under a conditional `#include` or `#if` (marked as uncertain); an ordinary name is not answered |
-| `textDocument/rename` + `prepareRename` | **macros only**; an ordinary name is refused, because editing half of a name's uses is a broken build written into the user's files |
+| `textDocument/references` | a macro's uses **exactly** — the macro environment decides each one, including those reached under a conditional `#include` or `#if` (shown, and refused by rename); an ordinary name through the same query the code lens counts, so the number a lens shows and the places a click reveals cannot disagree |
+| `textDocument/rename` + `prepareRename` | a macro's uses, or an ordinary name's — one `WorkspaceEdit` over the list Find References answers; refused with the protocol's `null` while the index still has work (half a rename is a broken build) or when the new spelling is not one identifier |
 | `textDocument/documentHighlight` | occurrences of the same name in the current file |
 | `textDocument/documentSymbol` | the file's own declaration tree (including what `#if 0` removes), namespaces and classes nested; a range for the declaration and one for the name |
 | `workspace/symbol` | the declarations the project index holds, by name |
@@ -161,7 +160,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/foldingRange` | brace blocks, comments, `#region`, runs of `#include` |
 | `textDocument/documentLink` | the path of an `#include`, as a link to the file |
 | `textDocument/inlayHint` | parameter names at call sites |
-| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp`, or of this file when there is no pair (always this file for a template class, whose members cannot be defined in a `.cpp`); `source.implement-pure-virtuals`: a derived class that has not implemented all of its base`s pure virtuals → every missing `Ret Class::method(params) const { }` in one edit |
+| `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp`, or of this file when there is no pair (always this file for a template class, whose members cannot be defined in a `.cpp`); `source.implement-pure-virtuals`: a derived class that has not implemented all of its base's pure virtuals → every missing `Ret Class::method(params) const { }` in one edit |
 | `textDocument/semanticTokens` | the standard types plus `decorator` (Doxygen commands) and the custom `variableTemplate`; inside string literals, `std::format`/`fmt`'s `{}` fields and the `printf` family (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
 | `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |
@@ -169,7 +168,9 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Forty-two rules, each with a fixed severity; `[diagnostics].disable` turns one off by name.
+Forty-three codes, each with a fixed severity; `[diagnostics].disable` turns one off by name. The registry is
+[`DiagnosticCode`](../crates/cpp_code_analysis/src/sema/check/diagnostic_code.rs), and the C subset is
+[`c-support.md`](c-support.md) §6 — a C++-only rule is skipped for a C file rather than run and silenced.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -189,7 +190,8 @@ Forty-two rules, each with a fixed severity; `[diagnostics].disable` turns one o
 | `ue-generated-header` | Error | a file with reflection annotations and no `*.generated.h` include, or one that is not the last include — **UE** (`[unreal] enable`) |
 | `ue-macro-scope` | Warning | a `UPROPERTY`/`UFUNCTION` on a local, a parameter or a file-scope declaration — the build tool reflects class members only — **UE** (`[unreal] enable`) |
 | `ue-specifier` | Warning | a specifier the engine does not know, which the build tool silently ignores — **UE** (`[unreal] enable`) |
-| `include-not-found` | Error | the `#include` was not found |
+| `include-not-found` | Warning | the `#include` was not found — a warning, because the search is ours rather than the compiler's |
+| `missing-include` | Warning | a type is used and no include in this file declares it; the fix names the header, and the standard library is never named |
 | `access-invisible` | Error | a member reached from somewhere that may not reach it |
 | `missing-return` | Error | a function that promises a value can reach its end |
 | `concept-not-satisfied` | Error | a constraint is not met |
@@ -204,7 +206,7 @@ Forty-two rules, each with a fixed severity; `[diagnostics].disable` turns one o
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |
-| `c-style-cast` | Warning | a C-style cast (a `(void)` cast is not reported) |
+| `cstyle-cast` | Warning | a C-style cast (a `(void)` cast is not reported) |
 | `macro-parentheses` | Warning | a macro body without parentheses of its own |
 | `unused` | Hint | a name nothing reads (tag: Unnecessary; `[[maybe_unused]]` and RAII guards are not reported) |
 | `braces-around-statements` | Hint | a single-statement branch without braces |

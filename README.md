@@ -17,9 +17,9 @@ layer and the LSP server are all in this repository. **No clangd, no libclang, n
 | --- | --- | --- |
 | Project model | a compilation database, or heuristics | nothing, or `.cppls.toml`, or a compilation database |
 | Unit of work | a file with flags | **the program**: includes inlined, `#if` resolved, macros expanded, modules resolved from their interface units |
-| Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`); a unit is identified by the `export module` it declares |
+| Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`, libc++'s `std.cppm` named by its `libc++.modules.json`); a unit is identified by the `export module` it declares |
 | Answers in | a file that compiles | a file being edited — half-typed lines included |
-| Diagnostics | Clang's | its own 26 checks, measured at **zero false positives** on libstdc++'s own sources |
+| Diagnostics | Clang's | its own 43 diagnostic codes, measured at **zero false positives** on libstdc++'s own sources |
 
 ## What makes it different
 
@@ -41,7 +41,7 @@ the naming conventions are a search order, not an assumption.
 project root, so a Visual Studio solution and an unconfigured checkout both work. A compilation database, when present,
 is used for exact per-file flags.
 
-**4. Every claim in this repository is measured.** **2,000+ tests**, plus probes that run against real
+**4. Every claim in this repository is measured.** **2,999 tests in 200 suites**, plus probes that run against real
 headers rather than fixtures. [`docs/open-questions.md`](docs/open-questions.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
 (**GCC 40, Clang 29, MSVC 62**) all run in CI.
@@ -65,7 +65,7 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 | Hover | The declaration, the deduced type, and the doc comment (Doxygen commands included) |
 | Signature help | The parameter list being filled in, from the same facts the call is checked against |
 | Definition / type definition / implementation | Where a name, its type, or the override of a virtual function is written — including a `` [`symbol`] `` a documentation comment refers to |
-| References, rename, document highlight | Every use in the project, and a rename that edits exactly those |
+| References, rename, document highlight | A macro's uses exactly (the macro environment decides each one); a symbol's through the index — and a rename that writes that same list |
 | Call hierarchy, document and workspace symbols | Who calls what, and the shape of a file or a project |
 | Folding, selection range | Blocks, comments and regions; the syntactic unit around the cursor |
 | Format-string awareness | Completion inside `printf` / `std::format` / `fmt::format` strings, hover on a specifier, and four custom semantic-token types |
@@ -78,12 +78,13 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
   (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`).
 - **Code actions** — quick fixes from the same diagnostics.
 - **Diagnostics** — `textDocument/diagnostic` for pull-capable clients, otherwise versioned
-  `textDocument/publishDiagnostics`, 26 codes: `syntax-error`, `include-not-found`,
-  `undefined-name`, `undefined-field`, `redefinition`, `missing-return`, `argument-count`, `param-type-check`,
-  `assign-type-check`, `return-type-mismatch`, `access-invisible`, `concept-not-satisfied`,
-  `assignment-in-condition`, `unnecessary-branch`, `macro-redefined`, nine clang-tidy-shaped style rules
-  (`cstyle-cast`, `use-auto`, `use-nullptr`, …), `unused`, `module-note` — each one enableable by name in
-  `.cppls.toml`.
+  `textDocument/publishDiagnostics`. **43 codes**, each enableable by name in `.cppls.toml`: syntax errors, the
+  language's own refusals (`undefined-name`, `undefined-field`, `argument-count`, `param-type-check`,
+  `assign-type-check`, `return-type-mismatch`, `access-invisible`, `concept-not-satisfied`, `missing-return`, the
+  lifetime rules, the override/`final` family, Unreal's five), twelve clang-tidy-shaped style rules
+  (`cstyle-cast`, `use-auto`, `use-nullptr`, …), and notes that are not complaints at all. The registry, with each
+  rule's severity, is [`docs/cpp-support.md` §6](docs/cpp-support.md#6-diagnostics); the C subset is
+  [`docs/c-support.md` §6](docs/c-support.md#6-diagnostics).
 
 **C and CUDA.** C is a first-class dialect. CUDA is a **special toolchain case**: `.cu` and `.cuh` are read with
 `<<<…>>>` launch blocks and the CUDA keywords, and a `[cuda]` section tells the analysis where the toolkit's headers
@@ -162,15 +163,17 @@ watches, a native watcher monitors that folder; watcher failures are reported to
 ## Working on it
 
 ```bash
-cargo test --workspace --release          # 2,000+ tests; the latency ones only measure in --release
+cargo test --workspace --release          # 2,999 tests in 200 suites; the latency ones only measure in --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 ```
 
 The probes are the interesting part: `CPPLS_TRACE_HOVER`, `CPPLS_TRACE_COOKING`, `CPPLS_TRACE_VISIBILITY`,
-`CPPLS_TRACE_NAMES`, `CPPLS_TRACE_DECLARATION` and `CPPLS_DUMP_RENDERING_DIR` print what a layer decided and why, and
-`cargo test --release -- --ignored --nocapture` runs the probes that need a real project or toolchain. `inspect` asks a
-question without an editor:
+`CPPLS_TRACE_DIAGNOSTICS`, `CPPLS_TRACE_MEMBERS`, `CPPLS_TRACE_UNITS`, `CPPLS_TRACE_NAMES` and
+`CPPLS_DUMP_RENDERING_DIR` print what a layer decided and why, and `cargo test --release -- --ignored --nocapture`
+runs the probes that need a real project or toolchain. Every switch is listed, with what it prints, in
+[`crates/cpp_code_analysis/src/probes.rs`](crates/cpp_code_analysis/src/probes.rs). `inspect` asks a question without
+an editor:
 
 ```bash
 inspect hover    --project . --file src/main.cpp --needle cout --shift 2

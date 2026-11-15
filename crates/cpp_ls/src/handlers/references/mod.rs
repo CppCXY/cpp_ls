@@ -1,19 +1,19 @@
 //! # `textDocument/references` — where else this name is written
 //!
-//! # What this answers, and what it deliberately does not
+//! # What this answers
 //!
-//! **Macros.** [`Session::macro_references`] walks the four-level ladder the index documents — the candidate files
-//! (a file can only use a macro it can see), the text filter (a file whose bytes do not contain the name has no
+//! **Macros, exactly.** [`Session::macro_references`] walks the four-level ladder the index documents — the candidate
+//! files (a file can only use a macro it can see), the text filter (a file whose bytes do not contain the name has no
 //! identifier of that name), the lexer (a comment and a string are one token, so a name inside them is not an
 //! identifier at all) and then the macro environment, which is the one level that decides by meaning rather than by
 //! shape.
 //!
-//! An ordinary name — a class, a variable, a function — answers `Unknown(NotDeclaredHere)` and this handler turns
-//! that into an **empty list**, which is what the protocol has for "nothing here". It is not a missing feature
-//! papered over: finding a *name*'s references means asking, for every candidate file, "does the name at this
-//! offset resolve to that declaration?", and that needs each candidate's scopes, which is a parse per candidate
-//! rather than a lex. The analysis says so in one place (see the module documentation of `index::references`) and
-//! this layer passes the answer through rather than inventing one.
+//! **And an ordinary name** — a class, a variable, a function — through [`places_of`]: the same query the code lens
+//! counts, so the number a lens shows and the places a click reveals cannot disagree. That path resolves the name at
+//! the cursor, asks the index for its declaration, and searches the files that can see it (its own file, its
+//! includers, and the modules that import the unit it is declared in). It used to answer nothing for a symbol, which
+//! is a false claim rather than a smaller truth: an empty list says "nothing uses this name", and a reader renames on
+//! it. `rename` writes exactly this list.
 //!
 //! # Uncertain references are **shown** and not edited
 //!
