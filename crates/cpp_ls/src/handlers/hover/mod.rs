@@ -1500,9 +1500,18 @@ fn declaration_markdown(
     // cold cache: the **first** hover answered `name_of(…)`, the second `constexpr std::string_view name_of(E value)`,
     // because by then the summary existed. The file's own view is here either way, and its facts are the same facts
     // the summary would hold — read synchronously, so the first hover is not worse than the second.
+    //
+    // **Except for a class or a namespace**, and the exception is the same argument one paragraph up: a type fact has
+    // no type, no return type and no parameter list *by construction*, so the condition below was true for every
+    // class and the re-read replaced the fact the caller had chosen with one built from the view — and for a standard
+    // header that view's own reading is not the cooked one, so `std::vector`'s card lost its scope (`std::`), its
+    // `clean` and its guard, and read "a type template over `_Ty`, `_Alloc`" beside two warnings about a conditional
+    // block and a parse recovery that the cooked reading does not have (measured: `vector` cooked reports **0**
+    // errors). A class is exactly the fact the index holds best; nothing here can complete it.
     if corrected.type_of.is_none()
         && corrected.returns.is_none()
         && corrected.parameter_list.is_none()
+        && !(corrected.definition && matches!(corrected.kind, DeclKind::Type | DeclKind::Namespace))
         && let Some(the_view) = if found.file == view.path {
             Some(view.clone())
         } else {
@@ -2112,9 +2121,12 @@ fn kind_words(fact: &DeclFact) -> String {
     // **Only when the declaration is the template.** A *member* of a class template carries the class's parameters in
     // this field — the member-list builder fills them so a use's arguments can be paired — so printing them as the
     // member's own said "`std::pair::second` — a variable template over `_T1`, `_T2`" (reported, with a screenshot): a
-    // member of a template is not a template, and the field cannot tell the two apart. A fact with a scope therefore
-    // stops claiming and lets the `in `` ` clause below say where it is.
-    if !named.is_empty() && fact.scope.is_none() {
+    // member of a template is not a template, and the field cannot tell the two apart. The field *paired with the
+    // kind* can: a **class** whose fact carries parameters is the template, because a member's parameters are the
+    // class's and a member is never `DeclKind::Type` with a definition of its own. `std::vector` is a class template
+    // declared in `std`, and both halves belong on the card — "a type template over `_Ty`, `_Alloc`, in `std`".
+    let is_the_template_itself = matches!(fact.kind, DeclKind::Type) && fact.definition;
+    if !named.is_empty() && (fact.scope.is_none() || is_the_template_itself) {
         words.push_str(&format!(" template over `{}`", named.join("`, `")));
     }
 
