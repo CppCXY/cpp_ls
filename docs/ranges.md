@@ -461,7 +461,37 @@ the deduction answers `void`, and a wrong type is worse than a refusal: the arm 
 
 **So the next step for this stage is that substitution**, not another operator rule: when a member's body names
 `this`-member variables, their types come from the class's template arguments the call was made on — the same pairing
-`member_bindings`/`TypeBindings` already performs for members, applied inside the body deduction. There the callee is `std::views::filter`, and
+`member_bindings`/`TypeBindings` already performs for members, applied inside the body deduction.
+
+A first attempt at that was made and failed, which narrows it: merging the class's parameter names into the
+`TypeSubstitutions` the body deduction receives (`_Closure` → `_Filter_fn` alongside the function's own) does **not**
+reach the member's type — the body reader resolves a name, not a `TypeSubstitutions` entry. The red test that pins the
+shape is
+
+```cpp
+template <class Fn> struct closure {
+    Fn _Fn;
+    template <class Rng> auto operator()(Rng&& rng) const { return _Fn(rng); }
+};
+closure<adaptor> c;
+auto r = c(1);           // Unknown today; `view` when the member's type is read with the class's argument
+```
+
+so what the body reader needs is what `member_fact` + `TypeBindings::applied_to` already do for a member *outside* a
+body: the enclosing class **and** the arguments the call was made with.
+
+## Where the objective stands
+
+| stage | state |
+| --- | --- |
+| (1) the C++20 fixture | done |
+| (2) `std::views::filter` resolves, and a call of it has a type | **done, measured in the live server**: `_Range_closure<_Filter_fn, decay_t<int>>` |
+| (3) `operator|` | **not done** — one step short: a member variable's type inside a deduced body (above) |
+| (4) a lambda's `auto` parameters from its invoker | not done; it needs (3)'s result to know what the range yields |
+| (5) this document and the README | kept up to date |
+
+Everything that *is* done is measured and pinned by tests, and the failing pieces have a red test's worth of shape
+written down here rather than a guess. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
