@@ -391,7 +391,15 @@ was tried and measured: the view still read 12 bytes, so the per-file cook puts 
 
 **That is the next fix:** a header's rendering must be made from a unit that **includes** it — the program's — not
 from a unit rooted at the header. Every step after this depends on it: the adaptor's body, `operator|`, and the
-lambda's parameter types. There the callee is `std::views::filter`, and
+lambda's parameter types.
+
+The code already knows how to choose that unit: `Session::the_unit_that_reads` walks the include graph's reverse edges
+(shallowest includer that can be a program root) and `cooking_materials` uses it — but only when the designated
+root's timeline is **held in memory and not provisional**. When it is not, the cook falls back to a **composed
+environment** (`the_indexed_environment` → `configuration_from_environment_and`), which is built from the *index's*
+macro facts rather than from a walk. That table is the next thing to measure: the compiler's own predefined macros
+(`_MSVC_LANG`, and with it `_HAS_CXX20`) are what the walk seeds from the project's standard, and whether the composed
+table carries them is the difference between the header's real body and its 12-byte `#else` branch. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
