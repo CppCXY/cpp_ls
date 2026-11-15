@@ -591,6 +591,30 @@ impl ProjectIndex {
             .unwrap_or_default()
     }
 
+    /// **The files that import the module `path` declares** — the module edge's reverse.
+    ///
+    /// The include graph keeps `included_by`; a module edge cannot have the same map, because an `import m;` names
+    /// a *module* and a module may have several units, so the answer is "every file whose `ModuleReading` imports
+    /// this name". The scan is over the summaries — the same place `module_interfaces` is derived from — and it is
+    /// one user-initiated query (find references, the code lens beside it), not a per-keystroke one.
+    ///
+    /// Without this a declaration in a module interface unit answered **0 references**: the candidate rule in
+    /// [`symbol_references`](crate::index::references::symbol_references) walked the reverse *include* edges, and a
+    /// `.cpp` that says `import math;` includes nothing. Measured on the `cpp_modules` fixture: `Point::length_squared`
+    /// used twice in `main.cpp` and reported nowhere.
+    pub fn importers_of_the_module_of(&self, path: &Path) -> Vec<PathBuf> {
+        let Some(summary) = self.summary(path) else {
+            return Vec::new();
+        };
+        let Some(module) = summary.modules.module.as_deref() else {
+            return Vec::new();
+        };
+        self.summaries()
+            .filter(|other| other.modules.imports.iter().any(|name| &**name == module))
+            .map(|other| other.path.clone())
+            .collect()
+    }
+
     /// **Add what a file's cooked reading found** — see the `cooked` field for what it is and why only declarations
     /// and diagnostics.
     ///

@@ -865,7 +865,8 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         self.unread_includes_of(path)
             .into_iter()
-            .find(|include| self.queue.is_queued(include))
+            .chain(self.unread_modules_of(path))
+            .find(|file| self.queue.is_queued(file))
     }
 
     /// Requeue an unread include so its preparation can happen outside the session lock.
@@ -874,9 +875,13 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Some(next) = self.next_file_to_catch_up(path) {
             return Some(next);
         }
-        let include = self.unread_includes_of(path).into_iter().next()?;
-        self.queue.again(include.clone(), Priority::Open, 1);
-        Some(include)
+        let next = self
+            .unread_includes_of(path)
+            .into_iter()
+            .chain(self.unread_modules_of(path))
+            .next()?;
+        self.queue.again(next.clone(), Priority::Open, 1);
+        Some(next)
     }
 
     pub fn gather_a_file_read(&self, path: &Path) -> Option<FileReadMaterials<SessionFiles<F>>> {

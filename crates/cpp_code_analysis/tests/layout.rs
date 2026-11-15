@@ -164,3 +164,66 @@ struct Outer { Alias a; char c; };
     );
     assert_eq!(layout.size, 12);
 }
+
+/// **A member written in one of the class's own template parameters is not sized**, and the layout says so instead of
+/// printing a number beside a guess.
+///
+/// The lookup that sized it used to resolve the parameter's spelling by *bare name against the asking file*, where
+/// some other class may well be called _Ty2 — measured on std::vector<widget::Widget>, whose card said
+/// "size 9 byte(s), alignment 1" built from _Mypair's 9. See [ClassLayout::unknown].
+#[test]
+fn a_member_written_in_a_template_parameter_is_unknown() {
+    let layout = layout(
+        "\
+template <class _Ty1, class _Ty2>
+struct _Compressed_pair {
+    _Ty2 _Mysecond;
+};
+template <class _Ty>
+struct Box {
+    _Compressed_pair<int, _Ty> pair;
+    _Ty value;
+    int tail;
+};
+",
+        "Box",
+    );
+    assert_eq!(
+        layout.unknown,
+        ["pair", "value"],
+        "the two dependent members are not sized"
+    );
+    assert_eq!(
+        layout
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tail"],
+        "the members that *can* be sized are still placed"
+    );
+}
+
+/// **A template-id is not a class this layer can size** — its size is the size of the instantiation.
+#[test]
+fn a_member_whose_type_is_a_template_id_is_unknown() {
+    let layout = layout(
+        "\
+template <class T> struct Holder { T value; };
+struct Outer {
+    Holder<int> first;
+    int second;
+};
+",
+        "Outer",
+    );
+    assert_eq!(layout.unknown, ["first"]);
+    assert_eq!(
+        layout
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["second"]
+    );
+}

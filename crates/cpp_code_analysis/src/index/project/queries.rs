@@ -292,6 +292,36 @@ pub fn member_definitions_across_files(
 /// The two answers are one query: this one, and the single-answer form restricted to the names that have exactly
 /// one declaration. A consumer that can show several locations should ask this one, because "ambiguous" is not an
 /// answer a client can use.
+/// **What a declaration answer is qualified by** — the qualifier the cursor wrote, or the scope the declaration
+/// itself is written in.
+///
+/// The two are different questions and both are needed. `ns::Widget` says which `Widget` the reader means, and that
+/// is the qualifier's answer. A cursor on a **bare** name says nothing, and this used to answer `None` — which made
+/// the fact's qualified name the bare spelling, so a reference search started from a method's own declaration
+/// compared `length_squared` against `math::Point::length_squared` and dropped every occurrence: **0 references**,
+/// and a code lens reading `0 references`, for every method in the project. Measured on the `cpp_modules` fixture,
+/// which is where the report came from.
+///
+/// The declaration's own scope is the answer the index gives the same fact (`DeclFact::scope`), so a binding-built
+/// answer and an indexed one agree about what the symbol is *called* — the identity a reference list, a rename and
+/// a code lens all key on.
+fn the_scope_of_the_answer(
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+    binding: &crate::Binding,
+) -> Option<String> {
+    crate::sema::resolve::qualified_name_at(root, offset)
+        .and_then(|(written, _)| {
+            written
+                .rsplit_once("::")
+                .map(|(scope, _)| scope.trim_start_matches("::").to_string())
+                .filter(|scope| !scope.is_empty())
+        })
+        .or_else(|| scopes.qualified_name_of(binding.scope))
+        .filter(|scope| !scope.is_empty())
+}
+
 pub fn definitions_across_files(
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
@@ -344,13 +374,7 @@ pub fn definitions_across_files(
                 &candidates,
             )
             .unwrap_or_else(|| candidates[0].clone());
-            let scope =
-                crate::sema::resolve::qualified_name_at(root, offset).and_then(|(written, _)| {
-                    written
-                        .rsplit_once("::")
-                        .map(|(scope, _)| scope.trim_start_matches("::").to_string())
-                        .filter(|scope| !scope.is_empty())
-                });
+            let scope = the_scope_of_the_answer(scopes, root, offset, &chosen);
             let local = scopes.declares_a_local(chosen.scope);
             return Known::Yes(ProjectDefinitions::one(ProjectDefinition::from_binding(
                 path, chosen, scope, local,
@@ -358,15 +382,7 @@ pub fn definitions_across_files(
         }
         Known::Yes(mut candidates) => {
             let binding = candidates.remove(0);
-            // The scope the answer was reached *through*, when the cursor wrote one: `ns` for `ns::Widget`. A bare
-            // name has none, and a leading `::` means the global name space, which is no scope at all.
-            let scope =
-                crate::sema::resolve::qualified_name_at(root, offset).and_then(|(written, _)| {
-                    written
-                        .rsplit_once("::")
-                        .map(|(scope, _)| scope.trim_start_matches("::").to_string())
-                        .filter(|scope| !scope.is_empty())
-                });
+            let scope = the_scope_of_the_answer(scopes, root, offset, &binding);
 
             // A definition answer can be a *local*: the cursor is inside the same body the name was declared in,
             // which is exactly when `definition_at` resolves it here rather than sending it to the index. Saying

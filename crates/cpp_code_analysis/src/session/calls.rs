@@ -246,8 +246,7 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **What a class costs in memory**: its size, its alignment, and where each data member sits — see
-    /// [`crate::sema::layout`].
-    ///
+    /// [`crate::sema::layout`].    ///
     /// `written_type` is a spelling (`Widget`, `ns::Widget`). `Known::No` when the name is not a class with a body,
     /// which is what "there is no layout to give" means here: a forward declaration has no size in this model, and
     /// `sizeof` of one is a compile error rather than a number.
@@ -294,8 +293,8 @@ impl<F: FileProvider + Clone> Session<F> {
         if data_members > LAYOUT_MEMBER_BUDGET {
             return Known::No;
         }
-        let union = as_written.as_ref().is_some_and(|(text, class_at, _)| {
-            let before = &text[..(*class_at).min(text.len())];
+        let union = as_written.as_ref().is_some_and(|written| {
+            let before = &written.text[..written.class_at.min(written.text.len())];
             // The last keyword before the name wins: `template <class T> union U` is a union, and a `class` earlier
             // in the text belongs to something else.
             ["union", "struct", "class"]
@@ -331,14 +330,27 @@ impl<F: FileProvider + Clone> Session<F> {
                 unknown.push(fact.name.clone());
                 continue;
             };
+            // **A member written in one of the class's own template parameters has no size here.** `_Ty2 _Mysecond;`
+            // is as large as the instantiation makes it, and the lookup below resolves the bare spelling against the
+            // *asking* file — where some other class may well be called `_Ty2`. Measured on
+            // `std::vector<widget::Widget>`: the card said "size 9 byte(s), alignment 1", built from `_Mypair`'s 9,
+            // which was `_Alty`'s 1 plus `_Scary_val`'s 4 plus a pointer, each of them another class's layout.
+            if as_written
+                .as_ref()
+                .is_some_and(|written| mentions_a_parameter(type_of, &written.parameters))
+            {
+                unknown.push(fact.name.clone());
+                continue;
+            }
             // **A bitfield has no width in a fact**, and a layout computed without it puts the next member at the
             // wrong offset — so the class is not answered rather than answered plausibly. The `:` is found at the
             // member's **file** offset, which is why the class was read out of its summary above: a member fact that
             // came from a cooked reading carries the rendering's offsets instead.
-            if as_written.as_ref().is_some_and(|(text, _, members)| {
-                members
+            if as_written.as_ref().is_some_and(|written| {
+                written
+                    .members
                     .get(&fact.name)
-                    .is_some_and(|at| Self::a_bitfield(text, *at))
+                    .is_some_and(|at| Self::a_bitfield(&written.text, *at))
             }) {
                 unknown.push(fact.name.clone());
                 continue;
@@ -361,7 +373,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         written_type: &str,
         asked_from: &std::path::Path,
-    ) -> Option<(String, usize, std::collections::HashMap<String, usize>)> {
+    ) -> Option<TheClassAsWritten> {
         let found = self
             .store
             .index()
@@ -389,7 +401,12 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .map(|fact| (fact.name.clone(), fact.name_range.end_offset()))
             .collect();
-        Some((text.to_string(), class.name_range.start_offset, members))
+        Some(TheClassAsWritten {
+            text: text.to_string(),
+            class_at: class.name_range.start_offset,
+            members,
+            parameters: class.parameters.clone(),
+        })
     }
 
     /// **Is this data member a bitfield?** — the text right after its name says so: `unsigned x : 3` has a `:` where
@@ -409,6 +426,14 @@ impl<F: FileProvider + Clone> Session<F> {
     ) -> Option<(usize, usize)> {
         if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelling) {
             return Some(builtin);
+        }
+        // **A template-id is not a class this layer can size.** _Compressed_pair<_Alty, _Scary_val> is a class
+        // *template applied to arguments*, and its size is the size of the instantiation — substituting the arguments
+        // and evaluating the layout again, which is a compiler's job. Resolving the bare name instead reports the
+        // template's own layout, which is a different object: measured on std::vector<widget::Widget>, whose card
+        // said "size 9 byte(s), alignment 1". None withholds the layout, the direction the module documents.
+        if spelling.contains('<') {
+            return None;
         }
         // **A typedef is the type it names.** Real C decides its members through one — neovim's `file_buffer` has
         // `pos_T b_op_start`, `handle_T handle`, `memline_T b_ml` — so without this the layout of most real structs
@@ -644,4 +669,31 @@ impl<F: FileProvider + Clone> Session<F> {
 
         crate::outline_of(&facts)
     }
+}
+
+/// **A class as its own file wrote it** — the text, where its name sits, where each data member's name sits, and the
+/// template parameters it declares.
+///
+/// The last field is what makes a layout honest: `_Ty2 _Mysecond;` inside `template <class _Ty1, class _Ty2> class
+/// _Compressed_pair` has the size of whatever the instantiation puts there, and a lookup of `_Ty2` by bare name in
+/// the asking file finds some *other* class spelled `_Ty2` — measured on `std::vector<widget::Widget>`, whose card
+/// said "size 9 byte(s), alignment 1" from exactly that. A member written in one of the class's parameters is
+/// therefore **unknown**, which withholds the layout rather than printing a number beside a guess (see
+/// [`crate::sema::layout::ClassLayout::unknown`]).
+pub(crate) struct TheClassAsWritten {
+    pub text: String,
+    pub class_at: usize,
+    pub members: std::collections::HashMap<String, usize>,
+    pub parameters: Vec<String>,
+}
+
+/// Does a type spelling use one of these names as a **word**? _Ty2 matches _Ty2* and ector<_Ty2>; _Ty20 does
+/// not match _Ty2.
+fn mentions_a_parameter(spelling: &str, parameters: &[String]) -> bool {
+    if parameters.is_empty() {
+        return false;
+    }
+    spelling
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .any(|word| parameters.iter().any(|parameter| parameter == word))
 }

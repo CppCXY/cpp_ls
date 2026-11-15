@@ -398,6 +398,53 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect()
     }
 
+    /// **The module interface units this file imports that the index has not read yet.**
+    ///
+    /// A module edge is not an `#include`, so [`Session::unread_includes_of`] never lists it — and a completion in
+    /// a file whose `import math;` has not been read yet answers **nothing** for `point.` where `point` is a
+    /// `math::Point`: measured on the `cpp_modules` fixture, the first completion after `didOpen` answered `[]`,
+    /// and the identical request half a second later answered `length_squared, x, y`. The names are in a file the
+    /// index had not looked at, so catching up on the includes is catching up on the wrong edges.
+    pub(crate) fn unread_modules_of(&self, path: &Path) -> Vec<PathBuf> {
+        let Some(summary) = self.store.index().summary(path) else {
+            return Vec::new();
+        };
+        let directory = path.parent().unwrap_or(Path::new("."));
+        let mut files: Vec<PathBuf> = Vec::new();
+        for name in &summary.modules.imports {
+            // **The index first, then the sibling convention, and nothing else.** A module the project cannot name
+            // either way is left alone on purpose: `import std;` is a prebuilt module unit, and a catch-up that kept
+            // trying to read it would take the session's write lock on every keystroke to discover there is nothing
+            // to read — the shape `read_the_modules_a_file_imports`'s note measured.
+            let known = self
+                .store
+                .index()
+                .interface_unit_of(name)
+                .map(PathBuf::from);
+            let beside = || {
+                ["cppm", "ixx", "ccm", "cxxm"]
+                    .into_iter()
+                    .map(|extension| directory.join(format!("{name}.{extension}")))
+                    .find(|file| self.files.exists(file))
+            };
+            let Some(file) = known.or_else(beside) else {
+                continue;
+            };
+            if self.store.index().summary(&file).is_none() {
+                files.push(file);
+            }
+        }
+        files.extend(
+            summary
+                .modules
+                .partitions
+                .iter()
+                .filter(|file| self.store.index().summary(file).is_none())
+                .cloned(),
+        );
+        files
+    }
+
     /// **Is there anything for [`Session::catch_up`] to read?** — the question a caller asks *before* taking the
     /// write lock.
     ///
@@ -414,7 +461,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// written in terms of it), and [`Session::unread_includes_of`] is the list `catch_up` itself walks. `false`
     /// means "read nothing", and reading nothing changes nothing.
     pub fn needs_catching_up(&self, path: &Path) -> bool {
-        self.queue.is_queued(path) || !self.unread_includes_of(path).is_empty()
+        self.queue.is_queued(path)
+            || !self.unread_includes_of(path).is_empty()
+            || !self.unread_modules_of(path).is_empty()
     }
 
     /// **Is every file this one can name from a summary in the index** — the question a *colouring* asks.

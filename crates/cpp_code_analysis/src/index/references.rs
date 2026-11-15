@@ -594,6 +594,11 @@ pub struct SymbolToFind {
     /// The offset of the declaration's own name in that file — the one occurrence that is the declaration rather
     /// than a use of it.
     pub name_at: usize,
+    /// **Can this name be reached from another file at all?** A local is declared in a function body, so no other
+    /// file can spell it — and searching for it by name across the project is not a smaller answer, it is a list of
+    /// other entities: measured on the cpp_modules fixture, find-references on main.cpp's local point answered
+    /// **350** places named point in the standard library.
+    pub local: bool,
 }
 
 impl SymbolToFind {
@@ -611,6 +616,7 @@ impl SymbolToFind {
             qualified: fact.qualified_name(),
             declared_in,
             name_at: fact.name_range.start_offset,
+            local: fact.local,
         }
     }
 }
@@ -665,12 +671,21 @@ fn symbol_candidates(
     answer: &mut SymbolReferences,
 ) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = vec![symbol.declared_in.clone()];
-    roots.extend(
-        index
-            .files_declaring(&symbol.qualified, &symbol.declared_in)
-            .into_iter()
-            .map(|found| found.file),
-    );
+    if !symbol.local {
+        roots.extend(
+            index
+                .files_declaring(&symbol.qualified, &symbol.declared_in)
+                .into_iter()
+                .map(|found| found.file),
+        );
+    }
+    // **And the files that import the module this declaration is in.** An `import m;` is a visibility edge that no
+    // `#include` records, so the reverse-include walk below cannot reach an importer: a declaration in a module
+    // interface unit answered **0 references** while the importer used it twice. See
+    // [`ProjectIndex::importers_of_the_module_of`]; a file with no module declaration contributes none.
+    if !symbol.local {
+        roots.extend(index.importers_of_the_module_of(&symbol.declared_in));
+    }
 
     let mut found: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -817,6 +832,52 @@ mod tests {
         }
     }
 
+    /// **A declaration in a module interface unit is referenced from the file that imports it.**
+    ///
+    /// `import m;` is a visibility edge no `#include` records, so the reverse-include walk cannot reach an importer:
+    /// on the `cpp_modules` fixture `Point::length_squared` was used three times in `main.cpp` and answered **0
+    /// references** — and a code lens reading `0 references` over every method of a module. The candidate roots
+    /// therefore include the files that import the module the declaration is in, see
+    /// [`ProjectIndex::importers_of_the_module_of`].
+    #[test]
+    fn a_declaration_in_a_module_interface_is_referenced_from_the_importer() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/math.cppm",
+                "export module math;\nnamespace math {\nexport struct Point {\n    double length_squared() const;\n};\n}\n",
+            )
+            .with_file(
+                "/p/main.cpp",
+                "import math;\nvoid f(math::Point p) { p.length_squared(); }\n",
+            );
+        let index = index_of(&files, &["/p/math.cppm", "/p/main.cpp"]);
+
+        let source = files
+            .read(Path::new("/p/math.cppm"))
+            .expect("the interface unit");
+        let at = source
+            .find("length_squared")
+            .expect("the declaration's name");
+        let symbol = SymbolToFind {
+            name: "length_squared".to_string(),
+            last_segment: "length_squared".to_string(),
+            qualified: "math::Point::length_squared".to_string(),
+            declared_in: std::path::PathBuf::from("/p/math.cppm"),
+            name_at: at,
+            local: false,
+        };
+
+        let shown = symbol_shown(&files, &index, &symbol);
+        assert!(
+            shown.iter().any(|line| line.starts_with("main.cpp:")),
+            "the importer's use is in the list: {shown:?}"
+        );
+        assert!(
+            shown.iter().any(|line| line.starts_with("math.cppm:")),
+            "and the declaration itself: {shown:?}"
+        );
+    }
+
     /// **A class and a variable, which is the shape that answered nothing at all.**
     ///
     /// Measured before this query existed, on a real file: `class Sux` answered **0 references** with `Sux sux;`
@@ -846,6 +907,7 @@ mod tests {
             qualified: "Sux".to_string(),
             declared_in: std::path::PathBuf::from("/p/sux.h"),
             name_at: 6,
+            local: false,
         };
 
         assert_eq!(
@@ -868,6 +930,7 @@ mod tests {
             qualified: "sux".to_string(),
             declared_in: std::path::PathBuf::from("/p/main.cpp"),
             name_at: 23,
+            local: false,
         };
 
         assert_eq!(
@@ -907,6 +970,7 @@ mod tests {
             qualified: "printf".to_string(),
             declared_in: std::path::PathBuf::from("/p/stdio.h"),
             name_at: 5,
+            local: false,
         };
 
         assert_eq!(

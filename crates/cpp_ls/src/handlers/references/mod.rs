@@ -1026,9 +1026,7 @@ fn an_occurrence_of_another_class<F: cpp_code_analysis::FileProvider + Clone>(
             Known::Yes(found) => {
                 cpp_code_analysis::sema::types::parse_type_spelling(&found.type_of)
                     .class_name()
-                    .is_some_and(|class| {
-                        crate::handlers::implementation::last_segment_of(class) != owner
-                    })
+                    .is_some_and(|class| !the_same_class(class, owner))
             }
             _ => false,
         };
@@ -1036,9 +1034,27 @@ fn an_occurrence_of_another_class<F: cpp_code_analysis::FileProvider + Clone>(
 
     // **Bare**: the enclosing class decides, and a class that is not this one means the name is not this member.
     match the_class_the_cursor_is_in(&view.scopes, &view.root, offset) {
-        Some(class) => class != owner,
+        Some(class) => !the_same_class(&class, owner),
         None => false,
     }
+}
+
+/// **Are these two spellings the same class?** — equal spellings, or one bare and the other qualified.
+///
+/// The owner comes from a declaration fact, which is **qualified** when the class is in a namespace or a module
+/// (`math::Point`), while the class a use's object has may be written bare (`Point`). Comparing the two as strings
+/// called every use another class's: measured on the `cpp_modules` fixture, `point.length_squared()` in `main.cpp`
+/// was dropped as "another class's member" because `Point != math::Point`, and Find References answered **0** for a
+/// method used twice. Two *qualified* spellings that differ are deliberately not equal — `a::Point` and `b::Point` are
+/// two classes, and the conservative direction here is to keep the occurrence.
+fn the_same_class(one: &str, other: &str) -> bool {
+    fn bare(spelling: &str) -> &str {
+        spelling.rsplit("::").next().unwrap_or(spelling)
+    }
+    if one == other {
+        return true;
+    }
+    bare(one) == bare(other) && !(one.contains("::") && other.contains("::"))
 }
 #[cfg(test)]
 mod name_level {
