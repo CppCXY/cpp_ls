@@ -443,6 +443,42 @@ fn the_standard_module_is_found_wherever_the_toolchain_ships_it() {
     );
 }
 
+/// **libc++ writes down where its modules are**, and a manifest beats a directory guess: `libc++.modules.json` names
+/// each module and the file that is its interface unit — including a file the directory templates would never try. Two
+/// shapes are read, because which one a version uses is not something to guess at: a path beside the manifest
+/// (`"path": "std_module.cppm"`) and one written from the prefix (`"path": "../../../custom/std.cppm"`).
+#[test]
+fn a_libcxx_manifest_names_the_module_file() {
+    let resolves = |manifest: &str, path: &str| {
+        let files = MemoryFiles::new()
+            .with_file("main.cpp", "import std;\n")
+            .with_file("/llvm/share/libc++/v1/libc++.modules.json", manifest)
+            .with_file(path, "module;\n#include <vector>\nexport module std;\n");
+        let mut config = CompilerConfig::new();
+        config.include_paths = vec![cpp_code_analysis::IncludePath::system(
+            "/llvm/include/c++/v1",
+        )];
+        let (graph, interner) = scan_with(&files, "main.cpp", &config);
+        let outcome = imports_of(&graph, &interner, "main.cpp")[0].outcome.clone();
+        assert!(
+            matches!(outcome, ImportOutcome::Resolved(_)),
+            "`import std;` did not resolve: {}",
+            outcome.describe()
+        );
+    };
+
+    // A file beside the manifest, under a name no convention would propose.
+    resolves(
+        r#"{"version": 1, "modules": [{"name": "std", "is_stdlib": true, "path": "std_module.cppm"}]}"#,
+        "/llvm/share/libc++/v1/std_module.cppm",
+    );
+    // A file somewhere else, named relative to the prefix.
+    resolves(
+        r#"{"version": 1, "modules": [{"name": "std.compat", "path": "std.compat.cppm"}, {"name": "std", "path": "../../../custom/std.cppm"}]}"#,
+        "/llvm/custom/std.cppm",
+    );
+}
+
 /// A file that exists under the conventional name but declares a different module is a **mismatch**, not a
 /// resolution./// This is the failure that looks like success. `import m;` finds `m.cppm`, so a resolver that stopped at
 /// "the file exists" would record a resolved edge and then attribute whatever `m.cppm` actually declares to

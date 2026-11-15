@@ -636,6 +636,27 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
                         candidates.push(candidate);
                     }
                 }
+                // **libc++ says where its modules are**, in a manifest beside them: `libc++.modules.json` names each
+                // module and the file that is its interface unit, which is exact where a directory guess is a guess.
+                // Clang reads this file itself, so a tree that has one is a tree whose answer is written down.
+                for relative in LIBCXX_MANIFEST_DIRECTORIES {
+                    let manifest = join_normalized(
+                        &directory,
+                        &Path::new(relative).join(LIBCXX_MANIFEST),
+                        case_insensitive,
+                    );
+                    let Some(text) = self.files.read(&manifest) else {
+                        continue;
+                    };
+                    let Some(written) = the_file_a_manifest_names(&text, name) else {
+                        continue;
+                    };
+                    for candidate in the_paths_the_manifest_may_mean(&manifest, &written) {
+                        if !candidates.contains(&candidate) {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
             }
         }
 
@@ -698,6 +719,84 @@ pub const STANDARD_MODULE_SOURCES: &[&str] = &[
     "../../share/libc++/v1/{name}.cppm",
     "../../../share/libc++/v1/{name}.cppm",
 ];
+
+/// **The manifest an installed libc++ ships beside its module sources** — `libc++.modules.json`, which names each
+/// module and the file that is its interface unit. Clang reads this file to discover the standard modules, so a tree
+/// that has one is a tree whose answer is written down; the directory templates above are the fallback for a tree
+/// that has not.
+const LIBCXX_MANIFEST: &str = "libc++.modules.json";
+
+/// The directories a libc++ manifest may be found in, relative to a directory the module scan already searches:
+/// beside the headers, and under the prefix's `share/` for the three include-path depths libc++ installs use
+/// (`<prefix>/include`, `<prefix>/include/c++`, `<prefix>/include/c++/v1`).
+const LIBCXX_MANIFEST_DIRECTORIES: &[&str] = &[
+    "",
+    "../share/libc++/v1",
+    "../../share/libc++/v1",
+    "../../../share/libc++/v1",
+];
+
+/// **The file a libc++ manifest names for one module** — `std` → the path string the manifest gives it.
+///
+/// The manifest is JSON, and the only two fields this needs are `"name"` and `"path"` in the same object. A
+/// hand-scan rather than a JSON dependency: the file is a list of small objects, both keys are unique inside one,
+/// and a parser that refuses a trailing comma is worse here than one that finds the two strings it needs. A `path`
+/// that comes after the object closed is not this module's, which is why the `}` check exists.
+fn the_file_a_manifest_names(text: &str, name: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(at) = rest.find("\"name\"") {
+        rest = &rest[at + "\"name\"".len()..];
+        let Some(value) = the_first_string_after(rest) else {
+            continue;
+        };
+        if value != name {
+            continue;
+        }
+        let path_at = rest.find("\"path\"")?;
+        if rest[..path_at].contains('}') {
+            return None;
+        }
+        return the_first_string_after(&rest[path_at + "\"path\"".len()..]);
+    }
+    None
+}
+
+/// The first JSON string in `text` after the `:` that introduces it.
+fn the_first_string_after(text: &str) -> Option<String> {
+    let start = text.find('"')?;
+    let rest = &text[start + 1..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// **The files a path in a manifest may mean** — a manifest names its modules relative to the prefix it was
+/// installed under, or beside itself, and which of the two is not one thing across versions. All the plausible
+/// readings are offered and the candidate is read before it is believed, so a wrong reading costs a failed read.
+fn the_paths_the_manifest_may_mean(manifest: &Path, written: &str) -> Vec<PathBuf> {
+    let written = Path::new(written);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if written.is_absolute() {
+        candidates.push(written.to_path_buf());
+        return candidates;
+    }
+    let Some(directory) = manifest.parent() else {
+        return candidates;
+    };
+    candidates.push(directory.join(written));
+    for ancestor in directory.ancestors().take(4) {
+        let candidate = ancestor.join(written);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    if let Some(name) = written.file_name() {
+        let beside = directory.join(name);
+        if !candidates.contains(&beside) {
+            candidates.push(beside);
+        }
+    }
+    candidates
+}
 
 /// How deep imports are followed before the scan gives up.
 ///
