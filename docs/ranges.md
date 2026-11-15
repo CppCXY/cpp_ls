@@ -346,7 +346,19 @@ all. Two measurements from it:
   why a fact's offset (`80 164`) finds no `operator()` in the file's tree: the fact may be an offset of the *unit*,
   not of the file.
 
-That is the next measurement: which reading the fact came from, and what tree its offset belongs to. There the callee is `std::views::filter`, and
+That is the next measurement: which reading the fact came from, and what tree its offset belongs to.
+
+**And the failure is not the lambda's.** A second call shape was written into the fixture and measured in the same
+way — `auto a_closure_int = std::views::filter(1);` — and it fails exactly like the lambda's:
+
+```text
+auto a_closure_int = std::views::filter(1);          could not be typed
+auto a_closure     = std::views::filter([](int v)…)  could not be typed
+```
+
+So the live failure of this stage is the **call arm for `<ranges>`'s adaptor generally**, not the unnamed lambda
+type, and every unit test of the call arm passes — which leaves the reading the facts come from as the one
+difference that is measured rather than guessed. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
