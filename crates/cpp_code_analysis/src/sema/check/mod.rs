@@ -294,6 +294,9 @@ pub struct CheckContext<'a> {
     /// skipped entirely (a C-only project, a code the reader turned off): the walk is paid by the first rule that
     /// needs it, and no rule pays twice.
     nodes: std::cell::OnceCell<Vec<cpp_parser::CppSyntaxNode>>,
+    /// **The file's own function definitions**, walked and classified once — three rules ask for them, each with its
+    /// own walk over every declaration in the file. See `CheckContext::functions`.
+    functions: std::cell::OnceCell<Vec<cpp_parser::CppSyntaxNode>>,
 }
 
 impl<'a> CheckContext<'a> {
@@ -325,6 +328,7 @@ impl<'a> CheckContext<'a> {
             inside,
             findings: Vec::new(),
             nodes: std::cell::OnceCell::new(),
+            functions: std::cell::OnceCell::new(),
         }
     }
 
@@ -592,6 +596,25 @@ impl<'a> CheckContext<'a> {
     /// surfaces on the one node type nothing else looks at.
     pub fn own_syntax_nodes(&self) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> + '_ {
         self.the_own_nodes().iter().cloned()
+    }
+
+    /// **This file's own function definitions**, classified once for the whole pass.
+    ///
+    /// Three rules want them — `argument-count`, `missing-return` and `unused` — and each used to filter every
+    /// declaration in the file for the shape itself. The predicate is not free: it casts a node and inspects a
+    /// declarator, and on a 2 701-line file the three walks were most of what those rules cost before doing any work
+    /// of their own.
+    pub fn functions(&self) -> &[cpp_parser::CppSyntaxNode] {
+        self.functions.get_or_init(|| {
+            use cpp_parser::CppAstNode;
+            // **Declarations first, then the shape question.** Only a `Declaration` can define a function, and asking
+            // the predicate of every node in the file — names, literals, specifiers — is what this walk did: the
+            // predicate casts to a declaration and returns `false` for all of them.
+            self.own::<cpp_parser::CppDeclaration>()
+                .map(|declaration| declaration.syntax().clone())
+                .filter(is_a_function_definition)
+                .collect()
+        })
     }
 
     /// The walk behind [CheckContext::own_syntax_nodes], done once for the whole pass.
@@ -886,16 +909,7 @@ pub fn body_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSy
 /// the three checks that call this function therefore reported nothing on any file while looking correct — measured,
 /// and the reason their positive tests were still ignored.
 pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSyntaxNode> {
-    use cpp_parser::CppAstNode;
-
-    // **Declarations first, then the shape question.** Only a `Declaration` can define a function, and asking the predicate of
-    // every node in the file — names, literals, specifiers — is what this walk did: the predicate casts to a declaration and
-    // returns `false` for all of them.
-    context
-        .own::<cpp_parser::CppDeclaration>()
-        .map(|declaration| declaration.syntax().clone())
-        .filter(is_a_function_definition)
-        .collect()
+    context.functions().to_vec()
 }
 /// **The return type a function definition writes**, as the text before its name.
 ///

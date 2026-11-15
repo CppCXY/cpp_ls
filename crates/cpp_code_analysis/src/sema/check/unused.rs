@@ -99,6 +99,7 @@ impl Check for Unused {
         // declaration would walk the token stream once per name, which is quadratic in a file the size of a real
         // header. Measured on MSVC's `<vector>`: 20 247 nodes, and the per-declaration form was the whole cost of
         // the layer.
+        let started = std::time::Instant::now();
         let mut written: HashMap<&str, usize> = HashMap::new();
         // **This file's own tokens**, not the rendering's: a token inside an inlined header is another file's
         // spelling, and counting it would make this rule answer about a name in `<string>`. See `CheckContext::own`.
@@ -120,37 +121,71 @@ impl Check for Unused {
         // `kind=Variable type=Some("_CSTD")`, and `xstring`'s `addressof` came out with `type=Some("_STD(_STD,
         // _Right)")`, the parameters inside the type. Four such facts were reported as "declared here and never used"
         // on a corpus that is known good, which is the one measurement this layer has to pass.
-        let bodies: Vec<cpp_parser::CppSyntaxNode> = super::function_definitions(context)
+        let counted = started.elapsed().as_millis();
+        // **The bodies as ranges, sorted by where they start** — the question "is this offset inside one" is asked
+        // once per local, and a file has many of both: measured on a 2 701-line fixture, 1 500 locals against ~300
+        // bodies, and the linear scan over the bodies was **22 of this rule's 43 ms loop**. A binary search on the
+        // starts finds the innermost body (the last one that starts before the offset) in log time; the few steps
+        // back from there are what keeps a local inside an outer body correct when an inner one is written after it
+        // (`void f() { struct G { void g(); }; … }`) — nesting in a *declared function* is shallow, and sixteen
+        // steps of it is more than any C++ file has.
+        // The ranges are **in the file own coordinates**, which is the side every declaration is already on: the
+        // bodies are a few hundred and the declarations are thousands, so the crossing is paid per body instead of
+        // per fact — measured, the per-fact direction was 1 500 linear scans of the reading map, and the whole of
+        // this rule time.
+        let mut bodies: Vec<std::ops::Range<usize>> = super::function_definitions(context)
             .into_iter()
             .filter_map(|function| super::body_of(&function))
+            .filter_map(|body| {
+                let start = context
+                    .view
+                    .file_offset_of(crate::file::coordinates::ReadingOffset::new(usize::from(
+                        body.text_range().start(),
+                    )))?
+                    .get();
+                let end = context
+                    .view
+                    .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(usize::from(
+                        body.text_range().end(),
+                    )))?
+                    .get();
+                (start < end).then_some(start..end)
+            })
             .collect();
+        bodies.sort_by_key(|body| body.start);
 
+        let walked = started.elapsed().as_millis();
+        let mut locals = 0usize;
         for fact in &context.summary.declarations {
             // **A local variable inside a function body**, which is the only shape this rule claims — see the module
             // documentation for the reasoning behind each condition.
             if !fact.local || fact.kind != crate::DeclKind::Variable {
                 continue;
             }
+            locals += 1;
             // **The comparison happens in the rendering's coordinates**, because the two sides come from different
             // places: `fact.range` is the file's — see `CheckContext::written` — while a body's range is the tree's,
             // which is the rendering. Asking without the crossing is how this guard first went wrong: a fixture whose
             // comment the cook removes shifted every offset by 28 bytes, and a local inside `main` read as outside it.
-            let Some(at) =
-                context
-                    .view
-                    .reading_offset_of(crate::file::coordinates::FileOffset::new(
-                        fact.range.start_offset,
-                    ))
-            else {
-                continue;
-            };
-            let inside_a_body = bodies.iter().any(|body| {
-                usize::from(body.text_range().start()) < at.get()
-                    && at.get() < usize::from(body.text_range().end())
+            let at = fact.range.start_offset;
+            let before = bodies.partition_point(|body| body.start < at);
+            let inside_a_body = (0..16).any(|steps_back| {
+                before
+                    .checked_sub(1 + steps_back)
+                    .and_then(|at_body| bodies.get(at_body))
+                    .is_some_and(|body| at < body.end)
             });
             if !inside_a_body {
                 continue;
             }
+            // **The scope question is asked in the rendering**, which is where the scopes are: the crossing is paid
+            // only by the locals that are inside a body, so it is a handful rather than every declaration.
+            let Some(at) = context
+                .view
+                .reading_offset_of(crate::file::coordinates::FileOffset::new(at))
+            else {
+                continue;
+            };
             // **A member of a type is not a local variable**, even when the type is written inside a body:
             // `sizeof(union { int i; double d; })` declares a union and its two members inline, and both members were
             // reported "declared here and never used" — a type in an unevaluated context has no reader to use it.
@@ -210,6 +245,16 @@ impl Check for Unused {
                     "`%{name}` is declared here and never used",
                     name = fact.name
                 ),
+            );
+        }
+        if crate::probes::diagnostics() {
+            eprintln!(
+                "[unused] {} declaration(s), {} local(s): counted tokens {} ms | bodies {} ms | loop {} ms",
+                context.summary.declarations.len(),
+                locals,
+                counted,
+                walked,
+                started.elapsed().as_millis().saturating_sub(walked)
             );
         }
     }

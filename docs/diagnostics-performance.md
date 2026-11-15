@@ -336,8 +336,20 @@ pass and the memo is per node, so what is left is *distinct* inference rather th
 `context.type_of` about expressions no other rule asked about. That is the engine's own cost, not a cache that is
 missing, which is why §4's item 1 turned out to be already done as far as plumbing goes.
 
-`Unused` is the exception: 60 → 63 ms with inference off, so it is a walk, not an inference — the largest remaining
-inference-free rule.
+`Unused` is the exception: 60 → 63 ms with inference off, so it is a walk. Its own split, from a probe added for
+this (`[unused] … counted tokens 9 ms | bodies 18 ms | loop 25 ms` for 3 300 declarations and 1 500 locals):
+
+* the identifier counting is **9 ms** — one pass over the file's own tokens, already linear;
+* the bodies are **18 ms** — a walk of the declarations plus one coordinate crossing per body;
+* the loop is **25 ms** — it was 43 ms, and the whole of the difference was one line: every local's offset was
+  mapped into the *rendering* before asking "is it inside a body", and `reading_offset_of` is a **linear scan of the
+  reading's spans** (three of them, in fact). 1 500 locals × ~20 000 spans. The bodies are now mapped into the
+  **file's** coordinates instead — a few hundred crossings instead of one per declaration — and the scope question
+  still crosses for the locals that reach it, which is a handful. `Unused` is 60 → **43 ms**.
+
+The function definitions the three walk-heavy rules share (`argument-count`, `missing-return`, `unused`) are
+classified once per pass too, after the same argument as §6's node walk: the predicate is a cast and a declarator
+inspection, and three rules were running it over every declaration in the file.
 
 ### `ArgumentCount`'s one-time 186 ms
 
