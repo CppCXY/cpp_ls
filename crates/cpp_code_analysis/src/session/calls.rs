@@ -340,6 +340,15 @@ impl<F: FileProvider + Clone> Session<F> {
         });
         // **The environment a member's type is read in** — the class's parameters, the arguments the use wrote (or
         // the declaration's own defaults), and the class's own members, which is where a member alias lives.
+        if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+            eprintln!(
+                "[layout] class {head:?} arguments {arguments:?} as-written {:?} members {}",
+                as_written
+                    .as_ref()
+                    .map(|written| written.parameters.clone()),
+                list.members.len()
+            );
+        }
         let no_names: Vec<String> = Vec::new();
         let instantiation = Instantiation {
             parameters: as_written
@@ -528,9 +537,15 @@ impl<F: FileProvider + Clone> Session<F> {
             None => spelling.to_string(),
         };
         let spelled = spelled.trim();
+        if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+            eprintln!("[layout] depth {depth} size of {spelled:?}");
+        }
         if let Some(environment) = instantiation
             && mentions_a_parameter(spelled, environment.parameters)
         {
+            if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+                eprintln!("[layout]   still a parameter");
+            }
             return None;
         }
         if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelled) {
@@ -546,16 +561,47 @@ impl<F: FileProvider + Clone> Session<F> {
         {
             return self.the_size_of_a_type_in(view, &target, depth + 1, instantiation);
         }
+        // **A dependent type** — `typename allocator_traits<_Alloc>::template rebind_alloc<_Ty>`. Its owner is a
+        // class template, and the member is an alias whose own parameters are the use's arguments; resolving it is
+        // what turns a standard container's `_Alty` into a type this layer can size (or, for an empty allocator crop,
+        // into nothing at all). Asked before the template-id branch because the tail after the last `::` is a
+        // template-id too, and taking the head as a class would look up `rebind_alloc` as if it were one.
+        if let Some((owner, member, arguments)) = split_a_dependent_name(spelled) {
+            return self.the_size_of_a_dependent_type(view, &owner, &member, &arguments, depth);
+        }
         if let Some((head, arguments)) = crate::index::project::split_template_arguments(spelled) {
-            let Known::Yes(layout) =
-                self.the_layout_of_a_class_with(view, &head, &arguments, depth + 1)
-            else {
-                return None;
-            };
-            return layout
-                .unknown
-                .is_empty()
-                .then_some((layout.size, layout.alignment));
+            // **The arguments are read in the environment of the class being laid out.** `_Mypair`'s type is
+            // `_Compressed_pair<_Alty, _Scary_val>`, and both spellings are *member aliases of `std::vector`* — so
+            // they are resolved here, where that class's members are at hand, and `_Compressed_pair` is instantiated
+            // with what they name.
+            let resolved: Vec<String> = arguments
+                .iter()
+                .map(|argument| {
+                    self.the_spelling_through_the_member_aliases(argument, instantiation)
+                })
+                .collect();
+            match self.the_layout_of_a_class_with(view, &head, &resolved, depth + 1) {
+                Known::Yes(layout) => {
+                    return layout
+                        .unknown
+                        .is_empty()
+                        .then_some((layout.size, layout.alignment));
+                }
+                // **Not a class: an alias template**, whose fact holds the spelling it expands to
+                // (`_Rebind_alloc_t` is `typename allocator_traits<_Alloc>::template rebind_alloc<_Value_type>`).
+                Known::No | Known::Unknown(_) => {}
+            }
+            if let Some(target) = self.the_target_of_an_alias_template(&head, &resolved, &view.path)
+            {
+                if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+                    eprintln!("[layout]   alias template {head} -> {target}");
+                }
+                return self.the_size_of_a_type_in(view, &target, depth + 1, None);
+            }
+            if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+                eprintln!("[layout]   no class and no alias template for {head} with {resolved:?}");
+            }
+            return None;
         }
         // **A typedef is the type it names.** Real C decides its members through one — neovim's `file_buffer` has
         // `pos_T b_op_start`, `handle_T handle`, `memline_T b_ml` — so without this the layout of most real structs
@@ -575,6 +621,100 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some((nested.size, nested.alignment));
         }
         None
+    }
+
+    /// **A member type named through a class template instance** — `typename A<args>::template name<args2>`.
+    ///
+    /// The owner is instantiated by [`Session::members_of`] (which substitutes its parameters), and the member alias
+    /// it names carries its own parameters — `allocator_traits<…>::rebind_alloc<_Other>` is `allocator<_Other>` — so
+    /// the use's arguments are substituted into the target before it is sized.
+    fn the_size_of_a_dependent_type(
+        &self,
+        view: &FileView,
+        owner: &str,
+        member: &str,
+        arguments: &[String],
+        depth: usize,
+    ) -> Option<(usize, usize)> {
+        let Known::Yes(list) = self.members_of(view, owner) else {
+            return None;
+        };
+        let alias = list.members.iter().find(|candidate| {
+            candidate.fact.name == member
+                && candidate.fact.kind == crate::DeclKind::Type
+                && candidate.fact.type_of.is_some()
+        })?;
+        let written = alias.fact.type_of.as_deref()?;
+        let target = crate::sema::types::substituted_spelling_with_defaults(
+            written,
+            &alias.fact.parameters,
+            &alias.fact.parameter_defaults,
+            arguments,
+        );
+        self.the_size_of_a_type_in(view, &target, depth + 1, None)
+    }
+
+    /// **A spelling with the enclosing class's member aliases substituted into it** — `_Scary_val` becomes what
+    /// `std::vector` declares it to be, in the instantiation being laid out.
+    ///
+    /// One alias, and only when the **whole spelling** is its name. Textual replacement of a name *inside* a longer
+    /// spelling was measured and is not sound: the member aliases of a standard container name each other
+    /// (`_Val_types`, `_Alvbase_traits`, `size_type`), and substituting one after another expands the spelling without
+    /// bound — the trace printed megabytes for a single `std::vector<widget::Widget>`, splicing fragments of other
+    /// classes' aliases wherever their names happened to occur. A name is resolved where its scope is known, which is
+    /// the recursive class walk below, not a global text substitution.
+    fn the_spelling_through_the_member_aliases(
+        &self,
+        spelling: &str,
+        instantiation: Option<&Instantiation<'_>>,
+    ) -> String {
+        let Some(environment) = instantiation else {
+            return spelling.to_string();
+        };
+        let spelled = crate::sema::types::substituted_spelling_with_defaults(
+            spelling,
+            environment.parameters,
+            environment.defaults,
+            environment.arguments,
+        );
+        let Some(alias) = environment.members.iter().find(|member| {
+            member.fact.kind == crate::DeclKind::Type
+                && member.fact.name == spelled.trim()
+                && member.fact.parameter_list.is_none()
+        }) else {
+            return spelled;
+        };
+        match alias.fact.type_of.as_deref() {
+            Some(target) => crate::sema::types::substituted_spelling_with_defaults(
+                target,
+                environment.parameters,
+                environment.defaults,
+                environment.arguments,
+            ),
+            None => spelled,
+        }
+    }
+
+    /// **The target of an alias template applied to arguments** — `_Rebind_alloc_t<A, T>` is what its fact says,
+    /// substituted.
+    fn the_target_of_an_alias_template(
+        &self,
+        head: &str,
+        arguments: &[String],
+        path: &std::path::Path,
+    ) -> Option<String> {
+        let known = self.store.index().definition(head, path).value()?;
+        let written = known.fact.type_of.as_deref()?;
+        if known.fact.parameters.is_empty() {
+            return None;
+        }
+        let target = crate::sema::types::substituted_spelling_with_defaults(
+            written,
+            &known.fact.parameters,
+            &known.fact.parameter_defaults,
+            arguments,
+        );
+        (target != head).then_some(target)
     }
 
     /// **The members `GENERATED_BODY()` writes that a macro cannot** — `Super` and `ThisClass`.
@@ -823,10 +963,50 @@ pub(crate) struct Instantiation<'a> {
 
 /// Does a type spelling use one of these names as a **word**? _Ty2 matches _Ty2* and ector<_Ty2>; _Ty20 does
 /// not match _Ty2.
+/// **A type named through another type** — `typename A<args>::template name<args2>` is `(A<args>, name, [args2])`.
+///
+/// The `::` that matters is the last one at angle-bracket depth zero: `allocator_traits<allocator<int>>::rebind_alloc`
+/// has three `:` pairs, and the last is the separator while the `std::`-shaped prefixes belong to the owner. Only a
+/// name whose **owner is an instantiation** is a dependent type here; `ns::Widget` is a qualified name, which the
+/// ordinary lookups already answer.
+fn split_a_dependent_name(spelling: &str) -> Option<(String, String, Vec<String>)> {
+    let trimmed = spelling.trim().trim_start_matches("typename ").trim();
+    let (owner, tail) = split_at_the_last_qualifier(trimmed)?;
+    if !owner.contains('<') {
+        return None;
+    }
+    let tail = tail.trim().trim_start_matches("template ").trim();
+    if tail.is_empty() {
+        return None;
+    }
+    match crate::index::project::split_template_arguments(tail) {
+        Some((member, arguments)) => Some((owner.to_string(), member, arguments)),
+        None => Some((owner.to_string(), tail.to_string(), Vec::new())),
+    }
+}
+
+/// The last `::` outside angle brackets, split into what is on either side.
+fn split_at_the_last_qualifier(text: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut at = None;
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 && bytes.get(index + 1) == Some(&b':') => at = Some(index),
+            _ => {}
+        }
+    }
+    let at = at?;
+    Some((&text[..at], &text[at + 2..]))
+}
+
 fn mentions_a_parameter(spelling: &str, parameters: &[String]) -> bool {
     if parameters.is_empty() {
         return false;
     }
+
     spelling
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .any(|word| parameters.iter().any(|parameter| parameter == word))

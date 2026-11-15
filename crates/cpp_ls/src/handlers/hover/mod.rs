@@ -1713,8 +1713,21 @@ fn declaration_markdown(
     // **What the class costs in memory**, which is the question `sizeof` answers and no reading answers for the
     // offsets — the shape rust-analyzer puts on a struct's hover. Shown only when every data member could be sized:
     // the numbers beside a partial layout would be a guess, and a guess about offsets is worse than no answer.
+    //
+    // **The spelling asked about is the one the reader wrote.** `fact.name` is the declaration's own (`vector`), and
+    // the size of `std::vector` — a class template with no arguments — is not a question with an answer: the
+    // instantiation's arguments are what make its members sizes, so a card that asked by name could only ever
+    // decline. Measured: `std::vector<widget::Widget>` reported "not computed" while the arguments were right there
+    // in `subject`.
     if matches!(fact.kind, DeclKind::Type)
-        && let Known::Yes(layout) = session.the_layout_of(view, &fact.name)
+        && let Known::Yes(layout) = session.the_layout_of(
+            view,
+            if subject.is_empty() {
+                fact.name.as_str()
+            } else {
+                subject
+            },
+        )
     {
         if layout.unknown.is_empty() {
             out.push_str(&format!("\n\n{}", layout.describe(&qualified)));

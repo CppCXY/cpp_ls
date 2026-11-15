@@ -331,6 +331,36 @@ struct Use3 {
     assert_eq!(layout.alignment, 8);
 }
 
+/// **An alias template is what it names** — `template <class T> using Slot = Blob;` makes `Slot<int>` a `Blob`, and a
+/// class template's *instance* is not the only spelling a member's type takes.
+#[test]
+fn a_member_whose_type_is_an_alias_template_is_sized() {
+    let layout = layout(
+        "\
+struct Blob {
+    int first;
+    int second;
+};
+template <class T>
+using Slot = Blob;
+struct Use6 {
+    Slot<double> slot;
+    int tail;
+};
+",
+        "Use6",
+    );
+    assert_eq!(layout.size, 12);
+    assert_eq!(
+        layout
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.offset))
+            .collect::<Vec<_>>(),
+        [("slot", 0), ("tail", 8)]
+    );
+}
+
 /// **A base that is a template *parameter* costs nothing when the argument is empty** — the `_Compressed_pair<_Ty1,
 /// _Ty2>` shape, which is what a standard container is built on.
 #[test]
