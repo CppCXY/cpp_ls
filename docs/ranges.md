@@ -288,6 +288,12 @@ Three tests now pin the shape from three directions: the same-file functor
 (`an_adaptor_behind_a_namespace_alias_deduces_its_operator`), and the parameter-naming return
 (`an_auto_returning_operator_naming_its_argument_is_deduced`).
 
+**And one step further, which is not done.** A return that puts an *alias template* between the parameter and the
+argument — `<ranges>`'s own `_Range_closure<_Filter_fn, decay_t<_Pr>>` — is deduced as
+`range_closure<_Filter_fn, decay_t<int>>`: the parameter is substituted, the alias is not resolved. Measured as a
+test that is not committed (it would be red), and the next step for this stage: resolve an alias template **inside**
+a deduced spelling, which is the same walk `a_trait_alias_resolved` already makes when the whole spelling is one.
+
 **What is still open in this stage:** the `<ranges>` fixture itself. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
