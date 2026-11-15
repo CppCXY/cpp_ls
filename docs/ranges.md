@@ -114,8 +114,30 @@ CompoundStat    (the body of `namespace ranges`)
 and swallowed the rest of the file, including the alias at 7666. The last 7 141 bytes of the rendering (the `_Zip_fn`
 block to EOF) parse correctly on their own, with the alias in `std`, which is what says the swallowing starts earlier.
 
-So the next step is a parser bug and not a ranges one: **which `template … requires …` in the tail of `<ranges>` is
-left open**, and why. It is the last thing between the niebloid and a typed pipeline.
+**A reproduction, and how far it is shrunk.** Extracting `lazy_split_view`'s declaration (10 294 bytes, offsets
+108 422–118 716 of the rendering's `<ranges>` body) and wrapping it as
+
+```cpp
+namespace std { namespace ranges {
+    <the declaration>
+}; } }            // the closers the file has
+namespace probe { int marker; }
+```
+
+parses with `marker` in **`std::probe`** — the declaration swallows its own closers, so one scope is left open. That
+is the bug in 10 KB. Shrinking it further, with the same wrapper and the same question:
+
+* the class's first 8 470 bytes plus `};` are **clean** (marker at global scope);
+* adding the two constructors after them — the `constexpr lazy_split_view(_Vw, _Pat) noexcept(…) : _Range(…), _Pattern(…)
+  {}` pair, the second one `template <input_range _Rng> requires …` — makes it nested;
+* either constructor alone is clean, and so are the two constructors in a synthetic class;
+* the whole class head is needed for the flip: 5 of its 6 top-level parts plus the pair stay clean, 6 plus the pair
+  is nested.
+
+So the trigger is a *combination* — the full `lazy_split_view` head (its base clause `public _Join_view_base<…>`, its
+`_Iterator`/`_Sentinel` nested templates and their `requires` clauses) with the two constructors after it. The next
+step is to halve the head with the same harness until the combination is a paragraph, then fix the parser: this is a
+parser bug and not a ranges one, and it is the last thing between the niebloid and a typed pipeline.
 
 ## What it answers today
 
