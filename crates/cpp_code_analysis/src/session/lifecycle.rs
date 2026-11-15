@@ -51,6 +51,21 @@ impl<F: FileProvider + Clone> Session<F> {
             .database
             .as_ref()
             .map(|database| &database.commands);
+        // **The project's own statement of its standard, when the configuration file has none.**
+        //
+        // This is where the *seed* comes from: `compilation_environment` below builds the macro table every file's
+        // cook starts from, and without a standard that table has no `__cplusplus` and no `_MSVC_LANG` — so MSVC's
+        // headers, which put everything inside `#if _HAS_CXX20`, render as their fallback stub. Measured on a
+        // `<ranges>` fixture whose only database entry says `/std:c++latest`: the cook of the header produced **12
+        // bytes** (`#pragma once`) and zero declarations, and `std::views` did not exist — while the same header
+        // cooked with the standard present was **1.8 MB and 22 345 declarations**. A project whose entries disagree
+        // answers `None` (see `CompileCommands::a_unanimous_standard`), and the configuration file still wins.
+        let mut config = config;
+        if config.standard.is_none()
+            && let Some(standard) = database.and_then(|commands| commands.a_unanimous_standard())
+        {
+            config.standard = Some(standard.into());
+        }
         let documents = files.overlay.clone();
         // **A CUDA project's scan takes `.cu` and `.cuh`**, and a project that is not CUDA does not: the engine's own
         // list is what a C++ project is made of, and a `.cu` in one is either a vendored file or an accident. With

@@ -57,10 +57,28 @@ Measured after both, on the fixture whose `compile_commands.json` names `main.cp
 std::views::filter        NotDeclaredHere  ->  filter variable in std::ranges::views type `_Filter_fn`
 ```
 
-and `std::views::transform` is still `NotDeclaredHere`, which is the next thing to look at: the header declares it at
-line 2504 in the same shape as `filter` at 2049 (`_EXPORT_STD inline constexpr _X_fn name;`), the raw summary has
-sixteen variable facts in `views` and `transform` is not one of them, so the question is what the cook does with that
-one declaration rather than what the pipeline does with it.
+**The seed needed it too.** A per-file configuration was not enough: `compilation_environment` builds the macro table
+every cook starts from, and that table is project-wide — so a header's *own* config could be right while the seed it
+was rendered against had no `__cplusplus` at all. Measured by dumping the live session's rendering of `<ranges>`:
+**12 bytes** before the seed carried the standard, **217 875 bytes** after. With it:
+
+```text
+std::views:: adaptors  20 item(s)  (all, as_const, common, counted, drop, ...)
+hover on transform     `inline constexpr _Transform_fn transform` - `std::ranges::views::transform`, a variable of
+                       type `_Transform_fn`, declared at ranges:2504:52   (was NotDeclaredHere)
+```
+
+The raw reading of `<ranges>` is still thin — parsing the header's own text gives 612 declarations and loses
+everything from about line 2490 (`transform`, `take_view`, `drop_view`, `zip_view`, `common_view` are all absent),
+while its **rendering** parses to 22 345 declarations with `transform` at `std::ranges::views`. That is the
+preprocessor doing its job: the raw text is full of `_STD_BEGIN`/`_RANGES`/`_EXPORT_STD`, and only the rendering is
+the program a compiler reads. So the declaration, the class (`_Transform_fn` with its two `operator()`) and
+`std::views` all resolve now.
+
+**What is left is the type of the niebloid and the call through it.** `typeDefinition` on `transform` answers **0
+locations**, so the variable's type `_Transform_fn` is not resolved from the importing file's context even though the
+hover card names it, and `type_of(std::views::transform)` answers `UnknownType`. That is step (3) of the plan: typing
+a variable whose type is a class, and calling its `operator()` — the two things a niebloid is made of.
 
 ## What it answers today
 

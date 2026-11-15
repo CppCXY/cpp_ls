@@ -91,6 +91,47 @@ pub(crate) fn the_projects_flags_win_over_the_databases_and_extra_args_add_to_th
     );
 }
 
+/// **The standard a database states is the project's own, so the seed carries it** — and a project whose entries
+/// disagree is not one standard.
+///
+/// The seed is the macro table every cook starts from. Without a standard it has no `__cplusplus` and no
+/// `_MSVC_LANG`, and MSVC's headers — which put everything inside `#if _HAS_CXX20` — render as their fallback stub.
+/// Measured on a `<ranges>` fixture: the cook of the header was **12 bytes** (`#pragma once`, zero declarations) and
+/// `std::views` did not exist, while the rendering with the standard present was **1.8 MB and 22 345 declarations**.
+#[test]
+pub(crate) fn the_database_states_the_projects_standard_and_the_seed_carries_it() {
+    let project = Project::new("config-standard-seed");
+    project.write("main.cpp", "int main() { return 0; }\n");
+    let root = project.root.to_string_lossy().replace('\\', "/");
+    // MSVC's spelling, which is what a CMake MSVC build writes.
+    project.write(
+        "compile_commands.json",
+        &format!(
+            "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"cl.exe\", \"/std:c++latest\", \"/c\", \"{root}/main.cpp\"]}}\n]\n"
+        ),
+    );
+
+    let documents = OpenDocuments::new();
+    let providers = SessionFiles::new(documents, DiskFiles);
+    let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+    assert_eq!(
+        session.config().standard.as_deref(),
+        Some("c++latest"),
+        "the session's own configuration — the one the seed is built from — states the database's standard"
+    );
+
+    // And a header, which no entry names, is read with it too.
+    assert_eq!(
+        session
+            .config_for(&project.root.join("some_header.hpp"))
+            .standard
+            .as_deref(),
+        Some("c++latest"),
+        "a file with no command inherits the project's one standard"
+    );
+}
+
 #[test]
 pub(crate) fn removing_and_adding_a_flag_is_one_pass_in_that_order() {
     // `remove_args` drops from the list that won, and `extra_args` appends to it — removing *first* is what
