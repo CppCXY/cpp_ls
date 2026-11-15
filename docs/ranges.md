@@ -335,8 +335,18 @@ all. Two measurements from it:
   even that message: the deduction is then **not reached at all**, which moves the question one step earlier — to
   whether `members_of`/`member_fact` answer for `_Filter_fn` in the live session, and with what parameter counts.
 
-**What is still open in this stage:** the `<ranges>` fixture itself — the next measurement is `members_of` for
-`_Filter_fn` in the live session, printed the same way. There the callee is `std::views::filter`, and
+**What is still open in this stage:** the `<ranges>` fixture itself. Two leads from the live trace, both concrete:
+
+* `members_of` **is** answered there:
+  `[arity] _Filter_fn wanted "operator()" arity 1: 2 member(s) ["operator() count=Some(2)", "operator() count=Some(1)"]`
+  — so the overload selection has the right input and picks the one-argument form.
+* the server reads `<ranges>` **as part of a program**: its own log (`%LOCALAPPDATA%\cpp_ls\logs\<project>.log`)
+  says `read a program as one piece: 96 file(s), 374 683 token(s), 0 error(s)`. That is a *different* reading from
+  the per-file rendering this round's offsets were being translated against, and it is the strongest candidate for
+  why a fact's offset (`80 164`) finds no `operator()` in the file's tree: the fact may be an offset of the *unit*,
+  not of the file.
+
+That is the next measurement: which reading the fact came from, and what tree its offset belongs to. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
