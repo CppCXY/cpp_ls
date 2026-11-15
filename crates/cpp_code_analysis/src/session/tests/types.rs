@@ -984,3 +984,122 @@ pub(crate) fn a_call_of_an_object_deduces_an_auto_returning_operator() {
         "the operator's body returns `closure`, and `auto` is not a type"
     );
 }
+
+/// **The same deduction across a file boundary** — the shape `<ranges>` actually has.
+///
+/// The unit test above keeps the functor and its call in one file; a range adaptor is a class in a *header* and the
+/// call is in the buffer. `operator_returns_of` reads the member through `member_fact` and then the body through the
+/// `declaring` closure, and either step can lose the class when it lives in another file.
+#[test]
+pub(crate) fn a_call_of_an_object_in_another_file_deduces_the_operator() {
+    let header = "struct closure { int value; };\n\
+                  struct functor {\n\
+                  \x20   auto operator()(int x) const { return closure{x}; }\n\
+                  };\n\
+                  extern functor make_one;\n";
+    let source = "#include \"a.hpp\"\n\
+                  void use() {\n\
+                  \x20   auto c = make_one(1);\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.hpp", header)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("an-auto-returning-operator-across-files", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = source.find("make_one(1)").expect("the fixture") + "make_one".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`make_one(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "closure",
+        "the operator is declared in the header and its body returns `closure`"
+    );
+}
+
+/// **The `<ranges>` shape exactly**: a class in a header, a namespace alias, and `inline constexpr` adaptor.
+///
+/// This is the fixture that failed end to end — `items | std::views::filter(…)` had no type while the same call
+/// through an unqualified name of a local functor deduced correctly. Everything the real header does is here:
+/// `std::views` is a namespace **alias** for `std::ranges::views`, the adaptor is an `inline constexpr` variable
+/// whose `operator()` returns `auto`, and the call is written through the alias.
+#[test]
+pub(crate) fn an_adaptor_behind_a_namespace_alias_deduces_its_operator() {
+    let header = "namespace std {\n\
+                  namespace ranges {\n\
+                  namespace views {\n\
+                  struct closure { int value; };\n\
+                  struct _Filter_fn {\n\
+                  \x20   template <class Pred>\n\
+                  \x20   auto operator()(Pred&& pred) const { return closure{1}; }\n\
+                  };\n\
+                  inline constexpr _Filter_fn filter;\n\
+                  }\n\
+                  }\n\
+                  namespace views = ranges::views;\n\
+                  }\n";
+    let source = "#include \"a.hpp\"\n\
+                  void use() {\n\
+                  \x20   auto c = std::views::filter(1);\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.hpp", header)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("an-adaptor-behind-an-alias", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at =
+        source.find("std::views::filter(1)").expect("the fixture") + "std::views::filter".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`std::views::filter(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "closure",
+        "the adaptor's `operator()` returns `closure`, through a namespace alias and a header"
+    );
+}
+
+/// **The operator's return depends on the operator's own template parameter** — `<ranges>`'s exact shape.
+///
+/// `_Filter_fn::operator()` returns `_Range_closure<_Filter_fn, decay_t<_Pr>>{…}`, so the body's expression names
+/// the *argument's* type. A deduction that does not know what the call passed cannot spell it, and the call stays
+/// unknown. This asserts the answer the argument decides.
+#[test]
+pub(crate) fn an_auto_returning_operator_naming_its_argument_is_deduced() {
+    let text = "template <class T> struct wrapper { T value; };\n\
+                struct functor {\n\
+                \x20   template <class Pred>\n\
+                \x20   auto operator()(Pred&& pred) const { return wrapper<Pred>{}; }\n\
+                };\n\
+                functor make_one;\n\
+                void use() {\n\
+                \x20   auto c = make_one(1);\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-operator-naming-its-argument", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("make_one(1)").expect("the fixture") + "make_one".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`make_one(1)` must have a type: {typed:?}");
+    };
+    assert_eq!(
+        typed.type_of, "wrapper<int>",
+        "the body returns `wrapper<Pred>` and the call passed an `int`"
+    );
+}

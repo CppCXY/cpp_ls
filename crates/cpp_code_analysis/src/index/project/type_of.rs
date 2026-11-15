@@ -1651,6 +1651,31 @@ pub(crate) fn operator_returns_of(
     class_type: &Type,
     operator: &str,
 ) -> Option<String> {
+    operator_returns_of_with_arguments(
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        class_type,
+        operator,
+        &[],
+    )
+}
+
+/// [`operator_returns_of`] with **what the call passed**, which a member whose return type is `auto` needs: the
+/// body may name the operator's own template parameters (`wrapper<Pred>`), and only the argument types say what
+/// they stand for. See [`deduced_returns_of_the_member`].
+pub(crate) fn operator_returns_of_with_arguments(
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class_type: &Type,
+    operator: &str,
+    argument_types: &[crate::sema::types::Type],
+) -> Option<String> {
     let class = class_type.class_name()?.to_string();
 
     // **A name that is an alias is not a class, and asking for its operator parses a file.**
@@ -1765,6 +1790,7 @@ pub(crate) fn operator_returns_of(
                     member_file.as_path(),
                     parameter_names,
                     &written_arguments,
+                    argument_types,
                 )
             {
                 return Some(deduced);
@@ -1865,6 +1891,7 @@ fn deduced_returns_of_the_member(
     file: &Path,
     parameter_names: &[String],
     written_arguments: &[String],
+    argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
     // **The fact's offset is a *file* offset; the tree speaks the *reading*.** The same translation the `Indexed`
     // arm of `what_a_call_has_in` makes, for the same reason: `name_range` comes from the index and counts the
@@ -1921,17 +1948,37 @@ fn deduced_returns_of_the_member(
             borrowed
         }
     };
-    let arguments: Vec<crate::sema::types::Type> = written_arguments
-        .iter()
-        .map(|argument| crate::sema::types::parse_type_spelling(argument))
-        .collect();
-    let substitutions = crate::sema::types::TypeSubstitutions::new(parameter_names, &arguments);
-    crate::sema::declarations::deduced_returns_of_substituted(
+    // **The operator's own template parameters come from what the call passed** — `_Pr` in
+    // `_Range_closure<_Filter_fn, decay_t<_Pr>>` is the argument's type, and without it the deduced spelling keeps
+    // the parameter's name (`wrapper<Pred>` for a call of `make_one(1)`, measured). The class's arguments are
+    // applied to the deduced spelling afterwards, because `TypeSubstitutions` pairs one list positionally and the
+    // two lists are written with different names.
+    let deduced_from_the_call = deduce_the_parameters(
+        &fact.parameters,
+        fact.parameter_list.as_deref(),
+        argument_types,
+    );
+    let substitutions =
+        crate::sema::types::TypeSubstitutions::new(&fact.parameters, &deduced_from_the_call);
+    let deduced = crate::sema::declarations::deduced_returns_of_substituted(
         &declared_in.root,
         binding,
         &substitutions,
-        &arguments,
-    )
+        argument_types,
+    )?;
+    // **The spelling the body wrote still carries the operator's parameter names.** The deduction answers with
+    // what the file wrote (`wrapper<Pred>` for `return wrapper<Pred>{}`), so the argument types are substituted into
+    // that spelling too — the parameter's name on its own is not a type any reader can use.
+    let as_written: Vec<String> = deduced_from_the_call
+        .iter()
+        .map(|argument| argument.to_string())
+        .collect();
+    let deduced = crate::sema::types::substituted_spelling(&deduced, &fact.parameters, &as_written);
+    Some(crate::sema::types::substituted_spelling(
+        &deduced,
+        parameter_names,
+        written_arguments,
+    ))
 }
 
 /// **The operand of a `co_await`, when this node is one.**

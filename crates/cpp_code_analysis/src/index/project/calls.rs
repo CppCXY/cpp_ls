@@ -363,7 +363,7 @@ pub(crate) fn type_of_a_call(
             memo, shapes, index, declaring, scopes, root, path, &callee, 0,
         )
         && matches!(callee_type, Type::Named { .. })
-        && let Some(returns) = operator_returns_of(
+        && let Some(returns) = operator_returns_of_with_arguments(
             index,
             declaring,
             scopes,
@@ -371,6 +371,7 @@ pub(crate) fn type_of_a_call(
             path,
             &callee_type,
             "operator()",
+            &argument_types,
         )
     {
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));

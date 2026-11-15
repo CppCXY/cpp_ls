@@ -269,6 +269,25 @@ closure, finds the operator's declaration and calls `deduced_returns_of_substitu
 The test is `a_call_of_an_object_deduces_an_auto_returning_operator` in `session/tests/types.rs`; it failed with
 `Unknown(UnknownType("make_one(1)"))` before this change and asserts `closure` after it.
 
+**The argument's type is part of the answer.** `_Filter_fn::operator()` returns
+`_Range_closure<_Filter_fn, decay_t<_Pr>>`, so the body's spelling names the *argument's* type, and a deduction that
+does not know what the call passed answers `wrapper<Pred>` — measured, and a red test before this step. Two things
+were needed:
+
+* `operator_returns_of` gained a sibling, `operator_returns_of_with_arguments`, which takes the call's argument
+  types; the old name delegates with an empty list, so the six other call sites are untouched, and the object arm in
+  `calls.rs` is the one that passes them.
+* the deduced spelling is then substituted **twice**: the operator's own parameters from the argument types
+  (`deduce_the_parameters` with the fact's written parameter list), and the class's from the type the call was made
+  on. The deduction answers with what the file wrote, so the first substitution is what turns `wrapper<Pred>` into
+  `wrapper<int>`.
+
+Three tests now pin the shape from three directions: the same-file functor
+(`a_call_of_an_object_deduces_an_auto_returning_operator`), the header-and-`extern` version
+(`a_call_of_an_object_in_another_file_deduces_the_operator`), the namespace-alias-and-`inline constexpr` version
+(`an_adaptor_behind_a_namespace_alias_deduces_its_operator`), and the parameter-naming return
+(`an_auto_returning_operator_naming_its_argument_is_deduced`).
+
 **What is still open in this stage:** the `<ranges>` fixture itself. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
