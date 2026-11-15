@@ -21,6 +21,23 @@ int main() {
 }
 ```
 
+## First check the standard, not the machinery
+
+Before any of this is worth debugging, the file has to be a **C++20** translation unit: MSVC's whole `<ranges>` sits
+inside `#if _HAS_CXX20`, and when the configuration does not supply C++20 the *cooked rendering of the header is the
+fallback stub* — measured with `CPPLS_DUMP_RENDERING_DIR` on a project with no compile database:
+
+```text
+#pragma once
+_Pragma("message( ... \"warning \" \"STL4038\" \": \" \"The contents of <ranges> are available only with C++20 or
+later.\" )")static_assert(true,"");
+```
+
+206 bytes. There is no `std::views` in that program, so `NotDeclaredHere("std::views")` was **right**, and a project
+without `/std:c++20` (MSVC's own default is C++14) cannot use `<ranges>` — the analysis is reporting what the
+compiler would. A fixture for this work therefore needs a compile-database entry with `/std:c++latest` (or
+`[compile] standard = "c++23"`), and that is the first thing to check before reading any of the numbers below.
+
 ## What it answers today
 
 ```text
