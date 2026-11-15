@@ -684,6 +684,10 @@ impl LanguageConfig {
             .trim()
             .strip_prefix("--std=")
             .or_else(|| flag.trim().strip_prefix("-std="))
+            // **MSVC's spelling**: `/std:c++latest`, `/std:c++20`. A compile database on Windows holds this form and
+            // nothing else, so a reader that only knew `-std=` never saw the language a project was built as.
+            .or_else(|| flag.trim().strip_prefix("/std:"))
+            .or_else(|| flag.trim().strip_prefix("-std:"))
             .unwrap_or_else(|| flag.trim());
         Self::from_standard_spelling(spelling)
     }

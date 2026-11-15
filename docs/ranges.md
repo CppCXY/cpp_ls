@@ -35,8 +35,32 @@ later.\" )")static_assert(true,"");
 
 206 bytes. There is no `std::views` in that program, so `NotDeclaredHere("std::views")` was **right**, and a project
 without `/std:c++20` (MSVC's own default is C++14) cannot use `<ranges>` — the analysis is reporting what the
-compiler would. A fixture for this work therefore needs a compile-database entry with `/std:c++latest` (or
-`[compile] standard = "c++23"`), and that is the first thing to check before reading any of the numbers below.
+compiler would.
+
+**Two defects were behind that, and both are fixed.**
+
+1. **The compile database's standard was never read when it was spelled MSVC's way.** `config_from_arguments` knew
+   `-std=` and not `/std:`, and `LanguageConfig::from_flag` had the same gap — so a CMake MSVC project, whose every
+   entry says `/std:c++latest`, was analysed as the compiler's default. `cplusplus_value` also had no number for
+   `latest`, which is the word MSVC actually writes. Both are read now, and `c++latest` means `202302L` — the newest
+   *settled* value the table has.
+2. **A header with no command of its own had no standard.** The measured consequence is the 12-byte stub above: the
+   *project* stated C++20 in its database, and `<ranges>` — a system header no entry names — was cooked with no
+   standard at all. A file with no command now inherits the project's standard **when the entries agree**
+   (`CompileCommands::a_unanimous_standard`); a project whose entries disagree keeps answering `None`, because then a
+   header really is built two ways.
+
+Measured after both, on the fixture whose `compile_commands.json` names `main.cpp` with `/std:c++latest`:
+
+```text
+<ranges> rendering        12 bytes  ->  217 875 bytes (live session) / 1 803 132 (cooked as its own root)
+std::views::filter        NotDeclaredHere  ->  filter variable in std::ranges::views type `_Filter_fn`
+```
+
+and `std::views::transform` is still `NotDeclaredHere`, which is the next thing to look at: the header declares it at
+line 2504 in the same shape as `filter` at 2049 (`_EXPORT_STD inline constexpr _X_fn name;`), the raw summary has
+sixteen variable facts in `views` and `transform` is not one of them, so the question is what the cook does with that
+one declaration rather than what the pipeline does with it.
 
 ## What it answers today
 

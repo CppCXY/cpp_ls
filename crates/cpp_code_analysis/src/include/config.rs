@@ -478,6 +478,23 @@ impl CompilerConfig {
             }
         }
 
+        // **A file with no command of its own inherits the project's standard, when the project states exactly one.**
+        //
+        // A header has no translation unit of its own, and the standard is what decides which half of every guarded
+        // header exists. Measured on a `<ranges>` fixture whose only database entry is `... /std:c++latest ...` for
+        // `main.cpp`: `<ranges>`'s config had no command, so no standard, so `_HAS_CXX20` was false and the cooked
+        // rendering of the header was the **12-byte** `#pragma once` stub — `std::views` did not exist and every
+        // pipeline answered `UnknownType`. The same rule answers `None` for a project whose entries disagree, where
+        // a header really is built two ways.
+        if config.standard.is_none()
+            && let Some(standard) = self
+                .database
+                .as_ref()
+                .and_then(|database| database.a_unanimous_standard())
+        {
+            config.standard = Some(standard.into());
+        }
+
         ahead.extend(config.include_paths);
         config.include_paths = ahead;
         config
@@ -757,6 +774,22 @@ pub fn config_from_arguments(
             }
         } else if let Some(rest) = argument.strip_prefix("-std=") {
             config.standard = Some(rest.into());
+        } else if let Some(rest) = argument
+            .strip_prefix("/std:")
+            .or_else(|| argument.strip_prefix("-std:"))
+        {
+            // **MSVC writes the standard with a slash and a colon** — `/std:c++latest`, `/std:c++20` — and this
+            // reader only knew `-std=`, so a project whose *only* statement of its standard is the compile database
+            // (every CMake MSVC build, and every `cl.exe` command line) was analysed as the compiler's default.
+            // Measured on a `<ranges>` fixture with `... /std:c++latest ...` in its `compile_commands.json`: the
+            // header's whole body is inside `#if _HAS_CXX20`, the standard never reached `__cplusplus`, and the
+            // cooked rendering of `<ranges>` was the **206-byte** `STL4038` fallback — `std::views` did not exist in
+            // the program the analysis read, so every range pipeline answered `UnknownType`.
+            config.standard = Some(rest.into());
+        } else if argument == "/Zc:__cplusplus" {
+            // The switch that makes MSVC report a true `__cplusplus` at all. This layer always defines the macro
+            // from the standard, so there is nothing to do beyond not mistaking the spelling for a source file.
+            continue;
         } else if argument == "-freflection" {
             // **GCC 16`s reflection switch**, and the one flag this layer needs for `<meta>`: see
             // [`CompilerConfig::reflection`].
@@ -861,6 +894,32 @@ impl CompileCommands {
 
     pub fn len(&self) -> usize {
         self.commands.len()
+    }
+
+    /// **The one standard every command that states one agrees on**, or None.
+    ///
+    /// A header has no translation unit of its own, and the standard is what decides which half of every guarded
+    /// header exists. Measured on a <ranges> fixture whose only database entry is
+    /// \... /std:c++latest ...\ for \main.cpp\: \<ranges>\'s own config had no command, so it had no standard,
+    /// so \_HAS_CXX20\ was false and the cooked rendering of the header was the **12-byte** \#pragma once\ stub —
+    /// the pipeline's type could never be inferred. A project where the entries disagree is one where the header
+    /// really is built two ways, and then this answers \None\ rather than picking one.
+    pub fn a_unanimous_standard(&self) -> Option<&str> {
+        let mut found: Option<&str> = None;
+        for command in &self.commands {
+            let standard = command.arguments.iter().find_map(|argument| {
+                argument
+                    .strip_prefix("/std:")
+                    .or_else(|| argument.strip_prefix("-std="))
+                    .or_else(|| argument.strip_prefix("-std:"))
+            })?;
+            match found {
+                None => found = Some(standard),
+                Some(held) if held == standard => {}
+                Some(_) => return None,
+            }
+        }
+        found
     }
 
     /// The command for a file, if the database has one.
@@ -1273,6 +1332,13 @@ fn cplusplus_value(standard: &str) -> Option<&'static str> {
         "17" => "201703L",
         "20" | "2a" => "202002L",
         "23" | "2b" => "202302L",
+        // **MSVC's "newest" writes no year at all.** `/std:c++latest` is what a CMake MSVC build writes, and the
+        // table answered `None` for it — so the answer to every `#if _HAS_CXX20` was `Unknown`, and a header's whole
+        // C++20 half went unread. `202302L` is the newest *settled* value this table knows, which is the one
+        // `c++23` gets; MSVC itself reports `202004L` for `latest` on 19.29 and higher with `/Zc:__cplusplus`, and a
+        // header gated on `>= 202002L` is the question this has to answer. Measured on `<ranges>`: the rendering
+        // went from the 206-byte fallback to the header's real body once this arm existed.
+        "latest" | "preview" => "202302L",
         // **C++26 is settled for this compiler**: `g++ 16.2 -std=c++26 -dM -E` says `202400L`, and libstdc++`s
         // `<meta>` is gated on `__cplusplus > 202302L` — absent was a branch the analysis could not decide.
         "26" | "2c" => "202400L",
@@ -1392,6 +1458,62 @@ mod tests {
                 "{standard} says nothing about `__cplusplus`"
             );
         }
+    }
+
+    /// **MSVC writes the standard with a slash and a colon**, and a compile database on Windows holds nothing else.
+    ///
+    /// Measured on a `<ranges>` fixture whose only entry is `... /std:c++latest ...`: the flag was not read, the
+    /// standard stayed unset, `_HAS_CXX20` answered false, and the cooked rendering of `<ranges>` was the 12-byte
+    /// `#pragma once` stub — `std::views` did not exist and every pipeline answered `UnknownType`.
+    #[test]
+    fn the_msvc_spelling_of_the_standard_is_read() {
+        for spelling in ["/std:c++latest", "/std:c++20", "-std:c++17"] {
+            let arguments = vec![spelling.to_string()];
+            let config = config_from_arguments(&arguments, None);
+            assert!(config.standard.is_some(), "{spelling} states a standard");
+        }
+
+        let arguments = vec!["/std:c++latest".to_string()];
+        let config = config_from_arguments(&arguments, None);
+        assert_eq!(config.standard.as_deref(), Some("c++latest"));
+        let macros = predefined_macros_of(&config);
+        assert_eq!(
+            macros
+                .iter()
+                .find(|entry| &*entry.name == "__cplusplus")
+                .and_then(|entry| entry.value.as_deref()),
+            Some("202302L"),
+            "`c++latest` is a number, not silence: every `#if _HAS_CXX20` depends on it"
+        );
+    }
+
+    /// **A header with no command of its own inherits a unanimous project standard** — and only a unanimous one.
+    #[test]
+    fn a_header_inherits_a_unanimous_standard_and_not_a_split_one() {
+        let command = |file: &str, standard: &str| CompileCommand {
+            directory: None,
+            file: PathBuf::from(file),
+            arguments: vec![format!("/std:{standard}"), "/c".to_string()],
+        };
+
+        let unanimous = CompileCommands {
+            commands: vec![
+                command("/p/a.cpp", "c++latest"),
+                command("/p/b.cpp", "c++latest"),
+            ],
+            malformed: 0,
+        };
+        assert_eq!(unanimous.a_unanimous_standard(), Some("c++latest"));
+
+        let split = CompileCommands {
+            commands: vec![command("/p/a.cpp", "c++17"), command("/p/b.cpp", "c++20")],
+            malformed: 0,
+        };
+        assert_eq!(
+            split.a_unanimous_standard(),
+            None,
+            "a header built two ways has no one standard to inherit"
+        );
     }
 
     /// MSVC's headers ask the same question under a different name.
