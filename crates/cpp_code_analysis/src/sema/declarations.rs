@@ -6287,6 +6287,40 @@ public:
         assert_eq!(index.get("g"), None, "a name no declaration mentions");
     }
 
+    /// **A declaration whose initializer contains a lambda is a variable.**
+    ///
+    /// The lambda carries a parameter list and a body, which is the shape of a *function definition* — the scope
+    /// builder asked "does this declarator contain a parameter list" of its whole subtree, and answered yes for the
+    /// lambda's. Measured on a `<ranges>` pipeline: `auto ids = items | std::views::filter([](const Item& item)
+    /// { return item.id > 0; });` recorded `ids` as a **function** with no parameters, so its hover was `ids(…)`
+    /// and its type could never be asked — every downstream question about a pipeline failed for that reason, not
+    /// because of anything the range machinery does.
+    #[test]
+    fn a_lambda_in_an_initializer_does_not_make_the_declaration_a_function() {
+        let source = "\
+auto ids = items | filter([](const Item& item) { return item.id > 0; });
+void f(int value);
+";
+        let (facts, _) = facts(source);
+        let kind_of = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .map(|fact| fact.kind)
+        };
+
+        assert_eq!(
+            kind_of("ids"),
+            Some(DeclKind::Variable),
+            "an initializer is an expression, and the lambda's parameters are its own"
+        );
+        assert_eq!(
+            kind_of("f"),
+            Some(DeclKind::Function),
+            "and a real function declarator is still a function"
+        );
+    }
+
     #[test]
     fn a_declaration_kind_survives_the_walk() {
         let (facts, _) = facts("struct C { int member; void method(); };\nnamespace ns { }\n");

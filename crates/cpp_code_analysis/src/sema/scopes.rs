@@ -2070,10 +2070,8 @@ impl ScopeWalker<'_> {
         let spelled = declarator.text().to_string();
         let trimmed = spelled.trim_start();
         let parenthesised_a_pointer = trimmed.starts_with("(*") || trimmed.starts_with("(&");
-        let is_function = !parenthesised_a_pointer
-            && declarator
-                .descendants()
-                .any(|child| cpp_parser::CppParamList::can_cast(child.kind().into()));
+        let is_function =
+            !parenthesised_a_pointer && a_parameter_list_of_the_declarator(declarator);
 
         // **A class-like keyword in the specifiers settles the question**: whatever the declarator looks like, the
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
@@ -2896,6 +2894,31 @@ fn class_like_binding_of(specifier: &CppSyntaxNode) -> Option<BindingKind> {
 /// Descending one level is what the shape asks for, and it is written as a **search rather than a rule about
 /// constructors**: a declaration whose declarators live in a nested declaration is exactly what wrapping produces, and
 /// the search stops at the first level, so it cannot wander into a body.
+/// **Does this declarator carry a parameter list of its own** — as opposed to one written inside its initializer?
+///
+/// A declarator holding a ParameterList names a function; that is the rule the scope builder has always used, and
+/// it was asked of descendants(). An **initializer is an expression**, and an expression may contain a parameter
+/// list that declares nothing about this declarator: uto ids = items | std::views::filter([](const Item& item)
+/// { return item.id > 0; }); holds the lambda's. Reading it as the declarator's made ids a **function** —
+/// measured on a <ranges> pipeline, its fact was kind: Function with no parameters, so its hover read ids(…)
+/// and its type could never be asked, which is why nothing downstream of the pipe worked. Nothing inside an
+/// initializer declares this declarator, so that subtree is skipped.
+fn a_parameter_list_of_the_declarator(node: &CppSyntaxNode) -> bool {
+    use cpp_parser::CppAstNode;
+    for child in node.children() {
+        if cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Initializer {
+            continue;
+        }
+        if cpp_parser::CppParamList::can_cast(child.kind().into()) {
+            return true;
+        }
+        if a_parameter_list_of_the_declarator(&child) {
+            return true;
+        }
+    }
+    false
+}
+
 fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     // **A zero-width declarator names nothing.** The grammar synthesises one after a specifier sequence that
     // consumed the whole declaration, and a `friend` definition is the shape that produces it: the inner

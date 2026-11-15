@@ -42,9 +42,19 @@ on. That is the same shape `build_facts` uses for a *function definition* — a 
 So a pipeline's type cannot be inferred for a reason that has nothing to do with `<ranges>`: the variable is not
 recorded as a variable.
 
-**Fix, and it is the first one worth making:** a declarator whose initializer is an `Initializer` node is a
-variable, whatever the initializer contains. That one rule makes `auto r = …` a variable again, which is the
-prerequisite for every item below.
+**Fixed.** The scope builder asked "does this declarator contain a parameter list" of its whole subtree, and an
+initializer is an expression — a lambda inside it declares nothing about the declarator it initializes. The question
+now skips initializer subtrees (`a_parameter_list_of_the_declarator`), and the fixture reads:
+
+```text
+12:10  ids      variable type `auto`        (was: function)
+13:10  names    variable type `auto`        (was: function)
+hover on `ids`  `ids` — a variable of type `auto`, declared in a function body   (was: `ids(…)` — a function)
+```
+
+The type is still `auto` — that is steps (2)–(5) below, which is where the range machinery actually begins. A
+regression test pins the two halves: the lambda-in-initializer declaration is a `Variable`, and `void f(int)` is
+still a `Function` (`a_lambda_in_an_initializer_does_not_make_the_declaration_a_function`).
 
 ## Why the rest still needs work, in order
 
