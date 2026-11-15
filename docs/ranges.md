@@ -134,10 +134,45 @@ is the bug in 10 KB. Shrinking it further, with the same wrapper and the same qu
 * the whole class head is needed for the flip: 5 of its 6 top-level parts plus the pair stay clean, 6 plus the pair
   is nested.
 
-So the trigger is a *combination* — the full `lazy_split_view` head (its base clause `public _Join_view_base<…>`, its
-`_Iterator`/`_Sentinel` nested templates and their `requires` clauses) with the two constructors after it. The next
-step is to halve the head with the same harness until the combination is a paragraph, then fix the parser: this is a
-parser bug and not a ranges one, and it is the last thing between the niebloid and a typed pipeline.
+So the trigger is a *combination* — the class head of `lazy_split_view` with two constructors after it — and it is
+now **922 bytes**:
+
+```text
+template <input_range _Vw, forward_range _Pat> requires (…) class lazy_split_view
+    : public _Lazy_split_view_base<_Vw, _Pat> {
+    constexpr lazy_split_view(_Vw, _Pat) noexcept( is_nothrow_move_constructible_v<_Vw>&& is_nothrow_move_constructible_v<_Pat>)
+        : _Range(::std::move(_Range_)), _Pattern(::std::move(_Pattern_)) {}
+    template <input_range _Rng>
+        requires constructible_from<_Vw, views::all_t<_Rng>>
+              && constructible_from<_Pat, single_view<range_value_t<_Rng>>>
+    constexpr lazy_split_view(_Rng&&, range_value_t<_Rng> _Elem)
+        noexcept(noexcept(_Vw(views::all(::std::forward<_Rng>(_Range_))))
+              && noexcept(_Pat(views::single(::std::move(_Elem)))))
+        : _Range(views::all(::std::forward<_Rng>(_Range_))), _Pattern(views::single(::std::move(_Elem))) {}
+};
+// then: namespace probe { int marker; }  ->  parsed as std::probe, i.e. one scope left open
+```
+
+The body of the class is **not** needed — the head plus the two constructors is the whole reproduction — and the
+reduction says which part of the second constructor matters:
+
+| change | verdict |
+| --- | --- |
+| (unchanged) | nested |
+| `requires constructible_from<…> && constructible_from<…>` → `requires true` | **global** |
+| `single_view<range_value_t<_Rng>>>` → `bool` | **global** |
+| `views::all_t<_Rng>` → `bool` | **global** |
+| either `noexcept(…)` simplified | nested |
+| all four simplifications | global |
+
+So it is the **constraint** of the converting constructor — specifically its template-ids (`views::all_t<_Rng>>`,
+`single_view<range_value_t<_Rng>>>`) — that the parser fails to close, and the declaration swallows the rest of the
+file. A minimal input built from that shape alone (`requires c2<V, holder<R>> && c2<P, holder<holder<R>>>`) does not
+reproduce, so the class head's own `requires` clause and the base clause are part of the trigger as well.
+
+The next step is the parser fix: the constrained declaration that ends with a template-id whose `>>`/`>>>` closes
+both the template-id and the outer constraint must end at its `;`. This is the last thing between the niebloid and a
+typed pipeline.
 
 ## What it answers today
 
