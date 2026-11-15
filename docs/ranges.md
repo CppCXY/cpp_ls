@@ -221,7 +221,33 @@ The regression test is `a_constrained_constructor_keeps_its_member_initializer_l
 
 **What is left of step (3)** — typing the niebloid's *call*: `std::views::filter` has a type now, but
 `std::views::filter([](const Item& item) { … })` does not, so `items | std::views::filter(…)` still has no type.
-That is the next stage: a call whose callee is a variable of a class type must select that class's `operator()`.
+
+The call arm already exists (`index/project/calls.rs`, "a call of an object"): it types the callee, checks the type
+is a `Named` class, and asks `operator_returns_of(…, "operator()")` for what the operator returns. The measurement
+says where it stops: MSVC's niebloids write
+
+```cpp
+template <class _Pr>
+constexpr auto operator()(_Pr&& _Pred) const noexcept(…)
+{ return _Range_closure<_Filter_fn, decay_t<_Pr>>{…}; }
+```
+
+— the return type is the **placeholder** `auto`, and `operator_returns_of` answers the *written* `returns`, which for
+this member is that keyword. `parse_type_spelling("auto")` cannot be `_Range_closure<…>`.
+
+So the next change has a fixed shape, and the machinery to copy is in the same file:
+
+| need | where it already exists |
+| --- | --- |
+| is a return spelling a placeholder (`auto`)? | `is_a_placeholder` (used at `type_of.rs:2298`) |
+| the declared return, when it is not a placeholder | `declared_returns_of_with` (`declarations.rs:2890`) |
+| the body's return with the call's arguments substituted | `deduced_returns_of_substituted` (`declarations.rs:1485`) |
+| a worked example of both, for a *function* callee | the `NamedDeclaration::Indexed` arm of `what_a_call_has_in` (`type_of.rs:2338`) |
+
+The work is to give `operator_returns_of` the call's argument types (it has three call sites) and, when the member's
+return is `auto`, read the class's file through the `declaring` closure it already receives, find the operator's
+declaration there, and deduce the body's return with the arguments substituted — exactly what the `Indexed` arm does
+for an ordinary function whose fact carries no usable return type.
 
 ## What it answers today
 
