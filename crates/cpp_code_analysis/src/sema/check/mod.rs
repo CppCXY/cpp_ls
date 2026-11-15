@@ -286,6 +286,14 @@ pub struct CheckContext<'a> {
     /// index, and none of them may be suggested — see [`super::missing_include`].
     pub inside: &'a [std::path::PathBuf],
     findings: Vec<Finding>,
+    /// **Every node of this file's own text, walked once.**
+    ///
+    /// Each rule asks [`CheckContext::own_syntax_nodes`] for its own node kind, and the walk behind that answer is
+    /// the same walk for every rule — so a pass over a 2 701-line file walked the tree twenty-five times, once per
+    /// rule. It is a `OnceCell` rather than a field filled in `new` because many of the rules in one pass are
+    /// skipped entirely (a C-only project, a code the reader turned off): the walk is paid by the first rule that
+    /// needs it, and no rule pays twice.
+    nodes: std::cell::OnceCell<Vec<cpp_parser::CppSyntaxNode>>,
 }
 
 impl<'a> CheckContext<'a> {
@@ -316,6 +324,7 @@ impl<'a> CheckContext<'a> {
             unreal,
             inside,
             findings: Vec::new(),
+            nodes: std::cell::OnceCell::new(),
         }
     }
 
@@ -582,9 +591,17 @@ impl<'a> CheckContext<'a> {
     /// measured, `missing-return` gave two identical findings for `int unfinished() { }`. A duplicate that only
     /// surfaces on the one node type nothing else looks at.
     pub fn own_syntax_nodes(&self) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> + '_ {
-        self.own_top_level_nodes()
-            .into_iter()
-            .flat_map(|child| child.descendants())
+        self.the_own_nodes().iter().cloned()
+    }
+
+    /// The walk behind [CheckContext::own_syntax_nodes], done once for the whole pass.
+    fn the_own_nodes(&self) -> &[cpp_parser::CppSyntaxNode] {
+        self.nodes.get_or_init(|| {
+            self.own_top_level_nodes()
+                .into_iter()
+                .flat_map(|child| child.descendants())
+                .collect()
+        })
     }
 
     /// **Every node of this file's own text, of one type** — what a check actually asks for.

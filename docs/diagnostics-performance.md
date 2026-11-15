@@ -292,6 +292,56 @@ Client-side guidance that does **not** help: `signs`, `virtual_text`, `severity_
   sending the next one; the server answers `Cancelled` at the next await point, and the work already
   spent is lost. During a burst this is most of the work.
 
+## 6. One walk instead of twenty-five
+
+A fresh reading of a 2 701-line file took **764 ms of checks** (pull after an edit: 820 ms). The per-rule table,
+from `CPPLS_TRACE_DIAGNOSTICS=1`:
+
+```text
+ReturnTypeMismatch 179   AccessInvisible 102   AssignTypeCheck 62   Unused 61
+UndefinedField  52   ParamTypeCheck 36   ArgumentCount 35   ImplicitBoolConversion 31
+Redefinition 20   UseAfterFree 18   UndefinedName 17   … nineteen more at 7–11 ms each
+```
+
+No rule dominates; the shape is *twenty-five rules at eight milliseconds*. They are not doing eight milliseconds of
+their own work — every one of them asks `context.own::<T>()`, and `own_syntax_nodes` built its list by walking the
+file's own top-level nodes' descendants **for each caller**. The same tree, walked twenty-five times.
+
+`CheckContext` now keeps that walk in a `OnceCell`: it is paid by the first rule that needs it, and every later rule
+iterates the same `&[CppSyntaxNode]`. Measured on the same file:
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| checks, one pass | 764 ms | **508 ms** | −34 % |
+| pull after an edit | 820 ms | **567 ms** | −31 % |
+| first pull after `didOpen` | 942 ms | **690 ms** | −27 % |
+| Neovim keystroke (client debounce off) | 852 ms | **571 ms** | −33 % |
+
+The rules that were 7–11 ms each do not appear in the trace any more: their walk is now free, and only the rules that
+do real work are left — `ReturnTypeMismatch` 171 ms, `AccessInvisible` 84 ms, `Unused` 59 ms, `UndefinedField` 46 ms,
+`AssignTypeCheck` 45 ms. §4's "what is left" item 1 (memoise type inference) is what those are made of now.
+
+## 7. Where the 150 ms of a keystroke goes
+
+`nvim_split.lua` records four instants per edit: the buffer update, the `didChange` notification, the `diagnostic`
+request, and the response applied. On the realistic TU (35 lines, four standard headers), with a stock client:
+
+```text
+edit 3: total 160.2 ms | didChange sent at 151.2 | diagnostic asked at 151.4 | applied at 160.2
+```
+
+**151 ms of the 160 is spent before the server sees anything.** It is Neovim's own batching:
+`flags.debounce_text_changes`, documented as *"Debounce `didChange` notifications to the server by the given number
+in milliseconds. No debounce occurs if `nil`. (default: 150)"* (`runtime/lua/vim/lsp/client.lua`). With it off
+(`flags = { debounce_text_changes = false }` in the client config) the same edit answers in **5.7–8.0 ms** end to end,
+of which the server's own pull `prepare` is ~3 ms *("pull prepare: 1 file(s) in 2.8 ms … no cook")*.
+
+So on a realistic TU the server is no longer part of the keystroke; on a 2 701-line file it is (571 ms, §6). The one
+cost that is still larger than the steady state is the first answer after a *new* text: ~230 ms on the realistic TU,
+which is the first cook plus the first pass' `ArgumentCount` (188 ms building one standard class's member list, cached
+for every pull after it). `commit_a_cooked` itself is **0–3 ms** (text+hash 0, rendering cache 0, disk 0–3, index 0),
+which is why §4's item 2 turned out not to be about the commit.
+
 ## Reproducing
 
 ```powershell
@@ -300,6 +350,12 @@ python target/bench/lspbench.py target/release/cpp_ls.exe my.cpp --root . --edit
 
 # the same inside Neovim (headless), with the server's debug log
 nvim --headless -u NONE -l target/bench/nvim_e2e.lua target/release/cpp_ls.exe . my.cpp 5 0 "--log-level debug"
+
+# the split of one keystroke: buffer → didChange → request → applied (5th argument: 0 disables the client debounce)
+nvim --headless -u NONE -l target/bench/nvim_split.lua target/release/cpp_ls.exe . my.cpp 6 0
+
+# the per-check table of one pull, on a file whose pull is expensive
+python target/bench/checks_probe.py
 
 # the client's own cost
 nvim --headless -u NONE -l target/bench/nvim_set_cost.lua

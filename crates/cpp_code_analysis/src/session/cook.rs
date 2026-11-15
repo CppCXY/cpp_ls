@@ -27,9 +27,32 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` when the file has no summary or no text — nothing has read it yet, which is a state and not an error.
     pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
+        let started = std::time::Instant::now();
         let materials = self.cooking_materials(path.as_ref())?;
+        let gathered = started.elapsed().as_millis();
+        let render_started = std::time::Instant::now();
         let rendered = self.render_a_cooked(&materials)?;
-        self.commit_a_cooked(rendered)
+        let rendered_for = render_started.elapsed().as_millis();
+        let committed = self.commit_a_cooked(rendered);
+        if crate::probes::cooking() {
+            log::info!(
+                "cook: {} gathered {} ms | rendered {} ms | committed {} ms | total {} ms | {}",
+                path.as_ref().display(),
+                gathered,
+                rendered_for,
+                started
+                    .elapsed()
+                    .as_millis()
+                    .saturating_sub(gathered + rendered_for),
+                started.elapsed().as_millis(),
+                if committed.is_some() {
+                    "filed"
+                } else {
+                    "dropped"
+                }
+            );
+        }
+        committed
     }
 
     /// **Everything a cook needs that is cheap to gather** — and it takes `&self`, which is the whole point of it.
@@ -324,12 +347,14 @@ impl<F: FileProvider + Clone> Session<F> {
             revision,
         } = rendered;
         let path = indexed.summary.path.clone();
+        let started = std::time::Instant::now();
 
         // **The check.** `self.text` is the file's text *now*, and the hash it is compared against is the one the
         // rendering was made from. A file that has become unreadable is the same answer — nothing to file.
         let current = self
             .text(&path)
             .map(|text| crate::cache::content_hash(&text));
+        let text_hash_ms = started.elapsed().as_millis();
         if !self.is_current(&revision) || current != Some(text_hash) {
             if crate::probes::cooking() {
                 eprintln!(
@@ -377,6 +402,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.renderings.lock().is_ok()
             );
         }
+        let before_the_disk = started.elapsed().as_millis();
         {
             // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
             // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
@@ -401,8 +427,25 @@ impl<F: FileProvider + Clone> Session<F> {
                     cooked.declarations.len()
                 );
             }
+            let declared = cooked.declarations.len();
+            let writing = std::time::Instant::now();
             self.store.put_the_cooked_reading(&path, &cooked);
+            let written = writing.elapsed().as_millis();
+            let inserting = std::time::Instant::now();
             self.store.index_mut().insert_cooked(&path, cooked);
+            let inserted = inserting.elapsed().as_millis();
+            if crate::probes::view() {
+                eprintln!(
+                    "commit timing {}: total {} ms | text+hash {} ms | cache {} ms | disk {} ms | index {} ms | {} declaration(s)",
+                    path.display(),
+                    started.elapsed().as_millis(),
+                    text_hash_ms,
+                    before_the_disk.saturating_sub(text_hash_ms),
+                    written,
+                    inserted,
+                    declared
+                );
+            }
             // **Cooked here counts as asked**, so the closure loop does not queue it again the moment its reading is
             // evicted from the index's bounded map — a file cooked by a program read or by a query is exactly the
             // "already read" this loop is trying to reach.
