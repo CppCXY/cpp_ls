@@ -697,7 +697,10 @@ pub async fn on_semantic_tokens(
             return None;
         }
 
-        let names = session.classified_names(&view);
+        let phase = std::time::Instant::now();
+    let names = session.classified_names(&view);
+    let classified = phase.elapsed().as_millis();
+    let phase = std::time::Instant::now();
 
         // **The format strings of the file**, read from its own text — and only when a project has not turned every
         // family off, which is the one state in which the pass costs nothing at all.
@@ -712,9 +715,22 @@ pub async fn on_semantic_tokens(
             }
         };
 
+        let formats_for = phase.elapsed().as_millis();
+        let phase = std::time::Instant::now();
+        let data = encode(held, Some(&view), &names, &drawable, multi_line, &formats);
+        if cpp_code_analysis::probes::semantic() {
+            eprintln!(
+                "[semantic] {} name(s), {} token(s): classified {} ms | formats {} ms | encoded {} ms",
+                names.len(),
+                data.len() / 5,
+                classified,
+                formats_for,
+                phase.elapsed().as_millis()
+            );
+        }
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: encode(held, Some(&view), &names, &drawable, multi_line, &formats),
+            data,
         }))
     })
     .await

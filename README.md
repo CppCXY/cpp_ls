@@ -199,6 +199,7 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
 - [`docs/configuration.md`](docs/configuration.md) — `.cppls.toml`, the compilation database, include paths, standards
 - [`docs/diagnostics-performance.md`](docs/diagnostics-performance.md) — what a diagnostics pull costs, measured
   through Neovim, with before/after numbers
+- [`docs/latency.md`](docs/latency.md) — what a semantic-token request and a completion cost, and what dominates them
 - [`docs/neovim.md`](docs/neovim.md) — neovim read the way an editor reads it: the census, the failures, the fixes
 - [`docs/usability.md`](docs/usability.md) — what answers and what does not over the protocol, by category
 - [`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence

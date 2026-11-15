@@ -82,6 +82,7 @@ switch! {
     walk_census => "CPPLS_WALK_CENSUS", "Every file the walk entered, spliced or fresh, and the conditions it mentions.";
     code_action => "CPPLS_TRACE_CODE_ACTION", "Where a code-action request's milliseconds went.";
     share => "CPPLS_WALK_SHARE", "Turn the walk cache's cross-walk contribution sharing **on** — an experiment switch, and off by default because the order is wrong: a contribution is replayed at the position it was recorded at in a *different* walk, which drops include edges. Measured on `import std;`: `<limits>` lost its `<cwchar>` and `<xstddef>` includes, so the `_MEMBER_CALL_*` macros were undefined where `<xtr1common>` uses them, and the standard module's rendering kept their invocations as text.";
+    semantic => "CPPLS_TRACE_SEMANTIC", "Where one semantic-token request's milliseconds went: the phase, the encoding and how many tokens came out.";
     trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/parser-review.md` §4.";
 }
 
