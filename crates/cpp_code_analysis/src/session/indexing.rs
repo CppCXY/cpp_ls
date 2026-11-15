@@ -772,6 +772,27 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.pending() + self.cooking.len() + self.refinements_wanted()
     }
 
+    /// **Module units the session has been told to read and has not read yet** — a *separate* count, because the
+    /// pump's own work is the three terms above.
+    ///
+    /// A unit is not in the index queue: nothing includes it, so it arrives through
+    /// [`Session::queue_the_modules_a_file_imports`], which asks for it *by name* in
+    /// [`Session::programs_wanted`] and lets [`Session::the_next_unit_to_read`] take it at the pump's budget when the
+    /// queue has drained. Measured on a project whose files start with `import std;`: from t+0.5 s to t+1.5 s after
+    /// `didOpen` every counter read **0** while the module's closure was still landing, so a completion at `std::`
+    /// answered eight names and reported `isIncomplete: false` — a final list to any client that caches one.
+    ///
+    /// **Not folded into [`Session::pending_work`]**, and that is a measurement rather than a preference: adding it
+    /// there kept the pump's loop believing it owed work, and the module unit was never read at all — the list
+    /// stayed at eight names for as long as the probe waited. A caller asking "may this answer still change" wants
+    /// this count; the pump decides what to do next from its own three.
+    pub fn pending_units(&self) -> usize {
+        self.programs_wanted
+            .iter()
+            .filter(|key| !self.units_read.contains(*key))
+            .count()
+    }
+
     /// Is everything the session knows about already **read**?
     ///
     /// **The indexing queue's question, not [`Session::pending`]'s**: the two differ by the cooking backlog, and the

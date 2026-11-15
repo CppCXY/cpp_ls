@@ -230,6 +230,11 @@ pub async fn on_completion(
                 // names are in its *rendering*. Measured with the index queue alone (t+0.5 s): the queue was empty
                 // and the answer was still the eight, so the cooking half is the one that matters here.
                 || session.pending_work() > 0
+                // **…and while a module unit it imports is still unread.** That work is not in pending_work (see
+                // Session::pending_units): the unit arrives by name rather than through an include, and the pump
+                // takes it once its queue has drained. Measured on import std;: t+0.5–1.5 s answered eight names
+                // with isIncomplete: false while 401 files of the module's closure were still landing.
+                || session.pending_units() > 0
                 // **…and when the analysis stopped short.** A member list can be *missing* members because the class
                 // it needs has not been read yet: `std::string* message; message->` offered **one** item on the first
                 // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file

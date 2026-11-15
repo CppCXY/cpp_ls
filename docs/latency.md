@@ -70,17 +70,27 @@ t+1.5s  main.cpp 1000 item(s) | test.cpp 121 item(s)
 ```
 
 So the answers are **live queries over an index that is still being filled**: each file reflects however much of the
-module's closure had been read and cooked at that moment. Two conclusions follow.
+module's closure had been read and cooked at that moment. The fix follows from that and is measured:
 
-1. **`isIncomplete` must be true while that work exists** — and it now is set when `session.pending_work() > 0`,
-   which is measured at t+0.2 s (`incomplete=True` where it used to be `false`). A client that caches a final list
-   no longer caches eight names.
-2. **`pending_work()` reads 0 at t+0.5–1.0 s while the closure is still landing** — the counters do not see the work
-   that fills the index in that window, so the flag is `false` there and the eight-name answer looks final. The
-   next step is to find which queue that work is in (the module unit's read is driven by `programs_wanted`, which is
-   not part of `pending_work`'s three terms) and count it, rather than to invalidate renderings: a generation-keyed
-   rendering cache was implemented and measured for this window and **moved no number at all**, which is what says
-   the answers are not stale renderings but partially filled index.
+**`isIncomplete` is now also set while a module unit the file imports is unread** — `Session::pending_units()`, the
+count of `programs_wanted` entries not yet in `units_read`. A unit is not in `pending_work`'s three terms because
+nothing includes it: it arrives by name and the pump takes it once its queue has drained, which is exactly the window
+this series shows. With that term in the flag, the series reads:
+
+```text
+t+0.0s  std::   86.3 ms,    0 item(s), incomplete=True
+t+0.2s  std::   14.4 ms,    8 item(s), incomplete=True
+t+0.5s  std::    1.3 ms,    8 item(s), incomplete=True     ← eight names, and "ask again"
+t+1.0s  std::    3.0 ms,    8 item(s), incomplete=True
+t+2.0s  std::   14.3 ms, 1000 item(s), incomplete=True     ← the real list, capped
+```
+
+and the steady state is unchanged: `point.` is 3 items with `incomplete=False` (the flag is not stuck on), `std::` is
+the capped 1000 with `incomplete=True` because there really are more.
+
+**A hypothesis measured and rejected**, recorded so it is not tried again: a **generation keyed into the rendering
+cache** — bumping it when a module unit is committed, so a rendering built before the unit landed is a miss. It moved
+no number at all, which is the measurement that says these answers are not stale renderings.
 
 **The first request after `didOpen`** costs 85–235 ms (completion) and 20 ms (pull) — the cook of the file plus the
 module's unit, the same cost `diagnostics-performance.md` §4 records for any first request.
