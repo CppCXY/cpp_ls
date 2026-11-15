@@ -49,16 +49,18 @@ impl<F: FileProvider + Clone> Session<F> {
         else {
             return Vec::new();
         };
-        let Some(concept) = the_concept_constraining(&view.root, binding.name_range.start_offset)
-        else {
-            return Vec::new();
-        };
-        let Some(required) = self.the_members_the_concept_names(&concept, &view.path) else {
-            return Vec::new();
-        };
-        required
-            .into_iter()
-            .map(|(name, called)| {
+        let concepts = the_concepts_constraining(&view.root, binding.name_range.start_offset);
+        let mut items: Vec<crate::CompletionItem> = Vec::new();
+        for concept in &concepts {
+            let Some(required) = self.the_members_the_concept_names(concept, &view.path) else {
+                continue;
+            };
+            for (name, called) in required {
+                // **One row per name**, even when two concepts require it: the list is something a reader picks from,
+                // and the detail line names the concept that was asked first.
+                if items.iter().any(|item| item.label == name) {
+                    continue;
+                }
                 let mut item = crate::CompletionItem::word(
                     &name,
                     if called {
@@ -69,28 +71,60 @@ impl<F: FileProvider + Clone> Session<F> {
                     &format!("required by concept `{concept}`"),
                 );
                 item.replace = replace;
-                item
-            })
-            .collect()
+                items.push(item);
+            }
+        }
+        items
     }
 
     /// The member names a concept's `requires` expressions write on its parameter, as `(name, called)`.
     ///
     /// `called` is the difference between `{ a.foo() }` and `a.bar` — a method and a field, which a client draws
     /// differently and which a reader may write differently.
+    ///
+    /// **A concept whose body is another concept is followed**, because that is how a library states one constraint in
+    /// several: `concept Combinable = HasFoo<T> && HasBar<T>;` requires both sets of names, and answering only the
+    /// first would be a popup that lists half of what the type must provide. The walk is bounded (a chain longer than
+    /// eight, or a cycle, stops) and visits each concept once.
     fn the_members_the_concept_names(
         &self,
         concept: &str,
         path: &Path,
     ) -> Option<Vec<(String, bool)>> {
-        let found = self.store.index().definition(concept, path).value()?;
-        let view = self.view_of_the_file(&found.file)?;
-        let token = cpp_parser::token_at(&view.root, found.fact.name_range.start_offset)?;
-        let concept_node = token.parent_ancestors().find(|node| {
-            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ConceptDecl
-        })?;
-
         let mut names: Vec<(String, bool)> = Vec::new();
+        let mut visited: Vec<String> = Vec::new();
+        self.collect_the_members_of_a_concept(concept, path, 0, &mut visited, &mut names);
+        Some(names)
+    }
+
+    fn collect_the_members_of_a_concept(
+        &self,
+        concept: &str,
+        path: &Path,
+        depth: usize,
+        visited: &mut Vec<String>,
+        names: &mut Vec<(String, bool)>,
+    ) {
+        if depth > 8 || visited.iter().any(|seen| seen == concept) {
+            return;
+        }
+        visited.push(concept.to_string());
+        let Some(found) = self.store.index().definition(concept, path).value() else {
+            return;
+        };
+        let Some(view) = self.view_of_the_file(&found.file) else {
+            return;
+        };
+        let Some(token) = cpp_parser::token_at(&view.root, found.fact.name_range.start_offset)
+        else {
+            return;
+        };
+        let Some(concept_node) = token.parent_ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ConceptDecl
+        }) else {
+            return;
+        };
+
         for requires in concept_node.descendants().filter(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RequiresExpr
         }) {
@@ -129,42 +163,80 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
-        Some(names)
+
+        for other in the_concepts_a_body_names(&concept_node) {
+            self.collect_the_members_of_a_concept(&other, &found.file, depth + 1, visited, names);
+        }
     }
 }
 
-/// **The concept that constrains the parameter whose name is at `name`** — `A` for `A auto a`.
+/// **The concepts that constrain the parameter whose name is at `name`** — `A` for `A auto a`.
 ///
-/// The parameter list is a `ParameterList` node whose contents are tokens, so the constraint is read from the text
-/// between the previous comma and the name: the word before `auto` is the concept. A parameter written `T a` under
-/// `template <A T>` names a template parameter instead, and its constraint is in the head the declaration sits under —
-/// also read from the text, one level up.
-fn the_concept_constraining(root: &cpp_parser::CppSyntaxNode, name: usize) -> Option<String> {
-    let token = cpp_parser::token_at(root, name)?;
-    let list = token.parent_ancestors().find(|node| {
+/// Three spellings say it, and a parameter may be constrained by more than one of them:
+///
+/// * `A auto a` — the word before `auto`, read from the text between the previous comma and the name (a
+///   `ParameterList`'s contents are tokens, not nodes);
+/// * `template <A T> ... (T t)` — the parameter's type names a template parameter, and the constraint is in the head
+///   one level up, under a `TemplateDecl`;
+/// * `template <class T> requires A<T> ...` — a requires-clause on the declaration, whose terms name concepts.
+fn the_concepts_constraining(root: &cpp_parser::CppSyntaxNode, name: usize) -> Vec<String> {
+    let mut concepts: Vec<String> = Vec::new();
+    let Some(token) = cpp_parser::token_at(root, name) else {
+        return concepts;
+    };
+    let Some(list) = token.parent_ancestors().find(|node| {
         cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ParameterList
-    })?;
+    }) else {
+        return concepts;
+    };
     let text = list.text().to_string();
     let start = usize::from(list.text_range().start());
-    let before = text.get(..name.saturating_sub(start))?;
-    let parameter = before.rsplit(',').next()?.trim();
+    let Some(before) = text.get(..name.saturating_sub(start)) else {
+        return concepts;
+    };
+    let parameter = before.rsplit(',').next().unwrap_or_default().trim();
     let words = the_words(parameter);
     if let Some(at) = words.iter().position(|word| *word == "auto") {
-        return words
-            .get(at.checked_sub(1)?)
-            .map(|word| (*word).to_string());
+        if let Some(constraint) = at.checked_sub(1).and_then(|at| words.get(at)) {
+            concepts.push((*constraint).to_string());
+        }
+    } else if let Some(written_type) = words.last()
+        && let Some(constraint) = the_head_constraint_of(&list, written_type)
+    {
+        concepts.push(constraint);
     }
-    // **`template <A T> … (T a)`** — the type names a template parameter, so the constraint is on the head. The word
-    // before the parameter's own name is its constraint, unless it is the keyword that introduces it.
-    let written_type = words.last()?;
+    // **A requires-clause is a constraint of the same kind**, and it is written beside the template head rather than
+    // in it. Read from the text for the same reason as the two above: the clause is a `RequiresClause` node, and the
+    // concepts it names are its leading identifiers.
+    // **Inside the declaration the parameter belongs to**, not anywhere above it: an ancestor's descendants reach
+    // every other declaration in the file, and a clause three functions further down is not this parameter's. Measured
+    // the first way: a completion in an unconstrained function offered the names of a concept another function wrote.
+    let declaration = list.ancestors().find(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
+    });
+    if let Some(clause) = declaration.and_then(|declaration| {
+        declaration.descendants().find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind())
+                == cpp_parser::CppSyntaxKind::RequiresClause
+        })
+    }) {
+        for concept in the_concepts_a_constraint_names(&clause.text().to_string()) {
+            if !concepts.contains(&concept) {
+                concepts.push(concept);
+            }
+        }
+    }
+    concepts
+}
+
+/// **The constraint written in a template head** — `A` for `template <A T>` when the type being looked for is `T`.
+fn the_head_constraint_of(list: &cpp_parser::CppSyntaxNode, written_type: &str) -> Option<String> {
+    // **The head is a *child* of the declaration the function sits in**, not an ancestor of the parameter list: the
+    // grammar keeps `template <...>` and what it introduces in one `Declaration`, with the head under a
+    // `TemplateDecl`, so that a caller can tell a template from its declaration.
     let declaration = list.ancestors().find(|node| {
         cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
     })?;
-    // **The head is a *child* of the declaration the function sits in**, not an ancestor of the parameter list: the
-    // grammar keeps `template <...>` and what it introduces in one `Declaration`, so the list is found one level down
-    // from an ancestor of the parameter.
-    // The head sits under a TemplateDecl inside that declaration, not directly under it — the grammar keeps
-    // template <...> and what it introduces apart so that a caller can tell a template from its declaration.
     let head = declaration.ancestors().find_map(|ancestor| {
         let head = ancestor.children().find(|child| {
             cpp_parser::CppSyntaxKind::from(child.kind())
@@ -202,7 +274,7 @@ fn the_concept_constraining(root: &cpp_parser::CppSyntaxNode, name: usize) -> Op
         let Some(last) = words.last() else {
             continue;
         };
-        if last != written_type || words.len() < 2 {
+        if *last != written_type || words.len() < 2 {
             continue;
         }
         let constraint = words[words.len() - 2];
@@ -214,10 +286,66 @@ fn the_concept_constraining(root: &cpp_parser::CppSyntaxNode, name: usize) -> Op
     None
 }
 
+/// **The concept names a constraint expression applies** — `A<T> && B<T>` names two, `sizeof(T) > 0` names none.
+fn the_concepts_a_constraint_names(text: &str) -> Vec<String> {
+    let body = text.trim().trim_start_matches("requires").trim();
+    let mut names: Vec<String> = Vec::new();
+    for term in body.split("&&").flat_map(|part| part.split("||")) {
+        let term = term.trim_matches(|character: char| {
+            character == '(' || character == ')' || character.is_whitespace()
+        });
+        let name: String = term
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect();
+        if !name.is_empty()
+            && !matches!(name.as_str(), "true" | "false" | "requires")
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// The identifier-shaped words of a spelling, in order.
 fn the_words(text: &str) -> Vec<&str> {
     text.split(|character: char| !character.is_alphanumeric() && character != '_')
         .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// **The concepts a concept's body applies** — `Combinable`'s `HasFoo<T> && HasBar<T>` names two.
+///
+/// The body is the text after the `=` that defines the concept. A body that starts with `requires` is a
+/// requires-expression, whose member names are collected directly and which names no further concept through `&&`;
+/// anything else is a constraint expression, and each of its `&&`/`||` terms starts with the concept it applies.
+/// The `=` is searched for **after** the word `concept`, so a default argument in the template head
+/// (`template <class T = int>`) is not mistaken for the definition.
+fn the_concepts_a_body_names(node: &cpp_parser::CppSyntaxNode) -> Vec<String> {
+    let text = node.text().to_string();
+    let after_the_keyword = text.find("concept").map_or(0, |at| at + "concept".len());
+    let Some(equals) = text[after_the_keyword..].find('=') else {
+        return Vec::new();
+    };
+    let body = text[after_the_keyword + equals + 1..].trim();
+    let body = body.trim_end_matches(';').trim();
+    if body.starts_with("requires") {
+        return Vec::new();
+    }
+    body.split("&&")
+        .flat_map(|part| part.split("||"))
+        .filter_map(|term| {
+            let term = term.trim_matches(|character: char| {
+                character == '(' || character == ')' || character.is_whitespace()
+            });
+            let name: String = term
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect();
+            (!name.is_empty() && !matches!(name.as_str(), "true" | "false" | "requires"))
+                .then_some(name)
+        })
         .collect()
 }
 

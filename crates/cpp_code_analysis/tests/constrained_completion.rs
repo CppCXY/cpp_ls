@@ -22,6 +22,25 @@ concept A = requires(T a) {
     a.count;
 };
 
+template <class T>
+concept HasFoo = requires(T t) {
+    { t.foo() };
+};
+
+template <class T>
+concept HasBar = requires(T t) {
+    t.bar;
+};
+
+template <class T>
+concept Both = HasFoo<T> && HasBar<T>;
+
+template <class T>
+concept LoopA = LoopB<T>;
+
+template <class T>
+concept LoopB = LoopA<T>;
+
 template <A T>
 auto by_head(T t) {
     t.
@@ -29,6 +48,22 @@ auto by_head(T t) {
 
 auto by_auto(A auto a) {
     a.
+}
+
+template <Both T>
+auto by_both(T t) {
+    t.
+}
+
+template <class T>
+    requires HasFoo<T>
+auto by_clause(T t) {
+    t.
+}
+
+template <LoopA T>
+auto by_loop(T t) {
+    t.
 }
 
 template <class U>
@@ -103,4 +138,35 @@ fn a_constrained_template_parameter_offers_the_same() {
 #[test]
 fn an_unconstrained_parameter_offers_nothing() {
     assert!(offered_after("auto unconstrained(U u) {\n    u.").is_empty());
+}
+
+/// **A requires-clause is the same constraint beside the head** — `template <class T> requires HasFoo<T>` says what
+/// `template <HasFoo T>` says, and both spellings must answer the same list.
+#[test]
+fn a_requires_clause_offers_the_same_as_a_head_constraint() {
+    assert_eq!(
+        offered_after("auto by_clause(T t) {\n    t."),
+        [("foo".to_string(), ItemKind::Method)]
+    );
+}
+
+/// **A concept written as a conjunction of concepts requires both sets of names** — `concept Both = HasFoo<T> &&
+/// HasBar<T>` is how a library states two constraints at once, and answering only the first would list half of what a
+/// type has to provide.
+#[test]
+fn a_concept_made_of_two_concepts_offers_both() {
+    assert_eq!(
+        offered_after("auto by_both(T t) {\n    t."),
+        [
+            ("foo".to_string(), ItemKind::Method),
+            ("bar".to_string(), ItemKind::Field),
+        ]
+    );
+}
+
+/// **A cycle between two concepts is not a hang** — `LoopA = LoopB<T>` and `LoopB = LoopA<T>` is a program no
+/// compiler accepts, and a completion asked in the meantime must answer (with nothing) rather than walk for ever.
+#[test]
+fn a_cycle_between_concepts_offers_nothing() {
+    assert!(offered_after("auto by_loop(T t) {\n    t.").is_empty());
 }
