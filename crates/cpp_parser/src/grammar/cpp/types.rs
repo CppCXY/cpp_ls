@@ -1321,6 +1321,22 @@ fn parse_decl_specifier_seq_with(
             specifiers_from,
             &[CppSyntaxKind::ClassBody, CppSyntaxKind::EnumDef],
         );
+        // **A known type name followed by a name ends the specifier sequence.**
+        //
+        // `EXTERN colnr_T dollar_vcol INIT( = -1);` — neovim's `globals.h`, sixteen times — writes a macro, a typedef
+        // and a declarator in a row, and the sequence would join all three to the type and take `INIT` for the
+        // declarator. The language's rule is the one applied here: the type is a *name*, and the declarator is the
+        // next name — the evidence for the split being that the name just read is a **known type**, which is a fact
+        // this file's own declarations answer. Two unknown names have no order between them and keep the old reading.
+        //
+        // `has_type_specifier` is what keeps it to the *second* name: `Widget w;` is read by the ordinary arm (the
+        // first name is the type, whatever it is), and only a name that arrives after a type can be the last one.
+        let a_known_type_ends_the_type = has_type_specifier
+            && p.token_kind_at(p.current_token_index()) == CppTokenKind::Identifier
+            && p.is_a_known_type_name(p.current_token_text())
+            && p.token_kind_at(super::decls::next_significant_index(p, p.current_token_index()))
+                == CppTokenKind::Identifier;
+
         if let Err(err) = parse_one_decl_specifier(
             p,
             &mut has_specifier,
@@ -1346,6 +1362,9 @@ fn parse_decl_specifier_seq_with(
             break;
         }
         specifiers += 1;
+        if a_known_type_ends_the_type {
+            break;
+        }
     }
 
     if specifiers == 0 {

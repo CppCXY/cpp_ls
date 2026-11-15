@@ -7722,3 +7722,34 @@ string_view held(count);
         "`count` is a value, so the parentheses initialise the object"
     );
 }
+/// **A known type name followed by a name ends the type.** `EXTERN colnr_T dollar_vcol INIT( = -1);` writes a macro, a
+/// typedef and a declarator; the specifier sequence used to join all three to the type and take `INIT` for the
+/// declarator, so the variable the line declares was lost. The split is licensed by `colnr_T` being a **known type** —
+/// the file's own declarations answer that — and by the next token being a *name*. Neovim's `globals.h` declares its
+/// globals this way sixteen times.
+#[test]
+fn a_known_type_name_ends_the_specifier_sequence() {
+    let source = "\
+typedef int colnr_T;
+EXTERN colnr_T dollar_vcol INIT( = -1);
+EXTERN int Rows INIT( = 24);
+int after_this;
+";
+    let parsed = CppParser::parse(source, ParserConfig::default());
+    assert_eq!(parsed.get_errors(), [], "the fixture parses without a recovery");
+    let root = parsed.get_red_root();
+    let declared = |name: &str| {
+        root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator
+                && node.text().to_string().contains(name)
+        })
+    };
+    assert!(
+        declared("dollar_vcol"),
+        "`dollar_vcol` is the declarator: `colnr_T` is the type and `INIT` is the macro that follows it"
+    );
+    // **The declarations after it survive too**, which is the cost the old reading paid: the expression fallback
+    // swallowed the rest of the header.
+    assert!(declared("Rows"));
+    assert!(declared("after_this"));
+}

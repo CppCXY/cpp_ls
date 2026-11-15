@@ -298,7 +298,13 @@ use std::path::{Path, PathBuf};
 /// and this parser now asks the question the language asks. Every such declaration in libstdc++`s `<meta>` changed
 /// kind, and a fact`s *kind* is what hover, completion and the call checks read: a cached summary that still holds
 /// `identifier_of` as a variable answers with the type of the call instead of the declaration.
-pub const FORMAT_VERSION: u32 = 33;
+/// # Why this moved to 34
+///
+/// **A known type name followed by a name now ends the specifier sequence.** `EXTERN colnr_T dollar_vcol INIT( = -1);`
+/// used to be read as the type `EXTERN colnr_T dollar_vcol` and the declarator `INIT`, so the variable the line
+/// declares — and every declaration after it in the header — was lost. A summary or a cooked reading made before this
+/// holds the loss: neovim's `globals.h` alone is sixteen declarations, and 135 `undefined-name` findings followed.
+pub const FORMAT_VERSION: u32 = 34;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
