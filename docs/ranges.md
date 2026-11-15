@@ -77,8 +77,30 @@ the program a compiler reads. So the declaration, the class (`_Transform_fn` wit
 
 **What is left is the type of the niebloid and the call through it.** `typeDefinition` on `transform` answers **0
 locations**, so the variable's type `_Transform_fn` is not resolved from the importing file's context even though the
-hover card names it, and `type_of(std::views::transform)` answers `UnknownType`. That is step (3) of the plan: typing
-a variable whose type is a class, and calling its `operator()` — the two things a niebloid is made of.
+hover card names it, and `type_of(std::views::transform)` answers `UnknownType`.
+
+The measurements narrow it to one name. Plain-qualified spellings work, alias-qualified ones do not:
+
+```text
+auto hop5 = std::ranges::views::iota;   _Iota_fn        (the spelling the facts carry)
+auto hop2 = std::views::iota;           UnknownType     (the spelling the header lets a reader write)
+```
+
+and the reason is visible with `CPPLS_TRACE_TYPES=1`, which prints the facts each prefix of the name resolves to:
+
+```text
+[alias] "std::views" candidates:
+  ... "views" scope Some("std::ranges") kind Namespace type Some("ranges::views") @ ranges
+```
+
+The trailing **`_EXPORT_STD namespace views = ranges::views;` lands one namespace too deep** in the cooked reading: its
+fact is `std::ranges::views` with target `ranges::views`, so the qualified name `std::views` names nothing and the
+adaptors cannot be reached through the alias. Completion after `std::views::` still works because it follows the alias
+fact's *target* rather than its qualified name — which is why the two questions disagree about the same spelling.
+
+So the next step is not the niebloid at all: it is **where the cooked rendering of `<ranges>` loses a closing brace**
+before line 7666, so that `namespace ranges` is still open when the alias is declared. That is a rendering/parser
+question about one header's tail, and it blocks everything in step (3).
 
 ## What it answers today
 
