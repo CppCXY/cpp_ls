@@ -39,6 +39,41 @@ completion at three shapes — a member after `.`, a name after `::`, a bare pre
 The 2 701-line file has 7 800 names, of which 2 400 become tokens. **Classification is the whole cost**: 29 ms of
 a 36 ms request (≈ 3.7 µs per name), and the encoding — the protocol's delta walk over 2 400 tokens — is 2 ms.
 
+## A project that starts every file with `import std;`
+
+Measured on a real module project (`cpp_modules`: `import std; import math; import report;`, an MSVC compile
+database, `std` resolved to MSVC's `modules/std.ixx`) — `target/bench/modules_series.py` and
+`modules_latency.py`. The question is what the first seconds cost and what the steady state is.
+
+**Steady state, warm:** completion at `std::` **9–11 ms** for 1000 items (the cap, `isIncomplete` true because of
+it); completion at `point.` **0.9–1.3 ms** for 3 items; a diagnostics pull **0.6–0.9 ms** for zero findings. The
+`import std;` itself is not a steady-state tax — the 401-file closure is read once and the answers come from the
+index.
+
+**The first two seconds are the problem**, and the series shows it plainly:
+
+```text
+t+0.0s  std::   88.8 ms,    0 item(s), incomplete=True     ← the module is being read
+t+0.2s  std::   23.0 ms,    8 item(s), incomplete=True
+t+0.5s  std::    1.1 ms,    8 item(s), incomplete=False    ← eight names, offered as final
+t+1.0s  std::    1.1 ms,    8 item(s), incomplete=False
+t+2.0s  std::   15.2 ms, 1000 item(s), incomplete=True     ← the real list, capped
+```
+
+Two defects, one fixed and one recorded:
+
+1. **An `isIncomplete: false` list of eight names**, while the module's closure is still being read and cooked. The
+   handler's flag is now also set when `session.pending_work() > 0`, so the client is told to ask again rather than
+   cache the eight — that closes the t+0.0–0.2 window.
+2. **t+0.5 s to t+2 s is still wrong**, and the counters are zero there: `pending_work` is 0 while the answer is
+   eight names. What changes at t+2 s is the file's **rendering**, which was built (and cached by text hash) before
+   the module's names were in its environment; the rendering for unchanged text is reused, so a query answers from a
+   stale splice until something re-cooks it. That is the defect to chase next — a rendering has to be keyed by the
+   environment it was built in, not only by the text, or invalidated when a module it imports lands.
+
+**The first request after `didOpen`** costs 85–235 ms (completion) and 20 ms (pull) — the cook of the file plus the
+module's unit, the same cost `diagnostics-performance.md` §4 records for any first request.
+
 ## What the numbers say
 
 1. **The warm path is fine.** 3 ms for completion and 0.7 ms for a small file's colours are below what an editor's

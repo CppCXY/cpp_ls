@@ -219,6 +219,17 @@ pub async fn on_completion(
             is_incomplete: found.items.is_empty()
                 || !session.is_locally_ready(&path)
                 || found.truncated
+                // **…and while the session still has work queued.** `is_locally_ready` is a fact about *this* file —
+                // its summary and its includes — and an answer can depend on files its **modules** bring in.
+                // Measured on a project whose files start with `import std;`: for about two seconds after `didOpen`,
+                // completion at `std::` answered **8 names with `isIncomplete: false`**, then 1000 (the cap) once
+                // the module's closure had been read and cooked. A client that caches a final list shows the eight
+                // and stops asking; the list was neither final nor right.
+                //
+                // `pending_work` rather than `pending`: the difference is the **cooking** backlog, and a module's
+                // names are in its *rendering*. Measured with the index queue alone (t+0.5 s): the queue was empty
+                // and the answer was still the eight, so the cooking half is the one that matters here.
+                || session.pending_work() > 0
                 // **…and when the analysis stopped short.** A member list can be *missing* members because the class
                 // it needs has not been read yet: `std::string* message; message->` offered **one** item on the first
                 // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file
