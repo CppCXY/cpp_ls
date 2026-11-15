@@ -35,6 +35,7 @@ fpr = "fpr"
 summar = "summar"
 allocater = "allocater"
 classs = "classs"
+nam = "nam"
 [files]
 extend-exclude = [
   "CHANGELOG.md",
