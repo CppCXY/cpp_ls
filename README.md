@@ -193,10 +193,15 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
 
 ## Documentation
 
-[`docs/cpp-support.md`](docs/cpp-support.md) ·
-[`docs/c-support.md`](docs/c-support.md) ·
-[`docs/configuration.md`](docs/configuration.md) ·
-[`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence
+- [`docs/cpp-support.md`](docs/cpp-support.md) — what the analysis reads, answers and reports for C++, feature by
+  feature, with the diagnostic registry and each rule's severity
+- [`docs/c-support.md`](docs/c-support.md) — the same for C, including the twenty-one rules that can fire there
+- [`docs/configuration.md`](docs/configuration.md) — `.cppls.toml`, the compilation database, include paths, standards
+- [`docs/diagnostics-performance.md`](docs/diagnostics-performance.md) — what a diagnostics pull costs, measured
+  through Neovim, with before/after numbers
+- [`docs/neovim.md`](docs/neovim.md) — neovim read the way an editor reads it: the census, the failures, the fixes
+- [`docs/usability.md`](docs/usability.md) — what answers and what does not over the protocol, by category
+- [`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence
 
 ## License
 
