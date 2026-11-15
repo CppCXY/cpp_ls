@@ -56,6 +56,7 @@ pub fn member_across_files(
     // The type of the object, which is what decides which class the member is looked for in.
     let Known::Yes((written, _)) = type_of_expression_memoed(
         &memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -66,6 +67,7 @@ pub fn member_across_files(
     ) else {
         let Known::Unknown(reason) = type_of_expression_memoed(
             &memo,
+            &crate::sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -88,7 +90,16 @@ pub fn member_across_files(
     // template is applied by the callers that ask for its type — see [`NamedDeclaration::type_of`] — and applying
     // it here as well would have to rewrite the fact's own spelling, which is what
     // `DeclFact::type_of` is documented to be *as the file wrote it*.
-    let found = member_fact(index, scopes, root, path, &class, &access.member, None);
+    let found = member_fact(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        &class,
+        &access.member,
+        None,
+    );
     let Known::Yes((fact, file)) = found else {
         let Known::Unknown(reason) = found else {
             unreachable!("the first match established that this is an `Unknown`")
@@ -406,6 +417,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         .filter_map(|element| {
             match type_of_expression_memoed(
                 memo,
+                &crate::sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,
@@ -532,6 +544,7 @@ pub(crate) fn the_pointee_of_a_handle(
         .map(|argument| argument.to_string())
         .collect();
     let Known::Yes((fact, file)) = member_fact(
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -620,6 +633,7 @@ pub(crate) fn the_class_spelling(type_of: &Type) -> String {
 /// that wrote none has not said nothing, it has said "whatever the name it used stands for". See
 /// [`resolve_aliases_with_arguments`].
 pub(crate) fn member_access_class_and_arguments(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -627,7 +641,8 @@ pub(crate) fn member_access_class_and_arguments(
     class: &str,
     written: &Type,
 ) -> (String, Vec<Type>) {
-    let (class, from_the_alias) = resolve_aliases_with_arguments(index, scopes, root, path, class);
+    let (class, from_the_alias) =
+        resolve_aliases_with_arguments(shapes, index, scopes, root, path, class);
 
     let arguments = if written.arguments().is_empty() {
         from_the_alias
@@ -835,12 +850,57 @@ pub fn own_members_of(
     path: &Path,
     class: &str,
 ) -> Known<Vec<(PathBuf, DeclFact)>> {
-    direct_members(index, scopes, root, path, class)
+    own_members_of_with(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+    )
+}
+
+/// [own_members_of], with the file's declaration table threaded in.
+pub fn own_members_of_with(
+    shapes: &crate::sema::declarations::ShapeTable,
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<(PathBuf, DeclFact)>> {
+    direct_members(shapes, index, scopes, root, path, class)
 }
 
 /// * No conditional region. A member of a class in the buffer comes back with [`FactGuard::Unconditional`]
 ///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
 pub fn members_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<MemberList> {
+    // **One table per call, for a caller that has no request to share it in.** The diagnostics path does — see
+    // [`members_of_with`] and `SemanticModel`'s cell — and this wrapper is what keeps every other caller of the
+    // public query compiling without a parameter it would have nothing to pass.
+    members_of_with(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+    )
+}
+
+/// [`members_of`], with the file's declaration table threaded in — see [`crate::sema::declarations::ShapeTable`].
+///
+/// The table is the one thing this query needs from the tree and cannot get from the index, and a caller that
+/// asks about many classes of one file must hand in **one** table: building it per class is what made a
+/// diagnostics pass quadratic (`docs/diagnostics-performance.md` §2.4 — 1 801 builds, 6.6 s of 7.2 s).
+pub fn members_of_with(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -865,7 +925,7 @@ pub fn members_of(
         return known;
     }
 
-    let listed = members_of_inner(index, scopes, root, path, class);
+    let listed = members_of_inner(shapes, index, scopes, root, path, class);
     // **A bare spelling the index files qualified.** `shared_ptr<int>` is what a type deduced from a `std::` function is
     // written as, and the class is `std::shared_ptr`; a member list asked for the bare name answered `NotDeclaredHere`
     // while the completion at the same cursor offered the members (reported: "`shared_ptr<int>` has no member `reset`"
@@ -891,7 +951,7 @@ pub fn members_of(
                             Some(at) => format!("{qualified}{}", &class[at..]),
                             None => qualified.to_string(),
                         };
-                        members_of_inner(index, scopes, root, path, &qualified)
+                        members_of_inner(shapes, index, scopes, root, path, &qualified)
                     }
                     _ => listed,
                 }
@@ -906,7 +966,7 @@ pub fn members_of(
                         Some(at) => format!("{qualified}{}", &class[at..]),
                         None => qualified,
                     };
-                    members_of_inner(index, scopes, root, path, &qualified)
+                    members_of_inner(shapes, index, scopes, root, path, &qualified)
                 }
                 _ => listed,
             }
@@ -1152,6 +1212,7 @@ impl ProjectIndex {
 }
 
 pub(crate) fn members_of_inner(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -1183,7 +1244,7 @@ pub(crate) fn members_of_inner(
     // must not invent findings (`undefined-field`) stays silent instead of reporting every member of `std::string` as
     // undefined. See [`resolve_aliases_or_unresolved`] for the measurement.
     let (resolved, _arguments, missing) =
-        resolve_aliases_or_unresolved(index, scopes, root, path, base_type_name(class));
+        resolve_aliases_or_unresolved(shapes, index, scopes, root, path, base_type_name(class));
     if let Some(missing) = missing {
         if crate::probes::members() {
             eprintln!("members_of_inner: {class} names {missing}, which nothing declares");
@@ -1205,14 +1266,14 @@ pub(crate) fn members_of_inner(
     // The retry is by the **last segment only** — the name the class is declared under, whatever namespaces wrap it —
     // and it runs only when the scoped spelling missed, so a class that is where the spelling says is unaffected.
     let mut class = (*resolved).to_string();
-    let own = match direct_members(index, scopes, root, path, &class) {
+    let own = match direct_members(shapes, index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {
             let last = without_the_namespace(&class);
             if last == class {
                 return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class)));
             }
-            match direct_members(index, scopes, root, path, &last) {
+            match direct_members(shapes, index, scopes, root, path, &last) {
                 Known::Yes(members) => {
                     class = last;
                     members
@@ -1239,7 +1300,7 @@ pub(crate) fn members_of_inner(
     let mut own = own;
     if own.is_empty()
         && let Some(target) = a_namespace_aliass_target(index, path, &class)
-        && let Known::Yes(found) = direct_members(index, scopes, root, path, &target)
+        && let Known::Yes(found) = direct_members(shapes, index, scopes, root, path, &target)
         && !found.is_empty()
     {
         own = found;
@@ -1289,7 +1350,7 @@ pub(crate) fn members_of_inner(
     // index — measured on `LuaSource.cpp`, `members_of("std::vector")` called that question twice for **251 ms and
     // 88 ms**, 96% of a member list whose own members cost 1 ms. The rule that removes them is not a heuristic: C++
     // makes a template parameter shadow any name of its class, so a parameter of *this* class can never be its base.
-    let parameters = class_template_parameters(index, scopes, root, path, &class);
+    let parameters = class_template_parameters(shapes, index, scopes, root, path, &class);
 
     // **The base's written spelling, arguments and all.** `bases_of` answers *names a class can be looked up by* — the
     // arguments are dropped there on purpose (they are not bases, and treating one as a base was measured at 251 ms on
@@ -1297,7 +1358,7 @@ pub(crate) fn members_of_inner(
     // `enable_shared_from_this<Node>::shared_from_this` returns `_Tp`, and without the arguments nothing downstream can
     // finish it. `raw_bases` reads the clause itself, and the level keeps the spelling.
     let mut level: Vec<(String, String)> =
-        match the_base_clauses_of(index, scopes, root, path, &class) {
+        match the_base_clauses_of(shapes, index, scopes, root, path, &class) {
             Known::Yes(bases) => bases
                 .into_iter()
                 .filter(|written| !names_a_template_parameter(base_type_name(written), &parameters))
@@ -1364,7 +1425,7 @@ pub(crate) fn members_of_inner(
                 continue;
             }
 
-            let members = match direct_members(index, scopes, root, path, &base) {
+            let members = match direct_members(shapes, index, scopes, root, path, &base) {
                 Known::Yes(members) => members,
                 // **A clause that is a *type* rather than a class name.** `allocator_traits<_Alloc> : conditional_t<…>`
                 // names no class: `conditional_t` is an alias whose target is `typename conditional<…>::type`. The
@@ -1421,7 +1482,7 @@ pub(crate) fn members_of_inner(
 
             // **The next level is substituted too**: a base of a base is written in the base's parameters
             // (`_Vector_base<_Tp, _Alloc>` inside `vector<_Tp>`), and those are this level's arguments.
-            let further = the_base_clauses_of(index, scopes, root, path, &base);
+            let further = the_base_clauses_of(shapes, index, scopes, root, path, &base);
             match further {
                 Known::Yes(clauses) => next.extend(
                     clauses
@@ -1476,6 +1537,7 @@ pub(crate) fn members_of_inner(
 /// class is in it, and from the fact the index holds otherwise — and falls back to `bases_of` when neither answers, so the
 /// walk is never worse than it was.
 pub(crate) fn the_base_clauses_of(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -1493,7 +1555,10 @@ pub(crate) fn the_base_clauses_of(
                 .find(|binding| binding.name.identifier_text() == Some(name))
         })
     {
-        return Known::Yes(crate::sema::declarations::declared_bases_of(root, binding));
+        return Known::Yes(crate::sema::declarations::declared_bases_of_with(
+            crate::sema::declarations::shapes_from(shapes, root),
+            binding,
+        ));
     }
     let base = base_type_name(class).to_string();
     // **The definition, not the forward declaration.** A class template is declared and then defined — MSVC's
@@ -1779,6 +1844,7 @@ pub(crate) fn the_bool_a_trait_has(
 }
 
 pub(crate) fn direct_members(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -1798,7 +1864,7 @@ pub(crate) fn direct_members(
     let class = if scopes.scope_with_qualified_name(class).is_some() {
         class.to_string()
     } else {
-        resolve_aliases(index, scopes, root, path, class)
+        resolve_aliases(shapes, index, scopes, root, path, class)
     };
     // **A namespace alias in the spelling's prefix** — `std::views::_Filter` is `std::ranges::views::_Filter`. Type aliases
     // are followed above; a namespace alias is not a type, so it needs this step, and it is *additive*: a spelling that
@@ -1811,14 +1877,14 @@ pub(crate) fn direct_members(
     {
         // **The file's shapes once, not once per member.** See [`fact_from_binding_with`] for the measurement: this
         // list is 151 members of `std::vector` on libstdc++, and the per-member form built the table 151 times.
-        let shapes = crate::sema::declarations::DeclarationShapes::of(root);
+        let shapes = crate::sema::declarations::shapes_from(shapes, root);
         return Known::Yes(
             data.bindings
                 .iter()
                 .map(|binding| {
                     (
                         path.to_path_buf(),
-                        fact_from_binding_with(&shapes, root, class, binding),
+                        fact_from_binding_with(shapes, root, class, binding),
                     )
                 })
                 .collect(),
@@ -1842,7 +1908,7 @@ pub(crate) fn direct_members(
     if let Some(scope) = a_class_nested_in_another(scopes, class)
         && let Some(data) = scopes.scope(scope)
     {
-        let shapes = crate::sema::declarations::DeclarationShapes::of(root);
+        let shapes = crate::sema::declarations::shapes_from(shapes, root);
         let qualified = scopes
             .qualified_name_of(scope)
             .unwrap_or_else(|| class.to_string());
@@ -1852,7 +1918,7 @@ pub(crate) fn direct_members(
                 .map(|binding| {
                     (
                         path.to_path_buf(),
-                        fact_from_binding_with(&shapes, root, &qualified, binding),
+                        fact_from_binding_with(shapes, root, &qualified, binding),
                     )
                 })
                 .collect(),

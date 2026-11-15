@@ -108,8 +108,9 @@ pub(crate) fn type_of_expression(
     // asked *inside* one expression are the ones that repeat. A caller that asks about many expressions shares a
     // larger memo by calling [`type_of_expression_memoed`] itself — see `SemanticModel`.
     let memo = TypeMemo::default();
+    let shapes = crate::sema::declarations::ShapeTable::new();
     type_of_expression_memoed(
-        &memo, index, declaring, scopes, root, path, expression, depth,
+        &memo, &shapes, index, declaring, scopes, root, path, expression, depth,
     )
 }
 
@@ -196,6 +197,7 @@ impl TypeMemo {
 /// [`type_of_expression`] with the caller's memo — no new map, and every question asked below shares it.
 pub(crate) fn type_of_expression_memoed(
     memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -256,7 +258,7 @@ pub(crate) fn type_of_expression_memoed(
         );
     }
     let answer = type_of_expression_inner(
-        memo, index, declaring, scopes, root, path, expression, depth,
+        memo, shapes, index, declaring, scopes, root, path, expression, depth,
     );
 
     if crate::probes::timing() && started.elapsed().as_millis() > 5 {
@@ -285,6 +287,7 @@ pub(crate) fn type_of_expression_memoed(
 /// [`type_of_expression_memoed`]** so that an answer already computed is never computed again.
 pub(crate) fn type_of_expression_inner(
     memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -326,6 +329,7 @@ pub(crate) fn type_of_expression_inner(
     if let Some(operand) = a_co_awaits_operand(expression) {
         let awaited = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -648,6 +652,7 @@ pub(crate) fn type_of_expression_inner(
 
         return match type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -705,7 +710,7 @@ pub(crate) fn type_of_expression_inner(
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
         return type_of_a_call(
-            memo, index, declaring, scopes, root, path, expression, depth,
+            memo, shapes, index, declaring, scopes, root, path, expression, depth,
         );
     }
 
@@ -745,6 +750,7 @@ pub(crate) fn type_of_expression_inner(
         if let (Some(one), Some(other)) = (branches.get(1), branches.get(2)) {
             let one_type = type_of_expression_memoed(
                 memo,
+                shapes,
                 index,
                 declaring,
                 scopes,
@@ -755,6 +761,7 @@ pub(crate) fn type_of_expression_inner(
             );
             let other_type = type_of_expression_memoed(
                 memo,
+                shapes,
                 index,
                 declaring,
                 scopes,
@@ -801,6 +808,7 @@ pub(crate) fn type_of_expression_inner(
         return match expression.children().next() {
             Some(inner) => type_of_expression_memoed(
                 memo,
+                shapes,
                 index,
                 declaring,
                 scopes,
@@ -839,9 +847,17 @@ pub(crate) fn type_of_expression_inner(
         if !matches!(
             operator.as_str(),
             "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
-        ) && let Known::Yes((left_class, file)) =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1)
-            && matches!(left_class, Type::Named { .. })
+        ) && let Known::Yes((left_class, file)) = type_of_expression_memoed(
+            memo,
+            shapes,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &left,
+            depth + 1,
+        ) && matches!(left_class, Type::Named { .. })
             && let Some(returns) = operator_returns_of(
                 index,
                 declaring,
@@ -862,8 +878,17 @@ pub(crate) fn type_of_expression_inner(
             return Known::Yes((Type::named("bool"), path.to_path_buf()));
         }
 
-        let left_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &left, depth + 1);
+        let left_type = type_of_expression_memoed(
+            memo,
+            shapes,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &left,
+            depth + 1,
+        );
         if matches!(
             operator.as_str(),
             "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
@@ -880,6 +905,7 @@ pub(crate) fn type_of_expression_inner(
 
         return match type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -925,6 +951,7 @@ pub(crate) fn type_of_expression_inner(
     if let Some(operand) = unary_operand_with(expression, "*") {
         let operand_type = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -985,6 +1012,7 @@ pub(crate) fn type_of_expression_inner(
     if let Some(operand) = unary_operand_with(expression, "&") {
         let operand_type = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1027,6 +1055,7 @@ pub(crate) fn type_of_expression_inner(
         };
         let operand_type = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1078,6 +1107,7 @@ pub(crate) fn type_of_expression_inner(
         };
         let then_type = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1088,6 +1118,7 @@ pub(crate) fn type_of_expression_inner(
         );
         let else_type = type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1117,8 +1148,17 @@ pub(crate) fn type_of_expression_inner(
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
     if let Some(base) = subscript_base(expression) {
-        let base_type =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &base, depth + 1);
+        let base_type = type_of_expression_memoed(
+            memo,
+            shapes,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &base,
+            depth + 1,
+        );
         return match base_type {
             // **An array's element is the model's own operation**, and a *class* with an `operator[]` is the case
             // this arm deliberately leaves alone: `v[0]` on a `std::vector` gives the template's `reference`, which
@@ -1180,6 +1220,7 @@ pub(crate) fn type_of_expression_inner(
         // through, so it is the one that has to be a single memoised question.
         let (inner_type, declared_in) = match type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1243,8 +1284,15 @@ pub(crate) fn type_of_expression_inner(
         // `basic_string<char, char_traits<char>, allocator<char>>`. Without them the pairing is empty, `_Elem` has
         // nothing to be replaced by, and `x.back()` on a `std::string` answers `_Elem&`: measured, and it is the
         // last step between that and `char&`. See [`member_access_class_and_arguments`].
-        let (class, arguments) =
-            member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type);
+        let (class, arguments) = member_access_class_and_arguments(
+            shapes,
+            index,
+            scopes,
+            root,
+            path,
+            &class,
+            &inner_type,
+        );
         // **The pointee, by the handle's own `element_type` — substituted.** `std::shared_ptr` declares
         // `using element_type = _Tp;`, so the member is `_Tp` until the object type's argument is paired with it
         // (`shared_ptr<Node>` → `Node`). Asked first, because it is the protocol and it knows the arguments; the
@@ -1269,6 +1317,7 @@ pub(crate) fn type_of_expression_inner(
             .collect();
         let found = memo.member(&class, &inner.member, || {
             member_fact(
+                shapes,
                 index,
                 scopes,
                 root,
@@ -1284,6 +1333,7 @@ pub(crate) fn type_of_expression_inner(
                 Some(qualified) => {
                     match memo.member(&qualified, &inner.member, || {
                         member_fact(
+                            shapes,
                             index,
                             scopes,
                             root,
@@ -1675,9 +1725,16 @@ pub(crate) fn operator_returns_of(
     // that `auto &` bound and both queries below were spelled with it.
     let class_spelling = the_class_spelling(class_type);
     for spelling in [wanted.as_str(), symbol] {
-        if let Known::Yes((fact, _)) =
-            member_fact(index, scopes, root, path, &class_spelling, spelling, None)
-        {
+        if let Known::Yes((fact, _)) = member_fact(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            &class_spelling,
+            spelling,
+            None,
+        ) {
             // **The spelling the fact refused, when the class is here to resolve it.** `reference operator[]` on a
             // `std::vector` has `returns: None`, because a fact's readers cannot resolve `reference` — but this
             // reader holds the class, and `a_members_answer_as_a_type` below is exactly the alias step that turns it
@@ -1856,8 +1913,16 @@ pub(crate) fn a_base_operators_return(
     // the completion after `shared_ptr<std::string>::operator->` is empty. A bare name is read as a member of the
     // class that declared the operator, substituted, and the operators around it put back on.
     if let Some((name, suffix)) = a_bare_type_and_its_operators(returns)
-        && let Known::Yes((alias, _)) =
-            member_fact(index, scopes, root, path, declared_in, name, None)
+        && let Known::Yes((alias, _)) = member_fact(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            declared_in,
+            name,
+            None,
+        )
         && let Some(target) = alias.type_of.clone()
     {
         let substituted =
@@ -2177,6 +2242,7 @@ impl NamedDeclaration {
     /// `reference` while the other reader of the same question answered `_Elem&`. One question, one reader.
     pub(crate) fn what_a_call_has(
         &self,
+        shapes: &crate::sema::declarations::ShapeTable,
         index: &ProjectIndex,
         declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
         scopes: &crate::ScopeTree,
@@ -2201,7 +2267,7 @@ impl NamedDeclaration {
         // taken apart, and that is not attempted — it is a different deduction, and half of it would be a guess.
         let deduced;
         let written_arguments = if written_arguments.is_empty() && !argument_types.is_empty() {
-            let (names, written_list) = self.parameters_of(index, scopes, root, path);
+            let (names, written_list) = self.parameters_of(shapes, index, scopes, root, path);
             deduced = deduce_the_parameters(&names, written_list.as_deref(), argument_types);
             &deduced[..]
         } else {
@@ -2221,9 +2287,15 @@ impl NamedDeclaration {
                 // body is in this very tree, so no other file has to be read: the branch whose condition holds under
                 // the substitutions is the only one instantiated, and `_It + 0` becomes `int* + 0`.
                 let names_for_the_call =
-                    crate::sema::declarations::declared_template_parameters_of(root, binding);
-                let returns = match crate::sema::declarations::declared_returns_of(root, binding)
-                    .filter(|returns| !is_a_placeholder(returns))
+                    crate::sema::declarations::declared_template_parameters_with(
+                        crate::sema::declarations::shapes_from(shapes, root),
+                        binding,
+                    );
+                let returns = match crate::sema::declarations::declared_returns_of_with(
+                    crate::sema::declarations::shapes_from(shapes, root),
+                    binding,
+                )
+                .filter(|returns| !is_a_placeholder(returns))
                 {
                     Some(returns) => parse_type_spelling(&returns),
                     None => {
@@ -2249,8 +2321,10 @@ impl NamedDeclaration {
                 // `size_type`. One question, two answers, and the difference was which of the two arms the lookup
                 // happened to land in. Measured on a fixture with both: the same-file call refused and the
                 // header's call deduced.
-                let names =
-                    crate::sema::declarations::declared_template_parameters_of(root, binding);
+                let names = crate::sema::declarations::declared_template_parameters_with(
+                    crate::sema::declarations::shapes_from(shapes, root),
+                    binding,
+                );
                 if names.is_empty() || written_arguments.is_empty() {
                     return Some(returns);
                 }
@@ -2405,6 +2479,7 @@ impl NamedDeclaration {
     /// A declaration that is not a template answers with no names, which is the ordinary case and costs nothing.
     pub(crate) fn parameters_of(
         &self,
+        shapes: &crate::sema::declarations::ShapeTable,
         index: &ProjectIndex,
         _scopes: &crate::ScopeTree,
         root: &cpp_parser::CppSyntaxNode,
@@ -2413,7 +2488,10 @@ impl NamedDeclaration {
         let _ = index;
         match self {
             NamedDeclaration::Here(binding) => (
-                crate::sema::declarations::declared_template_parameters_of(root, binding),
+                crate::sema::declarations::declared_template_parameters_with(
+                    crate::sema::declarations::shapes_from(shapes, root),
+                    binding,
+                ),
                 crate::sema::declarations::parameter_list_at(root, binding.name_range.start_offset),
             ),
             NamedDeclaration::Indexed(fact, _, _) => {
@@ -2433,9 +2511,13 @@ impl NamedDeclaration {
         _index: &ProjectIndex,
         root: &cpp_parser::CppSyntaxNode,
     ) -> Vec<String> {
+        let shapes = crate::sema::declarations::ShapeTable::new();
         match self {
             NamedDeclaration::Here(binding) => {
-                crate::sema::declarations::declared_parameter_defaults_of(root, binding)
+                crate::sema::declarations::declared_parameter_defaults_with(
+                    crate::sema::declarations::shapes_from(&shapes, root),
+                    binding,
+                )
             }
             NamedDeclaration::Indexed(fact, _, _) => fact.parameter_defaults.clone(),
         }
@@ -2578,17 +2660,35 @@ pub(crate) fn finish_a_nested_name(
             break;
         }
 
-        let found = match member_fact(index, scopes, root, path, class, &nested, None) {
+        let found = match member_fact(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            class,
+            &nested,
+            None,
+        ) {
             Known::Yes(found) => Known::Yes(found),
             miss => match the_head_and_the_member_of(&nested) {
                 Some((head, tail)) => {
-                    let head = resolve_aliases(index, scopes, root, path, head).to_string();
+                    let head = resolve_aliases(
+                        &crate::sema::declarations::ShapeTable::new(),
+                        index,
+                        scopes,
+                        root,
+                        path,
+                        head,
+                    )
+                    .to_string();
                     let arguments: Vec<String> = parse_type_spelling(&head)
                         .arguments()
                         .iter()
                         .map(|argument| argument.to_string())
                         .collect();
                     match member_fact(
+                        &crate::sema::declarations::ShapeTable::new(),
                         index,
                         scopes,
                         root,
@@ -2690,8 +2790,16 @@ pub(crate) fn a_trait_alias_resolved(
         return None;
     }
     let (class, member) = the_alias_behind(index, &named.file(path), &spelling)?;
-    let Known::Yes((fact, _)) = member_fact(index, scopes, root, path, &class, &member, None)
-    else {
+    let Known::Yes((fact, _)) = member_fact(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        &class,
+        &member,
+        None,
+    ) else {
         return None;
     };
     let target = fact.type_of.as_deref()?;

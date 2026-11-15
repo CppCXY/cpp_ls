@@ -6,6 +6,7 @@
 use super::*;
 
 pub(crate) fn member_fact(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -15,7 +16,7 @@ pub(crate) fn member_fact(
     arguments: Option<&[String]>,
 ) -> Known<(DeclFact, PathBuf)> {
     let started = std::time::Instant::now();
-    let answer = member_fact_inner(index, scopes, root, path, class, member, arguments);
+    let answer = member_fact_inner(shapes, index, scopes, root, path, class, member, arguments);
     if crate::probes::timing() && started.elapsed().as_millis() > 10 {
         eprintln!(
             "[member_fact] {:>5} ms  {class}::{member}",
@@ -26,6 +27,7 @@ pub(crate) fn member_fact(
 }
 
 pub(crate) fn member_fact_inner(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -41,7 +43,7 @@ pub(crate) fn member_fact_inner(
     // fails name the class rather than the alias: `Widget::size` is the question that could not be answered, and
     // `Alias::size` would be a question nobody asked. `direct_member` follows it again for the bases it is handed,
     // where the step is idempotent — a class resolves to itself.
-    let class = &resolve_aliases(index, scopes, root, path, class);
+    let class = &resolve_aliases(shapes, index, scopes, root, path, class);
 
     // **The arguments written on the class are what tells a partial specialization from its primary, and the caller
     // that has only a spelling has none to pass.** The nested-name walk is that caller: it arrives with
@@ -57,7 +59,8 @@ pub(crate) fn member_fact_inner(
     });
     let arguments = arguments.or(from_the_spelling.as_deref());
 
-    if let Some(found) = direct_member(index, scopes, root, path, class, member, arguments) {
+    if let Some(found) = direct_member(shapes, index, scopes, root, path, class, member, arguments)
+    {
         return Known::Yes(found);
     }
 
@@ -91,8 +94,16 @@ pub(crate) fn member_fact_inner(
     if !class.contains("::") {
         let bare = without_arguments(class);
         if let Some(declared_in) = qualified_from_the_index(index, path, bare)
-            && let Some(found) =
-                direct_member(index, scopes, root, path, &declared_in, member, arguments)
+            && let Some(found) = direct_member(
+                shapes,
+                index,
+                scopes,
+                root,
+                path,
+                &declared_in,
+                member,
+                arguments,
+            )
         {
             return Known::Yes(found);
         }
@@ -111,7 +122,7 @@ pub(crate) fn member_fact_inner(
     // looked up by", and asking "who declares `_Tp`" is a whole-index name query. Measured on `LuaSyntaxTree.cpp`,
     // `member_fact(std::vector, size_t)` — a member the class does not have — cost **370–389 ms** per call, eight
     // times, which was 2 280 ms of the file's inference.
-    let parameters = class_template_parameters(index, scopes, root, path, class);
+    let parameters = class_template_parameters(shapes, index, scopes, root, path, class);
     let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
         .unwrap_or_default()
@@ -135,7 +146,7 @@ pub(crate) fn member_fact_inner(
             // A base that cannot be resolved contributes nothing *and* stops nothing: whatever it might inherit
             // from is unknown, not absent, and the levels below it are still worth asking.
             if let Some(member_found) =
-                direct_member(index, scopes, root, path, &base, member, arguments)
+                direct_member(shapes, index, scopes, root, path, &base, member, arguments)
             {
                 found.push(member_found);
             }
@@ -237,7 +248,14 @@ pub(crate) fn member_bindings(
         return crate::sema::types::TypeBindings::default();
     }
 
-    let names = class_template_parameters(index, scopes, root, path, class);
+    let names = class_template_parameters(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+    );
     crate::sema::types::TypeBindings::new(names, arguments.to_vec())
 }
 
@@ -280,7 +298,14 @@ pub(crate) fn deduced_class_template_arguments(
     class: &str,
     initializer: &crate::sema::types::Type,
 ) -> Option<String> {
-    let parameters = class_template_parameters(index, scopes, root, path, class);
+    let parameters = class_template_parameters(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+    );
     let [only] = parameters.as_slice() else {
         return None;
     };
@@ -439,6 +464,7 @@ pub(crate) fn the_first_parameter_is(list: &str, only: &str) -> bool {
 }
 
 pub(crate) fn class_template_parameters(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -453,7 +479,10 @@ pub(crate) fn class_template_parameters(
                 .find(|binding| binding.kind == crate::BindingKind::Class)
         })
     {
-        let found = crate::sema::declarations::declared_template_parameters_of(root, binding);
+        let found = crate::sema::declarations::declared_template_parameters_with(
+            crate::sema::declarations::shapes_from(shapes, root),
+            binding,
+        );
         if !found.is_empty() {
             return found;
         }
@@ -494,13 +523,14 @@ pub(crate) const MAX_ALIAS_DEPTH: usize = 8;
 /// `NotDeclaredHere(<what the file wrote>)` rather than a name nobody wrote. See [`MAX_ALIAS_DEPTH`] for the bound
 /// and why a bound is needed at all.
 pub(crate) fn resolve_aliases(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
 ) -> String {
-    resolve_aliases_with_arguments(index, scopes, root, path, class).0
+    resolve_aliases_with_arguments(shapes, index, scopes, root, path, class).0
 }
 
 /// **The class a spelling names, following aliases — and the template arguments the alias carried.**
@@ -526,6 +556,7 @@ pub(crate) fn resolve_aliases(
 /// `_Ty` is the caller's step, because the caller is the one that knows what `T` stands for. See
 /// [`TypeBindings::applied_to`].
 pub(crate) fn resolve_aliases_with_arguments(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -533,7 +564,7 @@ pub(crate) fn resolve_aliases_with_arguments(
     class: &str,
 ) -> (String, Vec<Type>) {
     let (name, carried, _unresolved) =
-        resolve_aliases_or_unresolved(index, scopes, root, path, class);
+        resolve_aliases_or_unresolved(shapes, index, scopes, root, path, class);
     (name, carried)
 }
 
@@ -548,6 +579,7 @@ pub(crate) fn resolve_aliases_with_arguments(
 /// **empty, complete** list, and `undefined-field` reported `result.size()`, `formattedText.begin()` and eight more
 /// members of `std::string` as undefined. Ten false positives on one file, all from this fallback.
 pub(crate) fn resolve_aliases_or_unresolved(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -576,11 +608,11 @@ pub(crate) fn resolve_aliases_or_unresolved(
         // The prefix is what gets resolved, and the rest is carried along — one segment at a time, longest
         // prefix first, so a name nested two aliases deep is followed the same way. `seen` bounds it, so an
         // alias that leads back to itself stops here rather than looping.
-        let followed = alias_target_of(index, scopes, root, path, &current).or_else(|| {
+        let followed = alias_target_of(shapes, index, scopes, root, path, &current).or_else(|| {
             let segments: Vec<&str> = current.split("::").collect();
             (1..segments.len()).rev().find_map(|take| {
                 let prefix = segments[..take].join("::");
-                let (target, scope) = alias_target_of(index, scopes, root, path, &prefix)?;
+                let (target, scope) = alias_target_of(shapes, index, scopes, root, path, &prefix)?;
 
                 // **The arguments come off and the scope does not go on.** Both are the rules the candidate
                 // list below already applies, and applying them here as well compounded them: the first
@@ -760,6 +792,7 @@ pub(crate) fn without_template_arguments(written: &str) -> String {
 }
 
 pub(crate) fn alias_target_of(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -809,13 +842,19 @@ pub(crate) fn alias_target_of(
             .bindings
             .iter()
             .find(|binding| binding.name.identifier_text() == Some(short.as_str()))
-        && let Some(target) = crate::sema::declarations::declared_alias_target(root, binding)
+        && let Some(target) = crate::sema::declarations::declared_alias_target_with(
+            crate::sema::declarations::shapes_from(shapes, root),
+            binding,
+        )
     {
         // **The alias's own parameters replaced by what the use wrote.** A bare alias has no parameters and this
         // changes nothing; a template alias is the case the split above exists for.
         let target = crate::sema::types::substituted_spelling(
             &target,
-            &crate::sema::declarations::declared_template_parameters_of(root, binding),
+            &crate::sema::declarations::declared_template_parameters_with(
+                crate::sema::declarations::shapes_from(shapes, root),
+                binding,
+            ),
             &written_arguments,
         );
         return Some((

@@ -372,6 +372,7 @@ where
         let names =
             constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
                 let Known::Yes(callee) = callee_of_a_call(
+                    &crate::sema::declarations::ShapeTable::new(),
                     index,
                     &mut |_: &Path| None,
                     &view.scopes,

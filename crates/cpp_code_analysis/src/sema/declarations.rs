@@ -720,6 +720,34 @@ pub struct DeclarationShapes {
     parameter_lists: Vec<cpp_parser::SourceRange>,
 }
 
+/// **One file's declaration table, built at most once per request.**
+///
+/// [`DeclarationShapes::of`] is a pass over every node of a file (1.3 ms for a 200-line file, 3.6 ms for a
+/// 900-line one), and the queries that need it are asked **once per class-typed declaration** — so a query path
+/// that built its own table per call made diagnostics quadratic: measured on a 901-line file, one diagnostic pass
+/// built this table **1 801 times, 6.6 s of a 7.2 s pass** (`docs/diagnostics-performance.md` §2.4).
+///
+/// The table is a *function of one tree*, so the thing a caller threads through is a cell, not the table: a cell
+/// can be handed to a query that turns out not to need one (`members_of` answers from its own cache before it
+/// looks at the tree), which is the property that keeps a warm pull at a microsecond. `OnceCell` rather than
+/// `OnceLock` because all of this runs on one thread, within one request; see [`SemanticModel`], which owns one
+/// for the duration of a pull.
+///
+/// **A caller with no request to share one in passes `&ShapeTable::new()`** — completion, a hover, a test — and
+/// gets exactly what it built before: one table per query. That is what every public entry point does when it
+/// delegates to its `_with` form, and the reason that spelling appears at those call sites.
+///
+/// [`SemanticModel`]: crate::sema::model::SemanticModel
+pub type ShapeTable = std::cell::OnceCell<DeclarationShapes>;
+
+/// The table in `shapes`, built from `root` if this is the first ask.
+pub fn shapes_from<'a>(
+    shapes: &'a ShapeTable,
+    root: &cpp_parser::CppSyntaxNode,
+) -> &'a DeclarationShapes {
+    shapes.get_or_init(|| DeclarationShapes::of(root))
+}
+
 /// One node a question is answered at, and how it is reached.
 struct Shape {
     /// The node's own range — the interval that decides which bindings it is the shape *for*.
@@ -1266,7 +1294,10 @@ pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<
 }
 
 /// [`declared_alias_target`] for a caller that has the file's shapes already.
-fn declared_alias_target_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+pub(crate) fn declared_alias_target_with(
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
     if !matches!(binding.kind, BindingKind::Alias | BindingKind::Typedef) {
         return None;
     }

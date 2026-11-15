@@ -216,6 +216,7 @@ pub(crate) fn a_lambdas_body_the_callee_names(
 
 pub(crate) fn type_of_a_call(
     memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -291,7 +292,7 @@ pub(crate) fn type_of_a_call(
             .iter()
             .filter_map(|argument| {
                 match type_of_expression_memoed(
-                    memo, index, declaring, scopes, root, path, argument, 0,
+                    memo, shapes, index, declaring, scopes, root, path, argument, 0,
                 ) {
                     Known::Yes((type_of, _)) => Some(type_of),
                     _ => None,
@@ -323,9 +324,9 @@ pub(crate) fn type_of_a_call(
     // **A call through a function pointer** — `int (*fp)(int) = negate; fp(3)`. The callee is a variable whose type is a
     // *pointer to a function*, so what the call has is that function's return type. Measured: `auto through_pointer = fp(3)`
     // answered *"the type of `fp(3)` is not known here"*.
-    if let Known::Yes((callee_type, file)) =
-        type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
-        && let Some(returns) = a_function_pointer_returns(&callee_type)
+    if let Known::Yes((callee_type, file)) = type_of_expression_memoed(
+        memo, shapes, index, declaring, scopes, root, path, &callee, 0,
+    ) && let Some(returns) = a_function_pointer_returns(&callee_type)
     {
         return Known::Yes((returns, file));
     }
@@ -350,15 +351,17 @@ pub(crate) fn type_of_a_call(
     // member call answered **`std::optional`'s `operator()`**, and `auto op = vFile.GetSyntaxTree(vfs);` deduced
     // `value_type`. Measured on a real project: four unrelated-looking hover cards were this one arm, because the
     // wrong answer propagated to everything the variable fed.
-    let resolved =
-        declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
+    let resolved = declaration_of_a_callee(
+        memo, shapes, index, declaring, scopes, root, path, &callee, written,
+    );
     let names_a_function = match &resolved {
         Known::Yes(named) => named.fact_kind() == crate::DeclKind::Function,
         _ => false,
     };
     if !names_a_function
-        && let Known::Yes((callee_type, file)) =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &callee, 0)
+        && let Known::Yes((callee_type, file)) = type_of_expression_memoed(
+            memo, shapes, index, declaring, scopes, root, path, &callee, 0,
+        )
         && matches!(callee_type, Type::Named { .. })
         && let Some(returns) = operator_returns_of(
             index,
@@ -405,8 +408,9 @@ pub(crate) fn type_of_a_call(
     if names_define_static_array(&callee)
         && let Some(first) =
             crate::inlay::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
-        && let Known::Yes((argument, _)) =
-            type_of_expression_memoed(memo, index, declaring, scopes, root, path, &first, 0)
+        && let Known::Yes((argument, _)) = type_of_expression_memoed(
+            memo, shapes, index, declaring, scopes, root, path, &first, 0,
+        )
         && let Some(element) = range_element_of(as_a_range(&argument))
     {
         let element = crate::sema::types::parse_type_spelling(&element);
@@ -479,10 +483,12 @@ pub(crate) fn type_of_a_call(
         ));
     }
 
-    let resolved =
-        declaration_of_a_callee(memo, index, declaring, scopes, root, path, &callee, written);
+    let resolved = declaration_of_a_callee(
+        memo, shapes, index, declaring, scopes, root, path, &callee, written,
+    );
     let known_so_far = match resolved {
         Known::Yes(named) => match named.what_a_call_has(
+            shapes,
             index,
             declaring,
             scopes,
@@ -891,6 +897,7 @@ pub(crate) fn iterator_element_type(
 
     let Known::Yes((object, file)) = type_of_expression_memoed(
         memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -966,6 +973,7 @@ pub(crate) fn qualified_from_the_index(
 /// consumer reporting "not known" should name the code the user wrote, not the half of it the lookup started at.
 pub(crate) fn declaration_of_a_callee(
     memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -978,6 +986,7 @@ pub(crate) fn declaration_of_a_callee(
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
         let object = match type_of_expression_memoed(
             memo,
+            shapes,
             index,
             declaring,
             scopes,
@@ -1013,7 +1022,7 @@ pub(crate) fn declaration_of_a_callee(
         // therefore had none — while the same question asked of the same object from `type_of_expression` had
         // `char&`. One question, one reader.
         let (class, arguments) =
-            member_access_class_and_arguments(index, scopes, root, path, &class, &object);
+            member_access_class_and_arguments(shapes, index, scopes, root, path, &class, &object);
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
         if crate::probes::inference() {
@@ -1028,6 +1037,7 @@ pub(crate) fn declaration_of_a_callee(
             .map(|argument| argument.to_string())
             .collect();
         return match member_fact(
+            shapes,
             index,
             scopes,
             root,
@@ -1056,7 +1066,17 @@ pub(crate) fn declaration_of_a_callee(
     {
         let candidates: Vec<(DeclFact, PathBuf)> = bindings
             .iter()
-            .map(|binding| (fact_from_binding(root, "", binding), path.to_path_buf()))
+            .map(|binding| {
+                (
+                    fact_from_binding_with(
+                        crate::sema::declarations::shapes_from(shapes, root),
+                        root,
+                        "",
+                        binding,
+                    ),
+                    path.to_path_buf(),
+                )
+            })
             .collect();
         let explicit_arguments: Vec<String> = call
             .children()
@@ -1216,6 +1236,7 @@ pub(crate) fn callees_of_a_call(
     call: &cpp_parser::CppSyntaxNode,
 ) -> Known<Vec<Callee>> {
     let memo = TypeMemo::default();
+    let shapes = crate::sema::declarations::ShapeTable::new();
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -1233,7 +1254,7 @@ pub(crate) fn callees_of_a_call(
             Known::Yes(found) if !found.is_empty() => Known::Yes(found),
             other => match other {
                 Known::Unknown(reason) => Known::Unknown(reason),
-                _ => match callee_of_a_call(index, declaring, scopes, root, path, call) {
+                _ => match callee_of_a_call(&shapes, index, declaring, scopes, root, path, call) {
                     Known::Yes(one) => Known::Yes(vec![one]),
                     Known::Unknown(reason) => Known::Unknown(reason),
                     Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1396,7 +1417,15 @@ pub(crate) fn the_types_of_the_arguments(
             .iter()
             .map(|argument| {
                 match type_of_expression_memoed(
-                    memo, index, declaring, scopes, root, path, argument, 0,
+                    memo,
+                    &crate::sema::declarations::ShapeTable::new(),
+                    index,
+                    declaring,
+                    scopes,
+                    root,
+                    path,
+                    argument,
+                    0,
                 ) {
                     Known::Yes((type_of, _)) => Known::Yes(type_of.to_string()),
                     Known::No => Known::No,
@@ -1581,6 +1610,7 @@ pub(crate) fn member_callees(
 ) -> Known<Vec<Callee>> {
     let object = match type_of_expression_memoed(
         memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -1644,6 +1674,7 @@ pub(crate) fn member_callees(
 /// the name: a `const`, a `static` or a return type is outside the declarator, and a declaration may hold more
 /// than one declarator (`void (*f(int a))(int b)`).
 pub(crate) fn callee_of_a_call(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
@@ -1660,7 +1691,7 @@ pub(crate) fn callee_of_a_call(
     };
 
     match declaration_of_a_callee(
-        &memo, index, declaring, scopes, root, path, &callee, written,
+        &memo, shapes, index, declaring, scopes, root, path, &callee, written,
     ) {
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
@@ -1736,6 +1767,7 @@ pub(crate) fn a_members_answer_as_a_type(
 
     // **The class's own declaration of that name**, which is the only one whose parameters are the ones in hand.
     let Known::Yes((fact, _)) = member_fact(
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,

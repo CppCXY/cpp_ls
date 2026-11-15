@@ -73,6 +73,13 @@ pub struct SemanticModel<'a> {
     /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
     /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
     members: RefCell<BTreeMap<String, Known<MemberList>>>,
+    /// **This file's declaration table**, built at most once for the model's lifetime.
+    ///
+    /// Every member query used to build one for itself: the table is a pass over the whole tree, and a pull asks
+    /// for one per class-typed declaration, so that pass dominated the pull (1 801 builds, 6.6 s of a 7.2 s
+    /// diagnostic pass on a 901-line file — `docs/diagnostics-performance.md` §2.4). The cell makes the table a
+    /// *request*-scoped object, the same way `types` and `members` are.
+    shapes: crate::sema::declarations::ShapeTable,
 }
 
 impl<'a> SemanticModel<'a> {
@@ -99,6 +106,7 @@ impl<'a> SemanticModel<'a> {
             resolver: RefCell::new(resolver),
             types: crate::index::project::TypeMemo::default(),
             members: RefCell::new(BTreeMap::new()),
+            shapes: crate::sema::declarations::ShapeTable::new(),
         }
     }
 
@@ -129,6 +137,7 @@ impl<'a> SemanticModel<'a> {
         let mut resolver = self.resolver.borrow_mut();
         project::type_of_expression_memoed(
             &self.types,
+            &self.shapes,
             self.index,
             &mut **resolver,
             self.scopes,
@@ -157,7 +166,14 @@ impl<'a> SemanticModel<'a> {
     }
 
     fn members_of_uncached(&self, class: &str) -> Known<MemberList> {
-        let listed = project::members_of(self.index, self.scopes, self.root, self.path, class);
+        let listed = project::members_of_with(
+            &self.shapes,
+            self.index,
+            self.scopes,
+            self.root,
+            self.path,
+            class,
+        );
         // **The class's arguments, written through its members** — see [`project::substituted_members`].
         project::substituted_members(self.index, self.path, class, listed)
     }
@@ -189,7 +205,14 @@ impl<'a> SemanticModel<'a> {
     /// of walking for a class whose own list is empty. A check that only needs the class's own constructors —
     /// `assign-type-check` — was paying that on every pull. See [`project::own_members_of`].
     pub fn own_members_of(&self, class: &str) -> Known<Vec<(std::path::PathBuf, crate::DeclFact)>> {
-        project::own_members_of(self.index, self.scopes, self.root, self.path, class)
+        project::own_members_of_with(
+            &self.shapes,
+            self.index,
+            self.scopes,
+            self.root,
+            self.path,
+            class,
+        )
     }
 
     /// **Does `name` name a template parameter *where it is used*** — the `C` of `template <class C>`?

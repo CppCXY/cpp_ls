@@ -214,6 +214,7 @@ pub fn member_definitions_across_files(
 
     let Known::Yes((object_type, _)) = type_of_expression_memoed(
         &memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -224,6 +225,7 @@ pub fn member_definitions_across_files(
     ) else {
         let Known::Unknown(reason) = type_of_expression_memoed(
             &memo,
+            &crate::sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,

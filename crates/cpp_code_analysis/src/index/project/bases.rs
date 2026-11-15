@@ -6,6 +6,7 @@
 use super::*;
 
 pub(crate) fn direct_member(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -17,7 +18,7 @@ pub(crate) fn direct_member(
     // An alias has no members of its own, so the spelling is followed to the class it names before anything is
     // looked up: `std::string`'s members are `std::basic_string`'s. This is the one place a spelling becomes a
     // class for a **single** member, which is why the step lives here rather than at every caller.
-    let class = &resolve_aliases(index, scopes, root, path, class);
+    let class = &resolve_aliases(shapes, index, scopes, root, path, class);
 
     // A class declared in this file is looked up here first, which is what makes the whole query work on a buffer
     // that has never been written to disk. The declared type is filled in from the tree, because a member of a
@@ -29,7 +30,15 @@ pub(crate) fn direct_member(
             .iter()
             .find(|binding| binding.name.identifier_text() == Some(member))
     {
-        return Some((fact_from_binding(root, class, binding), path.to_path_buf()));
+        return Some((
+            fact_from_binding_with(
+                crate::sema::declarations::shapes_from(shapes, root),
+                root,
+                class,
+                binding,
+            ),
+            path.to_path_buf(),
+        ));
     }
 
     // Several declarations of one name **in one class** are overloads, not an ambiguity. The language keeps them in
@@ -332,13 +341,17 @@ pub(crate) fn fact_from_binding_with(
         // `auto` is not — the index's fact deduces through `declared_returns_of`, so this one must too, or the same function
         // has a return type in one answer and none in the other. Measured: `make_sized` printed `std::array<int, Size>` from
         // `facts` and "a function" from the hover.
+        // **No table is built for the fallback.** declared_returns_of_in already answers the deduction
+        // (deduced_returns_of); what it refuses is the unusable operator spelling, which the _with form still
+        // returns — the wrapper declared_returns_of would build a whole declaration table to say the same thing,
+        // and that fallback was measured at 1 000 builds for one 901-line diagnostic pass.
         returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-            .or_else(|| crate::sema::declarations::declared_returns_of(root, binding)),
+            .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding)),
         // **The same residue the index records**, because a member query is exactly the reader that has the class:
         // `parameters` and the class's file are both in hand here. See [`crate::DeclFact::returns_in_the_class`].
         returns_in_the_class: {
             let returns = crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-                .or_else(|| crate::sema::declarations::declared_returns_of(root, binding));
+                .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding));
             if returns.is_some() {
                 None
             } else {
@@ -435,10 +448,30 @@ pub(crate) fn bases_of(
     path: &Path,
     class: &str,
 ) -> Known<Vec<String>> {
-    bases_of_inner(index, scopes, root, path, class)
+    bases_of_with(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+    )
+}
+
+/// [ases_of], with the file's declaration table threaded in — see [crate::sema::declarations::ShapeTable].
+pub(crate) fn bases_of_with(
+    shapes: &crate::sema::declarations::ShapeTable,
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<String>> {
+    bases_of_inner(shapes, index, scopes, root, path, class)
 }
 
 pub(crate) fn bases_of_inner(
+    shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -459,9 +492,12 @@ pub(crate) fn bases_of_inner(
                 .find(|binding| binding.name.identifier_text() == Some(name))
         })
     {
-        return Known::Yes(lookup_names(&crate::sema::declarations::declared_bases_of(
-            root, binding,
-        )));
+        return Known::Yes(lookup_names(
+            &crate::sema::declarations::declared_bases_of_with(
+                crate::sema::declarations::shapes_from(shapes, root),
+                binding,
+            ),
+        ));
     }
 
     // **Every declaration of the class, not the first one, and `Ambiguous` is not a failure.**

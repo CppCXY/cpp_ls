@@ -33,7 +33,13 @@ pub(crate) fn substituted_at_the_use(
         return type_of;
     }
 
-    let (names, _) = named.parameters_of(index, scopes, root, path);
+    let (names, _) = named.parameters_of(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+    );
     if names.is_empty() {
         return type_of;
     }
@@ -492,7 +498,14 @@ pub(crate) fn an_element_type_through_the_members(
         // order, which is why both parts are removed here and the arguments stay in the substitution.
         let bare_target = without_arguments(target.trim()).to_string();
         let qualified = resolved_in_the_enclosing_scopes(index, scopes, path, class, &bare_target);
-        let qualified = resolve_aliases(index, scopes, root, path, &qualified);
+        let qualified = resolve_aliases(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            &qualified,
+        );
         if let Some(found) = an_element_type_through_the_members(
             index,
             scopes,
@@ -513,7 +526,14 @@ pub(crate) fn an_element_type_through_the_members(
         .unwrap_or_default()
     {
         let base = resolved_in_the_enclosing_scopes(index, scopes, path, class, base.trim());
-        let base = resolve_aliases(index, scopes, root, path, &base);
+        let base = resolve_aliases(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            &base,
+        );
         if let Some(found) = an_element_type_through_the_members(
             index,
             scopes,
@@ -688,6 +708,7 @@ pub(crate) fn the_return_the_body_gives_back(
         };
         let Known::Yes((type_of, _)) = type_of_expression_memoed(
             memo,
+            &crate::sema::declarations::ShapeTable::new(),
             index,
             declaring,
             the_scopes,

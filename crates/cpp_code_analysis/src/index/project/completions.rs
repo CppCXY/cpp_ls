@@ -93,6 +93,7 @@ pub fn member_completions_at(
 
     let written = match type_of_expression_memoed(
         &memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -939,7 +940,14 @@ pub(crate) fn names_in_a_scope_at(
                 // finds nothing. Measured: `std::string::` offered **0** items, and it is the most-used class in
                 // the library. `resolve_aliases` is the same resolution `members_of` does for a member's own type,
                 // so the two cannot disagree about what the spelling names.
-                let named = resolve_aliases(index, scopes, root, path, spelling);
+                let named = resolve_aliases(
+                    &crate::sema::declarations::ShapeTable::new(),
+                    index,
+                    scopes,
+                    root,
+                    path,
+                    spelling,
+                );
                 let named = named.as_ref();
                 if crate::probes::members() {
                     eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");

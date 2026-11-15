@@ -65,6 +65,7 @@ pub(crate) fn range_for_element_type(
 
     let Known::Yes((container, _)) = type_of_expression_memoed(
         memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -136,6 +137,7 @@ pub(crate) fn element_of_a_range_expression(
         && a_call_to_a_function(expression).is_none()
         && let Known::Yes((container, file)) = type_of_expression_memoed(
             memo,
+            &crate::sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -163,6 +165,7 @@ pub(crate) fn element_of_a_range_expression(
             return Some(
                 match type_of_expression_memoed(
                     memo,
+                    &crate::sema::declarations::ShapeTable::new(),
                     index,
                     declaring,
                     scopes,
@@ -332,6 +335,7 @@ pub(crate) fn element_of_an_iterator_expression(
         if written == "begin" || written.ends_with(".begin") {
             let Known::Yes((container, file)) = type_of_expression_memoed(
                 memo,
+                &crate::sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,
@@ -474,6 +478,7 @@ pub(crate) fn initializer_type(
 
     type_of_expression_memoed(
         memo,
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -934,6 +939,7 @@ pub(crate) fn structured_binding_type(
     let container = match range_expression_of_the_pattern(&pattern) {
         Some(range) => type_of_expression_memoed(
             memo,
+            &crate::sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -946,6 +952,7 @@ pub(crate) fn structured_binding_type(
             let initializer = initializer_of_the_pattern(&pattern)?;
             type_of_expression_memoed(
                 memo,
+                &crate::sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,

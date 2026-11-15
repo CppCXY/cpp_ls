@@ -327,7 +327,14 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     // `typename alloc_traits<Alloc>::template rebind<Tp>::other` — a spelling no reader can use, three levels into
     // the chain — and a class whose parameters cannot be found is a class whose members cannot be substituted.
     let inner_class = {
-        let qualified = resolve_aliases(index, scopes, root, path, inner_name);
+        let qualified = resolve_aliases(
+            &crate::sema::declarations::ShapeTable::new(),
+            index,
+            scopes,
+            root,
+            path,
+            inner_name,
+        );
         if qualified.is_empty() || qualified == inner_name {
             inner_name.to_string()
         } else {
@@ -518,7 +525,17 @@ pub(crate) fn a_member_the_class_declares(
     // is built from the primary, which has no `type` at all. `direct_member` is the function with that rule — the
     // pattern comparison, with the arguments read from the spelling — and it is the one lookup that does **not** end by
     // asking about an `operator->`, which is what keeps this walk out of the arrow's cycle.
-    direct_member(index, scopes, root, path, class, name, None).map(|(fact, _)| fact)
+    direct_member(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        class,
+        name,
+        None,
+    )
+    .map(|(fact, _)| fact)
 }
 /// **The (parameters, arguments) pairing a declaration's `pattern` implies.**
 ///
@@ -684,7 +701,16 @@ pub(crate) fn through_an_operator_arrow(
     // **The class without its arguments**, because that is the name its members are filed under, and the arguments
     // are what the arrow's return type is substituted with.
     let target = the_class_an_arrow_points_at(index, scopes, root, path, class, arguments)?;
-    direct_member(index, scopes, root, path, &target, member, None)
+    direct_member(
+        &crate::sema::declarations::ShapeTable::new(),
+        index,
+        scopes,
+        root,
+        path,
+        &target,
+        member,
+        None,
+    )
 }
 
 /// **The class an object's `operator->` reaches**, or `None` when it declares none — or when its answer is a
@@ -711,6 +737,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     // **The arguments are handed to the lookup**, so that a partial specialization whose pattern does not match is not
     // the declaration `operator->` is read from — the same rule `direct_member`'s members already follow.
     let (arrow, _) = direct_member(
+        &crate::sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
