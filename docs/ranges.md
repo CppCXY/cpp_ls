@@ -357,8 +357,28 @@ auto a_closure     = std::views::filter([](int v)…)  could not be typed
 ```
 
 So the live failure of this stage is the **call arm for `<ranges>`'s adaptor generally**, not the unnamed lambda
-type, and every unit test of the call arm passes — which leaves the reading the facts come from as the one
-difference that is measured rather than guessed. There the callee is `std::views::filter`, and
+type, and every unit test of the call arm passes.
+
+**The cause, measured.** With the trace finally readable end to end, the live answer is:
+
+```text
+[type_of] depth  1  "std::views::filter(1)"
+[type_of] depth  0  "std::views::filter"
+[call-arm] "std::views::filter(1)" callee resolved=Variable
+[class-file] _Filter_fn class_file=Some("…/include/ranges") arguments=1
+[members-return] operator() at SourceRange { start_offset: 80164, length: 10 } returns=None file=…/include/ranges
+[member-auto] view …/include/ranges tree 12 bytes          ← the STL4038 stub
+```
+
+The **view** the deduction is handed for `<ranges>` is **12 bytes** — the `#else` stub the whole stage started with —
+while the file's *cooked rendering* (the one the server dumped while indexing) is 217 875 bytes. The cook and the
+view disagree about the same header: the cook runs with the project's C++20 standard, and the view a query asks for
+is built without it. So the name resolution that hover uses (`_Filter_fn`, from the *cooked summary*) succeeds, and
+the body the deduction tries to read is 12 bytes long — `#pragma once` and nothing else.
+
+**That is the next fix and it is the last one in this stage:** make the view of a header use the same configuration
+the cook used (the session's, with the standard the build states), instead of asking the file for its own — a system
+header has no compile-database entry and therefore no standard of its own. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for

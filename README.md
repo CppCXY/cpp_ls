@@ -41,7 +41,7 @@ the naming conventions are a search order, not an assumption.
 project root, so a Visual Studio solution and an unconfigured checkout both work. A compilation database, when present,
 is used for exact per-file flags.
 
-**4. Every claim in this repository is measured.** **3,011 tests in 200 suites**, plus probes that run against real
+**4. Every claim in this repository is measured.** **3,012 tests in 200 suites**, plus probes that run against real
 headers rather than fixtures. [`docs/open-questions.md`](docs/open-questions.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
 (**GCC 40, Clang 29, MSVC 62**) all run in CI.
@@ -163,7 +163,7 @@ watches, a native watcher monitors that folder; watcher failures are reported to
 ## Working on it
 
 ```bash
-cargo test --workspace --release          # 3,011 tests in 200 suites; the latency ones only measure in --release
+cargo test --workspace --release          # 3,012 tests in 200 suites; the latency ones only measure in --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 ```

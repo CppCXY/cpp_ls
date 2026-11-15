@@ -1217,3 +1217,59 @@ pub(crate) fn an_alias_in_the_return_survives_a_lambda_argument() {
         typed.type_of
     );
 }
+
+/// **Every feature of the real adaptor at once**: a header, a namespace alias, two overloads (the two-argument one
+/// first), an alias template in the return, and a call through the alias.
+///
+/// Each of those is covered on its own and passes; this is the combination the live server fails on, and it is the
+/// last shape that can be checked without the server.
+#[test]
+pub(crate) fn the_real_adaptor_shape_deduces_the_closure() {
+    let header = "namespace std {\n\
+                  namespace ranges {\n\
+                  namespace views {\n\
+                  template <class T> struct remove_reference { using type = T; };\n\
+                  template <class T> using decay_t = typename remove_reference<T>::type;\n\
+                  template <class F, class P> struct range_closure { };\n\
+                  struct view { };\n\
+                  struct _Filter_fn {\n\
+                  \x20   template <class Rng, class Pred>\n\
+                  \x20   auto operator()(Rng&& rng, Pred&& pred) const { return view{}; }\n\
+                  \x20   template <class Pred>\n\
+                  \x20   auto operator()(Pred&& pred) const { return range_closure<_Filter_fn, decay_t<Pred>>{}; }\n\
+                  };\n\
+                  inline constexpr _Filter_fn filter;\n\
+                  }\n\
+                  }\n\
+                  namespace views = ranges::views;\n\
+                  }\n";
+    let source = "#include \"a.hpp\"\n\
+                  void use() {\n\
+                  \x20   auto c = std::views::filter(1);\n\
+                  }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/a.hpp", header)
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("the-real-adaptor-shape", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at =
+        source.find("std::views::filter(1)").expect("the fixture") + "std::views::filter".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`std::views::filter(1)` must have a type: {typed:?}");
+    };
+    // **The call answers**, which is the property this test exists for: the one-argument overload is selected by
+    // arity, its placeholder return is deduced from the body, and the class template it names is the answer. That
+    // the alias template *inside* the spelling is left unresolved (decay_t<int> rather than int) is the next
+    // stage of the work, recorded in docs/ranges.md; asserting the prefix keeps this test about the chain.
+    assert!(
+        typed.type_of.starts_with("range_closure<_Filter_fn,"),
+        "the one-argument overload's closure is the answer: {:?}",
+        typed.type_of
+    );
+}
