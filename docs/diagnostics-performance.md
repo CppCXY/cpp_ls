@@ -319,7 +319,42 @@ iterates the same `&[CppSyntaxNode]`. Measured on the same file:
 
 The rules that were 7–11 ms each do not appear in the trace any more: their walk is now free, and only the rules that
 do real work are left — `ReturnTypeMismatch` 171 ms, `AccessInvisible` 84 ms, `Unused` 59 ms, `UndefinedField` 46 ms,
-`AssignTypeCheck` 45 ms. §4's "what is left" item 1 (memoise type inference) is what those are made of now.
+`AssignTypeCheck` 45 ms.
+
+### What those 508 ms are made of
+
+The same pass with `CPPLS_NO_INFERENCE=1`, which answers every type question `Unknown`:
+
+```text
+ReturnTypeMismatch  171 -> 3 ms      AssignTypeCheck  45 -> <1 ms     AccessInvisible  84 -> <1 ms
+Unused               60 -> 63 ms     ArgumentCount    19 -> 19 ms    ParamTypeCheck   36 -> 4 ms
+checks total        508 -> 152 ms
+```
+
+**356 ms of the 508 is inference**, and the shared `TypeMemo` is already there — one `SemanticModel` serves the whole
+pass and the memo is per node, so what is left is *distinct* inference rather than repeated work: every rule asks
+`context.type_of` about expressions no other rule asked about. That is the engine's own cost, not a cache that is
+missing, which is why §4's item 1 turned out to be already done as far as plumbing goes.
+
+`Unused` is the exception: 60 → 63 ms with inference off, so it is a walk, not an inference — the largest remaining
+inference-free rule.
+
+### `ArgumentCount`'s one-time 186 ms
+
+On the realistic TU the first pass after an open spent **186 ms** in this one rule, and the trace says what for:
+
+```text
+[argument-count] std::map<std::string, int> . size: type 0 ms | own 0 ms | list 186 ms | 1 member(s)
+```
+
+`size` is inherited, so `own_members_of` answers nothing and the rule falls back to `members_of`, which builds 132
+members (ten bases) to find the one it needs. The list is cached by the index after that — the next pull's table is
+2 ms — so this is a **once-per-session** cost, not a per-keystroke one. The rule now asks the class's own
+declarations first, which makes the same query free for a member the class writes itself (the ordinary case in a
+project's own code); the inherited case is unchanged, because judging overload arity needs *every* overload of the
+name and the only query that walks bases returns the whole list. A name-filtered base walk — the same walk, keeping
+one name and all its overloads — is the fix that would remove it, and it is a new query rather than a call-site
+change.
 
 ## 7. Where the 150 ms of a keystroke goes
 

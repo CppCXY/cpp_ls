@@ -561,16 +561,42 @@ fn judge_a_member_call(
     let crate::Known::Yes((a_type, _)) = context.type_of(&access.object) else {
         return;
     };
-    let crate::Known::Yes(list) = context.model.members_of(&a_type.to_string()) else {
-        return;
-    };
-    let members: Vec<Callee> = list
-        .members
-        .iter()
-        .filter(|member| member.fact.name == access.member)
-        .filter_map(|member| member.fact.parameter_list.as_deref())
-        .filter_map(the_callee_in)
-        .collect();
+    let class = a_type.to_string();
+
+    // **The class's own declarations first, the base walk only if they do not name it.**
+    //
+    // `members_of` answers the reader's question — everything that can be written after `.`, inherited included —
+    // and building it walks the base chain: measured on the realistic fixture, a call of `size()` on
+    // `std::map<std::string, int>` spent **186 ms** of the first pass building 132 members to find one that its base
+    // declares. A member the class writes itself needs none of that, which is the ordinary case in a project's own
+    // code; an inherited one still takes the old path, so no call is judged differently — only cheaper when the class
+    // in front of it is the one that declares the name.
+    let mut members: Vec<Callee> = Vec::new();
+    if let crate::Known::Yes(own) = context.model.own_members_of(&class) {
+        for (_, fact) in &own {
+            if fact.name != access.member {
+                continue;
+            }
+            let Some(parameters) = fact.parameter_list.as_deref() else {
+                continue;
+            };
+            if let Some(callee) = the_callee_in(parameters) {
+                members.push(callee);
+            }
+        }
+    }
+    if members.is_empty() {
+        let crate::Known::Yes(list) = context.model.members_of(&class) else {
+            return;
+        };
+        members = list
+            .members
+            .iter()
+            .filter(|member| member.fact.name == access.member)
+            .filter_map(|member| member.fact.parameter_list.as_deref())
+            .filter_map(the_callee_in)
+            .collect();
+    }
     if members.is_empty() {
         return;
     }
