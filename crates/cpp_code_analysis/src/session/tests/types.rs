@@ -1103,3 +1103,42 @@ pub(crate) fn an_auto_returning_operator_naming_its_argument_is_deduced() {
         "the body returns `wrapper<Pred>` and the call passed an `int`"
     );
 }
+
+/// **When the argument has no nameable type, the answer keeps the parameter** — better than nothing.
+///
+/// A lambda's type is unnamed, so nothing can substitute `_Pr` in
+/// `_Range_closure<_Filter_fn, decay_t<_Pr>>` — and refusing the whole call for that reason is what made
+/// `std::views::filter([](const Item& item) { … })` answer `UnknownType`. The spelling with the parameter standing
+/// is a type a reader can hover, and it is what the file wrote.
+#[test]
+pub(crate) fn an_auto_returning_operator_called_with_a_lambda_still_answers() {
+    let text = "template <class T> struct remove_reference { using type = T; };\n\
+                template <class T> using decay_t = typename remove_reference<T>::type;\n\
+                template <class F, class P> struct range_closure { };\n\
+                struct _Filter_fn {\n\
+                \x20   template <class Pred>\n\
+                \x20   auto operator()(Pred&& pred) const { return range_closure<_Filter_fn, decay_t<Pred>>{}; }\n\
+                };\n\
+                inline constexpr _Filter_fn filter;\n\
+                void use() {\n\
+                \x20   auto c = filter([](int v) { return v > 0; });\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-operator-called-with-a-lambda", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("filter([]").expect("the fixture") + "filter".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`filter(lambda)` must answer something: {typed:?}");
+    };
+    assert!(
+        typed.type_of.starts_with("range_closure<"),
+        "the spelling the body wrote is the answer, with the parameter standing: {:?}",
+        typed.type_of
+    );
+}

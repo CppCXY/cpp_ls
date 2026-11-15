@@ -294,7 +294,22 @@ argument — `<ranges>`'s own `_Range_closure<_Filter_fn, decay_t<_Pr>>` — is 
 test that is not committed (it would be red), and the next step for this stage: resolve an alias template **inside**
 a deduced spelling, which is the same walk `a_trait_alias_resolved` already makes when the whole spelling is one.
 
-**What is still open in this stage:** the `<ranges>` fixture itself. There the callee is `std::views::filter`, and
+**One shape was found that the deduction gets *wrong*, not merely empty**, and it is the shape `<ranges>` writes:
+
+```cpp
+struct _Filter_fn {
+    template <class Rng, class Pred> auto operator()(Rng&& rng, Pred&& pred) const { return view{}; }
+    template <class Pred>            auto operator()(Pred&& pred) const { return range_closure<_Filter_fn, Pred>{}; }
+};
+auto c = filter([](int v) { return v > 0; });   // deduced `view` — the *two*-argument overload
+```
+
+`member_fact` answers the **first** declaration of the name, and the first is the two-argument form; passing the
+argument count through to it (tried) does not change the choice. The next step is therefore to select the overload
+whose parameter count fits the call before deducing — a red test was written and is not committed, and the fix is
+not the one line it looks like: it needs the member list, not the single-fact query.
+
+**What is still open in this stage:** the `<ranges>` fixture itself, plus this overload selection. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
 live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
 disk was built by the previous parser. So the next measurement is the live server's own answer for
