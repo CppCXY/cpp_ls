@@ -1142,3 +1142,41 @@ pub(crate) fn an_auto_returning_operator_called_with_a_lambda_still_answers() {
         typed.type_of
     );
 }
+
+/// **The overloaded shape the real adaptor has**: one `operator()` that takes a range and a predicate, one that
+/// takes the predicate alone. `member_fact` answers the *first* declaration of a name, and the first one here is
+/// the two-argument form — whose return is the same closure, so the answer must not depend on which was chosen.
+#[test]
+pub(crate) fn an_overloaded_adaptor_deduces_the_operator_that_the_arguments_fit() {
+    let text = "template <class F, class P> struct range_closure { };\n\
+                struct range { int value; };\n\
+                struct view { };\n\
+                struct _Filter_fn {\n\
+                \x20   template <class Rng, class Pred>\n\
+                \x20   auto operator()(Rng&& rng, Pred&& pred) const { return view{}; }\n\
+                \x20   template <class Pred>\n\
+                \x20   auto operator()(Pred&& pred) const { return range_closure<_Filter_fn, Pred>{}; }\n\
+                };\n\
+                inline constexpr _Filter_fn filter;\n\
+                void use() {\n\
+                \x20   auto c = filter([](int v) { return v > 0; });\n\
+                }\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", text);
+    let fixture = Memory::new("an-overloaded-adaptor", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", text);
+    session.index_everything();
+    let path = std::path::PathBuf::from("/p/a.cpp");
+    let view = session.view_of_the_file(&path).expect("a view");
+
+    let at = text.find("filter([]").expect("the fixture") + "filter".len();
+    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let Known::Yes(typed) = typed else {
+        panic!("`filter(lambda)` must answer something: {typed:?}");
+    };
+    assert!(
+        typed.type_of.starts_with("range_closure<"),
+        "the one-argument form is the one the call fits: {:?}",
+        typed.type_of
+    );
+}

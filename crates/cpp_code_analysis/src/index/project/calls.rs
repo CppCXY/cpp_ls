@@ -372,6 +372,7 @@ pub(crate) fn type_of_a_call(
             &callee_type,
             "operator()",
             &argument_types,
+            crate::inlay::arguments_of(call).map(|arguments| arguments.len()),
         )
     {
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));

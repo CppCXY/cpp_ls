@@ -1660,6 +1660,7 @@ pub(crate) fn operator_returns_of(
         class_type,
         operator,
         &[],
+        None,
     )
 }
 
@@ -1675,6 +1676,9 @@ pub(crate) fn operator_returns_of_with_arguments(
     class_type: &Type,
     operator: &str,
     argument_types: &[crate::sema::types::Type],
+    // **How many arguments the call wrote** — the types can be fewer, because a lambda's type is unnamed and a
+    // conversion that failed records nothing. The count is what picks an overload; the types are what fill it in.
+    argument_count: Option<usize>,
 ) -> Option<String> {
     let class = class_type.class_name()?.to_string();
 
@@ -1749,7 +1753,59 @@ pub(crate) fn operator_returns_of_with_arguments(
     // `Unknown(UnknownType("events[Pos]"))` for a `std::vector<MarkEvent>`, because the object's type carries the `&`
     // that `auto &` bound and both queries below were spelled with it.
     let class_spelling = the_class_spelling(class_type);
+    // **The overload the call fits.** `member_fact` answers the *first* declaration of a name, and an adaptor
+    // declares the two-argument form first:
+    //
+    // ```cpp
+    // struct _Filter_fn {
+    //     template <class Rng, class Pred> auto operator()(Rng&& rng, Pred&& pred) const { return view{}; }
+    //     template <class Pred>            auto operator()(Pred&& pred) const { return range_closure<…>{}; }
+    // };
+    // auto c = filter([](int v) { return v > 0; });   // the first declaration's return type — `view`
+    // ```
+    //
+    // — measured, and passing the argument count through to `member_fact` does not change the choice. So when the
+    // caller knows what the call passed and the first fact's parameter count disagrees, the member list is asked for
+    // the one whose count agrees. A call whose arity matches nothing keeps the first fact, which is the answer this
+    // arm gave before.
+    let arity = argument_count.or((!argument_types.is_empty()).then_some(argument_types.len()));
+    let matching = match arity {
+        Some(wanted_arity) => a_member_with_that_arity(
+            &mut *declaring,
+            index,
+            scopes,
+            root,
+            path,
+            class_file.as_deref(),
+            &class_spelling,
+            &wanted,
+            symbol,
+            wanted_arity,
+        ),
+        None => None,
+    };
     for spelling in [wanted.as_str(), symbol] {
+        if let Some((fact, member_file)) = matching.clone()
+            && let Some(answer) = the_members_return(
+                &mut *declaring,
+                index,
+                scopes,
+                root,
+                path,
+                &fact,
+                // **The class's file, not the member's own "declared in" field** — a member list records the class
+                // the member was found in there, not a path (measured: `"_Filter_fn"`). The member is read from the
+                // file the class is declared in, which is where its body is.
+                class_file
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(&member_file)),
+                parameter_names,
+                &written_arguments,
+                argument_types,
+            )
+        {
+            return Some(answer);
+        }
         if let Known::Yes((fact, member_file)) = member_fact(
             &crate::sema::declarations::ShapeTable::new(),
             index,
@@ -1782,25 +1838,20 @@ pub(crate) fn operator_returns_of_with_arguments(
             // *keyword* (or nothing at all when the fact recorded no return type), and every call of a niebloid
             // (`std::views::filter(pred)`, `transform(f)`) came back `UnknownType`. Measured on a fixture with the
             // same shape: `auto c = make_one(1);` had no type. See [`deduced_returns_of_the_member`].
-            let returns = fact.returns.clone().or(fact.returns_in_the_class.clone());
-            if returns.as_deref().is_none_or(is_a_placeholder)
-                && let Some(deduced) = deduced_returns_of_the_member(
-                    declaring,
-                    &fact,
-                    member_file.as_path(),
-                    parameter_names,
-                    &written_arguments,
-                    argument_types,
-                )
-            {
-                return Some(deduced);
-            }
-            let returns = returns?;
-            return Some(crate::sema::types::substituted_spelling(
-                &returns,
+            if let Some(answer) = the_members_return(
+                &mut *declaring,
+                index,
+                scopes,
+                root,
+                path,
+                &fact,
+                member_file.as_path(),
                 parameter_names,
                 &written_arguments,
-            ));
+                argument_types,
+            ) {
+                return Some(answer);
+            }
         }
     }
 
@@ -1862,6 +1913,102 @@ pub(crate) fn operator_returns_of_with_arguments(
         parameter_names,
         &written_arguments,
     ))
+}
+
+/// **What one member returns, by its written type or by its body.**
+///
+/// A member whose return type is written returns that spelling, substituted with the class's arguments; one whose
+/// type is the placeholder `auto` — every range adaptor's `operator()` — has its body read instead. Both the
+/// first-declaration path and the arity-matched path of [`operator_returns_of_with_arguments`] go through here, so
+/// the two cannot disagree about the same declaration.
+#[allow(clippy::too_many_arguments)]
+fn the_members_return(
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    fact: &crate::DeclFact,
+    member_file: &Path,
+    parameter_names: &[String],
+    written_arguments: &[String],
+    argument_types: &[crate::sema::types::Type],
+) -> Option<String> {
+    let _ = (index, scopes, root, path);
+    let returns = fact.returns.clone().or(fact.returns_in_the_class.clone());
+    if returns.as_deref().is_none_or(is_a_placeholder)
+        && let Some(deduced) = deduced_returns_of_the_member(
+            declaring,
+            fact,
+            member_file,
+            parameter_names,
+            written_arguments,
+            argument_types,
+        )
+    {
+        return Some(deduced);
+    }
+    let returns = returns?;
+    Some(crate::sema::types::substituted_spelling(
+        &returns,
+        parameter_names,
+        written_arguments,
+    ))
+}
+
+/// **How many parameters a fact's declaration takes**, from the names it recorded or the list it wrote.
+fn a_facts_parameter_count(fact: &crate::DeclFact) -> Option<usize> {
+    if !fact.parameters.is_empty() {
+        return Some(fact.parameters.len());
+    }
+    let list = fact.parameter_list.as_deref()?;
+    let inside = list
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    if inside.is_empty() || inside == "void" {
+        return Some(0);
+    }
+    Some(inside.split(',').count())
+}
+
+/// **The member of that name whose parameter count is `arity`**, from the class's member list.
+///
+/// The member list rather than [`member_fact`], because that query answers the *first* declaration of a name and an
+/// adaptor declares its two-argument `operator()` first — see the note at the call site.
+#[allow(clippy::too_many_arguments)]
+fn a_member_with_that_arity(
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class_file: Option<&Path>,
+    class_spelling: &str,
+    wanted: &str,
+    symbol: &str,
+    arity: usize,
+) -> Option<(crate::DeclFact, String)> {
+    let view = class_file.and_then(declaring);
+    let (class_scopes, class_root, class_path) = match &view {
+        Some(view) => (view.scopes.as_ref(), &view.root, view.path.as_path()),
+        None => (scopes, root, path),
+    };
+    let Known::Yes(list) = members_of(index, class_scopes, class_root, class_path, class_spelling)
+    else {
+        return None;
+    };
+    let found = list.members.iter().find(|member| {
+        let name: String = member
+            .fact
+            .name
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        (name == wanted || name == symbol) && a_facts_parameter_count(&member.fact) == Some(arity)
+    })?;
+    Some((found.fact.clone(), found.declared_in.clone()))
 }
 
 /// **What a member whose return type is `auto` returns**, read from its body.

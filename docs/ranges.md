@@ -305,9 +305,18 @@ auto c = filter([](int v) { return v > 0; });   // deduced `view` — the *two*-
 ```
 
 `member_fact` answers the **first** declaration of the name, and the first is the two-argument form; passing the
-argument count through to it (tried) does not change the choice. The next step is therefore to select the overload
-whose parameter count fits the call before deducing — a red test was written and is not committed, and the fix is
-not the one line it looks like: it needs the member list, not the single-fact query.
+argument count through to it (tried) does not change the choice — it needs the member list, not the single-fact
+query. **Fixed**, and the two details that were not obvious:
+
+* the overload is chosen by the **number of arguments the call wrote** (`crate::inlay::arguments_of(call).len()`),
+  not by the number of argument *types*: a lambda's type is unnamed, so a call that passes one lambda can have an
+  empty type list, and the arity then looked like zero.
+* a member list's `declared_in` is **not a path** — measured, it is the class's name (`"_Filter_fn"`). The member's
+  body is read from the file the *class* is declared in, which is where it is written.
+
+The member's return is now read through one function, `the_members_return`, shared by the first-declaration path and
+the arity-matched path, so the two cannot disagree. The test `an_overloaded_adaptor_deduces_the_operator_that_the_
+arguments_fit` asserts the one-argument call's closure rather than the first overload's `view`, and it passed.
 
 **What is still open in this stage:** the `<ranges>` fixture itself, plus this overload selection. There the callee is `std::views::filter`, and
 whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
