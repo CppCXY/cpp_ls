@@ -200,8 +200,30 @@ Which parts are needed, by deletion and replacement:
 
 So the shape is a constructor with a **`requires` clause followed by a nested `noexcept` whose operand is a
 functional cast of a qualified call**, and then a member-initializer list. The `:` of that list is not recognised,
-and the list becomes declarators. The next step is in `decls.rs`: how a class member's declaration decides whether
-it has a member-initializer list, and why the constrained form loses that decision.
+and the list becomes declarators.
+
+**Fixed.** `decls.rs` asked the parser's *live* "the last declarator was a function" flag at the `:` — and the
+suffixes in between parse expressions, one of which contains a declarator of its own, which resets the flag. The arm
+now uses the answer taken **when the declarator was read** (`declarator_is_function`), which is the same question at
+the right time and at least as permissive (it is the live flag or a parameter list in the event stream, so an empty
+parameter list is still recognised). Measured:
+
+```text
+the reproduction            marker in std::probe  ->  marker in probe
+std::views::iota  (hop2)    UnknownType            ->  _Iota_fn
+std::views::transform (hop) UnknownType            ->  _Transform_fn
+`, the trailing alias       std::ranges::views     ->  reaches `std::views` (the adaptors resolve)
+```
+
+The regression test is `a_constrained_constructor_keeps_its_member_initializer_list` in
+`crates/cpp_parser/tests/concepts.rs`, over the versioned fixture; it fails without the fix (the parse leaves an
+`ErrorNode`) and passes with it.
+
+**What is left of step (3)** — typing the niebloid's *call*: `std::views::filter` has a type now, but
+`std::views::filter([](const Item& item) { … })` does not, so `items | std::views::filter(…)` still has no type.
+That is the next stage: a call whose callee is a variable of a class type must select that class's `operator()`.
+
+## What it answers today
 
 ## What it answers today
 

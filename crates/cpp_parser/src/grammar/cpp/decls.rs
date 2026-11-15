@@ -2084,7 +2084,21 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // true when a parameter list is parsed, including an empty one. Consulting the event stream as well looks
         // like belt and braces and is not: an empty parameter list leaves no node behind, so `Foo() : a(1)` would
         // be read as a variable declaration and its member initializer list rejected.
-        CppTokenKind::Colon if p.last_declarator_is_function() => {
+        // **The answer taken when the declarator was read, not the one in force here.**
+        //
+        // The suffixes between the two points parse *expressions* — a
+        // `noexcept(noexcept(_Vw(views::all(::std::forward<_Rng>(_Range_)))))` among them — and an expression may
+        // contain a declarator of its own (`decltype(…)`, a functional cast that the recovery reads as one), which
+        // resets the parser's flag. Measured on MSVC's `<ranges>`: `lazy_split_view`'s converting constructor has
+        // exactly that exception specification, the live flag came back false at the `:`, and
+        // `: _Range(…), _Pattern(…)` was read as a second declarator — `_Pattern(…)` followed by `{}` is a function
+        // definition, so the rest of the class became its body and the file's trailing
+        // `namespace views = ranges::views;` was swallowed (which is why `std::views` named nothing).
+        //
+        // `declarator_is_function` is the same question asked at the right time, and it is at least as permissive:
+        // it is the live flag *or* a parameter list in the event stream, so an empty parameter list — which leaves
+        // no node behind — is still recognised.
+        CppTokenKind::Colon if declarator_is_function => {
             parse_member_initializer_list(p)?;
             parse_further_member_initializer_lists(p)?;
         }

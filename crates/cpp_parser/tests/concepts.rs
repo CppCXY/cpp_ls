@@ -100,6 +100,42 @@ fn a_concept_definition_is_its_own_node() {
 }
 
 #[test]
+fn a_constrained_constructor_keeps_its_member_initializer_list() {
+    // The failure this pins is the quiet one, one level down from this module's own: a constructor's
+    // `: _Range(...), _Pattern(...)` read as *declarators* — the `b` of `int a, b;` — so `_Pattern(...)` followed
+    // by the body's `{}` became a function definition, and the rest of the class (and of the file) became that
+    // body. The file is the reduced case from MSVC's `<ranges>`; see `docs/ranges.md`.
+    //
+    // What made it happen is the exception specification: `noexcept(noexcept(_Vw(views::all(::std::forward
+    // <_Rng>(_Range_)))))` parses expressions between the declarator and the `:`, one of them contains a
+    // declarator of its own, and the parser's "last declarator was a function" flag came back false at the colon.
+    // The arm now uses the answer taken when the declarator was read.
+    let source = include_str!("data/a_constraint_swallows_the_rest_of_the_file.hpp");
+    parses(source);
+
+    let parsed = tree(source);
+    let probe = parsed
+        .get_red_root()
+        .descendants()
+        .find(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl
+                && node
+                    .text()
+                    .to_string()
+                    .trim_start()
+                    .starts_with("namespace probe")
+        })
+        .expect("the fixture declares `namespace probe`");
+    let parent = probe.parent().expect("the namespace has a parent");
+
+    assert_eq!(
+        CppSyntaxKind::from(parent.kind()),
+        CppSyntaxKind::TranslationUnit,
+        "the declaration above must not swallow the namespace"
+    );
+}
+
+#[test]
 fn a_requires_clause_takes_the_whole_constraint() {
     // The clause is not "the first term of the constraint". Reading it that way leaves a tree in which the `&&`
     // and everything after it have been handed to the declaration that follows — well formed, and wrong. The
