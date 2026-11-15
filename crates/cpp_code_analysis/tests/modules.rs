@@ -391,56 +391,57 @@ fn an_unknown_module_is_unknown_rather_than_absent() {
 /// no file in the project behind it, so the only way an analysis can read the module is to know where the library
 /// puts it: GCC under `bits/`, MSVC beside the include directory, libc++ under the prefix's `share/`.
 ///
-/// All three layouts are tried for every standard-module name and in every directory the scan already searches, so
-/// a project on any of them resolves `import std;` to the unit its compiler reads — which is the whole point: the
-/// exported names come from that file, not from a guess.
+/// All three layouts are tried for **both** standard-module names and in every directory the scan already searches,
+/// so a project on any of them resolves `import std;` and `import std.compat;` to the unit its compiler reads — which
+/// is the whole point: the exported names come from that file, not from a guess.
 #[test]
 fn the_standard_module_is_found_wherever_the_toolchain_ships_it() {
-    let resolves = |files: MemoryFiles, include: &str| {
+    let resolves = |files: MemoryFiles, include: &str, module: &str| {
         let mut config = CompilerConfig::new();
         config.include_paths = vec![cpp_code_analysis::IncludePath::system(include)];
+        let source = format!("import {module};\n");
+        let files = files.with_file("main.cpp", source.as_str());
         let (graph, interner) = scan_with(&files, "main.cpp", &config);
         let outcome = imports_of(&graph, &interner, "main.cpp")[0].outcome.clone();
         assert!(
             matches!(outcome, ImportOutcome::Resolved(_)),
-            "`import std;` did not resolve: {}",
+            "`import {module};` did not resolve: {}",
             outcome.describe()
         );
     };
 
-    // GCC 14+ (MinGW among them): `<include>/bits/std.cc`, which is a module unit spelled unlike any other.
-    resolves(
-        MemoryFiles::new()
-            .with_file("main.cpp", "import std;\n")
-            .with_file(
-                "/gcc/include/bits/std.cc",
-                "module;\n#include <bits/stdc++.h>\nexport module std;\n",
+    for module in ["std", "std.compat"] {
+        // GCC 14+ (MinGW among them): `<include>/bits/std.cc`, a module unit spelled unlike any other.
+        resolves(
+            MemoryFiles::new().with_file(
+                format!("/gcc/include/bits/{module}.cc"),
+                format!("module;\n#include <bits/stdc++.h>\nexport module {module};\n"),
             ),
-        "/gcc/include",
-    );
+            "/gcc/include",
+            module,
+        );
 
-    // MSVC: `<VC>/Tools/MSVC/<version>/modules/std.ixx`, beside the include directory rather than inside it.
-    resolves(
-        MemoryFiles::new()
-            .with_file("main.cpp", "import std;\n")
-            .with_file(
-                "/vc/modules/std.ixx",
-                "export module std;\n#include <vector>\n",
+        // MSVC: `<VC>/Tools/MSVC/<version>/modules/std.ixx`, beside the include directory rather than inside it.
+        resolves(
+            MemoryFiles::new().with_file(
+                format!("/vc/modules/{module}.ixx"),
+                format!("export module {module};\n#include <vector>\n"),
             ),
-        "/vc/include",
-    );
+            "/vc/include",
+            module,
+        );
 
-    // libc++ (Clang), installed: the module source is under the prefix's `share/`, while the include path is
-    // `<prefix>/include/c++/v1` — three levels down, which is what the relative hops in the table are for.
-    resolves(
-        MemoryFiles::new()
-            .with_file("main.cpp", "import std;\n")
-            .with_file(
-                "/llvm/share/libc++/v1/std.cppm",
-                "module;\n#include <vector>\nexport module std;\n",
+        // libc++ (Clang), installed: the module source is under the prefix's `share/`, while the include path is
+        // `<prefix>/include/c++/v1` — three levels down, which is what the relative hops in the table are for.
+        resolves(
+            MemoryFiles::new().with_file(
+                format!("/llvm/share/libc++/v1/{module}.cppm"),
+                format!("module;\n#include <vector>\nexport module {module};\n"),
             ),
-        "/llvm/include/c++/v1",
-    );
+            "/llvm/include/c++/v1",
+            module,
+        );
+    }
 }
 
 /// **libc++ writes down where its modules are**, and a manifest beats a directory guess: `libc++.modules.json` names
@@ -476,6 +477,35 @@ fn a_libcxx_manifest_names_the_module_file() {
     resolves(
         r#"{"version": 1, "modules": [{"name": "std.compat", "path": "std.compat.cppm"}, {"name": "std", "path": "../../../custom/std.cppm"}]}"#,
         "/llvm/custom/std.cppm",
+    );
+}
+
+/// **Every module a manifest lists is found, not only the two standard names.** A library may ship modules of its
+/// own beside `std`, and a manifest is a statement about *its* library rather than about the standard — so the name
+/// is looked up in the manifest whatever it is, and `import mylib;` resolves to the `mylib.cppm` the manifest names.
+#[test]
+fn a_manifest_is_consulted_for_any_module_it_lists() {
+    let files = MemoryFiles::new()
+        .with_file("main.cpp", "import mylib;
+")
+        .with_file(
+            "/llvm/share/libc++/v1/libc++.modules.json",
+            r#"{"version": 1, "modules": [{"name": "std", "path": "std.cppm"}, {"name": "mylib", "is_stdlib": true, "path": "mylib.cppm"}]}"#,
+        )
+        .with_file(
+            "/llvm/share/libc++/v1/mylib.cppm",
+            "module;\n#include <vector>\nexport module mylib;\n",
+        );
+    let mut config = CompilerConfig::new();
+    config.include_paths = vec![cpp_code_analysis::IncludePath::system(
+        "/llvm/include/c++/v1",
+    )];
+    let (graph, interner) = scan_with(&files, "main.cpp", &config);
+    let outcome = imports_of(&graph, &interner, "main.cpp")[0].outcome.clone();
+    assert!(
+        matches!(outcome, ImportOutcome::Resolved(_)),
+        "`import mylib;` did not resolve: {}",
+        outcome.describe()
     );
 }
 

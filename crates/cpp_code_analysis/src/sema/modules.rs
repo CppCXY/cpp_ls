@@ -338,6 +338,12 @@ pub struct ModuleScanner<'a, F: FileProvider> {
     index: HashMap<Box<str>, Vec<ModuleUnitEntry>>,
     /// The units read so far, in the order read — what becomes [`ModuleGraph::units`].
     scanned_units: Vec<ModuleUnitEntry>,
+    /// The libc++ manifests already read, keyed by path — the text, or `None` when there is no such file.
+    ///
+    /// A manifest names *every* module its library ships, and resolution asks about every import, so the file is read
+    /// once per scan rather than once per name: on a tree with a manifest that is the difference between one read and
+    /// one per `import`.
+    manifests: std::cell::RefCell<HashMap<PathBuf, Option<String>>>,
 }
 
 impl<'a, F: FileProvider> ModuleScanner<'a, F> {
@@ -347,6 +353,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             config,
             index: HashMap::new(),
             scanned_units: Vec::new(),
+            manifests: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -636,31 +643,63 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
                         candidates.push(candidate);
                     }
                 }
-                // **libc++ says where its modules are**, in a manifest beside them: `libc++.modules.json` names each
-                // module and the file that is its interface unit, which is exact where a directory guess is a guess.
-                // Clang reads this file itself, so a tree that has one is a tree whose answer is written down.
-                for relative in LIBCXX_MANIFEST_DIRECTORIES {
-                    let manifest = join_normalized(
-                        &directory,
-                        &Path::new(relative).join(LIBCXX_MANIFEST),
-                        case_insensitive,
-                    );
-                    let Some(text) = self.files.read(&manifest) else {
-                        continue;
-                    };
-                    let Some(written) = the_file_a_manifest_names(&text, name) else {
-                        continue;
-                    };
-                    for candidate in the_paths_the_manifest_may_mean(&manifest, &written) {
-                        if !candidates.contains(&candidate) {
-                            candidates.push(candidate);
-                        }
-                    }
-                }
+            }
+        }
+
+        // **libc++ writes down where its modules are**, and a manifest names *every* module the library ships — `std`,
+        // `std.compat`, and the `c++` module beside them in some versions — so it is consulted for any name rather
+        // than for the two this table knows about. It is exact where a directory is a guess, and clang reads the same
+        // file, so a tree that has one is a tree whose answer is written down.
+        for candidate in self.the_files_a_libcxx_manifest_names(name, including) {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
             }
         }
 
         candidates
+    }
+
+    /// **The files a libc++ manifest names for this module**, from every directory the scan looks at.
+    ///
+    /// Appended after the naming conventions and the standard-module table, so a project that ships its own module
+    /// file still wins. Each manifest is read once per scan (see [`ModuleScanner::manifests`]); a directory without
+    /// one costs a cached `None`.
+    fn the_files_a_libcxx_manifest_names(&self, name: &str, including: &Path) -> Vec<PathBuf> {
+        let case_insensitive = self.files.is_case_insensitive();
+        let mut found: Vec<PathBuf> = Vec::new();
+        for directory in self.search_directories(including) {
+            for relative in LIBCXX_MANIFEST_DIRECTORIES {
+                let manifest = join_normalized(
+                    &directory,
+                    &Path::new(relative).join(LIBCXX_MANIFEST),
+                    case_insensitive,
+                );
+                let Some(text) = self.the_text_of(&manifest) else {
+                    continue;
+                };
+                let Some(written) = the_file_a_manifest_names(&text, name) else {
+                    continue;
+                };
+                for candidate in the_paths_the_manifest_may_mean(&manifest, &written) {
+                    if !found.contains(&candidate) {
+                        found.push(candidate);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The text of a file the scan has already read, or `None` — one read per path per scan.
+    fn the_text_of(&self, path: &Path) -> Option<String> {
+        if let Some(remembered) = self.manifests.borrow().get(path) {
+            return remembered.clone();
+        }
+        let text = self.files.read(path);
+        self.manifests
+            .borrow_mut()
+            .insert(path.to_path_buf(), text.clone());
+        text
     }
 
     /// The directories a module named after its file would be found in.
