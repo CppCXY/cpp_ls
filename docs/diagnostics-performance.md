@@ -223,6 +223,16 @@ once per member access with a fresh `TypeMemo` and a fresh table. `classified_na
 (and a `TypeMemo`) for the whole file and hands both to `member_kinds` and `kind_of_binding`; the two
 `member_across_files` callers are split into a `_with` form. That is 1 100 tables down to one.
 
+**And `access-invisible` was asking for a member list it could never use.** On a 35-line file that
+includes `<vector>`, `items_.size()` asked for `std::vector`'s whole member list — ten bases and the
+walk that walks them — to find a `size` whose declaration is not in this file, which is exactly what
+the rule documents it does not judge. Measured: **263 ms of a 271 ms diagnostic pass**, the single most
+expensive rule. The rule now asks the object's class first (`scope_with_qualified_name`, which is
+`direct_members`' own first question) and returns unless this file declares it; the same pass is 1 ms.
+The next rule to take the 263 ms was `argument-count`, on `std::map<std::string, int>` — one list build
+of 132 members, and it is paid **once**: the index's `member_lists` cache serves it to the next pull, so
+the first pass after opening a real TU costs ~240 ms and the ones after it 5–10 ms (§5).
+
 Measured, same machine, same files as §2:
 
 | | before | after | |
@@ -231,15 +241,18 @@ Measured, same machine, same files as §2:
 | `cpp_check`, 901-line file | 7 222 ms | **277 ms** | 26× |
 | `cpp_check`, 2 701-line file | 49 561 ms | **1 479 ms** | 33× |
 | semantic tokens, 901-line file | 1 150 ms | **8.8 ms** | 130× |
+| realistic TU (35 lines, 4 standard headers), pull after an edit | 207–301 ms | **5–10 ms** (first pass 239 ms) | 30× |
 | Neovim per keystroke, 901-line file | 4 427 ms | **127 ms** | 35× |
 | Neovim per keystroke, 2 801-line file | 302 ms | **101 ms** | 3× |
+| Neovim per keystroke, realistic TU | ~250 ms | **158 ms** | 1.6× |
 | table builds in one pull, 901-line file | 1 801 | **2** (the indexer's own) | |
 
-The Neovim row was the point of the exercise: the pull was already 113 ms once the table was shared,
+The Neovim rows are the point of the exercise: the pull was already 113 ms once the table was shared,
 and the other 1 s was the update queue waiting for the semantic-token request the editor sends 200 ms
 after every change — the same per-declaration table builds, on the same analysis thread. With that gone
-a keystroke on the 901-line file costs ~127 ms end to end, and the 2 801-line file (2 000-line bodies,
-100 diagnostics) ~101 ms.
+a keystroke on the 901-line file costs ~127 ms end to end. The realistic TU's 158 ms is now mostly the
+didChange itself — the cook of a translation unit that expands four standard headers, which §4's
+"what is left" item 2 is about.
 
 ### What is left, in order of expected gain
 

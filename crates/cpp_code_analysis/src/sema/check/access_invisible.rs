@@ -93,10 +93,23 @@ impl Check for AccessInvisible {
             let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
-            let crate::Known::Yes(members) = context
-                .model
-                .members_of(object.class_name().unwrap_or_default())
-            else {
+            // **The object's class has to be one this file declares** — which is this rule's own scope, not an
+            // optimisation: a member of a class from a header is not judged (see the module documentation), and the
+            // member list of such a class is where a pull spends its time. Measured on a 35-line file that includes
+            // `<vector>`: one `items_.size()` asked for `std::vector`'s members — ten bases and the walk that walks
+            // them — to find a `size` whose declaration is not in this file, and the rule cost **263 ms** of a
+            // 271 ms diagnostic pass. The test is `direct_members`' own first question, so a class this file
+            // declares at all still reaches the member query below.
+            let class_spelling = object.class_name().unwrap_or_default();
+            if context
+                .view
+                .scopes
+                .scope_with_qualified_name(class_spelling)
+                .is_none()
+            {
+                continue;
+            }
+            let crate::Known::Yes(members) = context.model.members_of(class_spelling) else {
                 continue;
             };
             let Some(member) = members
