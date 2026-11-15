@@ -200,6 +200,8 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
 - [`docs/diagnostics-performance.md`](docs/diagnostics-performance.md) — what a diagnostics pull costs, measured
   through Neovim, with before/after numbers
 - [`docs/latency.md`](docs/latency.md) — what a semantic-token request and a completion cost, and what dominates them
+- [`docs/ranges.md`](docs/ranges.md) — what `<ranges>` answers today, the five things it still needs, and why the
+  first one is not about ranges at all
 - [`docs/neovim.md`](docs/neovim.md) — neovim read the way an editor reads it: the census, the failures, the fixes
 - [`docs/usability.md`](docs/usability.md) — what answers and what does not over the protocol, by category
 - [`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence
