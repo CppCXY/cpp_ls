@@ -387,10 +387,64 @@ fn an_unknown_module_is_unknown_rather_than_absent() {
     );
 }
 
-/// A file that exists under the conventional name but declares a different module is a **mismatch**, not a
-/// resolution.
+/// **The standard module is a *source file*, and each toolchain ships it somewhere of its own.** `import std;` has
+/// no file in the project behind it, so the only way an analysis can read the module is to know where the library
+/// puts it: GCC under `bits/`, MSVC beside the include directory, libc++ under the prefix's `share/`.
 ///
-/// This is the failure that looks like success. `import m;` finds `m.cppm`, so a resolver that stopped at
+/// All three layouts are tried for every standard-module name and in every directory the scan already searches, so
+/// a project on any of them resolves `import std;` to the unit its compiler reads — which is the whole point: the
+/// exported names come from that file, not from a guess.
+#[test]
+fn the_standard_module_is_found_wherever_the_toolchain_ships_it() {
+    let resolves = |files: MemoryFiles, include: &str| {
+        let mut config = CompilerConfig::new();
+        config.include_paths = vec![cpp_code_analysis::IncludePath::system(include)];
+        let (graph, interner) = scan_with(&files, "main.cpp", &config);
+        let outcome = imports_of(&graph, &interner, "main.cpp")[0].outcome.clone();
+        assert!(
+            matches!(outcome, ImportOutcome::Resolved(_)),
+            "`import std;` did not resolve: {}",
+            outcome.describe()
+        );
+    };
+
+    // GCC 14+ (MinGW among them): `<include>/bits/std.cc`, which is a module unit spelled unlike any other.
+    resolves(
+        MemoryFiles::new()
+            .with_file("main.cpp", "import std;\n")
+            .with_file(
+                "/gcc/include/bits/std.cc",
+                "module;\n#include <bits/stdc++.h>\nexport module std;\n",
+            ),
+        "/gcc/include",
+    );
+
+    // MSVC: `<VC>/Tools/MSVC/<version>/modules/std.ixx`, beside the include directory rather than inside it.
+    resolves(
+        MemoryFiles::new()
+            .with_file("main.cpp", "import std;\n")
+            .with_file(
+                "/vc/modules/std.ixx",
+                "export module std;\n#include <vector>\n",
+            ),
+        "/vc/include",
+    );
+
+    // libc++ (Clang), installed: the module source is under the prefix's `share/`, while the include path is
+    // `<prefix>/include/c++/v1` — three levels down, which is what the relative hops in the table are for.
+    resolves(
+        MemoryFiles::new()
+            .with_file("main.cpp", "import std;\n")
+            .with_file(
+                "/llvm/share/libc++/v1/std.cppm",
+                "module;\n#include <vector>\nexport module std;\n",
+            ),
+        "/llvm/include/c++/v1",
+    );
+}
+
+/// A file that exists under the conventional name but declares a different module is a **mismatch**, not a
+/// resolution./// This is the failure that looks like success. `import m;` finds `m.cppm`, so a resolver that stopped at
 /// "the file exists" would record a resolved edge and then attribute whatever `m.cppm` actually declares to
 /// module `m` — a wrong answer produced by the very check that was supposed to prevent it.
 #[test]

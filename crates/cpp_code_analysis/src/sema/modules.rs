@@ -605,29 +605,36 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             }
         }
 
-        // **GCC's standard module is a *source file* inside the include tree**, and it is spelled unlike any
-        // other module unit: `<include>/bits/std.cc` (97 KB on MinGW GCC 15.1: `module;`, `#include
-        // <bits/stdc++.h>`, `export module std;`, then `export namespace std { … }` blocks) and
-        // `<include>/bits/std.compat.cc`.
+        // **Where each standard library puts its `std` module**, as path templates under a directory this scan
+        // already looks at — and it looks at several, so the three toolchains are covered by one table:
         //
-        // A default GCC install has **no** `std.gcm` — the compiler answers `import std;` with *"failed to read
-        // compiled module: No such file or directory … compiled module file is 'gcm.cache/std.gcm'"* (verified by
-        // running the project's compiler) — so the source is the only thing an analysis can read, and it is the
-        // right thing: it *is* the module's interface unit, and reading it gives the exported names exactly as the
-        // compiler would.
+        // * **GCC (MinGW among them)** — `<include>/bits/std.cc` and `bits/std.compat.cc`: 97 KB of `module;`,
+        //   `#include <bits/stdc++.h>`, `export module std;`, then `export namespace std { … }` blocks. A default
+        //   GCC install has **no** `std.gcm` — the compiler answers `import std;` with *"failed to read compiled
+        //   module: No such file or directory … 'gcm.cache/std.gcm'"* — so the source is the only thing an analysis
+        //   can read, and it is the right thing: it *is* the interface unit.
+        // * **MSVC** — `<VC>/Tools/MSVC/<version>/modules/std.ixx`, **beside** the include directory. No entry is
+        //   needed for it here: [`ModuleScanner::search_directories`] already adds each include path's sibling
+        //   `modules` directory, and `std.ixx` is one of [`INTERFACE_UNIT_EXTENSIONS`].
+        // * **libc++ (Clang)** — `<prefix>/include/c++/v1/std.cppm` in a source tree (that directory is the include
+        //   path, so the naming convention already finds it), and `<prefix>/share/libc++/v1/std.cppm` when installed,
+        //   which is why the relative hops below exist: the include path sits three levels under the prefix.
         //
-        // Appended **after** the naming conventions so that a project shipping its own `std.cppm` still wins, and
-        // only for the two standard names: `bits/<anything>.cc` is not a convention, it is where this one library
-        // put these two files.
+        // Each is still only a **candidate**: the file is read and must declare the module, so a layout that is not
+        // there costs one failed read and a compiler that keeps its standard module elsewhere is a module this scan
+        // does not find rather than one it finds wrongly. Appended **after** the naming conventions, so a project
+        // shipping its own `std.cppm` still wins.
         if matches!(name, "std" | "std.compat") {
             for directory in self.search_directories(including) {
-                let candidate = join_normalized(
-                    &directory,
-                    Path::new(&format!("bits/{name}.cc")),
-                    case_insensitive,
-                );
-                if !candidates.contains(&candidate) {
-                    candidates.push(candidate);
+                for template in STANDARD_MODULE_SOURCES {
+                    let candidate = join_normalized(
+                        &directory,
+                        Path::new(&template.replace("{name}", name)),
+                        case_insensitive,
+                    );
+                    if !candidates.contains(&candidate) {
+                        candidates.push(candidate);
+                    }
                 }
             }
         }
@@ -673,6 +680,24 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         directories
     }
 }
+
+/// Where the standard libraries put the `std` module's source, as path templates under a directory the module scan
+/// already searches. `{name}` is the module's name, so `std` and `std.compat` are two files in each place.
+///
+/// GCC and libc++ are here by *placement*; MSVC's `modules/std.ixx` is found by the sibling-`modules` rule in
+/// [`ModuleScanner::search_directories`] plus the `ixx` naming convention. See the note where this is read.
+pub const STANDARD_MODULE_SOURCES: &[&str] = &[
+    // GCC 14+ (MinGW among them): `<include>/bits/std.cc` and `bits/std.compat.cc`.
+    "bits/{name}.cc",
+    // The same shape under an extension another distribution chose.
+    "bits/{name}.cppm",
+    // libc++ (Clang), installed: the module source lives under the prefix, while the include path is
+    // `<prefix>/include/c++/v1` — so the hops are counted from that directory.
+    "share/libc++/v1/{name}.cppm",
+    "../share/libc++/v1/{name}.cppm",
+    "../../share/libc++/v1/{name}.cppm",
+    "../../../share/libc++/v1/{name}.cppm",
+];
 
 /// How deep imports are followed before the scan gives up.
 ///
