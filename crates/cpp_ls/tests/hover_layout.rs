@@ -90,6 +90,26 @@ fn a_unions_card_says_so_and_puts_every_member_at_zero() {
     );
 }
 
+/// **A bare `unsigned` is four bytes** — `struct dim3 { unsigned x, y, z; }` could not be laid out at all, so its card
+/// named all three members as unsized. Reported from a CUDA project, where `dim3` is the launch-configuration type.
+#[test]
+fn a_member_written_unsigned_is_sized() {
+    let card = the_card(
+        "struct Dim {\n    unsigned x, y, z;\n    Dim(unsigned a = 1);\n};\n",
+        "struct Dim",
+    );
+    assert!(
+        card.contains("size 12 byte(s), alignment 4"),
+        "three `unsigned`s are twelve bytes: {card}"
+    );
+    assert!(
+        card.contains("offset   0, 4 byte(s)")
+            && card.contains("offset   4, 4 byte(s)")
+            && card.contains("offset   8, 4 byte(s)"),
+        "each member is four bytes after the last: {card}"
+    );
+}
+
 /// **A class whose layout cannot be computed says which member stopped it**, rather than showing numbers that are
 /// wrong about every member after it.
 #[test]

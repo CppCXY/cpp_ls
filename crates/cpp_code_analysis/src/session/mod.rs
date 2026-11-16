@@ -1855,6 +1855,8 @@ mod queries;
 mod units;
 mod views;
 
+pub use queries::WrittenAttribute;
+
 /// Which reading answered a file's diagnostics — see [`Session::diagnostics`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticReading {

@@ -144,7 +144,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | Feature | What it gives |
 | --- | --- |
 | `textDocument/completion` | names in scope (locals → class members → namespaces → included headers), the right of `.`/`->`/`::` by type (a **namespace alias** offers the names of its target, whether the alias is written here or in a header), macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order (a local before a keyword before a name from a header), snippets when the client supports them, and `completionItem/resolve` for the one item being looked at |
-| `textDocument/hover` | macros first, then the declaration (signature/type/scope), then the type of the expression; the comment next to the declaration comes with it |
+| `textDocument/hover` | macros first, then the declaration (signature/type/scope), then the type of the expression; the comment next to the declaration comes with it; a class also says what it costs in memory (`sizeof`, alignment and every data member's offset); an attribute or a macro written before a declaration is drawn above its signature — the macro expanded, and `__inline__` as `inline` |
 | `textDocument/signatureHelp` | the list of overloads with `activeParameter` — the position of the argument being typed |
 | `textDocument/definition` | the declaration of a macro, type, function, variable, member or enumerator, across files through the index |
 | `textDocument/implementation` | a virtual function's declaration → its overriders; a function declaration → its definition |

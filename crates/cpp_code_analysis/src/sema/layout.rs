@@ -191,7 +191,11 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
     if words.iter().filter(|word| **word == "long").count() >= 2 {
         return Some((8, 8));
     }
-    if has("long") || has("int") {
+    // **`unsigned` and `signed` on their own are `unsigned int` and `signed int`** — the spelling a typedef or a
+    // struct member very often uses, and the one this table did not have: measured on a CUDA project,
+    // `struct dim3 { unsigned x, y, z; };` could not be laid out at all, so its card named every member as unsized.
+    // The branches above take the combinations (`unsigned char`, `unsigned short`, `unsigned long`) first.
+    if has("long") || has("int") || has("unsigned") || has("signed") {
         return Some((4, 4));
     }
     if has("void") {
@@ -253,5 +257,18 @@ mod tests {
         assert_eq!(a_builtin_in_memory("double[3]"), Some((24, 8)));
         assert_eq!(a_builtin_in_memory("Widget"), None);
         assert_eq!(a_builtin_in_memory("std::string"), None);
+    }
+
+    /// **A bare `unsigned` is an `unsigned int`** — the spelling `struct dim3 { unsigned x, y, z; }` writes, and the
+    /// one whose absence made the whole struct unsizable. The combinations keep the sizes their own words decide.
+    #[test]
+    fn a_bare_unsigned_or_signed_is_an_int() {
+        assert_eq!(a_builtin_in_memory("unsigned"), Some((4, 4)));
+        assert_eq!(a_builtin_in_memory("signed"), Some((4, 4)));
+        assert_eq!(a_builtin_in_memory("unsigned int"), Some((4, 4)));
+        assert_eq!(a_builtin_in_memory("unsigned char"), Some((1, 1)));
+        assert_eq!(a_builtin_in_memory("unsigned short"), Some((2, 2)));
+        assert_eq!(a_builtin_in_memory("unsigned long"), Some((4, 4)));
+        assert_eq!(a_builtin_in_memory("unsigned long long"), Some((8, 8)));
     }
 }

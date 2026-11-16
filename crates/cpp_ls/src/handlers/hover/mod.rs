@@ -1619,8 +1619,46 @@ fn declaration_markdown(
     // printed by its own writer, a parameter list is parsed and rebuilt, and the head comes from the declaration's
     // template parameters. The renderer is the one place that decides this, so the card, the overload list and the
     // member list cannot disagree.
+    //
+    // **The specifiers the grammar keeps outside the declaration's node** are added here, because they are the one
+    // part of the declaration the fact cannot hold: `__attribute__((cold)) int f();`, `[[nodiscard]] int f();` and
+    // `NESTED int f();` parse with the attribute or the macro as the declaration's *sibling*. A macro is expanded,
+    // and the result is drawn the way a compiler's diagnostics draw it — the attributes above the declaration, the
+    // specifier words in front of its type:
+    //
+    // ```text
+    // __attribute__((always_inline)) __attribute__((cold))
+    // inline int f_flat(int x)
+    // ```
+    //
+    // Measured on a CUDA project: `#define FLAT __inline__ __attribute__((always_inline)) __attribute__((cold))` was
+    // the declaration's whole meaning and the card showed `int f_flat(int x)`.
+    let annotations =
+        session.the_attributes_before_a_declaration(&found.file, fact.range.start_offset);
+    let (attributes, specifiers) = the_annotations_as_the_card_shows_them(&annotations);
     let node = session.the_declaration_node(&found.file, fact.range.start_offset);
-    let declaration = cpp_code_analysis::sema::render::an_item(fact, node.as_ref(), constant_value);
+    let mut declaration =
+        cpp_code_analysis::sema::render::an_item(fact, node.as_ref(), constant_value);
+    if !attributes.is_empty() {
+        declaration.insert(0, attributes.join(" "));
+    }
+    if !specifiers.is_empty()
+        && let Some(line) = declaration.last_mut()
+        && !line.is_empty()
+    {
+        // **A word the line already carries is not repeated.** A declaration written `inline NESTED int f()` renders
+        // with its `inline` from the fact and would get a second one from the macro's expansion.
+        let mut fresh: Vec<&str> = Vec::new();
+        for specifier in specifiers.iter().map(String::as_str) {
+            if fresh.contains(&specifier) || line.split_whitespace().any(|word| word == specifier) {
+                continue;
+            }
+            fresh.push(specifier);
+        }
+        if !fresh.is_empty() {
+            *line = format!("{} {}", fresh.join(" "), line);
+        }
+    }
     out.push_str(&code_block(&declaration.join("\n")));
     // **The instantiation the reader wrote**, when it is not what the declaration says. A class template's fact
     // describes the declaration; the cursor may be on `std::map<std::string, LuaTokenKind>` and the signature that
@@ -1760,6 +1798,35 @@ fn declaration_markdown(
     }
 
     out
+}
+
+/// **The specifiers written before a declaration, split the way the card draws them** — attributes above the
+/// declaration, specifier words in front of its type.
+///
+/// Each annotation is a sibling the parser kept out of the declaration: an `AttributeList` (`__attribute__((cold))`,
+/// `[[nodiscard]]`, `__declspec(dllexport)`) or a `MacroCall` (`NESTED`, `__global__`). A macro is expanded first —
+/// the point of the line is that the source's macro name is not what the declaration means — and the expansion is
+/// split by [`cpp_code_analysis::sema::render::attributes_and_specifiers`].
+///
+/// Two fallbacks, both "as written": a macro with no expansion (`__global__`) is a specifier word, and so is a macro
+/// whose expansion is not a specifier sequence at all (it holds `;` or `{`, so it is a declaration macro and not
+/// something that belongs in front of a type).
+fn the_annotations_as_the_card_shows_them(
+    annotations: &[cpp_code_analysis::WrittenAttribute],
+) -> (Vec<String>, Vec<String>) {
+    let mut attributes = Vec::new();
+    let mut specifiers = Vec::new();
+    for annotation in annotations {
+        let expanded = annotation.expansion.as_deref().filter(|expanded| {
+            !expanded.contains(';') && !expanded.contains('{') && !expanded.contains('}')
+        });
+        let text = expanded.unwrap_or(annotation.written.as_str());
+        let (their_attributes, their_specifiers) =
+            cpp_code_analysis::sema::render::attributes_and_specifiers(text);
+        attributes.extend(their_attributes);
+        specifiers.extend(their_specifiers);
+    }
+    (attributes, specifiers)
 }
 
 /// The comment a declaration is documented by, as markdown — `None` when the file writes none.

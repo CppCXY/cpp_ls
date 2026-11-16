@@ -645,6 +645,116 @@ fn split_at_a_top_level_default(written: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// **An expanded specifier sequence, split into the attributes and the words.**
+///
+/// A macro before a declaration expands to that declaration's *specifiers*. The CUDA project's
+/// `#define AI __inline__ __attribute__((always_inline))` and `#define FLAT AI __attribute__((cold))` make
+/// `FLAT int f_flat(int x)` mean
+///
+/// ```text
+/// __attribute__((always_inline)) __attribute__((cold))
+/// inline int f_flat(int x)
+/// ```
+///
+/// — the attributes above, the specifier words in front of the type. The split is:
+///
+/// * **attributes** — `__attribute__((…))`, `__declspec(…)`, `alignas(…)`, `__launch_bounds__(…)`, `__pragma(…)` and
+///   `[[…]]`, each with its balanced group;
+/// * **specifiers** — every other word, as written, except that `__inline__`, `__inline` and `__forceinline` are the
+///   one specifier a reader knows as `inline`. A quoted string stays one word (`extern "C"`).
+///
+/// The hover puts the first line above the declaration and the second in front of its type, which is the form a
+/// compiler's diagnostics print and the one the reporter of this defect wrote out.
+pub fn attributes_and_specifiers(expanded: &str) -> (Vec<String>, Vec<String>) {
+    let mut attributes = Vec::new();
+    let mut specifiers = Vec::new();
+    let mut rest = expanded.trim_start();
+    while !rest.is_empty() {
+        if rest.starts_with("[[") {
+            // `[[nodiscard]]`, `[[deprecated("…")]]` — to the closing `]]`, which is the attribute's own end.
+            let end = rest.find("]]").map_or(rest.len(), |end| end + 2);
+            attributes.push(rest[..end].to_string());
+            rest = rest[end..].trim_start();
+            continue;
+        }
+        // **A quoted string is one word** — `extern "C"` names a linkage, not two specifiers.
+        if rest.starts_with('"') || rest.starts_with('\'') {
+            let quote = rest.chars().next().unwrap_or('"');
+            let mut end = rest.len();
+            let mut escaped = false;
+            for (at, character) in rest.char_indices().skip(1) {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if character == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if character == quote {
+                    end = at + character.len_utf8();
+                    break;
+                }
+            }
+            specifiers.push(rest[..end].to_string());
+            rest = rest[end..].trim_start();
+            continue;
+        }
+        let word_end = rest
+            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .unwrap_or(rest.len());
+        if word_end == 0 {
+            // A character that starts no word — a comma, a `*`: kept as a token so nothing is lost.
+            let end = rest.chars().next().map_or(1, char::len_utf8);
+            specifiers.push(rest[..end].to_string());
+            rest = rest[end..].trim_start();
+            continue;
+        }
+        let word = &rest[..word_end];
+        let after = rest[word_end..].trim_start();
+        let takes_a_group = matches!(
+            word,
+            "__attribute__"
+                | "__attribute"
+                | "__declspec"
+                | "alignas"
+                | "__launch_bounds__"
+                | "__pragma"
+        );
+        if takes_a_group && after.starts_with('(') {
+            let mut depth = 0i32;
+            let mut close = None;
+            for (at, character) in after.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(at + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                // An unbalanced group is the rest of the text; the callers show it as written.
+                attributes.push(rest.to_string());
+                break;
+            };
+            attributes.push(format!("{word}{}", &after[..close]));
+            rest = after[close..].trim_start();
+            continue;
+        }
+        specifiers.push(match word {
+            "__inline__" | "__inline" | "__forceinline" => "inline".to_string(),
+            other => other.to_string(),
+        });
+        rest = after;
+    }
+    (attributes, specifiers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,5 +930,47 @@ mod tests {
         );
         assert_eq!(a_type("const char * const"), "const char*");
         assert_eq!(a_type("typename Alloc::value_type"), "Alloc::value_type");
+    }
+
+    /// **An expansion is split where a card draws the line**: attributes above, specifiers in front of the type.
+    #[test]
+    fn an_expansion_is_split_into_attributes_and_specifiers() {
+        assert_eq!(
+            attributes_and_specifiers(
+                "__inline__ __attribute__((always_inline)) __attribute__((cold))"
+            ),
+            (
+                vec![
+                    "__attribute__((always_inline))".to_string(),
+                    "__attribute__((cold))".to_string()
+                ],
+                vec!["inline".to_string()]
+            ),
+            "`__inline__` is the specifier a reader calls `inline`"
+        );
+        assert_eq!(
+            attributes_and_specifiers("[[nodiscard]] inline"),
+            (
+                vec!["[[nodiscard]]".to_string()],
+                vec!["inline".to_string()]
+            )
+        );
+        assert_eq!(
+            attributes_and_specifiers("__declspec(dllexport)"),
+            (vec!["__declspec(dllexport)".to_string()], vec![])
+        );
+        assert_eq!(
+            attributes_and_specifiers("__launch_bounds__(256)"),
+            (vec!["__launch_bounds__(256)".to_string()], vec![])
+        );
+        assert_eq!(
+            attributes_and_specifiers("__global__"),
+            (vec![], vec!["__global__".to_string()])
+        );
+        assert_eq!(
+            attributes_and_specifiers("extern \"C\""),
+            (vec![], vec!["extern".to_string(), "\"C\"".to_string()]),
+            "a quoted string is one specifier"
+        );
     }
 }

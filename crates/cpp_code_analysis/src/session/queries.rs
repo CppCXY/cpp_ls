@@ -4,6 +4,16 @@
 
 use super::*;
 
+/// **A specifier written before a declaration but kept outside its node** — see
+/// [`Session::the_attributes_before_a_declaration`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenAttribute {
+    /// The text as the file wrote it: `__attribute__((cold))`, `[[nodiscard]]`, `NESTED`.
+    pub written: String,
+    /// What a macro invocation expands to, when the file defines it — one line, whitespace collapsed.
+    pub expansion: Option<String>,
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// The closure of `path` **with the text of each file**, in the order the graph is walked, and a map from the
     /// key every path is compared by to its place in that list.
@@ -721,6 +731,65 @@ impl<F: FileProvider + Clone> Session<F> {
             &text,
             &cpp_formatter::Style::fallback_style(),
         ))
+    }
+
+    /// **The specifiers written before a declaration, which the grammar keeps as its siblings** — the attributes and
+    /// the macro invocations that stand for them.
+    ///
+    /// `__attribute__((cold)) int f();`, `[[nodiscard]] int f();` and `NESTED int f();` parse with the attribute in an
+    /// `AttributeList` (or, for a macro, a `MacroCall`) **beside** the `Declaration`, not inside it. The declaration's
+    /// fact therefore holds no trace of either, and the hover card — generated from the fact — dropped them: measured on
+    /// a CUDA project, `#define NESTED AI __attribute__((cold))` followed by `NESTED int f_nested(int x)` hovered as
+    /// `int f_nested(int x)`, with nothing about the attributes the source line carries.
+    ///
+    /// Walked **backwards from the declaration's own node** while the previous sibling is one of those two kinds, then
+    /// reversed, so the answer is in source order. A macro's expansion is asked at its own offset — the same query the
+    /// macro card uses — and a macro the file does not define (a CUDA `__global__`, which the grammar reads as a macro)
+    /// answers with `None` for it rather than inventing one.
+    pub fn the_attributes_before_a_declaration(
+        &self,
+        file: &std::path::Path,
+        offset: usize,
+    ) -> Vec<WrittenAttribute> {
+        use cpp_parser::CppAstNode as _;
+
+        let Some(view) = self.view_of_the_file(file) else {
+            return Vec::new();
+        };
+        let Some(token) = cpp_parser::token_at(&view.root, offset) else {
+            return Vec::new();
+        };
+        let Some(declaration) = token
+            .parent_ancestors()
+            .find_map(cpp_parser::CppDeclaration::cast)
+        else {
+            return Vec::new();
+        };
+        let mut found: Vec<WrittenAttribute> = Vec::new();
+        let mut sibling = declaration.syntax().prev_sibling();
+        while let Some(node) = sibling {
+            let kind = cpp_parser::CppSyntaxKind::from(node.kind());
+            let is_a_macro = kind == cpp_parser::CppSyntaxKind::MacroCall;
+            if !is_a_macro && kind != cpp_parser::CppSyntaxKind::AttributeList {
+                break;
+            }
+            let written = node.text().to_string().trim().to_string();
+            let expansion = is_a_macro
+                .then(|| {
+                    self.the_expansion_of_a_macro(
+                        &view,
+                        crate::file::coordinates::FileOffset::new(usize::from(
+                            node.text_range().start(),
+                        )),
+                    )
+                })
+                .flatten()
+                .map(|expanded| expanded.split_whitespace().collect::<Vec<_>>().join(" "));
+            found.push(WrittenAttribute { written, expansion });
+            sibling = node.prev_sibling();
+        }
+        found.reverse();
+        found
     }
 
     /// The index of the `)` that closes the `(` at `open`, counting nesting and skipping literals.
