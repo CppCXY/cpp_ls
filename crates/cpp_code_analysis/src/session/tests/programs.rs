@@ -745,34 +745,27 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
         stats
     };
 
-    // **The text that was walked**, as a fresh session reads it.
+    // **The text that was walked**, as a fresh session reads it. The record the first session wrote answers for it —
+    // its facts *and* its rendering — so there is no walk at all. This is the hit the per-file record exists for, and
+    // the sharpest form of "a fresh session costs nothing for a text already compiled".
     let unedited = over_a_fresh_session("unedited", main);
-    let walked_baseline = unedited.walked;
-    // **A fresh session walks, because there is no timeline cache on disk any more** — `tu/` is gone with the
-    // rest of the per-directory cache: a stored timeline outlives the files it was built from, which is a
-    // correctness question rather than a speed one. What survives is what the cases below measure: a keystroke must
-    // not cost *more* than the fresh session already pays.
     assert_eq!(
-        unedited.walked, walked_baseline,
-        "the entry the first session wrote answers for the text it was walked from: {unedited:?}"
-    );
-    assert!(
-        unedited.walked > 0,
-        "…and the fresh session walked, because no timeline survives a session any more: {unedited:?}"
+        unedited.walked, 0,
+        "the record the first session wrote answers for the text it was cooked from: {unedited:?}"
     );
 
-    // **A character typed into the body.** Nothing above the file's last directive moves, and nothing below it
-    // can be read by a walk — so the unit the first session built is still this file's unit. **This is the
-    // acceptance of stage 1**: before the root of a unit was keyed on its preamble, this session walked.
+    // **A character typed into the body** is a text nobody has cooked, so it is walked once — and the next fresh
+    // session gets *that* text from the record the edit's cook wrote.
     let typed = format!("{main}\nint more() {{ return A; }}\n");
     let edited = over_a_fresh_session("a body edit", &typed);
-    assert_eq!(
-        edited.walked, walked_baseline,
-        "a body edit must not cost more walks than a fresh session already pays: {edited:?}"
-    );
     assert!(
-        edited.walked > 0,
-        "…and the body edit walked, as every fresh session now does: {edited:?}"
+        edited.walked >= 1,
+        "a text nobody has cooked needs its unit walked: {edited:?}"
+    );
+    let again = over_a_fresh_session("the same body edit again", &typed);
+    assert_eq!(
+        again.walked, 0,
+        "and the record the edit's cook wrote answers for it: {again:?}"
     );
 
     // **An `#include` above the body is a different matter**: it moves the preamble, which is the key.

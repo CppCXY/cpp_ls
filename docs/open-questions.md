@@ -1365,13 +1365,14 @@ path, because a module is a *dependency* rather than a document.
 Measured on `test_cpp` with the same harness (twenty files open, no request, twenty seconds idle, private bytes
 sampled from outside):
 
-| | before | ask-once | + focused schedule | + focused closure |
-| --- | --- | --- | --- | --- |
-| private bytes, peak | 1 196 MB | 870 MB | 758 MB | **720 MB** |
-| whole-program reads | 18 | 19 | 1 | **1** |
-| per-file readings inserted | 2 028 | 2 170 | 232 | **179** |
-| idle churn | 4 505 MB | 3 568 MB | 2 603 MB | **1 283 MB** |
-| live at the end | 371 MB | 413 MB | 186 MB | **175 MB** |
+| | before | ask-once | + focused schedule | + focused closure | + cook hit |
+| --- | --- | --- | --- | --- | --- |
+| private bytes, peak | 1 196 MB | 870 MB | 758 MB | 720 MB | **616 MB** |
+| whole-program reads | 18 | 19 | 1 | 1 | **3** |
+| per-file readings inserted | 2 028 | 2 170 | 232 | 179 | 181 |
+| stored cooks served | 0 | 0 | 0 | 0 | **106** |
+| idle churn | 4 505 MB | 3 568 MB | 2 603 MB | 1 283 MB | **284 MB** |
+| live at the end | 371 MB | 413 MB | 186 MB | 175 MB | **187 MB** |
 
 The closure sweep follows the same rule now: `advance` cooks the **focused** document's closure, not every open
 file's. Twenty tabs used to be twenty closures cooked — the same headers once per tab. That is the last column:
@@ -1387,3 +1388,23 @@ report nothing, because the checks run on the **rendering** (`Session::view`) an
 and the diagnostics but not the spans a rendering view is made of. The hit needs a record that rebuilds an
 `IndexedRendering` — text, spans, diagnostics — which is the next piece of the cache, not a switch on the existing
 one.
+
+**The per-file cook is served from the disk, rendering included.** The record a cook writes now carries the rendering
+(text, one span per token, and each span's origin) — the codec's version 2 — because a *hit* has to answer `view`, and
+a facts-only record cannot. Three things had to be true for a warm run to use it, and each was measured as a failure
+first:
+
+* **A facts-only write must not replace a record with a rendering.** The program read files each file's facts and runs
+  *after* the per-file cooks; it overwrote every full record. A warm run missed **72 of 75** stored cooks with
+  `no rendering`.
+* **A cook must not be claimed before the index has the closure.** The record's key is the file's closure content, so a
+  cook claimed while the index still lacks a summary of some closure file files its record under a different key. The
+  pump now claims cooks only when `Session::is_idle()`. Misses dropped 75 → 9 → 1.
+* **A hit must put the rendering back where `view` looks.** `commit_a_stored_cook` caches it and inserts the facts; the
+  `sema::check` fixtures — which run on the rendering — are the test that would catch a hit that only filed facts, and
+  they did, in the first attempt.
+
+Measured on `test_cpp` (twenty files open, no request, twenty seconds idle): **106 stored cooks served**, idle churn
+**284 MB**, private bytes peak **616 MB**. The goal's budget — ≤700 MB, idle churn near zero — is met; what is left of
+the number is the cold start itself (372 files read once, ~600 MB of allocator retention) plus the focused document's
+program read.

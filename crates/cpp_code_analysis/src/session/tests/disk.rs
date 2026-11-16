@@ -480,3 +480,57 @@ pub(crate) fn a_program_read_files_each_files_reading_on_the_disk() {
         "the reading is the program's, so it has the macro's declaration"
     );
 }
+
+/// **A record written by one session is a cook the next session does not run.**
+///
+/// The per-file cook writes its facts *and* its rendering. A second session on the same project asks the disk first,
+/// and the record answers: no lex, no render, no parse — and `view` answers immediately, because the rendering came
+/// with it. The observable is the walk count: a session that has to build the environment walks a timeline, and one
+/// that is served does not.
+#[test]
+pub(crate) fn a_stored_cook_answers_the_next_session() {
+    let project = Project::new("a-stored-cook-answers");
+    let source = "#include \"b.h\"\nint main() { return B; }\n";
+    let main = project.write("main.cpp", source);
+    project.write("b.h", "#define B 1\n");
+
+    let open = || {
+        Session::with_config(
+            &project.root,
+            SessionFiles::new(OpenDocuments::new(), DiskFiles),
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        )
+    };
+
+    // **Nothing on disk, so this session pays for the cook** and writes the record with its rendering.
+    let mut first = open();
+    first.add_project_files([main.clone()]);
+    first.did_open(&main, source);
+    first.index_everything();
+    assert!(
+        first.unit_stats().walked > 0,
+        "the first session had nothing to read from: {:?}",
+        first.unit_stats()
+    );
+
+    // **A session that has never seen the project.** Only the disk record connects them.
+    let mut second = open();
+    second.add_project_files([main.clone()]);
+    second.did_open(&main, source);
+    second.index_everything();
+    assert!(
+        second.index().cooked_declarations(&main).is_some(),
+        "the file is read in the second session"
+    );
+    assert_eq!(
+        second.unit_stats().walked,
+        0,
+        "and no timeline was walked: the record answered with its rendering: {:?}",
+        second.unit_stats()
+    );
+    assert!(
+        second.view_of_the_file(&main).is_some(),
+        "and the rendering is there for a view, which is what a facts-only record could not give"
+    );
+}

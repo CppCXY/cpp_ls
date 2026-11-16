@@ -481,7 +481,18 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     // **And which files the next cooking slice is for**, which is a queue pop and nothing more: what
                     // a cook needs is gathered, rendered and parsed under the read lock below, beside whatever a
                     // person is typing ([`Session::materials_for`], [`Session::render_them`]).
-                    let claimed = session.claim_cooking(COOK_A_SLICE);
+                    //
+                    // **No cook until the index has caught up with the text.** A cook's record key is the file's
+                    // *closure* — every file it includes, by content — so a cook claimed while the index still lacks
+                    // a summary of some closure file computes a different key from the same cook made after the queue
+                    // drains, and files its record where nobody will look. Measured on `test_cpp`: a warm run missed
+                    // **72 of 75** stored cooks with `no rendering`, every one of them filed under the complete key
+                    // and looked up under an incomplete one.
+                    let claimed = if session.is_idle() {
+                        session.claim_cooking(COOK_A_SLICE)
+                    } else {
+                        Vec::new()
+                    };
 
                     let pending_now = session.pending_work();
                     // **Where the memory is, at the one moment somebody looks**: when the queue drains, the
@@ -572,25 +583,43 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 asked.len()
             );
             let live_before_the_drain = crate::live_bytes();
-            let (prepared_drain, cooks, cooking_revision) = context
+            let (prepared_drain, stored_cooks, cooks, cooking_revision) = context
                 .analysis()
                 .run_blocking("prepare the drain", move |session| {
                     let revision = session.revision();
-                    let cooks = claimed
-                        .iter()
-                        .filter_map(|path| session.gather_a_cook(path))
-                        .collect();
-                    Some((session.prepare_the_drain(drain), cooks, Some(revision)))
+                    // **The disk before the render**, per claimed file: a record with its rendering is a cook this
+                    // slice does not run at all — it is filed straight into the index, and the rendering answers
+                    // `view` immediately.
+                    let mut stored = Vec::new();
+                    let mut cooks = Vec::new();
+                    for path in &claimed {
+                        match session.a_stored_cook(path) {
+                            Some(record) => stored.push(record),
+                            None => {
+                                if let Some(cook) = session.gather_a_cook(path) {
+                                    cooks.push(cook);
+                                }
+                            }
+                        }
+                    }
+                    Some((
+                        session.prepare_the_drain(drain),
+                        stored,
+                        cooks,
+                        Some(revision),
+                    ))
                 })
                 .await
                 .unwrap_or_default();
             let live_after_the_drain = crate::live_bytes();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;
             let live_after_the_renders = crate::live_bytes();
-            let built: Vec<std::path::PathBuf> = rendered_cooks
-                .iter()
-                .map(|rendered| rendered.indexed.summary.path.clone())
-                .collect();
+            let slice = cpp_code_analysis::session::AClaimedSlice {
+                stored: stored_cooks,
+                fresh: rendered_cooks,
+            };
+            let built: Vec<std::path::PathBuf> =
+                slice.paths().map(|path| path.to_path_buf()).collect();
 
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
@@ -627,7 +656,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     let re_read = session.commit_the_drain(prepared_drain);
                     let drained = started.elapsed().as_millis();
                     let started = std::time::Instant::now();
-                    let cooked = session.commit_them(rendered_cooks).len();
+                    let cooked = session.commit_them(slice).len();
                     let inserted = started.elapsed().as_millis();
                     if cook_logged {
                         log::info!(

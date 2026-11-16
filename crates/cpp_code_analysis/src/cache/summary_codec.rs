@@ -1751,30 +1751,130 @@ fn get_macro(reader: &mut Reader<'_>) -> Result<MacroFact, DecodeError> {
 /// place — and a version check that rejects every older entry, which a cache is allowed to do.
 const COOKED_MAGIC: &[u8; 8] = b"CPPLSCKR";
 /// The version of the cooked-reading record. Bumped whenever the bytes of one change; see [`COOKED_MAGIC`].
-const COOKED_VERSION: u32 = 1;
+///
+/// 2: the record may carry the rendering it was read from — the per-file cook's, which is what a cook hit needs to
+/// answer a `view` without rendering anything. A record without one is what a program read files (it has no
+/// per-file spans to keep), and the kind byte says which it is.
+const COOKED_VERSION: u32 = 2;
+
+/// **The record has its rendering with it** — see [`COOKED_VERSION`].
+const COOKED_HAS_A_RENDERING: u8 = 1;
 
 pub fn encode_the_cooked_reading(reading: &CookedFile) -> Vec<u8> {
+    encode_the_cooked_record(reading, None)
+}
+
+/// **One file's cook, as bytes** — the facts, and optionally the rendering they were read from.
+///
+/// The rendering is what makes a *hit* answerable: `Session::view` answers from a rendering, so a record without one
+/// leaves the file "read" in the index and unavailable to every query that needs the tree. A per-file cook has the
+/// rendering in hand and writes it; a program read produces facts per file but no per-file spans, and writes the
+/// facts alone.
+pub fn encode_the_cooked_record(
+    reading: &CookedFile,
+    rendered: Option<&crate::preprocess::cooked::RenderedCooked>,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 + reading.declarations.len() * 48);
     out.extend_from_slice(COOKED_MAGIC);
     put_u32(&mut out, COOKED_VERSION);
-    put_u32(&mut out, reading.declarations.len() as u32);
-    for fact in &reading.declarations {
-        put_declaration(&mut out, fact);
+    put_u8(
+        &mut out,
+        if rendered.is_some() {
+            COOKED_HAS_A_RENDERING
+        } else {
+            0
+        },
+    );
+    put_cooked_body(&mut out, reading);
+    if let Some(rendered) = rendered {
+        put_str(&mut out, &rendered.text);
+        put_u32(&mut out, rendered.spans.len() as u32);
+        for span in &rendered.spans {
+            put_span(&mut out, span);
+        }
     }
-    put_u32(&mut out, reading.macros.len() as u32);
-    for fact in &reading.macros {
-        put_macro(&mut out, fact);
-    }
-    put_u32(&mut out, reading.diagnostics.len() as u32);
-    for diagnostic in &reading.diagnostics {
-        put_range(&mut out, diagnostic.range);
-        put_str(&mut out, &diagnostic.message);
-    }
-    put_u32(&mut out, reading.unplaced as u32);
     out
 }
 
+fn put_cooked_body(out: &mut Vec<u8>, reading: &CookedFile) {
+    put_u32(out, reading.declarations.len() as u32);
+    for fact in &reading.declarations {
+        put_declaration(out, fact);
+    }
+    put_u32(out, reading.macros.len() as u32);
+    for fact in &reading.macros {
+        put_macro(out, fact);
+    }
+    put_u32(out, reading.diagnostics.len() as u32);
+    for diagnostic in &reading.diagnostics {
+        put_range(out, diagnostic.range);
+        put_str(out, &diagnostic.message);
+    }
+    put_u32(out, reading.unplaced as u32);
+}
+
+/// **One token of a rendering, with where it came from.** The origin is the half a `view` needs for navigation:
+/// a token a macro produced has a call site and a definition, and a hit that dropped them would answer "go to
+/// definition" with nothing for every token the file did not write itself.
+fn put_span(out: &mut Vec<u8>, span: &crate::preprocess::cooked::RenderedSpan) {
+    put_range(out, span.cooked);
+    match span.written {
+        Some(range) => {
+            put_u8(out, 1);
+            put_range(out, range);
+        }
+        None => put_u8(out, 0),
+    }
+    put_range(out, span.reported);
+    put_origin(out, &span.origin);
+}
+
+fn put_origin(out: &mut Vec<u8>, origin: &crate::preprocess::expand::Origin) {
+    use crate::preprocess::expand::Origin;
+    match origin {
+        Origin::Source => put_u8(out, 0),
+        Origin::Expanded { invocations } => {
+            put_u8(out, 1);
+            put_u32(out, invocations.len() as u32);
+            for invocation in invocations {
+                put_str(out, &invocation.name);
+                put_range(out, invocation.definition);
+                put_range(out, invocation.name_at);
+                put_range(out, invocation.call_site);
+                match invocation.written_in {
+                    None => put_u8(out, 0),
+                    Some(crate::macros::MacroFile::Here) => put_u8(out, 1),
+                    Some(crate::macros::MacroFile::Frame(frame)) => {
+                        put_u8(out, 2);
+                        put_u32(out, frame);
+                    }
+                }
+            }
+        }
+        Origin::Pasted { call_site } => {
+            put_u8(out, 2);
+            put_range(out, *call_site);
+        }
+        Origin::Stringized { call_site } => {
+            put_u8(out, 3);
+            put_range(out, *call_site);
+        }
+    }
+}
+
 pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError> {
+    decode_the_cooked_record(bytes).map(|(reading, _)| reading)
+}
+
+pub fn decode_the_cooked_record(
+    bytes: &[u8],
+) -> Result<
+    (
+        CookedFile,
+        Option<crate::preprocess::cooked::RenderedCooked>,
+    ),
+    DecodeError,
+> {
     let mut reader = Reader::new(bytes);
     if reader.take(COOKED_MAGIC.len())? != COOKED_MAGIC {
         return Err(DecodeError::NotASummary);
@@ -1782,6 +1882,7 @@ pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError
     if reader.u32()? != COOKED_VERSION {
         return Err(DecodeError::UnsupportedVersion);
     }
+    let kind = reader.u8()?;
     let mut declarations = Vec::new();
     for _ in 0..reader.count()? {
         declarations.push(get_declaration(&mut reader)?);
@@ -1798,11 +1899,79 @@ pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError
         });
     }
     let unplaced = reader.u32()? as usize;
-    Ok(CookedFile {
+    let reading = CookedFile {
         declarations,
         macros,
         diagnostics,
         unplaced,
+    };
+    if kind != COOKED_HAS_A_RENDERING {
+        return Ok((reading, None));
+    }
+    let text = reader.string()?;
+    let mut spans = Vec::new();
+    for _ in 0..reader.count()? {
+        spans.push(get_span(&mut reader)?);
+    }
+    Ok((
+        reading,
+        Some(crate::preprocess::cooked::RenderedCooked::from_parts(
+            text, spans,
+        )),
+    ))
+}
+
+fn get_span(
+    reader: &mut Reader<'_>,
+) -> Result<crate::preprocess::cooked::RenderedSpan, DecodeError> {
+    let cooked = reader.range()?;
+    let written = match reader.u8()? {
+        0 => None,
+        _ => Some(reader.range()?),
+    };
+    let reported = reader.range()?;
+    let origin = get_origin(reader)?;
+    Ok(crate::preprocess::cooked::RenderedSpan {
+        cooked,
+        written,
+        reported,
+        origin,
+    })
+}
+
+fn get_origin(reader: &mut Reader<'_>) -> Result<crate::preprocess::expand::Origin, DecodeError> {
+    use crate::preprocess::expand::Origin;
+    Ok(match reader.u8()? {
+        0 => Origin::Source,
+        1 => {
+            let mut invocations = Vec::new();
+            for _ in 0..reader.count()? {
+                let name = reader.string()?;
+                let definition = reader.range()?;
+                let name_at = reader.range()?;
+                let call_site = reader.range()?;
+                let written_in = match reader.u8()? {
+                    0 => None,
+                    1 => Some(crate::macros::MacroFile::Here),
+                    _ => Some(crate::macros::MacroFile::Frame(reader.u32()?)),
+                };
+                invocations.push(crate::preprocess::expand::MacroInvocation {
+                    name: name.into_boxed_str(),
+                    definition,
+                    name_at,
+                    call_site,
+                    written_in,
+                });
+            }
+            Origin::Expanded { invocations }
+        }
+        2 => Origin::Pasted {
+            call_site: reader.range()?,
+        },
+        3 => Origin::Stringized {
+            call_site: reader.range()?,
+        },
+        _ => return Err(DecodeError::BadDiscriminant),
     })
 }
 
@@ -1945,4 +2114,68 @@ fn a_cooked_reading_round_trips() {
         decode_the_cooked_reading(&next_layout).is_err(),
         "and one written by a different layout is refused on its version"
     );
+}
+
+/// **A cooked record with its rendering round-trips** — the record the per-file cook writes and a hit is served from.
+///
+/// The spans are the half that makes a *hit* answerable: `Session::view` answers from a rendering, and an origin is
+/// where "go to macro definition" gets its target. So the test builds one span of each origin kind, with the frame
+/// of a definition from another file of a unit, and asserts they come back equal.
+#[test]
+fn a_cooked_record_with_its_rendering_round_trips() {
+    use crate::preprocess::cooked::{RenderedCooked, RenderedSpan};
+    use crate::preprocess::expand::{MacroInvocation, Origin};
+
+    let reading = CookedFile::declarations(Vec::new());
+    let span = |cooked: SourceRange, origin: Origin| RenderedSpan {
+        cooked,
+        written: Some(cooked),
+        reported: cooked,
+        origin,
+    };
+    let rendered = RenderedCooked::from_parts(
+        "int x;".to_string(),
+        vec![
+            span(SourceRange::new(0, 3), Origin::Source),
+            span(
+                SourceRange::new(4, 1),
+                Origin::Expanded {
+                    invocations: vec![MacroInvocation {
+                        name: "X".into(),
+                        definition: SourceRange::new(10, 5),
+                        name_at: SourceRange::new(17, 1),
+                        call_site: SourceRange::new(30, 1),
+                        written_in: Some(crate::macros::MacroFile::Frame(3)),
+                    }],
+                },
+            ),
+            span(
+                SourceRange::new(5, 1),
+                Origin::Pasted {
+                    call_site: SourceRange::new(40, 2),
+                },
+            ),
+            span(
+                SourceRange::new(5, 1),
+                Origin::Stringized {
+                    call_site: SourceRange::new(41, 2),
+                },
+            ),
+        ],
+    );
+
+    let bytes = encode_the_cooked_record(&reading, Some(&rendered));
+    let (back, rendering) =
+        decode_the_cooked_record(&bytes).expect("the bytes this encoder wrote decode");
+    assert_eq!(back.declarations.len(), reading.declarations.len());
+    let rendering = rendering.expect("the record says it carries a rendering");
+    assert_eq!(rendering.text, rendered.text);
+    assert_eq!(
+        rendering.spans, rendered.spans,
+        "the spans, and where each token came from, are the record's reason to exist"
+    );
+
+    // **And the record without one says so**, which is what a program read writes: facts, no per-file spans.
+    let without = decode_the_cooked_record(&encode_the_cooked_reading(&reading)).expect("decodes");
+    assert!(without.1.is_none());
 }

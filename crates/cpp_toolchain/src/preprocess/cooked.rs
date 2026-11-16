@@ -287,6 +287,19 @@ impl RenderedCooked {
     pub fn weight(&self) -> usize {
         self.text.len() + self.spans.len() * std::mem::size_of::<RenderedSpan>()
     }
+
+    /// **A rendering whose parts were read back rather than produced** — the decoder's door.
+    ///
+    /// The reverse index is derived on the first question and never stored, so a rendering a cache hands back is the
+    /// same value the renderer produced; nothing here checks the spans, and nothing needs to: the record they were
+    /// read from is keyed by the text and the environment they were rendered under.
+    pub fn from_parts(text: String, spans: Vec<RenderedSpan>) -> Self {
+        RenderedCooked {
+            text,
+            spans,
+            written_order: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 /// **Would writing these two spellings with nothing between them produce a different first token?**

@@ -4,6 +4,65 @@
 
 use super::*;
 
+/// **One file a cooking slice claimed**, and where its reading will come from.
+///
+/// A cook used to have one shape — gather, render, parse — and every file paid for it. The disk can hold the answer
+/// under the file's own key ([`SummaryStore::the_stored_cooked_reading_with_rendering`]), and then there is nothing to
+/// render: the two arms are kept apart so the commit can say which one it is filing.
+pub enum AClaimedCook {
+    /// The disk already holds this file's reading **and its rendering**, validated against its content, configuration
+    /// and closure.
+    Stored(
+        PathBuf,
+        crate::index::CookedFile,
+        crate::preprocess::cooked::RenderedCooked,
+    ),
+    /// This slice must render and parse it.
+    Fresh(CookingMaterials),
+}
+
+/// **What a cooking slice produced** — the two kinds of reading, kept apart because they commit differently.
+#[derive(Default)]
+pub struct AClaimedSlice {
+    /// Readings the disk held; committing one caches its rendering and inserts its facts.
+    pub stored: Vec<(
+        PathBuf,
+        crate::index::CookedFile,
+        crate::preprocess::cooked::RenderedCooked,
+    )>,
+    /// Readings this slice rendered and parsed; committing one checks the text and files it.
+    pub fresh: Vec<RenderedCook>,
+}
+
+impl AClaimedCook {
+    /// The file this claim is for.
+    pub fn path(&self) -> &Path {
+        match self {
+            AClaimedCook::Stored(path, _, _) => path,
+            AClaimedCook::Fresh(materials) => &materials.path,
+        }
+    }
+}
+
+impl AClaimedSlice {
+    pub fn len(&self) -> usize {
+        self.stored.len() + self.fresh.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every file the slice produced a reading for, in the order the claims arrived.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.stored.iter().map(|(path, _, _)| path.as_path()).chain(
+            self.fresh
+                .iter()
+                .map(|rendered| rendered.indexed.summary.path.as_path()),
+        )
+    }
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// Read one file the way a compiler reads it**, and let the index answer for what came out.    ///
     /// One call that is the whole foundation, in the order the layers were built: walk the file's own translation
@@ -28,6 +87,24 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `None` when the file has no summary or no text — nothing has read it yet, which is a state and not an error.
     pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
         let started = std::time::Instant::now();
+        // **The disk before the render.** A record with its rendering — the file's content, its configuration and its
+        // closure, all validated by the reader — is the reading this call would produce, and the rendering is what
+        // makes filing it different from filing facts: `view` answers from it immediately.
+        let resolved = self.store.index().summary(path.as_ref())?.path.clone();
+        if let Some((cooked, rendered)) = self
+            .store
+            .the_stored_cooked_reading_with_rendering(&resolved)
+        {
+            let committed = self.commit_a_stored_cook(resolved, cooked, rendered);
+            if crate::probes::cooking() {
+                log::info!(
+                    "cook: {} served from the disk in {:?}",
+                    path.as_ref().display(),
+                    started.elapsed()
+                );
+            }
+            return committed;
+        }
         let materials = self.cooking_materials(path.as_ref())?;
         let gathered = started.elapsed().as_millis();
         let render_started = std::time::Instant::now();
@@ -422,6 +499,9 @@ impl<F: FileProvider + Clone> Session<F> {
             // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
             // 45 ms rebuilt against 1.2 ms served, see `docs/refinement.md` §3.2. Written *before* the index insert
             // because the write borrows the store and the insert needs it mutably; both are cheap.
+            // **The rendering, kept beside the facts** --- a record with only the facts is one a hit cannot answer
+            // from, because every query that reads the tree needs the text and the spans.
+            let rendered = std::sync::Arc::clone(&indexed.rendered);
             let cooked: crate::index::CookedFile = indexed.into();
             if crate::probes::cooking() {
                 // **How many declarations the cook found**, which the cache line above does not say: a cook that
@@ -443,7 +523,8 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             let declared = cooked.declarations.len();
             let writing = std::time::Instant::now();
-            self.store.put_the_cooked_reading(&path, &cooked);
+            self.store
+                .put_the_cooked_reading_with_rendering(&path, &cooked, &rendered);
             let written = writing.elapsed().as_millis();
             let inserting = std::time::Instant::now();
             self.store.index_mut().insert_cooked(&path, cooked);
@@ -514,10 +595,62 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
-    pub fn materials_for(&self, paths: Vec<PathBuf>) -> Vec<CookingMaterials> {
+    /// **The cook the disk already holds for `path`** — the record with its rendering, as the pump's claim needs it.
+    ///
+    /// The name is resolved the way every cook resolves it (the index's own spelling), because the store's key is
+    /// built from the path the index holds and a caller's spelling of the same file is not that path.
+    pub fn a_stored_cook(
+        &self,
+        path: &Path,
+    ) -> Option<(
+        PathBuf,
+        crate::index::CookedFile,
+        crate::preprocess::cooked::RenderedCooked,
+    )> {
+        let resolved = self.store.index().summary(path)?.path.clone();
+        match self.store.the_stored_cook_reason(&resolved) {
+            Ok((cooked, rendered)) => {
+                if crate::probes::cooking() {
+                    eprintln!(
+                        "cooking: {} served from the disk ({} declaration(s))",
+                        resolved.display(),
+                        cooked.declarations.len()
+                    );
+                }
+                Some((resolved, cooked, rendered))
+            }
+            Err(reason) => {
+                // **Named, because "0 hits" is not a diagnosis.** `not stored` is a cold cache; `no closure` is the
+                // index not holding every file the key is built from yet, which is a race the pump can lose.
+                if crate::probes::cooking() {
+                    eprintln!(
+                        "cooking: {} has no stored cook: {reason}",
+                        resolved.display()
+                    );
+                }
+                None
+            }
+        }
+    }
+    pub fn materials_for(&self, paths: Vec<PathBuf>) -> Vec<AClaimedCook> {
         paths
             .into_iter()
             .filter_map(|path| {
+                // **The disk before the render.** The key is the file's content, its configuration and its closure,
+                // and the reader validates all three, so a hit is the reading this slice would produce — rendering
+                // included. A record a program read wrote has no rendering and is not a hit: `view` answers from a
+                if let Some((cooked, rendered)) =
+                    self.store.the_stored_cooked_reading_with_rendering(&path)
+                {
+                    if crate::probes::cooking() {
+                        eprintln!(
+                            "cooking: {} served from the disk ({} declaration(s))",
+                            path.display(),
+                            cooked.declarations.len()
+                        );
+                    }
+                    return Some(AClaimedCook::Stored(path, cooked, rendered));
+                }
                 let built = self.cooking_materials(&path);
                 // **A claimed file that yields no materials is a file that is now neither queued nor cooked.**
                 // `claim_cooking` popped it and this answered `None`, so it is gone from both places and the loop
@@ -536,35 +669,112 @@ impl<F: FileProvider + Clone> Session<F> {
                         path.display()
                     );
                 }
-                built
+                built.map(AClaimedCook::Fresh)
             })
             .collect()
     }
 
     /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
-    pub fn render_them(&self, materials: Vec<CookingMaterials>) -> Vec<RenderedCook> {
+    pub fn render_them(&self, claimed: Vec<AClaimedCook>) -> AClaimedSlice {
         let tracing = crate::probes::cooking();
-        materials
-            .into_iter()
-            .filter_map(|materials| {
-                let path = materials.path.clone();
-                let built = self.render_a_cooked(&materials);
-                // **The last silent drop.** A claimed file whose render declines is gone from the queue and was
-                // never cooked, which the pump reads as "no work left".
-                if built.is_none() && tracing {
-                    eprintln!("cooking: {} did not render", path.display());
+        let mut slice = AClaimedSlice::default();
+        for cook in claimed {
+            match cook {
+                // Nothing to render: the disk holds this file's reading and its rendering, and the commit files them.
+                AClaimedCook::Stored(path, cooked, rendered) => {
+                    slice.stored.push((path, cooked, rendered));
                 }
-                built
-            })
-            .collect()
+                AClaimedCook::Fresh(materials) => {
+                    let path = materials.path.clone();
+                    let built = self.render_a_cooked(&materials);
+                    // **The last silent drop.** A claimed file whose render declines is gone from the queue and was
+                    // never cooked, which the pump reads as "no work left".
+                    match built {
+                        Some(rendered) => slice.fresh.push(rendered),
+                        None if tracing => eprintln!("cooking: {} did not render", path.display()),
+                        None => {}
+                    }
+                }
+            }
+        }
+        slice
     }
 
-    /// **Put a slice's worth of rendered readings into the index** — one insert each, under the write lock.
-    pub fn commit_them(&mut self, rendered: Vec<RenderedCook>) -> Vec<CookedReading> {
-        rendered
-            .into_iter()
-            .filter_map(|reading| self.commit_a_cooked(reading))
-            .collect()
+    /// **Put a slice's worth of readings into the index** — one insert each, under the write lock.
+    pub fn commit_them(&mut self, slice: AClaimedSlice) -> Vec<CookedReading> {
+        let mut readings = Vec::new();
+        for (path, cooked, rendered) in slice.stored {
+            if let Some(reading) = self.commit_a_stored_cook(path, cooked, rendered) {
+                readings.push(reading);
+            }
+        }
+        for rendered in slice.fresh {
+            if let Some(reading) = self.commit_a_cooked(rendered) {
+                readings.push(reading);
+            }
+        }
+        readings
+    }
+
+    /// **File a reading the disk already held, with the rendering it was read from** — the commit half of a stored
+    /// cook, and the one place the two kinds of reading meet.
+    ///
+    /// The record was validated when it was taken ([`SummaryStore::the_stored_cooked_reading_with_rendering`]
+    /// recomputes the key from the file's content, its configuration and its closure), so there is no text to check
+    /// and nothing to render. What is left is the insert the fresh path ends with, the rendering cache entry that
+    /// makes `view` answerable, and the same "cooked here counts as asked" mark.
+    fn commit_a_stored_cook(
+        &mut self,
+        path: PathBuf,
+        cooked: crate::index::CookedFile,
+        rendered: crate::preprocess::cooked::RenderedCooked,
+    ) -> Option<CookedReading> {
+        let text_hash = self
+            .text(&path)
+            .map(|text| crate::cache::content_hash(&text))?;
+        // **The rendering, where a `view` will look for it** — the reason this record carries one at all.
+        if let Ok(mut known) = self.renderings.lock() {
+            let weight = rendered.weight();
+            known.insert(
+                a_rendering_key(&path, text_hash),
+                std::sync::Arc::new(rendered),
+                weight,
+            );
+        }
+        // **The declarations the file's own text does not have** — the same count `render_cook` makes, and the only
+        // number a stored record cannot carry: it is a comparison with the summary, not a property of the reading.
+        let already_declared: std::collections::HashSet<String> = self
+            .store
+            .index()
+            .summary(&path)?
+            .declarations
+            .iter()
+            .map(crate::DeclFact::qualified_name)
+            .collect();
+        let reading = CookedReading {
+            declarations: cooked.declarations.len(),
+            only_after_expansion: cooked
+                .declarations
+                .iter()
+                .filter(|fact| !already_declared.contains(&fact.qualified_name()))
+                .count(),
+            diagnostics: cooked.diagnostics.len(),
+            unplaced: cooked.unplaced,
+            // **Not stored, and not claimed.** The map is a property of the parse this slice did not do.
+            mapped: crate::MapReport::default(),
+        };
+        if crate::probes::cooking() {
+            eprintln!(
+                "cooking: filed {} from the disk | {} declaration(s)",
+                path.display(),
+                reading.declarations
+            );
+        }
+        self.store.index_mut().insert_cooked(&path, cooked);
+        if let Ok(mut asked) = self.cooked_or_wanted.lock() {
+            asked.insert(queue_key(&path));
+        }
+        Some(reading)
     }
 
     // **Everything a cook needs, gathered under the write lock and then used without it.**

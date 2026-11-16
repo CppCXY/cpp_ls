@@ -1827,6 +1827,9 @@ impl<F: FileProvider> crate::effect::Reads for SessionReads<'_, F> {
     }
 }
 
+/// **What a cooking slice claimed and produced** --- the two kinds of reading, re-exported because the server's
+/// pump gathers and commits them from outside this module. See [cook::AClaimedSlice].
+pub use cook::{AClaimedCook, AClaimedSlice};
 mod calls;
 pub mod completion;
 mod constrained;

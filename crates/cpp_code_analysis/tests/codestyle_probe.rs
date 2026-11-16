@@ -540,7 +540,10 @@ fn what_keeps_the_pump_busy() {
     for round in 0..40 {
         let claimed = session.claim_cooking(64);
         let materials = session.materials_for(claimed.clone());
-        let built: Vec<std::path::PathBuf> = materials.iter().map(|one| one.path.clone()).collect();
+        let built: Vec<std::path::PathBuf> = materials
+            .iter()
+            .map(|one| one.path().to_path_buf())
+            .collect();
         session.refuse_the_cooks_that_built_nothing(&claimed, &built);
         let rendered = session.render_them(materials);
         let cooked = session.commit_them(rendered).len();

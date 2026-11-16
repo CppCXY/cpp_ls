@@ -659,3 +659,44 @@ pub(crate) fn a_program_of_any_size_is_read() {
         ),
     }
 }
+
+/// **A per-file cook writes its rendering to the disk with its facts.** The facts alone are what a warm start's
+/// refinement needs; a *hit* needs the rendering too, because `Session::view` answers from a tree and a record without
+/// the text and spans leaves the file read-but-unavailable. This pins the write half of that record.
+#[test]
+pub(crate) fn a_cook_writes_its_rendering_to_the_disk() {
+    let source = "#include \"b.h\"\nint main() { return B; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/b.h", "#define B 1\n")
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("a-cook-writes-its-rendering", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+    session.cook("/p/a.cpp").expect("the file cooks");
+
+    let (cooked, rendered) = session
+        .store
+        .the_stored_cooked_reading_with_rendering(Path::new("/p/a.cpp"))
+        .expect("the record has its rendering");
+    assert!(!cooked.declarations.is_empty(), "and its facts");
+    assert!(
+        !rendered.spans.is_empty(),
+        "one span per token of the rendering: {} span(s) for {:?}",
+        rendered.spans.len(),
+        rendered.text
+    );
+
+    // **A facts-only write does not replace a record with a rendering.** The program read writes that shape, and it
+    // runs after the cooks: without the guard, a warm run's hit answered "no rendering" for every file.
+    session
+        .store
+        .put_the_cooked_reading(Path::new("/p/a.cpp"), &cooked);
+    assert!(
+        session
+            .store
+            .the_stored_cooked_reading_with_rendering(Path::new("/p/a.cpp"))
+            .is_some(),
+        "the rendering the cook wrote survives a facts-only write"
+    );
+}

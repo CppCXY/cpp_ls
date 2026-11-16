@@ -1851,6 +1851,68 @@ impl<F: FileProvider> SummaryStore<F> {
     ///
     /// The key is [`SummaryStore::the_closure_fingerprint`]'s: the file's content, the compilation context, and the
     /// content of its whole closure. A rendering is a function of exactly those, which is why one key serves both.
+    /// **Write one file's cook with the rendering it was read from** — the record a cook *hit* is served from.
+    ///
+    /// The facts alone are enough for a warm start's refinement (it files them and marks the rendering owed); they are
+    /// not enough for a hit, because every query that answers from a tree needs the rendering — the text and the span
+    /// of every token, origins included. A per-file cook has both in hand and writes both; a program read has no
+    /// per-file spans and writes the facts alone ([`SummaryStore::put_the_cooked_reading`]).
+    pub fn put_the_cooked_reading_with_rendering(
+        &self,
+        path: &Path,
+        reading: &CookedFile,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+    ) {
+        let Some(source) = self.files.read(path) else {
+            return;
+        };
+        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+            return;
+        };
+        let key = CacheKey {
+            content: content_hash(&source),
+            config: self.context_hash(path),
+            env: fingerprint,
+        };
+        let Some(database) = self.summary_database() else {
+            return;
+        };
+        let bytes = crate::summary_codec::encode_the_cooked_record(reading, Some(rendered));
+        database.put_cooked_reading(key, &bytes);
+    }
+
+    /// **The cooked reading stored for `path` together with its rendering**, when the record has one.
+    ///
+    /// `None` for a record a program read wrote (facts only), which is the distinction a hit needs: without the
+    /// rendering the file is "read" in the index and unavailable to `Session::view`. The key is validated exactly as
+    /// [`SummaryStore::the_stored_cooked_reading`] validates it.
+    pub fn the_stored_cooked_reading_with_rendering(
+        &self,
+        path: &Path,
+    ) -> Option<(CookedFile, crate::preprocess::cooked::RenderedCooked)> {
+        self.the_stored_cook_reason(path).ok()
+    }
+
+    /// **Why a stored cook is not usable, named** — the instrument a hit rate is read with: `not stored` and `no
+    /// closure` are both misses, and only one of them is about the cache.
+    pub fn the_stored_cook_reason(
+        &self,
+        path: &Path,
+    ) -> Result<(CookedFile, crate::preprocess::cooked::RenderedCooked), &'static str> {
+        let source = self.files.read(path).ok_or("no text")?;
+        let fingerprint = self.the_closure_fingerprint(path).ok_or("no closure")?;
+        let key = CacheKey {
+            content: content_hash(&source),
+            config: self.context_hash(path),
+            env: fingerprint,
+        };
+        let database = self.summary_database().ok_or("no database")?;
+        let bytes = database.cooked_reading(key).ok_or("not stored")?;
+        let (cooked, rendered) =
+            crate::summary_codec::decode_the_cooked_record(&bytes).map_err(|_| "undecodable")?;
+        let rendered = rendered.ok_or("no rendering")?;
+        Ok((cooked, rendered))
+    }
     pub fn put_the_cooked_reading(&self, path: &Path, reading: &CookedFile) {
         let Some(source) = self.files.read(path) else {
             return;
@@ -1866,6 +1928,18 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(database) = self.summary_database() else {
             return;
         };
+        // **A record with a rendering is not replaced by one without.** Both write the same key, and the program read
+        // — which has no per-file spans to keep — runs *after* the cooks that do. Without this, every full record was
+        // overwritten by a facts-only one, and the next session's hit answered `no rendering` for all of them
+        // (measured: 67 of 70 misses in a warm run). The kind byte is at a fixed offset, so the test is a byte and not
+        // a decode.
+        const KIND_AT: usize = 8 + 4;
+        if database
+            .cooked_reading(key)
+            .is_some_and(|existing| existing.get(KIND_AT) == Some(&1))
+        {
+            return;
+        }
         let bytes = crate::summary_codec::encode_the_cooked_reading(reading);
         database.put_cooked_reading(key, &bytes);
     }

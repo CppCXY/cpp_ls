@@ -149,10 +149,7 @@ fn where_a_start_spends_its_time() {
         let asked = claimed.clone();
         let materials = session.materials_for(claimed);
         let rendered = session.render_them(materials);
-        let built: Vec<PathBuf> = rendered
-            .iter()
-            .map(|rendered| rendered.indexed.summary.path.clone())
-            .collect();
+        let built: Vec<PathBuf> = rendered.paths().map(|path| path.to_path_buf()).collect();
         let gathered = draining.elapsed();
         session.commit_the_drain(drain);
         session.refuse_the_cooks_that_built_nothing(&asked, &built);
@@ -278,10 +275,7 @@ fn where_a_start_spends_its_time() {
         let asked = claimed.clone();
         let materials = session.materials_for(claimed);
         let rendered = session.render_them(materials);
-        let built: Vec<PathBuf> = rendered
-            .iter()
-            .map(|rendered| rendered.indexed.summary.path.clone())
-            .collect();
+        let built: Vec<PathBuf> = rendered.paths().map(|path| path.to_path_buf()).collect();
         session.commit_the_drain(drain);
         session.refuse_the_cooks_that_built_nothing(&asked, &built);
         let _ = session.commit_them(rendered);
