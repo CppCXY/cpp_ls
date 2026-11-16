@@ -770,6 +770,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 reading.declarations
             );
         }
+        self.stored_cooks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.store.index_mut().insert_cooked(&path, cooked);
         if let Ok(mut asked) = self.cooked_or_wanted.lock() {
             asked.insert(queue_key(&path));

@@ -1055,6 +1055,9 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// expensive thing this session does, and a background tab is not a reason to do it — the same trade
     /// `the_program_to_read` already states for files nobody has open.
     focused_document: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// **How many cooks the disk answered** --- a cook that rendered, parsed and indexed nothing, because the file's
+    /// record was already on the disk with its rendering. The number the per-file cache is judged by.
+    stored_cooks: std::sync::atomic::AtomicUsize,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read

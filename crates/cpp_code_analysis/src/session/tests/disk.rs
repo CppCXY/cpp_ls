@@ -533,4 +533,9 @@ pub(crate) fn a_stored_cook_answers_the_next_session() {
         second.view_of_the_file(&main).is_some(),
         "and the rendering is there for a view, which is what a facts-only record could not give"
     );
+    assert!(
+        second.cooks_served_from_disk() > 0,
+        "and the counter the budget is read from says so: {} served",
+        second.cooks_served_from_disk()
+    );
 }

@@ -828,6 +828,13 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.len()
     }
 
+    /// **How many cooks the disk answered** --- a cook that rendered nothing, because the file's record was already
+    /// on the disk with its rendering. A warm start should do most of its cooking here; a run whose count stays at
+    /// zero on a project it has already read is a run whose records are not being found.
+    pub fn cooks_served_from_disk(&self) -> usize {
+        self.stored_cooks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// **How many files the second pass has still to re-read** — the backlog `advance` drains four at a time.
     ///
     /// A third kind of pending work, and the one no count used to name: [`Session::pending`] is the

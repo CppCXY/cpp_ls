@@ -1367,11 +1367,11 @@ sampled from outside):
 
 | | before | ask-once | + focused schedule | + focused closure | + cook hit |
 | --- | --- | --- | --- | --- | --- |
-| private bytes, peak | 1 196 MB | 870 MB | 758 MB | 720 MB | **616 MB** |
+| private bytes, peak | 1 196 MB | 870 MB | 758 MB | 720 MB | **595 MB** |
 | whole-program reads | 18 | 19 | 1 | 1 | **3** |
 | per-file readings inserted | 2 028 | 2 170 | 232 | 179 | 181 |
 | stored cooks served | 0 | 0 | 0 | 0 | **106** |
-| idle churn | 4 505 MB | 3 568 MB | 2 603 MB | 1 283 MB | **284 MB** |
+| idle churn | 4 505 MB | 3 568 MB | 2 603 MB | 1 283 MB | **414 MB** |
 | live at the end | 371 MB | 413 MB | 186 MB | 175 MB | **187 MB** |
 
 The closure sweep follows the same rule now: `advance` cooks the **focused** document's closure, not every open
@@ -1405,6 +1405,7 @@ first:
   they did, in the first attempt.
 
 Measured on `test_cpp` (twenty files open, no request, twenty seconds idle): **106 stored cooks served**, idle churn
-**284 MB**, private bytes peak **616 MB**. The goal's budget — ≤700 MB, idle churn near zero — is met; what is left of
+**414 MB**, private bytes peak **595 MB** (two runs, 106 hits each; the misses — 24 in the last one — are the files
+the program read re-files as facts and the ones a request named, not repeats of an unchanged cook). The goal's budget — ≤700 MB, idle churn near zero — is met; what is left of
 the number is the cold start itself (372 files read once, ~600 MB of allocator retention) plus the focused document's
 program read.
