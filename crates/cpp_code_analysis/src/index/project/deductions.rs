@@ -129,7 +129,14 @@ pub(crate) fn element_of_a_range_expression(
             depth + 1,
         )
     {
-        return Some(adapted_element(&left_element, &right, index, path));
+        return Some(adapted_element(
+            &left_element,
+            &right,
+            index,
+            scopes,
+            root,
+            path,
+        ));
     }
 
     // **The base case: a range expression that is a value.** `numbers`, `collection`, a function call returning a
@@ -403,30 +410,46 @@ pub(crate) fn the_two_operands_of_a_pipe(
 }
 
 /// **The element a view adaptor yields from `element`** — the right-hand side of a pipe, applied.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn adapted_element(
     element: &Known<(Type, PathBuf)>,
     adaptor: &cpp_parser::CppSyntaxNode,
     index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
     path: &Path,
 ) -> Known<(Type, PathBuf)> {
+    use cpp_parser::CppAstNode;
+
     let Known::Yes((element, file)) = element else {
         return element.clone();
     };
     let written = adaptor.text().to_string();
     let written = written.trim();
-    let _ = (index, path);
 
     // **`transform`'s element is the lambda's return type.** It used to be refused — the body is where the answer is, and
     // a guess would offer the wrong members — but the deduction for a lambda's `return` exists
     // (`a_lambdas_return_type`, which a call of the lambda uses), so this is the same answer rather than a guess. A body
     // this layer cannot type (`return ++counter;`) still answers nothing.
+    //
+    // **A return that projects a member** (`[](auto item) { return item.name; }`) is the second half: the syntax alone
+    // cannot state it, because a member's type is the class's declaration and therefore the index's. See
+    // [`the_member_a_lambdas_return_names`].
     if written.contains("views::transform") || written.contains("views::transform_view") {
         let lambda = adaptor
             .descendants()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr);
-        return match lambda.and_then(|lambda| {
-            crate::sema::declarations::a_lambdas_return_type(&lambda, std::slice::from_ref(element))
-        }) {
+        let label = lambda.and_then(|lambda| {
+            if let Some(label) = crate::sema::declarations::a_lambdas_return_type(
+                &lambda,
+                std::slice::from_ref(element),
+            ) {
+                return Some(label);
+            }
+            let lambda = cpp_parser::CppLambdaExpr::cast(lambda)?;
+            the_member_a_lambdas_return_names(&lambda, element, index, scopes, root, path)
+        });
+        return match label {
             Some(label) => Known::Yes((
                 crate::sema::types::parse_type_spelling(&label),
                 file.clone(),
@@ -462,6 +485,79 @@ pub(crate) fn adapted_element(
     // **Every other adaptor passes the element through**: `filter`, `reverse`, `take`, `drop`, `take_while`,
     // `drop_while`, `filter_view`, `reverse_view`, `take_view`, `drop_view`, `common`, `all`, `counted`, `elements`…
     Known::Yes((element.clone(), file.clone()))
+}
+
+/// **The type a transform's callable returns when its body projects a member** — `[](auto item) { return item.name; }`.
+///
+/// `a_lambdas_return_type` answers a return the syntax states on its own (`n`, `n * n`, a literal). A member access
+/// does not: the object's class and the member's declaration are the *index's* answer, not the expression's. The object
+/// must be one of the lambda's **parameters** — the generic one takes the range's element, a written one its own
+/// spelling — and the type that comes back is the member's recorded type, substituted through a class template's
+/// arguments when the object is one (`std::pair<int, std::string>` yields `std::string` for `second`).
+///
+/// Conservative by construction: every `return` must project a member of a parameter, the class's member list must
+/// answer, and the member must be a **data** member. Anything else is `None`, which leaves the caller's refusal in
+/// place rather than offering a member the class does not have.
+fn the_member_a_lambdas_return_names(
+    lambda: &cpp_parser::CppLambdaExpr,
+    element: &Type,
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+) -> Option<String> {
+    use cpp_parser::CppAstNode;
+
+    let body = lambda.get_body()?;
+    let parameters: Vec<cpp_parser::CppParam> = lambda.get_params()?.get_params().collect();
+    let mut agreed: Option<String> = None;
+    for statement in body
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppReturnStat::cast)
+    {
+        // **A nested lambda's return is its own** — the same rule the syntax-only deduction states.
+        if statement
+            .syntax()
+            .ancestors()
+            .take_while(|ancestor| ancestor != body.syntax())
+            .any(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::LambdaExpr)
+        {
+            continue;
+        }
+        let expression = statement.get_expr()?;
+        let access = crate::sema::resolve::member_access_of(expression.syntax())?;
+        let object = cpp_parser::CppNameExpr::cast(access.object)?.get_name_text()?;
+        let parameter = parameters
+            .iter()
+            .find(|parameter| parameter.get_name_text().as_deref() == Some(object.as_str()))?;
+        let spelled = if parameter.is_auto() {
+            element.clone()
+        } else {
+            crate::sema::types::parse_type_spelling(&parameter.get_type_text())
+        };
+        // **The class, not the reference the parameter binds** — `const Item&` and `Item` have the same members.
+        let class = as_a_range(&spelled).to_string();
+        let Known::Yes(listed) = members_of(index, scopes, root, path, &class) else {
+            return None;
+        };
+        // **A class template's arguments reach its members** — `pair<int, std::string>`'s `second` is the `std::string`
+        // only after the substitution; a plain class is left alone by the same function.
+        let Known::Yes(listed) = substituted_members(index, path, &class, Known::Yes(listed))
+        else {
+            return None;
+        };
+        let member = listed.members.iter().find(|member| {
+            member.fact.name == access.member && member.fact.kind == crate::DeclKind::Variable
+        })?;
+        let written = member.fact.type_of.clone()?;
+        match &agreed {
+            None => agreed = Some(written),
+            Some(previous) if *previous == written => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
 }
 
 /// **One component of a `pair`-shaped type**, without the `const` a map's key carries.

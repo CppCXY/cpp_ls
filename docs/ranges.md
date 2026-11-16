@@ -521,19 +521,22 @@ So the stage is **deferred as a design item**, not half-done as an arm.
    `the_element_a_lambda_parameter_receives` pairs it with the declaration's own reference shape (`auto&` → `T&`) and
    refuses every other spelling — a project's own `apply(f)` says nothing about what `f` receives. The transform's element
    follows from it: `n * n` is an `int`.
+3. **A transform that projects a member answers the member's type.** `[](auto item) { return item.name; }` is the
+   canonical transform, and the syntax alone cannot state its return: the member's type is the class's declaration.
+   `the_member_a_lambdas_return_names` requires the object to be one of the lambda's parameters (the generic one takes
+   the range's element, a written one its own spelling), asks `members_of` for the class — substituted through a class
+   template's arguments — and accepts a **data** member only. A member the class does not declare stays refused.
 
 Pinned in `crates/cpp_code_analysis/tests/ranges.rs`:
 `a_named_pipeline_keeps_the_element_of_its_range`, `a_named_pipeline_of_two_adaptors_keeps_it_too`,
 `a_generic_lambdas_parameter_takes_the_ranges_element`, `a_generic_lambdas_parameter_keeps_the_reference_it_wrote`,
 `a_generic_lambdas_parameter_feeds_the_transform_element`,
-`a_generic_lambdas_parameter_in_an_algorithm_takes_the_first_arguments_element`, and the refusal
-`a_lambda_outside_the_standard_adaptors_keeps_its_placeholder`.
+`a_generic_lambdas_parameter_in_an_algorithm_takes_the_first_arguments_element`, the three member projections
+(`a_transform_of_a_generic_lambdas_member_answers_the_members_type`, its written-parameter form, and the
+undeclared-member refusal), and the refusal `a_lambda_outside_the_standard_adaptors_keeps_its_placeholder`.
 
 **What is still not answered:** the pipeline's own type — hover on `auto ids` still says its initializer could not be typed
-— and therefore an inlay hint for it. That is the design item above. One smaller gap is worth naming: a `transform` whose
-generic lambda returns a **member** of its parameter (`[](auto item) { return item.id; }`) still has no element. The
-parameter is `Item` now, so the piece that is missing is the lambda's *return*, which the syntax-only path types
-(`type_with_the_auto_parameters`) — it has no member lookup, so `n * n` is answered and `item.id` is not.
+— and therefore an inlay hint for it. That is the design item above.
 
 ## Where the objective stands
 
@@ -543,7 +546,7 @@ parameter is `Item` now, so the piece that is missing is the lambda's *return*, 
 | (2) `std::views::filter` resolves, and a call of it has a type | **done, measured in the live server**: `_Range_closure<_Filter_fn, decay_t<int>>` |
 | (3) `operator|` | **deferred** — the member-variable model it was planned on does not match the installed STL (measured); the real chain needs expression-level substitutions and a representation for an unnamed lambda |
 | (3a) a named pipeline keeps its element | **done** — pinned by the tests above |
-| (3b) a generic lambda's parameter takes the element | **done for the standard adaptors and algorithms**; a lambda handed to a project's own function stays unknown |
+| (3b) a generic lambda's parameter takes the element | **done for the standard adaptors and algorithms**, and a transform that projects a member answers the member's type; a lambda handed to a project's own function stays unknown |
 | (4) a lambda's `auto` parameters from its invoker | **the bounded form is (3b)**; what remains is the invoker a project writes itself, which no table can decide |
 | (5) this document and the README | kept up to date |
 
@@ -561,6 +564,8 @@ type of `ids`                            not known — the view's own type has n
 element of `ids`                         `Item`, so `for (auto v : ids)` binds `Item`       ✓ (3a)
 `views::filter([](auto v) { … })`'s `v`  `Item`                                             ✓ (3b)
 `views::transform([](auto n) { … })`     its element is the lambda's `n * n`, an `int`      ✓ (3b)
+`views::transform([](auto i) { return i.name; })`
+                                         its element is `name`'s declared type              ✓ (3b)
 inlay hint for `ids`                     nothing — it needs the view's type                (stage 3)
 ```
 

@@ -196,6 +196,73 @@ void use(std::vector<Item> items) {
     assert_eq!(type_after(source, "value.id"), Some("Item".to_string()));
 }
 
+/// **A transform that projects a member answers that member's type** — `[](auto item) { return item.name; }`.
+///
+/// The parameter is `Item` now (3b), so the missing half was the *return*: a member access needs the class's member
+/// list, which the syntax-only deduction does not have. Measured before this: the loop over `names` answered `auto`.
+#[test]
+fn a_transform_of_a_generic_lambdas_member_answers_the_members_type() {
+    let source = "
+#include <ranges>
+#include <string>
+#include <vector>
+struct Item { int id; std::string name; };
+int main() {
+    std::vector<Item> items;
+    auto names = items | std::views::transform([](auto item) { return item.name; });
+    for (auto name : names) {
+        name.size();
+    }
+}
+";
+    assert_eq!(
+        type_after(source, "name :"),
+        Some("std::string".to_string()),
+        "`names` yields what `item.name` is"
+    );
+}
+
+/// **The parameter does not have to be generic** — `[](const Item& item)` names its own type, and the member lookup is
+/// the same question.
+#[test]
+fn a_transform_of_a_written_parameters_member_answers_the_members_type() {
+    let source = "
+#include <ranges>
+#include <string>
+#include <vector>
+struct Item { int id; std::string name; };
+int main() {
+    std::vector<Item> items;
+    auto names = items | std::views::transform([](const Item& item) { return item.name; });
+    for (auto name : names) {
+        name.size();
+    }
+}
+";
+    assert_eq!(
+        type_after(source, "name :"),
+        Some("std::string".to_string())
+    );
+}
+
+/// **A member the class does not have stays refused** — the answer is the class's own list, not a guess from a name.
+#[test]
+fn a_transform_of_a_member_that_is_not_declared_stays_unknown() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct Item { int id; };
+int main() {
+    std::vector<Item> items;
+    auto names = items | std::views::transform([](auto item) { return item.missing; });
+    for (auto name : names) {
+        name = 0;
+    }
+}
+";
+    assert_eq!(type_after(source, "name :"), None);
+}
+
 /// **`views::iota` yields the type of its first argument.**
 #[test]
 fn a_counted_range_yields_its_bound() {
