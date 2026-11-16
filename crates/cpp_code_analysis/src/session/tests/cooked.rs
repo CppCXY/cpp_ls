@@ -603,14 +603,22 @@ pub(crate) fn a_program_is_read_when_the_reader_stops_editing() {
     );
 }
 
-/// **A program of any size is the program to read.** This used to be the other half of the schedule: a program over
-/// eight megabytes of source was refused, because a unit read is linear in its program and its preparing half held the
-/// read lock. Measured with a counter that counts frees as well as allocations, the size was never the problem — a
-/// 159-file program is 5.09 s and ~28 MB of live bytes — and the ceiling only made a reader's file keep the per-file
-/// reading. The fixture is the same shape as the test above, with one large comment-only header in the closure, so the
-/// schedule is the only thing that differs between them.
+/// **A program of any size is read.** This used to be the other half of the schedule: a program over eight megabytes
+/// of source was refused, because a unit read is linear in its program and its preparing half held the read lock.
+/// Measured with a counter that counts frees as well as allocations, the size was never the problem — a 159-file
+/// program is 5.09 s and ~28 MB of live bytes — and the ceiling only made a reader's file keep the per-file reading.
+/// The fixture is the same shape as the test above, with one large comment-only header in the closure.
+///
+/// # Why the assertion is about the read rather than about the queue
+///
+/// Because **the drain may have already done it**. The fixture's index takes longer than
+/// [`UNTIL_A_UNIT_MAY_BE_READ`] — nine megabytes of comment is nine megabytes to lex — so the pump's own `advance`
+/// reaches the pause inside `index_everything`, reads the program, and marks the root read. That is the right
+/// outcome, and it made this test fail for the wrong reason: it asserted the *schedule* named the file, which is
+/// only true while nothing has read it. So the question is asked in both of its shapes — the root is either already
+/// read, or it is the next one to read — and "it was refused for being large" is the one answer both halves rule out.
 #[test]
-pub(crate) fn a_program_of_any_size_is_the_program_to_read() {
+pub(crate) fn a_program_of_any_size_is_read() {
     // Bigger than the old ceiling, and sized from the text rather than from a constant that no longer exists.
     let line = "// padding padding padding padding\n";
     let big = line.repeat((9 * 1024 * 1024) / line.len() + 1);
@@ -639,9 +647,15 @@ pub(crate) fn a_program_of_any_size_is_the_program_to_read() {
         crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1),
     );
 
-    assert_eq!(
-        session.the_program_to_read().as_deref(),
-        Some(Path::new("/p/main.cpp")),
-        "the reader's program is the one to read, whatever its closure weighs"
-    );
+    let root = crate::session::queue_key(Path::new("/p/main.cpp"));
+    match session.the_program_to_read() {
+        // The drain has not reached it yet: the schedule still owes this program, whatever its closure weighs.
+        Some(next) => assert_eq!(next.as_path(), Path::new("/p/main.cpp")),
+        // The drain has read it already — which is the same claim about size, made by the read itself.
+        None => assert!(
+            session.units_read.contains(&root),
+            "the program is neither read nor owed: the file kept its per-file reading, which is what the old \
+             size ceiling did"
+        ),
+    }
 }

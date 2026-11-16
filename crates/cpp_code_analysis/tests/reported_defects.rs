@@ -481,10 +481,18 @@ fn a_type_whose_last_segment_is_the_declared_name_is_not_dropped() {
             &view,
             cpp_code_analysis::file::coordinates::ReadingOffset::new(at),
         );
-        assert_eq!(
-            known.map(|found| found.type_of.clone()),
-            cpp_code_analysis::Known::Yes(type_of.to_string()),
-            "`{declaration}` must be a `{type_of}`, not `void`"
+        // **The written type is the floor, not the answer.** `std::pair pair{1, 2}` is a class template whose
+        // arguments the braces deduce, so the right answer is `std::pair<int, int>` — the test's subject is that the
+        // specifier is not dropped (which read as `void`), and demanding the *written* spelling would pin the engine to
+        // the less useful answer. A prefix is what both answers share.
+        let answered = known.map(|found| found.type_of.clone());
+        let spelling = match &answered {
+            cpp_code_analysis::Known::Yes(spelling) => spelling.clone(),
+            other => panic!("`{declaration}` must be a `{type_of}`, not `void`: {other:?}"),
+        };
+        assert!(
+            spelling.starts_with(type_of),
+            "`{declaration}` must be a `{type_of}`, not `void`: {answered:?}"
         );
     }
 }
