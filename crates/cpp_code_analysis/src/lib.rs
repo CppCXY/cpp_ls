@@ -1,42 +1,46 @@
-//! Code analysis on top of the C++ syntax tree.
+//! Code analysis on top of the C++ syntax tree — and on top of `cpp_toolchain`, which is what reads a file the way a
+//! compiler does.
 //!
 //! # What this crate is for
 //!
-//! `cpp_parser` answers "what does this file *look* like" — a lossless tree of every token, with no
-//! opinion about what any of it means. This crate answers "what does it *mean*", which in C++ starts
-//! with the preprocessor: the text a compiler sees is not the text in the file.
+//! `cpp_parser` answers "what does this file *look* like" — a lossless tree of every token, with no opinion about what
+//! any of it means. `cpp_toolchain` answers "what does the compiler *read*" — which project this is, which include
+//! paths it has, which file includes which, what the macros are at a position, and what one file looks like once they
+//! are applied. This crate answers "what does any of it *mean*": scopes, declarations, types, members, overloads, and
+//! the diagnostics a reader is shown.
 //!
-//! # Why the preprocessor is a separate layer over the tree, not a pass before it
+//! # Why the preprocessor is a layer of its own, and why it is a crate
 //!
-//! The obvious design — run a preprocessor, then parse its output — is the one a compiler uses, and it
-//! is unusable for an editor:
+//! The obvious design — run a preprocessor, then parse its output — is the one a compiler uses, and it is unusable for
+//! an editor:
 //!
-//! * **The tree must stay lossless.** Expansion results cannot be written back into the tree without
-//!   losing the correspondence between a byte of source and a byte of the file. So expansion produces
-//!   a *shadow* token stream and the tree is left alone.
+//! * **The tree must stay lossless.** Expansion results cannot be written back into the tree without losing the
+//!   correspondence between a byte of source and a byte of the file. So expansion produces a *shadow* token stream —
+//!   the rendering — and the tree is left alone.
 //! * **Both branches of `#if` must stay visible.** A compiler picks one; an editor cannot. Code inside
-//!   `#if defined(_WIN32)` is code a person is writing, on whatever platform they happen to be on, and
-//!   making it disappear is the failure mode users notice first.
-//! * **Every edit would invalidate everything.** Expansion is not local — one `#define` changes the
-//!   meaning of every file that includes it — so doing it before parsing would make the parse itself
-//!   un-incremental.
+//!   `#if defined(_WIN32)` is code a person is writing, on whatever platform they happen to be on, and making it
+//!   disappear is the failure mode users notice first.
+//! * **Every edit would invalidate everything.** Expansion is not local — one `#define` changes the meaning of every
+//!   file that includes it — so doing it before parsing would make the parse itself un-incremental.
 //!
-//! # What this layer produces
+//! It is a **separate crate** because the direction of the dependency is the design: the preprocessor may not ask this
+//! layer what a name means, and while both lived in one crate nothing stopped it. What that buys is the unit the cache
+//! is built around — one file's rendering, keyed by its text and its environment — which is a thing the toolchain can
+//! produce without a project, an index, or a session.
+//!
+//! # What this layer answers with
 //!
 //! ```text
-//! PreprocessorDirective nodes  ->  typed Directive values        (directive.rs)
-//! #define                      ->  MacroDef, token sequence       (macros.rs)
-//! #if / #elif                  ->  Guard conditions over macros   (condition.rs, guard.rs)
-//! a macro call                 ->  a shadow token stream, every
-//!                                 token carrying its origin       (expand.rs)
+//! a rendering, mapped back      ->  the file's declarations            (index, summary)
+//! a name at an offset           ->  a declaration, or why not          (sema::resolve, index::project)
+//! a call                        ->  the overload, and what it returns  (index::project::calls)
+//! a cursor                      ->  members, parameters, a card        (completion, inlay, hover)
+//! a project                     ->  an index, its cache, its session   (index::store, cache, session)
 //! ```
 //!
-//! A [`Guard`] travels with everything derived from a conditional region, so that a consumer can ask
-//! "is this code even being compiled?" and get `Active`, `Inactive`, or — the common answer —
-//! `Unknown`, because `#if _MSC_VER > 1900` cannot be decided on a machine that is not MSVC.
-//!
-//! An [`ExpandedToken`] travels with a [`Origin`], so that "where is this?" has an answer even when the
-//! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
+//! The vocabulary the preprocessor produced — directives, guards, the shadow stream, the rendering — is re-exported
+//! from here (`crate::condition`, `crate::macros`, `crate::preprocess::cooked`, …) so that a consumer of this crate
+//! does not have to know which crate below it defined a type it is looking at.
 
 // **Alignment against a real compiler** (`align`) — the one module here whose answer does not come from this crate.
 // It puts our token stream beside a real `-E`'s and reports where they differ, by mechanism; see its module
@@ -74,16 +78,12 @@ pub mod effect;
 pub mod file;
 pub mod folding;
 pub mod format;
-pub mod include;
 pub mod index;
 pub mod inlay;
 pub mod memory;
 /// **Where a read's allocations go**, when the `perf-probe` feature is on — see the module.
 #[cfg(feature = "perf-probe")]
 pub mod perf;
-pub mod preprocess;
-pub mod probes;
-pub mod project;
 pub mod sema;
 pub mod semantic;
 pub mod session;
@@ -93,15 +93,24 @@ pub mod summary_codec;
 pub mod surface;
 pub mod unit_codec;
 
-// The folders above are the *organisation*; the modules inside them keep their own names, and they are
-// re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
-// inside this crate, `cpp_code_analysis::directive::…` outside it. Moving a file is a change to the filesystem,
-// and this is what keeps it from being a change to the API.
+// **The toolchain and the preprocessor live in `cpp_toolchain`** — the layer below this one, which finds a
+// translation unit, configures it, walks it and renders one file of it. The re-exports are deliberate and are the
+// whole of the migration's API promise: every path written before the split still resolves — `crate::include::…`,
+// `crate::macros::…`, `crate::probes::…` — so the split is a change to the filesystem, not to the vocabulary.
 //
-// * `file`     — one file analysed, and the token of the expanded stream
-// * `preprocess` — directives, macros, conditions, guards, expansion (the entry point is this module itself)
-// * `include`  — include paths and compiler settings, the file provider, the resolver, the graph
-// * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
+// The direction is one-way by construction, and that is the point of the crate: the preprocessor may not ask the
+// index what a name means.
+pub use cpp_toolchain::{include, preprocess, probes, project};
+
+// The folders are the *organisation*; the modules inside them keep their own names, and they are re-exported here so
+// that every path written before a reorganisation still resolves. The four that moved down a layer keep their
+// re-export as well — `include`, `preprocess`, `project`, `probes` — so a consumer that already says
+// `cpp_code_analysis::include::config::CompilerConfig` needs no change; a new one should reach for `cpp_toolchain::…`
+// directly and skip the hop.
+//
+// * `file`     — one file analysed, the VFS holding it, and a view of it parsed
+// * `index`    — the summaries, the store, and the queries over them
+// * `session`  — a project opened: the pump, the caches, the reads
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
     CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,

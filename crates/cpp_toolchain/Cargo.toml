@@ -1,0 +1,32 @@
+[package]
+name = "cpp_toolchain"
+version = "0.4.0"
+edition = "2024"
+description = "The toolchain and preprocessor layer of cpp_ls: how a translation unit is found, configured, walked and rendered."
+license = "MIT"
+authors = ["CppCXY"]
+repository = "https://github.com/CppCXY/cpp_ls"
+keywords = ["cpp", "language-server"]
+categories = ["development-tools"]
+
+# **What this crate is.** The layer under the analysis: the compiler and its include paths (`include`), the project's
+# own description of itself (`.cppls.toml`, the build system), the file provider a reader is answered from (`paths`),
+# and the preprocessor — directives, macros, conditions, guards, the walk and the rendering (`preprocess`).
+#
+# It is a crate rather than several modules for one reason: the analysis is being rebuilt around a cache whose unit is
+# a *file's rendering*, and that unit belongs to this layer. Nothing above it may reach into it with a query; it asks
+# for a reading, and the reading is this crate's whole vocabulary.
+#
+# The dependency direction is one-way and checked by the compiler: `cpp_code_analysis` depends on this crate, never the
+# other way. What that forbids is what the split exists for — the preprocessor may not ask the index what a name means.
+[dependencies]
+cpp_parser.workspace = true
+
+# The project's configuration files (`.cppls.toml`), and the exclusion patterns it states. A file a user hand-writes
+# gets a real parser rather than a subset that silently ignores what it cannot read.
+glob.workspace = true
+rust-i18n.workspace = true
+serde.workspace = true
+toml.workspace = true
+rustc-hash = "2"
+smol_str = "0.2"

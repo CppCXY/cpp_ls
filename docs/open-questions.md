@@ -1194,3 +1194,58 @@ ceiling: the candidate set is finite and the answer is one of them). The `PROGRA
 weight and goes with the same change.
 
 
+
+
+## The toolchain and the preprocessor are their own crate, so the cache has a unit to key
+
+Every memory number in the section above was read from a process whose unit of work is a **whole program**, while its
+caches are bounded per **file** (`renderings` 8 entries, `cooked` 512, `views` 8). The two do not fit: opening twenty
+files ran **18 whole-program reads with no request at all**, 2 028 per-file readings inserted, 4.5 GB of churn in
+twenty seconds, and the private bytes went 462 MB → 1 196 MB. Turning the program reads off pinned the same run at
+596 MB. The repetition is not in a header's parse — the same `<vcruntime_new.h>` was parsed once per program, ten
+times — it is that **nothing is shared between one program and the next**.
+
+That is a design question, not a tuning one, and the answer starts by making the unit honest: a **file's rendering**
+— its text with the environment applied, and the spans back to the file — is what a cache can key and hold, and it is
+produced entirely by the toolchain. So the layer moves out:
+
+```text
+cpp_toolchain   project (`.cppls.toml`, compile_commands, CMake, the toolchain)   2 942 lines
+                include (search order, resolver, graph, msvc, system headers)     8 162
+                preprocess (directives, macros, conditions, guards, expand, cook) 6 591
+                paths, token, probes                                              1 025
+                                                                         total   18 720
+```
+
+and what is left in `cpp_code_analysis` is the index, its cache, the session, and the semantics — the layer whose
+caches are the ones that do not fit.
+
+**Three seams had to be cut, and each one is a dependency that should not have existed:**
+
+1. `preprocess` asked `index::environment` two questions (`MacrosHere::from_walk`, `a_branch_is_taken`). The first was
+   the seed answering for itself (`Marked::lookup`); the second — "is this `#ifdef` branch the compiled one" — moved
+   to `cpp_toolchain::preprocess::environment` and is re-exported by the index, because the *walk* is its caller.
+2. `preprocess::cooked::FileMacros` took the analysis's `MacroView` and `UnitDefinitions` by value. It now takes
+   `&dyn MacroEnvironment` and `&dyn UnitDefinitionsView`, two methods each, implemented by those types in
+   `summary.rs`: the renderer owns a file's text and expansion, the timeline owns where the file sits, and neither
+   needs the other's types. This is also the seam the new cache is built on — a rendering is a function of *this
+   file* and *this environment*, and both are now nameable without a session.
+3. The index's `Marked::observe(&MacroFact)` was deleted with the walk, and the one caller now uses
+   `index::environment::observe_a_macro_fact(&mut Marked, &MacroFact)` — the state is the toolchain's, the fact is
+   the summary's, and the function between them belongs to the layer that owns the fact.
+
+Two smaller ones moved with their owners: `CACHE_DIRECTORY` and the two hashes (`fnv1a64`, `content_hash`) are the
+project's layout and the cache's key, and the toolchain needs them first; `PathPattern` stayed in the index, and the
+config reader now validates a pattern with `glob::Pattern::new` directly, because *what a pattern must be* is the
+glob grammar and *what it excludes* is the index's question.
+
+**What did not change**: no behaviour, no test assertion. `cargo test -p cpp_toolchain` is 145 tests, the workspace is
+**3 039 in 200 suites**, and every path written before the split still resolves — `crate::include::…`,
+`crate::macros::…`, `crate::probes::…` are re-exports, not a second copy.
+
+**Next**, and the reason the split was worth its churn: the cache and the index are rewritten in place. The unit is one
+file's rendering, keyed by `(content hash, environment fingerprint)`; a program read becomes a list of those keys, a
+second program with the same list does no work, and a query never asks for a cook because a cache missed — it returns
+what it knows and the misses it needs, and the scheduler serves the focused document only. The budget is not a byte
+ceiling read from a counter that only adds: it is `idle ⇒ zero allocations`, `a drained queue ⇒ zero cooks`, and a
+peak per program read, all three asserted by tests.

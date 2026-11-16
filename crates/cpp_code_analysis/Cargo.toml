@@ -12,6 +12,11 @@ categories = ["development-tools"]
 [dependencies]
 cpp_parser.workspace = true
 
+# **The layer below this one**: the toolchain, the include resolver, the walk and the preprocessor. It is a crate
+# rather than a folder because the direction has to be the compiler's to enforce — the preprocessor may not ask the
+# index what a name means, and while both lived in one crate nothing stopped it.
+cpp_toolchain.workspace = true
+
 # **An expansion is code, and the hover shows it as code.** `the_expansion_of_a_macro` hands the preprocessor's own
 # answer to the formatter before a reader sees it: `((a)+(b))` with the arguments substituted is not what a reader
 # wants to compare with the source, and re-spacing it by hand here would be a second formatter. The formatter depends
@@ -31,16 +36,14 @@ log.workspace = true
 # configuration file has a glob in its hand, not a directory.
 glob.workspace = true
 
-# The project's own configuration file. `serde` is already in the graph (`cpp_parser` derives a `Serialize` for
-# `CppSyntaxId`), and `toml` is the parser for it — a file a user hand-writes gets a real parser rather than a
-# subset that silently ignores what it cannot read.
+# The diagnostics speak the reader's language (see the crate documentation), the cache is one embedded database with
+# compressed entries, and `rustc-hash` is the hasher the index's tables are built over — three things that are about
+# what a *summary* is, and therefore still this layer's. `serde`/`toml`/`smol_str` moved to `cpp_toolchain` with the
+# files that read them (a `.cppls.toml` is the project's, not the index's).
 rust-i18n.workspace = true
-serde.workspace = true
 redb.workspace = true
 zstd.workspace = true
-toml.workspace = true
 rustc-hash = "2"
-smol_str = "0.2"
 
 [features]
 # **The performance probe's observation points.** Off by default and **not compiled** when off: the marks in the

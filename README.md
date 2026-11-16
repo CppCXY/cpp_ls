@@ -51,7 +51,8 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 | Crate | crates.io | What it is |
 | --- | --- | --- |
 | [`cpp_parser`](crates/cpp_parser) | [![crates.io](https://img.shields.io/crates/v/cpp_parser.svg)](https://crates.io/crates/cpp_parser) | A lossless C++ parser over preprocessed text: a rowan CST with error recovery, C++23/C23 features, CUDA, and vendor extensions |
-| [`cpp_code_analysis`](crates/cpp_code_analysis) | [![crates.io](https://img.shields.io/crates/v/cpp_code_analysis.svg)](https://crates.io/crates/cpp_code_analysis)  | The preprocessor and cook, the index and its cache, symbol scopes, type inference, modules/partitions, diagnostics |
+| [`cpp_toolchain`](crates/cpp_toolchain) | [![crates.io](https://img.shields.io/crates/v/cpp_toolchain.svg)](https://crates.io/crates/cpp_toolchain) | The layer under the analysis: the project's build description and compiler, include resolution, the translation-unit walk, and the preprocessor — directives, macros, guards, expansion, and one file's rendering |
+| [`cpp_code_analysis`](crates/cpp_code_analysis) | [![crates.io](https://img.shields.io/crates/v/cpp_code_analysis.svg)](https://crates.io/crates/cpp_code_analysis)  | The index and its cache, symbol scopes, type inference, the session, completions, modules/partitions, and diagnostics |
 | [`cpp_ls`](crates/cpp_ls) | [![crates.io](https://img.shields.io/crates/v/cpp_ls.svg)](https://crates.io/crates/cpp_ls) | The server: LSP transport, handlers, configuration, and the binary |
 | [`cpp_formatter`](crates/cpp_formatter) | [![crates.io](https://img.shields.io/crates/v/cpp_formatter.svg)](https://crates.io/crates/cpp_formatter) | An independent formatter with clang-format's configuration surface |
 
@@ -163,7 +164,7 @@ watches, a native watcher monitors that folder; watcher failures are reported to
 ## Working on it
 
 ```bash
-cargo test --workspace --release          # 3,012 tests in 200 suites; the latency ones only measure in --release
+cargo test --workspace --release          # 3,039 tests in 200 suites; the latency ones only measure in --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 ```
@@ -172,7 +173,7 @@ The probes are the interesting part: `CPPLS_TRACE_HOVER`, `CPPLS_TRACE_COOKING`,
 `CPPLS_TRACE_DIAGNOSTICS`, `CPPLS_TRACE_MEMBERS`, `CPPLS_TRACE_UNITS`, `CPPLS_TRACE_NAMES` and
 `CPPLS_DUMP_RENDERING_DIR` print what a layer decided and why, and `cargo test --release -- --ignored --nocapture`
 runs the probes that need a real project or toolchain. Every switch is listed, with what it prints, in
-[`crates/cpp_code_analysis/src/probes.rs`](crates/cpp_code_analysis/src/probes.rs). `inspect` asks a question without
+[`crates/cpp_toolchain/src/probes.rs`](crates/cpp_toolchain/src/probes.rs). `inspect` asks a question without
 an editor:
 
 ```bash

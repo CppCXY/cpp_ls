@@ -4479,7 +4479,7 @@ pub(crate) fn apply_fact(
 
     match reach {
         // In force: the name and its value, as the file wrote them.
-        FactReach::Active => state.observe(fact),
+        FactReach::Active => crate::index::environment::observe_a_macro_fact(state, fact),
         // Handled above.
         FactReach::Inactive | FactReach::Unknown => {}
     }

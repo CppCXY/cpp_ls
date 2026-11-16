@@ -1094,14 +1094,10 @@ fn a_macro_that_declares_a_type_declares_it_in_the_cooked_reading() {
 
     // **The cooked reading**: the program a compiler sees, indexed and mapped back into the file.
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-    let macros = cpp_code_analysis::FileMacros::new(
-        timeline
-            .environment_of(api)
-            .expect("the unit reaches api.h"),
-        &shared,
-        None,
-        true,
-    );
+    let view = timeline
+        .environment_of(api)
+        .expect("the unit reaches api.h");
+    let macros = cpp_code_analysis::FileMacros::new(&view, &shared, None, true);
     let cooked = cpp_code_analysis::cook_with(source, &tokens, &macros);
     let rendered = cooked.render();
     assert!(
@@ -1169,14 +1165,10 @@ fn a_definition_says_which_file_it_was_written_in() {
     let main = Path::new("/p/main.cpp");
     let text = unit.sources.get(main).expect("read");
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
-    let macros = cpp_code_analysis::FileMacros::new(
-        timeline
-            .environment_of(main)
-            .expect("the unit reaches main.cpp"),
-        &shared,
-        None,
-        true,
-    );
+    let view = timeline
+        .environment_of(main)
+        .expect("the unit reaches main.cpp");
+    let macros = cpp_code_analysis::FileMacros::new(&view, &shared, None, true);
     let cooked = cpp_code_analysis::cook_with(text, &tokens, &macros);
     let rendered = cooked.render();
 
@@ -1241,12 +1233,8 @@ fn a_definition_says_which_file_it_was_written_in() {
     let path = Path::new("/p/local.cpp");
     let text = unit.sources.get(path).expect("read");
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
-    let macros = cpp_code_analysis::FileMacros::new(
-        timeline.environment_of(path).expect("reached"),
-        &shared,
-        None,
-        true,
-    );
+    let view = timeline.environment_of(path).expect("reached");
+    let macros = cpp_code_analysis::FileMacros::new(&view, &shared, None, true);
     let cooked = cpp_code_analysis::cook_with(text, &tokens, &macros);
     let rendered = cooked.render();
     let seven = cooked
@@ -1336,7 +1324,7 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         );
 
         // …and the reading that reads the unit once and answers positionally.
-        let file_macros = cpp_code_analysis::FileMacros::new(view, &shared, None, true);
+        let file_macros = cpp_code_analysis::FileMacros::new(&view, &shared, None, true);
 
         let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
         let from_the_table = cpp_code_analysis::cook_with(text, &tokens, &configuration.table);
@@ -1381,8 +1369,8 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
             .map(|token| token.text().to_string())
             .collect()
     };
-    let with_seed =
-        cpp_code_analysis::FileMacros::new(timeline.root_environment(), &shared, Some(&seed), true);
+    let root = timeline.root_environment();
+    let with_seed = cpp_code_analysis::FileMacros::new(&root, &shared, Some(&seed), true);
 
     assert_eq!(
         with_seed.definition("LATE").map(body_of),

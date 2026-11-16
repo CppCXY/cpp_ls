@@ -241,7 +241,7 @@ pub struct CompileSection {
     pub remove_args: Vec<String>,
     /// **`[compile.cuda]`** — what this project says about CUDA, when the discovery cannot work it out.
     ///
-    /// See [`CudaSection`](crate::project::cuda::CudaSection): the toolkit's location is the one thing no compiler on the machine can answer, because
+    /// See `cuda::CudaSection`: the toolkit's location is the one thing no compiler on the machine can answer, because
     /// `nvcc` is not installed by default and the headers it ships are not on any system path.
     #[serde(default)]
     pub cuda: Option<CudaSection>,
@@ -707,7 +707,7 @@ pub struct CodeLensSection {
 #[serde(deny_unknown_fields)]
 pub struct CompletionSection {
     /// The most items one completion may answer with. Absent is the crate's own default
-    /// ([`crate::completion::ITEM_BUDGET`], 1 000).
+    /// (`ITEM_BUDGET`, 1 000).
     ///
     /// Clamped to `1..=20 000`: a client that receives twenty thousand items is being sent megabytes per keystroke, and
     /// a budget of zero would answer "there is nothing here" — a lie with no upside.
@@ -791,7 +791,7 @@ pub enum FunctionEntry {
 
 impl FunctionEntry {
     /// The syntax as the analysis names it, or `None` for a name this build does not have — which is reported to the
-    /// user by [`validate`] rather than silently ignored.
+    /// user by `validate` rather than silently ignored.
     pub fn syntax(&self) -> Option<FormatSyntax> {
         let written = match self {
             FunctionEntry::Syntax(syntax) => syntax,
@@ -816,7 +816,7 @@ impl FunctionEntry {
 
 /// **The three grammars a format string can be written in**, as the configuration spells them.
 ///
-/// Here rather than in [`crate::format`] so that the analysis's own vocabulary and the file's do not become one
+/// Here rather than in the formatter so that the analysis's own vocabulary and the file's do not become one
 /// thing: the file's job is to say what a person wrote, and `crate::format::FormatKind` is what the scanner reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatSyntax {
@@ -1079,12 +1079,16 @@ fn validate(report: &mut ConfigReport) {
 
     // The patterns are compiled by the caller that builds the filter, but a bad one is a *configuration* problem
     // and belongs in the report the user reads — so it is checked here, once, where the file is read.
+    //
+    // **The check is the matcher's own parser, not the filter's type.** The type that *applies* a pattern lives in the
+    // analysis, where the files a change touches are decided; what a pattern must be is a property of the glob
+    // grammar, and asking it here keeps this crate below the layer that applies one.
     let bad_patterns: Vec<&String> = report
         .config
         .workspace
         .exclude
         .iter()
-        .filter(|pattern| crate::PathPattern::new(pattern).is_err())
+        .filter(|pattern| glob::Pattern::new(pattern).is_err())
         .collect();
 
     for pattern in bad_patterns {
@@ -1096,7 +1100,7 @@ fn validate(report: &mut ConfigReport) {
         .config
         .workspace
         .exclude
-        .retain(|pattern| crate::PathPattern::new(pattern).is_ok());
+        .retain(|pattern| glob::Pattern::new(pattern).is_ok());
 
     for relative in report.config.compile.include.values().flatten() {
         if Path::new(relative).is_absolute() {

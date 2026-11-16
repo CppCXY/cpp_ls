@@ -201,7 +201,7 @@ impl CachedCommands {
                 bytes.extend_from_slice(value.to_string_lossy().as_bytes());
             }
         }
-        crate::cache::fnv1a64(&bytes)
+        crate::hash::fnv1a64(&bytes)
     }
 
     fn the_file(&self, key: u64) -> std::path::PathBuf {
@@ -371,7 +371,7 @@ impl Environment {
 /// others are the ones people actually install. `cl` is not here — see the module documentation.
 const COMPILER_NAMES: &[&str] = &["g++", "clang++", "c++", "gcc", "clang", "cc"];
 
-/// **Which language's search list the compiler is asked for** — see [`search_paths_with`]'s `-x`.
+/// **Which language's search list the compiler is asked for** — see `search_paths_with`'s `-x`.
 ///
 /// It has to be asked for, because one compiler answers twice and the answers differ: `gcc -x c++ -E -v -` lists
 /// `…/include/c++`, `…/include/c++/x86_64-w64-mingw32` and `…/include/c++/backward`, while `gcc -x c -E -v -` lists only
@@ -848,7 +848,7 @@ fn search_paths_with(
 ///
 /// `None` for the last candidate of the assumed list — the compiler's own default is not an assumption the analysis
 /// made, it is the compiler answering the question it was asked, and claiming otherwise would be a note about
-/// nothing. See [`ASSUMED_STANDARD_MSVC`] for why the assumed path exists at all.
+/// nothing. See `ASSUMED_STANDARD_MSVC` for why the assumed path exists at all.
 fn assumed_standard_note(standard: Option<&str>) -> Option<String> {
     let standard = standard?;
 
@@ -1021,7 +1021,7 @@ pub fn discover_with(
 ) -> Option<Toolchain> {
     // **The standard the compiler is asked about**: what the project says this file is built as, or — when nobody
     // says — the newest the compiler takes. See [`Toolchain::standard`] for why the answer travels back, and
-    // [`ASSUMED_STANDARD_MSVC`] for why the last case is not left to the compiler's own default.
+    // `ASSUMED_STANDARD_MSVC` for why the last case is not left to the compiler's own default.
     let standard = statement.standard_for(for_file, &mut |path| files.read(path));
 
     // **Which language's search list to ask for** — see [Language]. It comes from the standard when the build states
@@ -1230,7 +1230,7 @@ fn ask_msvc(
         msvc.toolset.cl = named;
     }
 
-    // **The project's standard, or the newest this compiler takes** — see [`ASSUMED_STANDARD_MSVC`]. The macro
+    // **The project's standard, or the newest this compiler takes** — see `ASSUMED_STANDARD_MSVC`. The macro
     // table is what carries `_MSVC_LANG` and `__cplusplus`, so the standard has to be settled *before* the compiler
     // is asked: a table printed for the default C++14 is a table that says `<format>` is empty, and no later step
     // can tell that apart from a project that really is C++14.
@@ -1389,7 +1389,7 @@ pub struct Toolchain {
     /// [`Toolchain::builtin_macros`] is the value for *this* standard, and a reader comparing two runs of the same
     /// project — or asking why `<format>` is empty — needs to see which one it was. [`Toolchain::config`] puts it
     /// into the configuration, where [`crate::include::config::predefined_macros_of`] uses it to state
-    /// `__cplusplus`/`_MSVC_LANG` even when the compiler could not be asked. See [`ASSUMED_STANDARD_MSVC`].
+    /// `__cplusplus`/`_MSVC_LANG` even when the compiler could not be asked. See `ASSUMED_STANDARD_MSVC`.
     pub standard: Option<String>,
     /// How this toolchain was found, which is the first thing to check when an analysis is wrong.
     pub source: ToolchainSource,
@@ -1462,7 +1462,7 @@ impl Toolchain {
     ///
     /// # The three, and what is measured behind each
     ///
-    /// * **MSVC.** `import std;` is C++23 and `/std:c++latest` ([`ASSUMED_STANDARD_MSVC`] is what this analysis asks
+    /// * **MSVC.** `import std;` is C++23 and `/std:c++latest` (`ASSUMED_STANDARD_MSVC` is what this analysis asks
     ///   for when a project states nothing). The *source* of the standard module ships with the toolchain:
     ///   `<VC>/Tools/MSVC/<version>/modules/std.ixx`, and the build has to compile it into an `.ifc` and name it —
     ///   `/reference std=std.ifc`, or `/ifcSearchDir <dir>`. Measured on 14.35.32215: the file is 3 194 bytes, a

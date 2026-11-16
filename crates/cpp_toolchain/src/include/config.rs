@@ -227,7 +227,7 @@ impl CompilerConfig {
     ///
     /// Order, and why: the file's own command first, because a compilation database is per translation unit and one
     /// target may be C++17 while another is C++20; then the project's `extra_args`, which is a person saying what the
-    /// build is; then [`LanguageConfig::permissive`], because a parse that has not been told what it is reading must not
+    /// build is; then `LanguageConfig::permissive`, because a parse that has not been told what it is reading must not
     /// refuse the headers it is reading.
     ///
     /// No stored field: a cached copy would go stale the moment the database or `extra_args` changed, and the database is
@@ -899,7 +899,7 @@ impl CompileCommands {
     /// **The one standard every command that states one agrees on**, or None.
     ///
     /// A header has no translation unit of its own, and the standard is what decides which half of every guarded
-    /// header exists. Measured on a <ranges> fixture whose only database entry is
+    /// header exists. Measured on a `<ranges>` fixture whose only database entry is
     /// \... /std:c++latest ...\ for \main.cpp\: \<ranges>\'s own config had no command, so it had no standard,
     /// so \_HAS_CXX20\ was false and the cooked rendering of the header was the **12-byte** \#pragma once\ stub —
     /// the pipeline's type could never be inferred. A project where the entries disagree is one where the header

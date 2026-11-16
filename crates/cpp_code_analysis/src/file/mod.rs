@@ -186,8 +186,13 @@ impl FileAnalysis {
 // provider chain and the file id); `vfs` is the set of files an analysis is *holding*, each with its line index
 // kept in step with its text; `view` is one of those files parsed, which is what a cursor query asks for; and
 // `token` is the token of the *expanded* stream — the one that knows which macro produced it.
+//
+// **`paths` and `token` live in `cpp_toolchain` now.** Reading a file and the token of an expanded stream are
+// properties of the toolchain, not of an analysis: the preprocessor produces that token, and the resolver is what
+// asks for the text. This module keeps the re-exports so that `crate::file::paths::…` and `crate::file::token::…`
+// still resolve — moving a file is a change to the filesystem, not to the vocabulary.
+pub use cpp_toolchain::{paths, token};
+
 pub mod coordinates;
-pub mod paths;
-pub mod token;
 pub mod vfs;
 pub mod view;

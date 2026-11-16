@@ -457,7 +457,7 @@ pub fn directive_signature(source: &str) -> DirectiveSignature {
 /// **Where a file's preamble ends** — after its last directive, or `0` for a file with none.
 ///
 /// [`directive_signature`]'s third field, as a function, for the caller that wants only the bound
-/// ([`crate::TranslationUnitCache`], which keys a unit's root on it). It scans, so a caller that wants the whole
+/// (`TranslationUnitCache`, which keys a unit's root on it). It scans, so a caller that wants the whole
 /// signature should call `directive_signature` once rather than both.
 pub fn preamble_end(source: &str) -> usize {
     directive_signature(source).preamble_end
@@ -716,7 +716,7 @@ fn skip_trivia(tokens: &[Token], index: &mut usize) {
 /// needs it too, now that a header's directives are read from its tokens rather than from a parse. Two copies would
 /// be two answers to "what does this `#include` line say", and a file one of them resolved and the other did not see
 /// is a difference no test would attribute.
-pub(crate) fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
+pub fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
     let next_significant = |tokens: &[CppTokenData], from: usize| {
         (from..tokens.len()).find(|&at| !cpp_parser::is_trivia(tokens[at].kind))
     };

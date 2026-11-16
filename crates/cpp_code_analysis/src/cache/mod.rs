@@ -407,10 +407,10 @@ pub const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The directory name this crate keeps its cache in, under the project root.
 ///
-/// A dot-directory inside the project rather than the operating system's cache directory: it is what the user
-/// asked for, it travels with the repository checkout (so CI gets the same warm cache as a developer), and
-/// deleting it is an obvious, local operation.
-pub const CACHE_DIRECTORY: &str = ".cppls";
+/// **Defined in `cpp_toolchain`, and re-exported here.** Two layers name the directory — the toolchain's project
+/// scan must never descend into it, and this crate writes summaries there — and a name with two definitions is a
+/// cache that is written into one directory and read from another.
+pub use cpp_toolchain::CACHE_DIRECTORY;
 
 /// Everything that determines what a summary of one file contains.
 ///
@@ -488,32 +488,18 @@ impl SummaryKey {
     }
 }
 
-/// A stable 64-bit FNV-1a hash of `bytes`.
-///
-/// See the module documentation for why the standard library's hasher is not used. Exposed because the same
-/// function has to be used for a file's content hash, the configuration hash and the macro-environment hash — three
-/// places that must agree, and the only way to make them agree is to have one implementation.
-pub fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
+// **The two hashes every key is built from, defined in `cpp_toolchain` and re-exported here.** The same function
+// hashes a file's content, the configuration and the macro environment — three places that must agree, and the only
+// way to make them agree is one implementation. The toolchain needs it first: its own cache is filed under a hash of
+// the compiler's output.
+pub use cpp_toolchain::{content_hash, fnv1a64};
 
-    let mut hash = OFFSET_BASIS;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
-}
-
-/// The hash of a file's text, as the cache sees it.
-///
-/// Nothing about *where* the file is enters here, which is what makes a branch switch cheap: a file that comes
-/// back to a content the cache has seen — after `git checkout`, a revert, or a rename within its directory — is
-/// found without being parsed. The directory is a separate part of the key, because the text alone does not
-/// determine what its includes resolve to.
-pub fn content_hash(text: &str) -> u64 {
-    fnv1a64(text.as_bytes())
-}
+// The hash of a file's text, as the cache sees it, is [`cpp_toolchain::content_hash`].
+//
+// Nothing about *where* the file is enters it, which is what makes a branch switch cheap: a file that comes back to
+// a content the cache has seen — after `git checkout`, a revert, or a rename within its directory — is found without
+// being parsed. The directory is a separate part of the key, because the text alone does not determine what its
+// includes resolve to.
 
 /// **The key a translation unit's rendering is filed under** — the files the walk read, their texts, and the reader
 /// that would produce the stream.

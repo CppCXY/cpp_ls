@@ -216,7 +216,7 @@ fn non_empty(value: &str) -> Option<String> {
 
 /// Work out what a project is, without running a compiler.
 ///
-/// Split from the toolchain step — which *does* run one, and which [`crate::Session::open`] does next — because the
+/// Split from the toolchain step — which *does* run one, and which `Session::open` does next — because the
 /// two fail differently and a caller wants to see the first half's answer even when the second half finds nothing.
 pub fn discover(
     files: &impl FileProvider,

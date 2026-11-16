@@ -136,7 +136,7 @@ pub fn detect_guard_from_tokens(
     .unwrap_or(Guard::None)
 }
 
-/// [has_a_macro_guard] for a caller with no tree — see [detect_guard_from_tokens].
+/// `has_a_macro_guard` for a caller with no tree — see [detect_guard_from_tokens].
 pub fn has_a_macro_guard_from_tokens(
     directives: &[SpannedDirective],
     tokens: &[cpp_parser::CppTokenData],

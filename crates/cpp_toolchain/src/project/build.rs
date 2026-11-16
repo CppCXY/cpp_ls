@@ -19,7 +19,7 @@
 //! `build`, `out`, `cmake-build-*`, `_build`, `Build`, `x64`, `Debug`, and would still miss the one the project
 //! uses; a walk finds it and costs a few hundred `read_dir` calls on a project whose build tree is already there.
 //!
-//! It deliberately does **not** use the session's [`WatchFilter`](crate::WatchFilter): a project's `exclude` list
+//! It deliberately does **not** use the session's `WatchFilter`: a project's `exclude` list
 //! usually names its own build tree, and the compile database is inside it. What the walk skips is what no
 //! database can be inside — `.git`, the cache directory, and directories that are themselves a checkout
 //! (`node_modules`).

@@ -204,7 +204,7 @@ struct Binding {
 ///
 /// A trait rather than a path→text map because the caller decides where text comes from: a disk provider, the
 /// buffers an editor holds, a test's fixtures. `None` is an answer too, and a load-bearing one — the unit's cook
-/// **records the hole** ([`crate::summary::RenderedUnit::missing`]) rather than cooking an empty file, because "this file
+/// **records the hole** (`RenderedUnit::missing`) rather than cooking an empty file, because "this file
 /// is empty" and "this file was not read" are different programs.
 pub trait UnitSources {
     /// The text of `path`, when this caller has it.

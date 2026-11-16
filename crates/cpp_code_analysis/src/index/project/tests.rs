@@ -138,12 +138,8 @@ fn a_declaration_a_macro_makes_is_found_once_the_file_is_cooked() {
     );
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
     let unit_definitions = unit.definitions();
-    let macros = crate::preprocess::cooked::FileMacros::new(
-        unit.environment_of(api).expect("the unit reaches api.h"),
-        &unit_definitions,
-        None,
-        true,
-    );
+    let view = unit.environment_of(api).expect("the unit reaches api.h");
+    let macros = crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, None, true);
     let rendered = crate::preprocess::cooked::cook_with(source, &tokens, &macros).render();
 
     let provider = crate::MemoryFiles::new();

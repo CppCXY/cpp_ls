@@ -899,9 +899,9 @@ mod tests {
 // be asked: Microsoft's layout (measured), and the conventional directories of an operating
 // system.
 //
-// **`paths` is not here any more**: reading a file is the *file* layer's business (`crate::file::paths`), and this
-// module keeps a re-export so that every path written before the move still resolves. The distinction is the one
-// that matters for a language server: an include search *asks* for a file, and the file layer is what *holds* one.
+// **`paths` is not here any more**: reading a file is the *file* layer's business (`crate::paths`), and this module
+// keeps a re-export so that every path written before the move still resolves. The distinction is the one that
+// matters for a language server: an include search *asks* for a file, and the file layer is what *holds* one.
 pub mod config;
 pub mod fuzzy;
 pub mod graph;
@@ -909,4 +909,4 @@ pub mod msvc;
 pub mod system_headers;
 pub mod toolchain;
 
-pub use crate::file::paths;
+pub use crate::paths;

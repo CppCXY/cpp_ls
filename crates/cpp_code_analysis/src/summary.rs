@@ -2519,9 +2519,11 @@ impl UnitCook<'_> {
         let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
         // **The frame's own environment is the floor.** What the program's cook has already executed sits on top of it
         // in `self.state`: a name the rendering has passed is answered by the table, one it has not reached by the view
-        // — a change of state, not of policy.
+        // — a change of state, not of policy. The view is a local because the renderer borrows it: it is two words,
+        // and `FileMacros` reads it through the trait rather than owning it.
+        let frame_view = unit.environment_at(frame);
         let initial = crate::preprocess::cooked::FileMacros::new(
-            unit.environment_at(frame),
+            &frame_view,
             definitions,
             seed,
             use_in_force_bodies,
@@ -5563,6 +5565,34 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+/// **The two positional questions the renderer asks** — see
+/// [`cpp_toolchain::preprocess::cooked::MacroEnvironment`].
+///
+/// This is the whole seam between the walk's timeline and a rendering: the renderer owns the file's text and the
+/// expansion, the environment owns where the file sits and which definitions are in force there, and neither needs the
+/// other's types. `MacroView` is two words — the unit and a frame — so the answers are the same comparisons they were
+/// when the renderer took the view by value.
+impl cpp_toolchain::preprocess::cooked::MacroEnvironment for MacroView<'_> {
+    fn visible_body_in_force(&self, name: &str) -> Option<u32> {
+        MacroView::visible_body_in_force(self, name)
+    }
+
+    fn visible_binding(&self, name: &str) -> Option<(usize, u32)> {
+        MacroView::visible_binding(self, name)
+    }
+}
+
+/// **A unit's definitions, answered by slot** — see
+/// [`cpp_toolchain::preprocess::cooked::UnitDefinitionsView`].
+///
+/// Lazy on both sides: the table lexes a replacement list the first time a rendering meets it, and a slot nobody asks
+/// for is never read. `of` is the reader; this trait is the door the renderer is allowed to knock on.
+impl cpp_toolchain::preprocess::cooked::UnitDefinitionsView for UnitDefinitions<'_> {
+    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
+        self.of(index)
+    }
+}
 
 #[cfg(test)]
 mod tests {

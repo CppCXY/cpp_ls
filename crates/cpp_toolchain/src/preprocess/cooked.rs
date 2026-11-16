@@ -14,7 +14,7 @@
 //!   table, which is a different question.
 //! * **A `#define` in a branch that is not compiled does not take effect.** This stream keeps its *own*
 //!   [`MacroTable`], fed only by definitions the walk actually reached. That is the difference from
-//!   [`crate::preprocess()`], which records every definition because a consumer asking "where is this name
+//!   `preprocess()`, which records every definition because a consumer asking "where is this name
 //!   defined" wants to see the ones that are not compiled too.
 //! * **Macro invocations are replaced by their expansions**, recursively, with the hide set, `#` and `##`
 //!   ([`crate::expand()`]). Every token that comes out of a body carries its [`Origin`] chain, so a consumer
@@ -62,7 +62,7 @@ pub struct CookedStream {
     /// Collected because a `#error` is a **probe a header can be asked to answer**: putting one at a position and
     /// seeing whether it fires is how a reader finds out which branch a real chain took. That is a question no
     /// amount of reading the code answers when two layers disagree, and it is the question this crate kept having to
-    /// approximate by copying a header and hoping the copy behaved the same — see [`crate::RenderedUnit`] and the
+    /// approximate by copying a header and hoping the copy behaved the same — see `RenderedUnit` and the
     /// note on `#pragma once`, where a copy demonstrably did not.
     ///
     /// Only **live** ones: a message in a branch nobody compiles is not said by the compilation, and reporting it
@@ -282,7 +282,7 @@ impl RenderedCooked {
     /// **What this rendering costs a cache that wants to bound itself**: its text and one span per token.
     ///
     /// The session keeps a few of these and drops the least recently used when the total passes
-    /// [`crate::cache_lru::RENDERING_BYTES`], so the number has to include the spans: a closure of 600 000 tokens is
+    /// the session's rendering budget, so the number has to include the spans: a closure of 600 000 tokens is
     /// 600 000 `RenderedSpan`s, which is as much as the text itself.
     pub fn weight(&self) -> usize {
         self.text.len() + self.spans.len() * std::mem::size_of::<RenderedSpan>()
@@ -500,7 +500,7 @@ type InForceDefinition<'a> = (&'a str, Option<std::sync::Arc<str>>, std::sync::A
 /// The parameter list is what makes a function-like definition expandable — substitution is by parameter, and a
 /// body without one would leave the parameter names standing where arguments belong. `None` is an object-like
 /// macro (or a caller that stores no parameters), and the text is then just the name and the body.
-pub(crate) fn definition_text(name: &str, parameters: Option<&str>, body: &str) -> String {
+pub fn definition_text(name: &str, parameters: Option<&str>, body: &str) -> String {
     let head = match parameters {
         Some(list) => format!("{name}{list}"),
         None => name.to_string(),
@@ -788,6 +788,34 @@ pub fn configuration_from_environment_and(
 
     out
 }
+/// **A file's place in a walked unit** — the two positional questions a cook's starting table asks.
+///
+/// # Why this is a trait rather than the analysis's `MacroView`
+///
+/// Because the renderer is below the walk. A rendering is a function of one file's text and the macros in force where
+/// it sits; *where it sits* is the walk's business, and the walk's timeline belongs to the layer above this one. The
+/// seam is two questions — "which definition is in force from the start" and "which binding does this file see, and
+/// from where" — and both are answers the walk already computes. Keeping them behind a trait is what lets the
+/// preprocessor be compiled and tested without a project, and it is the direction the analysis is being rebuilt
+/// around: this crate renders, the analysis decides *which* renderings are worth keeping.
+pub trait MacroEnvironment {
+    /// The definition in force from offset 0 because a condition settled it — layer 1 of [`FileMacros`].
+    fn visible_body_in_force(&self, name: &str) -> Option<u32>;
+
+    /// The unit's last binding for `name` in this file, and the offset it is in force from — layer 2.
+    fn visible_binding(&self, name: &str) -> Option<(usize, u32)>;
+}
+
+/// **A unit's definitions, read once and answered by slot** — what [`FileMacros`] asks for a binding's body.
+///
+/// Lazy on purpose, and the laziness is the walk's: a unit holds one slot per `#define` event, and only the slots a
+/// rendering actually meets are ever lexed. The analysis's `UnitDefinitions` implements this by falling back to its
+/// own `of(index)`; see `summary.rs`. An index this type does not recognise answers `None`, which is the same answer
+/// as a body that did not read — the definition is simply not in the table.
+pub trait UnitDefinitionsView {
+    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>>;
+}
+
 /// **What one file of a walked unit starts with**, as the cooker asks it: the unit's definitions *as that file
 /// sees them*, with the compilation's own builtins underneath.
 ///
@@ -802,7 +830,7 @@ pub fn configuration_from_environment_and(
 /// 1. the **in-force channel** — a body a condition settled, in force from offset 0, and the newest layer, so it
 ///    wins outright when it is usable (see `Configuration::in_force_without_a_parameter_list`);
 /// 2. the **definition channel** — the unit's own `#define`s, in force from the offset the fact came into force
-///    at *in this file*, which is what `MacroView::visible_binding` resolves;
+///    at *in this file*, which is what [`MacroEnvironment::visible_binding`] resolves;
 /// 3. the **seed** — what the compiler predefines, the oldest layer, so a header that redefines a builtin is in
 ///    force over it.
 ///
@@ -810,11 +838,11 @@ pub fn configuration_from_environment_and(
 ///
 /// Every file used to get its own: ~10 000 bindings copied per file, the same definitions differing only in the
 /// offset each was in force from (255 files, 1.7 s of environment plus 4.1 s of table build in the census). None
-/// of that is per file: the **definitions** are the unit's ([`crate::UnitDefinitions`], parsed once) and the
+/// of that is per file: the **definitions** are the unit's ([`UnitDefinitionsView`], parsed once) and the
 /// **offsets** are a property of the file, computed by the view when a query names one.
 pub struct FileMacros<'unit> {
-    view: crate::MacroView<'unit>,
-    definitions: &'unit crate::UnitDefinitions<'unit>,
+    view: &'unit dyn MacroEnvironment,
+    definitions: &'unit dyn UnitDefinitionsView,
     /// What the compiler predefines and the configuration decides — the oldest layer.
     seed: Option<&'unit MacroTable>,
     /// May the in-force channel be used? A decision the measurement left open, and the caller's to make: see
@@ -825,8 +853,8 @@ pub struct FileMacros<'unit> {
 impl<'unit> FileMacros<'unit> {
     /// What `view`'s file starts with, over the unit's definitions and the compilation's seed.
     pub fn new(
-        view: crate::MacroView<'unit>,
-        definitions: &'unit crate::UnitDefinitions<'unit>,
+        view: &'unit dyn MacroEnvironment,
+        definitions: &'unit dyn UnitDefinitionsView,
         seed: Option<&'unit MacroTable>,
         use_in_force_bodies: bool,
     ) -> Self {
@@ -846,7 +874,8 @@ impl<'unit> FileMacros<'unit> {
         if !self.use_in_force_bodies {
             return None;
         }
-        self.definitions.of(self.view.visible_body_in_force(name)?)
+        self.definitions
+            .definition_of(self.view.visible_body_in_force(name)?)
     }
 
     /// The unit's own definition of `name`, with the offset it is in force from **in this file** — layer 2.
@@ -860,7 +889,7 @@ impl<'unit> FileMacros<'unit> {
         name: &str,
     ) -> Option<(usize, &'unit std::sync::Arc<crate::macros::MacroDef>)> {
         let (at, index) = self.view.visible_binding(name)?;
-        Some((at, self.definitions.of(index)?))
+        Some((at, self.definitions.definition_of(index)?))
     }
 }
 
@@ -892,7 +921,7 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
                         Some((at, index)) => format!(
                             "binding@{} definition={}",
                             at,
-                            if self.definitions.of(index).is_some() {
+                            if self.definitions.definition_of(index).is_some() {
                                 "yes"
                             } else {
                                 "NO"

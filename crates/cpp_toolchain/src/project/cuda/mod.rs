@@ -29,7 +29,7 @@
 //! kernels       the launch bracket `<<<…>>>`, its grid/block argument types, and the kernel's own parameter rules
 //! ```
 //!
-//! The rules that judge CUDA code are checks like any other and live in [`crate::sema::check`](crate::sema::check); this
+//! The rules that judge CUDA code are checks like any other and live in `sema::check`; this
 //! module owns the configuration and the discovery, so that the grammar's CUDA flag has one source.
 
 use std::path::PathBuf;

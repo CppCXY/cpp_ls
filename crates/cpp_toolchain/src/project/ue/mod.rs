@@ -43,7 +43,7 @@
 //! ```
 //!
 //! **The rules themselves do not live here.** One check per code, in
-//! [`crate::sema::check`](crate::sema::check) — `ue_naming`, `ue_generate_body` — like every other rule, because that is
+//! `sema::check` — `ue_naming`, `ue_generate_body` — like every other rule, because that is
 //! where a rule is found by its code and where its tests are. What this module owns is the *answers* those rules read,
 //! so that two rules cannot disagree about which class a `UCLASS()` annotates.
 

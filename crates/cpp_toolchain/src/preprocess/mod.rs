@@ -188,11 +188,11 @@ pub fn preprocess_with_a_seed(
     tokens: &[CppTokenData],
     seed: &crate::Marked,
 ) -> FilePreprocessing {
-    preprocess_using(source, tokens, &mut |name, offset| {
-        crate::MacroValues::lookup(
-            &crate::index::environment::MacrosHere::from_walk(seed, offset),
-            name,
-        ) != crate::Lookup::Undefined
+    // **The seed answers for itself.** It was asked through a `MacrosHere` view built over it, and the view's
+    // `lookup` for a name the walk has not reached is the seed's own — the view adds a *file's* facts, and there is
+    // no file here. One call less on a path that runs for every directive of every file.
+    preprocess_using(source, tokens, &mut |name, _offset| {
+        crate::MacroValues::lookup(seed, name) != crate::Lookup::Undefined
     })
 }
 
@@ -291,7 +291,7 @@ fn preprocess_using(
             // **The branch's verdict**, asked of the compilation rather than of the file's own table: these are
             // questions about names the compiler predefines (`__cplusplus`, `_MSC_VER`), and no directive above them
             // in this file has anything to say about those. `None` leaves the branch exactly as it was.
-            let taken = crate::index::environment::a_branch_is_taken(
+            let taken = crate::preprocess::environment::a_branch_is_taken(
                 is_a_macro,
                 kind,
                 &branch,
@@ -410,6 +410,8 @@ pub fn opens_unclosed_region(directive: &Directive) -> bool {
 pub mod condition;
 pub mod cooked;
 pub mod directive;
+/// **The one decision that needs the walk and the compilation together** — see [`environment`].
+pub mod environment;
 pub mod expand;
 pub mod guard;
 pub mod guards;

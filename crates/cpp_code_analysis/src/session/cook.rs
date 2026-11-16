@@ -295,8 +295,9 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = match (unit, configuration) {
             (Some(unit), _) => {
                 let definitions = unit.definitions();
+                let view = unit.environment_of(path)?;
                 let macros = crate::preprocess::cooked::FileMacros::new(
-                    unit.environment_of(path)?,
+                    &view,
                     &definitions,
                     Some(seed),
                     true,
@@ -614,12 +615,9 @@ impl<F: FileProvider + Clone> Session<F> {
         let seed = MacroTable::from_marked(self.store.index().macros());
         let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();
-        let macros = crate::preprocess::cooked::FileMacros::new(
-            unit.environment_of(&path)?,
-            &unit_definitions,
-            Some(&seed),
-            true,
-        );
+        let view = unit.environment_of(&path)?;
+        let macros =
+            crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, Some(&seed), true);
         Some(crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render())
     }
 

@@ -384,7 +384,7 @@ impl<F: FileProvider> DetachedRead<F> {
                 let (tokens, _) =
                     cpp_parser::lex(&self.source, &cpp_parser::LexerConfig::default());
                 let macros = crate::preprocess::cooked::FileMacros::new(
-                    view,
+                    &view,
                     &definitions,
                     Some(&seed),
                     true,
@@ -1236,7 +1236,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let definitions = unit.definitions();
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let macros =
-            { crate::preprocess::cooked::FileMacros::new(view, &definitions, Some(&seed), true) };
+            { crate::preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
         let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
 
         // **The directives the caller may have read already.** For a file the index cannot describe — the one a
@@ -2146,7 +2146,7 @@ impl<F: FileProvider> SummaryStore<F> {
         };
         let uncovered_candidates = candidates
             .iter()
-            .filter(|summary| bodies_of(&environments, &seed, &summary.path).is_none())
+            .filter(|summary| bodies_of(&environments, &summary.path).is_none())
             .count();
 
         let uncovered = uncovered_candidates > 0;
@@ -2170,8 +2170,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // `docs/indexing-review.md`). With no units the per-candidate arm below builds the defining file's own
             // composed environment instead, which is the reading phase 2 introduced.
             if !environments.is_empty() {
-                candidates
-                    .retain(|summary| bodies_of(&environments, &seed, &summary.path).is_some());
+                candidates.retain(|summary| bodies_of(&environments, &summary.path).is_some());
             }
 
             // Then their text, which is what the scan slices bodies out of — and, for a file being re-read that no
@@ -2256,7 +2255,7 @@ impl<F: FileProvider> SummaryStore<F> {
             };
 
             let mut environment: Option<cpp_parser::MacroEnvironment> = None;
-            let bodies = bodies_of(&environments, &seed, &summary.path);
+            let bodies = bodies_of(&environments, &summary.path);
 
             for fact in &summary.macros {
                 if !fact.kind.is_definition() || is_bodied.contains(fact.name.as_str()) {
@@ -2282,9 +2281,16 @@ impl<F: FileProvider> SummaryStore<F> {
                     APlainShape::Settled => false,
                     APlainShape::Unplaceable => match &bodies {
                         // **The unit's own timeline**: the body is read in the environment of the file that
-                        // defines it, which is a position in the walk — no closure walked here at all.
-                        Some(bodies) => {
-                            cpp_parser::shape_of_a_body_at(body, bodies, range.start_offset)
+                        // defines it, which is a position in the walk — no closure walked here at all. The cook is
+                        // built here, from the view and the unit's definitions, because the renderer borrows them.
+                        Some((view, definitions)) => {
+                            let bodies = crate::preprocess::cooked::FileMacros::new(
+                                view,
+                                *definitions,
+                                Some(&seed),
+                                true,
+                            );
+                            cpp_parser::shape_of_a_body_at(body, &bodies, range.start_offset)
                                 .a_reading_uses_this()
                         }
                         // A caller with **no timeline at all** — a probe indexing a closure from an entry point,
@@ -2494,7 +2500,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 let definitions = unit.definitions();
                 let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
                 let macros = crate::preprocess::cooked::FileMacros::new(
-                    view,
+                    &view,
                     &definitions,
                     Some(&seed),
                     true,
@@ -2560,7 +2566,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // a file, which is what the timeline-less half of this pass cannot do (see the note on `eager`).
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
             let macros =
-                crate::preprocess::cooked::FileMacros::new(view, definitions, Some(&seed), true);
+                crate::preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
             let rendered =
                 { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
 
@@ -3268,22 +3274,25 @@ impl<F: FileProvider> SummaryStore<F> {
 ///
 /// `None` when no unit in `environments` reads the file, which the caller answers with the plain shape: a file
 /// outside every unit is one nobody compiled, and there is no environment to read its bodies in.
+///
+/// # Why it answers the pieces rather than a [`FileMacros`](crate::preprocess::cooked::FileMacros)
+///
+/// Because the renderer **borrows** its environment (`FileMacros::new` takes `&dyn MacroEnvironment`), and the view
+/// below is a value: returning a `FileMacros` would return something that borrows a local. The caller binds the view
+/// and builds the cook where it is used, which is one line and no allocation — a `MacroView` is two words.
 fn bodies_of<'pass>(
     environments: &'pass [(
         &'pass std::sync::Arc<crate::TranslationUnit>,
         crate::UnitDefinitions<'pass>,
     )],
-    seed: &'pass crate::macros::MacroTable,
     path: &Path,
-) -> Option<crate::preprocess::cooked::FileMacros<'pass>> {
+) -> Option<(
+    crate::MacroView<'pass>,
+    &'pass crate::UnitDefinitions<'pass>,
+)> {
     environments.iter().find_map(|(unit, definitions)| {
         let view = unit.environment_of(path)?;
-        Some(crate::preprocess::cooked::FileMacros::new(
-            view,
-            definitions,
-            Some(seed),
-            true,
-        ))
+        Some((view, definitions))
     })
 }
 

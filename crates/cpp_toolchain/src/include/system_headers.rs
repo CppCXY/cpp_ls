@@ -16,7 +16,7 @@
 //! Headers resolve: `#include <vector>` finds a file and its declarations are indexed, which is the difference
 //! between a project that is half-usable and one that is not usable at all. What is *not* there is the compiler's
 //! macro table — and that is not a detail: `#ifdef _WIN32`, `#if _MSC_VER >= 1930` and every `__cplusplus` test
-//! then answer `Unknown`, which the analysis reports rather than guesses (see [`crate::Known`]). A caller that
+//! then answer `Unknown`, which the analysis reports rather than guesses (see `Known`). A caller that
 //! took a guess for a fact would turn "I did not find a compiler" into a wrong answer about which code is compiled
 //! — the one failure this layer exists to avoid.
 //!

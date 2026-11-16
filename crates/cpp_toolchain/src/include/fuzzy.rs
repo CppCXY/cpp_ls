@@ -4,7 +4,7 @@
 //! # Why this exists
 //!
 //! An include resolves in one of two ways: a compile database says where the compiler looked, or the `include/`
-//! convention beside `src/` is inferred ([`crate::include::include_roots_above`]). Both are *exact* — the file has to
+//! convention beside `src/` is inferred (`include_roots_above`). Both are *exact* — the file has to
 //! be at the spelling asked for, under a directory something named.
 //!
 //! The gap is a project that states neither. Measured: a real CMake project with **no** `compile_commands.json` —
@@ -168,7 +168,7 @@ impl FuzzyIndex {
     /// and does not match one that merely contains the words somewhere.
     ///
     /// `written` is the include's target as the file spelled it — `Session/StandardIOSession.h` — and a target with a
-    /// single component is refused before any of this, by [`wanted_components`].
+    /// single component is refused before any of this, by `wanted_components`.
     pub fn matching(&self, written: &str) -> Vec<PathBuf> {
         let Some(components) = wanted_components(written) else {
             return Vec::new();

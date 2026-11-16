@@ -22,6 +22,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// **The directory a project keeps this server's own state in** — `.cppls`, beside the sources it describes.
+///
+/// One name, two consumers, and they must not disagree: [`crate::project::build`] never searches it (its contents are
+/// this server's, not the build's, and a generated file inside it is not a source), and the analysis files the
+/// summary database there. A project that put its own `.cppls` directory in a source tree has said, by that name,
+/// what it holds.
+pub const CACHE_DIRECTORY: &str = ".cppls";
+
 /// A file's identity within one analysis.
 ///
 /// Minted by [`PathInterner`], stable for as long as that interner lives, and meaningless outside it — a
@@ -35,7 +43,7 @@ impl FileId {
         self.0 as usize
     }
 
-    /// Mint an id from a number. For the layer that owns the numbering ([`crate::Vfs`]) and nothing else.
+    /// Mint an id from a number. For the layer that owns the numbering (the VFS) and nothing else.
     pub fn new(number: u32) -> FileId {
         FileId(number)
     }
@@ -72,7 +80,7 @@ pub trait FileProvider: Sync {
     /// Is this path one the **editor has open**, rather than one on disk?
     ///
     /// A question only an overlay can answer, which is why the default says `false`: a provider that is not an
-    /// overlay reads the disk, and the disk is never a buffer. [`crate::OpenDocuments`] and
+    /// overlay reads the disk, and the disk is never a buffer. `OpenDocuments` and
     /// [`OverlayFiles`] answer it for real, and the VFS records the answer with each entry —
     /// a view has to be able to say whether the analysis saw what the user sees.
     fn is_open_buffer(&self, _path: &Path) -> bool {
@@ -109,7 +117,7 @@ impl FileProvider for DiskFiles {
 /// # What it is not
 ///
 /// It is **not** a cache across runs — it is *this* run's snapshot, and the caches that do cross runs
-/// ([`crate::SummaryStore`], [`crate::TranslationUnitCache`]) are keyed by **content hashes** for the same
+/// (`SummaryStore`, `TranslationUnitCache`) are keyed by **content hashes** for the same
 /// reason. Nothing here looks at a timestamp: a file whose content changed while its mtime stood still is not a
 /// case this layer can get wrong, because it never asks one. A caller that knows a file changed — an editor's
 /// `didChange`, a watcher's event — says so with [`CachedFiles::reload`].

@@ -31,10 +31,12 @@
 use std::path::Path;
 
 use crate::ProjectIndex;
+use crate::Token;
 use crate::condition::{Lookup, MacroValues};
 use crate::guard::Visibility;
 use crate::include::config::CompilerConfig;
 use crate::include::graph::Marked;
+use crate::macros::{MacroBody, MacroDef, MacroFile};
 use crate::summary::{FactGuard, FileSummary, MacroFact, MacroKind};
 
 /// The macros in force at one point in one file, as far as a query can know.
@@ -174,6 +176,86 @@ impl<'a> MacrosHere<'a> {
                     && fact.range.start_offset <= self.offset
             })
             .max_by_key(|fact| fact.range.start_offset)
+    }
+}
+
+/// **Account for one `#define` or `#undef` a walk has just passed** — the state a condition below it sees.
+///
+/// The translation unit's macro state is built by *reading it in order*, which is what this is for: the walk calls it
+/// for every fact of every file it enters, and the state after the call is what a condition written below that fact
+/// reads. Until this existed the environment was only what the compiler and the command line define, and every
+/// condition a header's own feature macro answers stayed `Unknown`.
+///
+/// The value comes from [`MacroFact::value`], which is the macro's body only when that body is one integer literal —
+/// the one kind of body a condition can read. A fact without one defines the name and leaves its value unknown, which
+/// is the same answer a condition gets from a `#define NAME something` it must expand itself: `defined(NAME)` is true
+/// and `#if NAME` is undecidable.
+///
+/// # Why this is a function here rather than a method on [`Marked`]
+///
+/// Because its argument is a **summary's fact**, and summaries belong to this layer. The state it mutates is the
+/// toolchain's, and the toolchain has no business knowing what a fact is — that is the direction the split exists to
+/// keep. One caller, one function, and the type it reads is the type this layer owns.
+pub fn observe_a_macro_fact(state: &mut Marked, fact: &MacroFact) {
+    match fact.kind {
+        MacroKind::Undefinition => state.undefine(&fact.name),
+        MacroKind::Definition => match fact.value.as_deref() {
+            // The literal's own text, with the token kind the reader of a *value* accepts. No lexer is needed for
+            // that: `MacroFact::value` is written only when the body is one integer literal, so the text and the
+            // kind are both already known — which is why they are stored that way.
+            Some(value) => state.define(MacroDef {
+                name: fact.name.as_str().into(),
+                params: None,
+                body: MacroBody {
+                    tokens: vec![Token::new(
+                        cpp_parser::CppTokenKind::IntegerLiteral,
+                        value,
+                        fact.range,
+                    )],
+                    stringize: Vec::new(),
+                    paste: Vec::new(),
+                },
+                range: fact.range,
+                name_range: fact.range,
+                // A definition a **summary** describes: the fact has a range in the file the summary is of, and the
+                // caller that asked for this state is walking that file — see `MacroFile::Here`. (What is *not* here
+                // is the file's identity: a `Marked` is one file's state, and the ranges are positions in it.)
+                written_in: Some(MacroFile::Here),
+                value: std::sync::OnceLock::new(),
+            }),
+            // **The name the body aliased, when the body *is* one name** — `#define _STL_LANG __cplusplus`.
+            //
+            // The third shape a condition can read, beside a literal and nothing at all, and the one that decides
+            // MSVC's whole language mode. `vcruntime.h` writes `_STL_LANG` as an alias of either `_MSVC_LANG` or
+            // `__cplusplus`, and then asks `#if _STL_LANG > 201402L` to set `_HAS_CXX17`. With this arm missing,
+            // `_STL_LANG` was a name with no body, the comparison was undecidable, `_HAS_CXX17` was never defined,
+            // and every `#if _HAS_CXX17` below it — including the one around `#include <atomic>` in `<memory>` — was
+            // undecidable too.
+            //
+            // The body is the alias as an **identifier token**, which is what the expander walks: it looks the name
+            // up in this same state and substitutes that definition, so `_STL_LANG` → `__cplusplus` → `202400L`
+            // resolves in one step per link, exactly as a preprocessor would.
+            None => match fact.alias.as_deref() {
+                Some(alias) => state.define(MacroDef {
+                    name: fact.name.as_str().into(),
+                    params: None,
+                    body: MacroBody {
+                        tokens: vec![Token::new(
+                            cpp_parser::CppTokenKind::Identifier,
+                            alias,
+                            fact.range,
+                        )],
+                        stringize: Vec::new(),
+                        paste: Vec::new(),
+                    },
+                    range: fact.range,
+                    name_range: fact.range,
+                    written_in: Some(MacroFile::Here),
+                    value: std::sync::OnceLock::new(),
+                }),
+                None => state.define_name(&fact.name),
+            },
+        },
     }
 }
 
@@ -329,46 +411,13 @@ impl crate::condition::MacroValues for KnownMacros<'_> {
     }
 }
 
-/// **Is this branch the one that gets compiled?** Asked of the compilation's own knowledge, before a file is read.
+/// **Is this branch the one that gets compiled?** — asked of the compilation's own knowledge, before a file is read.
 ///
-/// `None` when nobody can say — no environment, or a condition whose expression needs a body — which leaves the
-/// branch exactly as the walk treated it before this existed. The direction is deliberate: a branch wrongly called
-/// *dead* loses a `#define` that is really there, while one wrongly called *live* keeps a definition that shadows a
-/// better one. Only an answer the environment is **sure** of is turned into a decision.
-///
-/// Written for `vcruntime.h`:
-///
-/// ```cpp
-/// #ifdef __cplusplus
-///     #define _STL_LANG _MSVC_LANG
-/// #else
-///     #define _STL_LANG 0L          // <- recorded as the definition, because it is the last one
-/// #endif
-/// ```
-///
-/// `__cplusplus` is the compiler's own name and is in the environment, so this answers `true` for the first branch
-/// and `false` for the `#else` — which is what stops `0L` from shadowing the real value.
-pub fn a_branch_is_taken(
-    is_a_macro: &mut dyn FnMut(&str, usize) -> bool,
-    kind: crate::DirectiveKind,
-    branch: &crate::preprocess::guard::Branch,
-    offset: usize,
-) -> Option<bool> {
-    match kind {
-        // **The two forms that only ask whether a name is a macro**, and therefore the two this can decide.
-        crate::DirectiveKind::Ifdef => {
-            let name = branch.name.as_deref()?;
-            Some(is_a_macro(name, offset))
-        }
-        crate::DirectiveKind::Ifndef => {
-            let name = branch.name.as_deref()?;
-            Some(!is_a_macro(name, offset))
-        }
-        // Everything else is left as it was: an expression needs bodies (`#if X > 2`, `defined X`), and an
-        // `#elif`'s verdict depends on the branches before it rather than on itself.
-        _ => None,
-    }
-}
+/// **Defined in `cpp_toolchain` and re-exported here**, because the caller that most needs it is the preprocessor
+/// itself: the walk reads `#ifdef`/`#ifndef` before any summary exists, and a function that answered only for the
+/// index would have forced the walk to keep its own copy — which is exactly the second implementation that made
+/// `vcruntime.h`'s `_STL_LANG` read as `0L` while the compiler had `202400L`.
+pub use cpp_toolchain::preprocess::environment::a_branch_is_taken;
 
 ///
 /// Written because a `#include` is a guarded fact too, and the walk used to descend into one **without asking**.
