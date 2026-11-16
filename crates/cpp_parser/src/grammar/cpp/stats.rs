@@ -2179,14 +2179,32 @@ fn a_qualified_name_that_cannot_be_declared(p: &CppParser) -> bool {
     let at = p.current_token_index();
     if p.token_kind_at(at) != CppTokenKind::Identifier
         || p.token_kind_at(at + 1) != CppTokenKind::Scope
-        || p.token_kind_at(at + 2) != CppTokenKind::Identifier
-        || p.token_kind_at(at + 3) != CppTokenKind::LeftParen
     {
         return false;
     }
-    let first = p.token_text_at(at);
-    let second = p.token_text_at(at + 2);
-    first != second && second != "operator"
+    // **The whole chain, not the first two segments.** The name a constructor or a destructor repeats is the one the
+    // *final* `::` qualifies — `a::B::B()` is B's constructor, and `a::B::~B()` is its destructor — so the answer is
+    // the last identifier against the segment before it, at any length. The two-segment form of this rule left
+    // `std::ranges::find_if(items, f);` a `Declaration` with **no `CallExpr` anywhere**, which is every standard
+    // algorithm called at statement scope; measured by counting calls in that statement (0 before this, 1 after).
+    let mut cursor = at;
+    let mut previous: Option<&str> = None;
+    loop {
+        if p.token_kind_at(cursor) != CppTokenKind::Identifier {
+            return false;
+        }
+        let name = p.token_text_at(cursor);
+        let next = p.token_kind_at(cursor + 1);
+        if next == CppTokenKind::LeftParen {
+            return previous.is_some_and(|previous| previous != name) && name != "operator";
+        }
+        // A `~` or an `operator` after the `::` is a declaration's own shape, and neither is a call this rule is for.
+        if next != CppTokenKind::Scope || p.token_kind_at(cursor + 2) != CppTokenKind::Identifier {
+            return false;
+        }
+        previous = Some(name);
+        cursor += 2;
+    }
 }
 
 /// **Is this statement `name ( & …`?** — see the rule at the head of `parse_declaration_or_expression_statement`.

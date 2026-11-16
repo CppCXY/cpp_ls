@@ -861,3 +861,33 @@ fn a_qualified_name_that_names_two_different_things_is_a_call() {
         );
     }
 }
+
+/// **The rule is about the whole chain, not about two segments** — every standard algorithm is called
+/// `std::ranges::name(…)`, and that shape was read as a declaration: no `CallExpr` anywhere in the statement.
+///
+/// The name a constructor or a destructor repeats is the one the **final** `::` qualifies — `a::B::B()` is still B's
+/// constructor — so the answer is the last segment against the segment before it, at any length.
+#[test]
+fn a_qualified_name_is_judged_at_the_end_of_its_chain() {
+    let tree = cpp_parser::CppParser::parse(
+        "namespace std { namespace ranges { void find_if(); } }\n\
+         void f(int items) { std::ranges::find_if(items, 1); }\n",
+        ParserConfig::default(),
+    );
+    assert_eq!(tree.get_errors(), [], "the statement parses cleanly");
+    assert_eq!(
+        cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count(),
+        1,
+        "`std::ranges::find_if(items, 1);` is one call expression"
+    );
+
+    // **A three-segment constructor and destructor are declarations**, and the call above is the only difference.
+    let declarations = "namespace a { struct B { B(); ~B(); }; }\na::B::B() {}\na::B::~B() {}\n";
+    let tree = cpp_parser::CppParser::parse(declarations, ParserConfig::default());
+    assert_eq!(tree.get_errors(), [], "both are declarations");
+    assert_eq!(
+        cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count(),
+        0,
+        "`a::B::B()` and `a::B::~B()` declare, they do not call"
+    );
+}
