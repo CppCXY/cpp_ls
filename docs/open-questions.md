@@ -1076,3 +1076,40 @@ CPPLS_NO_PROGRAM_READ on that run   511 MB flat for 60 s
 Left open: the first programme read of a standard-heavy file still peaks around 600 MB, which is the feature's own
 cost (one parse of the whole program) rather than a leak; a project with twenty tabs open now pays for one such
 program and keeps its own reading for the rest.
+## `std::println` shows two declarations, both from `<ostream>` — open
+
+Reported from `test_module`'s `std_module_demo.cpp` (GCC 15 / MinGW). Hovering `std::println("…")` draws
+
+```text
+→ inline void println(ostream& __os)
+`std::println` — 2 declarations. The `→` one is what this call means: its parameter list accepts the arguments …
+```
+
+and the parameter hints label the string literal `__os:`. The standard library the file imports has **six** `println`
+overloads: two in `<ostream>` (`ostream&`, and `ostream&, format_string<…>, _Args&&...`) and four in `<print>`
+(`format_string<…>, _Args&&...`, `FILE*, format_string<…>, _Args&&...`, `FILE*`, and `()`). `inspect facts` on `<print>`
+lists all four, and the program's rendering of `<print>` — dumped with `CPPLS_DUMP_RENDERING_DIR` — contains them; the
+hover sees only the two.
+
+Measured, in the order that named the layers:
+
+* the index's `println` postings **do** include `<print>` — `(file 11, reading 0, index 26/29/37/40)` beside
+  `<ostream>`'s — so the declarations are indexed and narrowed to;
+* the answer came through `members_of(index, …, "std")`: a **class** member list asked about a **namespace**, which
+  returned the declarations of whichever file declared `std` first. A namespace's members are every file that opens
+  it, so the query cannot answer this question at all. The branch exists for `Derived::instances` (a class member
+  through a base) and needs a `scope_names_a_class` guard before `members_of`;
+* with that branch skipped by hand, the lookup falls through to `definitions_in_scope` → the visibility walk, and still
+  answers **two**. The walk's files include `<print>` (the module closure records it, 384 files), and its postings are
+  filed under the **summary** reading (`id 0`), while `the_reading_for` selects a **cooked** reading for that file —
+  the program's reading of `<print>`, which is where the four declarations should come from. Which reading id it picks,
+  and whether that reading holds `println`, is the next measurement; a temporary trace in `visible_declarations_upto`
+  for that file did not fire, so the loop never reached it, and that is the first number to produce.
+
+The consequence is not only the count. With `println(ostream&)` the only arity-viable candidate, `choose` returns it, the
+card says its parameter list *accepts* the argument, and `inlayHint` labels a `const char*` `__os`. The card's sentence
+is only as good as the set it was given.
+
+Also fixed in the same round: the two declaration sentences in `overloads_markdown` carried a literal `\` and the next
+line's indentation — `\\` in a Rust string is an escaped backslash, not a line continuation — so the reported card read
+"and the others \ cannot".

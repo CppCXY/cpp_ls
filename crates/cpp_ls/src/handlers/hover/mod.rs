@@ -1047,10 +1047,10 @@ fn overloads_markdown(
         found.found.len(),
         if let Some(selected) = &call_selected {
             if selected.len() == 1 {
-                "The `→` one is what this call means: its parameter list accepts the arguments, and the others \\
-                 cannot. `go to definition` lists them all."
+                "The `→` one is what this call means: its parameter list accepts the arguments, and the others cannot. \
+                 `go to definition` lists them all."
             } else {
-                "These are the declarations whose parameter list accepts this call's arguments; the types do not \\
+                "These are the declarations whose parameter list accepts this call's arguments; the types do not \
                  decide between them, so they are all shown — `go to definition` lists the rest."
             }
         } else if hidden > 0 {
