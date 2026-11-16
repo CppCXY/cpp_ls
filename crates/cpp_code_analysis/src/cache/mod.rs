@@ -304,7 +304,14 @@ use std::path::{Path, PathBuf};
 /// used to be read as the type `EXTERN colnr_T dollar_vcol` and the declarator `INIT`, so the variable the line
 /// declares — and every declaration after it in the header — was lost. A summary or a cooked reading made before this
 /// holds the loss: neovim's `globals.h` alone is sixteen declarations, and 135 `undefined-name` findings followed.
-pub const FORMAT_VERSION: u32 = 34;
+/// # Why this moved to 35
+///
+/// **A qualified call is not a declaration.** `std::ranges::find_if(items, f);` was read as a `Declaration` whose
+/// declarator was the call, so a summary recorded a function called `find_if` in `std::ranges` — a fact that does not
+/// exist — and no `CallExpr` for the statement itself (`a56783f2`). A summary made before this holds the phantom
+/// declaration, and every algorithm called at statement scope was invisible to hover, signature help and the checks
+/// that read a call.
+pub const FORMAT_VERSION: u32 = 35;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
