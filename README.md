@@ -19,7 +19,7 @@ layer and the LSP server are all in this repository. **No clangd, no libclang, n
 | Unit of work | a file with flags | **the program**: includes inlined, `#if` resolved, macros expanded, modules resolved from their interface units |
 | Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`, libc++'s `std.cppm` named by its `libc++.modules.json`); a unit is identified by the `export module` it declares |
 | Answers in | a file that compiles | a file being edited — half-typed lines included |
-| Diagnostics | Clang's | its own 43 diagnostic codes, measured at **zero false positives** on libstdc++'s own sources |
+| Diagnostics | Clang's | its own 43 diagnostic codes |
 
 ## What makes it different
 
@@ -41,7 +41,7 @@ the naming conventions are a search order, not an assumption.
 project root, so a Visual Studio solution and an unconfigured checkout both work. A compilation database, when present,
 is used for exact per-file flags.
 
-**4. Every claim in this repository is measured.** **3,012 tests in 200 suites**, plus probes that run against real
+**4. Every claim in this repository is measured.** **3,000+ tests in 200 suites**, plus probes that run against real
 headers rather than fixtures. [`docs/open-questions.md`](docs/open-questions.md) is a record of before/after numbers: a sweep of
 libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct table of compiler extensions
 (**GCC 40, Clang 29, MSVC 62**) all run in CI.
@@ -197,14 +197,6 @@ installed. Its output is idiomatic, not byte-identical to clang-format's.
   feature, with the diagnostic registry and each rule's severity
 - [`docs/c-support.md`](docs/c-support.md) — the same for C, including the twenty-one rules that can fire there
 - [`docs/configuration.md`](docs/configuration.md) — `.cppls.toml`, the compilation database, include paths, standards
-- [`docs/diagnostics-performance.md`](docs/diagnostics-performance.md) — what a diagnostics pull costs, measured
-  through Neovim, with before/after numbers
-- [`docs/latency.md`](docs/latency.md) — what a semantic-token request and a completion cost, and what dominates them
-- [`docs/ranges.md`](docs/ranges.md) — what `<ranges>` answers today, the five things it still needs, and why the
-  first one is not about ranges at all
-- [`docs/neovim.md`](docs/neovim.md) — neovim read the way an editor reads it: the census, the failures, the fixes
-- [`docs/usability.md`](docs/usability.md) — what answers and what does not over the protocol, by category
-- [`docs/open-questions.md`](docs/open-questions.md) — what is measured and **not** fixed, with the evidence
 
 ## License
 
