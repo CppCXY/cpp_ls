@@ -70,7 +70,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let call = token.parent_ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
         })?;
-        let arguments = crate::inlay::arguments_of(&call)?;
+        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
 
         // The engine answers with a parsed `Type` and the file it came from; the resolver ranks spellings, which is the
         // same information the facts carry.
@@ -203,7 +203,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let call = token.parent_ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
         })?;
-        let arguments = crate::inlay::arguments_of(&call)?;
+        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
 
         let session: &Session<F> = self;
         let index: &crate::ProjectIndex = session.store.index();

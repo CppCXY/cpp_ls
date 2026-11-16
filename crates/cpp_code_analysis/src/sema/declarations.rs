@@ -3191,7 +3191,7 @@ fn begins_an_exported_region(node: &CppSyntaxNode) -> bool {
 /// **The parameter list a declaration at `offset` was written with**, as the file spells it — parentheses included.
 ///
 /// The **innermost `Declarator` ancestor** of the name, and *its* `ParameterList` child, which is the same reading
-/// [`crate::inlay::parameter_list_of`] makes for a call's parameters: a variable declared inside a function body has
+/// [`crate::sema::call_syntax::parameter_list_of`] makes for a call's parameters: a variable declared inside a function body has
 /// the enclosing function's list above it, and `void (*f(int a))(int b)` has two lists in one declaration. The
 /// declarator the name is a name *of* is the one whose list says what the name's parameters are.
 ///
@@ -3205,7 +3205,7 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
     let declarator =
         cpp_parser::typed_ancestors::<cpp_parser::CppDeclarator>(&token.parent()?).next()?;
 
-    crate::inlay::parameter_list_text(declarator.syntax())
+    crate::sema::call_syntax::parameter_list_text(declarator.syntax())
 }
 
 /// **The parameter list as the file spells it, read from the shape table** — `"(int a, int b)"`.
@@ -3247,7 +3247,7 @@ pub(crate) fn declared_parameters_with(
         }
     });
 
-    crate::inlay::parameter_list_text(&found?)
+    crate::sema::call_syntax::parameter_list_text(&found?)
 }
 
 /// Is the **name this declarator declares** the one at `offset`?
@@ -4816,9 +4816,9 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
             },
             // **The parameter list, taken from the declaration's own header** — the walker's declarator has no name for this
             // shape, so a fact read through it carried `parameter_list: None` and a signature had no fallback label.
-            declaration
-                .get_param_list()
-                .map(|list| crate::inlay::tidy_list_text(&list.syntax().text().to_string()).0),
+            declaration.get_param_list().map(|list| {
+                crate::sema::call_syntax::tidy_list_text(&list.syntax().text().to_string()).0
+            }),
         ));
     }
 

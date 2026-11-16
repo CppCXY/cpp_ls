@@ -68,6 +68,20 @@
 pub mod cache_db;
 pub mod cache_lru;
 
+// **What the cache stores, and what it reads back.** A summary is the unit the whole cache is built from, the two
+// codecs are its bytes, and memory/lloc are the two numbers a report about it needs. lign is here because
+// the thing it compares against a compiler is a RenderedUnit --- the cached reading of a program.
+pub mod align;
+pub mod alloc;
+pub mod memory;
+/// **Where a read's allocations go**, when the perf-probe feature is on --- a stage's own marks, next to the
+/// counter that reads them.
+#[cfg(feature = "perf-probe")]
+pub mod perf;
+pub mod summary;
+pub mod summary_codec;
+pub mod unit_codec;
+
 use std::path::{Path, PathBuf};
 
 /// The version of everything that produces a summary: the parser's grammar, this crate's summary schema, and the

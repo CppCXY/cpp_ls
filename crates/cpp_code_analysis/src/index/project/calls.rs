@@ -287,7 +287,7 @@ pub(crate) fn type_of_a_call(
     // never writes `<int*>`, it passes one. Computed only when nothing was written, which is the only case it is
     // used in, because typing every argument of every call is not free.
     let argument_types: Vec<Type> = if written_arguments.is_empty() {
-        crate::inlay::arguments_of(call)
+        crate::sema::call_syntax::arguments_of(call)
             .unwrap_or_default()
             .iter()
             .filter_map(|argument| {
@@ -372,7 +372,7 @@ pub(crate) fn type_of_a_call(
             &callee_type,
             "operator()",
             &argument_types,
-            crate::inlay::arguments_of(call).map(|arguments| arguments.len()),
+            crate::sema::call_syntax::arguments_of(call).map(|arguments| arguments.len()),
         )
     {
         return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
@@ -409,7 +409,7 @@ pub(crate) fn type_of_a_call(
     // ordinary expression typer does know. `vector<std::meta::info>` yields the element `std::meta::info`.
     if names_define_static_array(&callee)
         && let Some(first) =
-            crate::inlay::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
+            crate::sema::call_syntax::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
         && let Known::Yes((argument, _)) = type_of_expression_memoed(
             memo, shapes, index, declaring, scopes, root, path, &first, 0,
         )
@@ -436,7 +436,7 @@ pub(crate) fn type_of_a_call(
     // template over a closure type, so the index cannot spell it; what a reader does with the result is dereference it or
     // count with it, and those are the two answers below. See [`a_ranges_algorithm_the_call_names`].
     if let Some(algorithm) = a_ranges_algorithm_the_call_names(&callee) {
-        let arguments = crate::inlay::arguments_of(call).unwrap_or_default();
+        let arguments = crate::sema::call_syntax::arguments_of(call).unwrap_or_default();
         match algorithm.as_str() {
             "find" | "find_if" | "find_if_not" | "max" | "min" | "max_element" | "min_element"
             | "lower_bound" | "upper_bound" | "equal_range" | "search" => {
@@ -517,7 +517,7 @@ pub(crate) fn type_of_a_call(
         &the_names_the_call_may_use(&callee),
         &written_arguments,
         &argument_types,
-        crate::inlay::arguments_of(call)
+        crate::sema::call_syntax::arguments_of(call)
             .map(|arguments| arguments.len())
             .unwrap_or_default(),
         memo,
@@ -1413,7 +1413,7 @@ pub(crate) fn the_types_of_the_arguments(
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Option<Vec<Known<String>>> {
-    let arguments = crate::inlay::arguments_of(call)?;
+    let arguments = crate::sema::call_syntax::arguments_of(call)?;
     Some(
         arguments
             .iter()

@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use cpp_parser::{CppDocComment, CppSyntaxElement, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
 use crate::index::project::{Callee, callees_of_a_call};
-use crate::inlay::{arguments_of, parameter_list_of};
+use crate::sema::call_syntax::{arguments_of, parameter_list_of};
 use crate::sema::scopes::parameters_of;
 use crate::{FileView, Known, ProjectIndex};
 
@@ -178,7 +178,7 @@ where
                 // right, unlike parsing the file's own text at a *rendering* offset, which would name the wrong
                 // declaration in any file with a macro above it.
                 if let Some(parameters) = &candidate.parameters {
-                    let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+                    let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
                     signatures.push(CallSignature {
                         label: format!("{spelling}{tidy}"),
                         parameters: Vec::new(),
@@ -242,7 +242,7 @@ where
         if sources.is_empty()
             && let Some(parameters) = &candidate.parameters
         {
-            let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+            let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
             signatures.push(CallSignature {
                 label: format!("{spelling}{tidy}"),
                 parameters: Vec::new(),
@@ -277,7 +277,7 @@ where
                 })
                 .collect();
 
-            let (tidy, moved) = crate::inlay::tidy_list_text(list_text);
+            let (tidy, moved) = crate::sema::call_syntax::tidy_list_text(list_text);
             let list_start = spelling.len();
             let label = format!("{spelling}{tidy}");
             let parameters: Vec<(Range<usize>, String)> = raw
@@ -787,7 +787,7 @@ fn constructors_in_the_index(
         let Some(parameters) = declaration.fact.parameter_list.as_deref() else {
             continue;
         };
-        let (tidy, _) = crate::inlay::tidy_list_text(parameters);
+        let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
         constructors.push(CallSignature {
             label: format!("{class}{tidy}"),
             parameters: Vec::new(),

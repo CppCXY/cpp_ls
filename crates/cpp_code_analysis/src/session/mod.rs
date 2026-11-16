@@ -1,6 +1,6 @@
-//! The driver: one open project, with the four layers joined and a queue that notifications re-seed.
+//! The driver: one open project, with the layers below joined and a queue that notifications re-seed.
 //!
-//! Everything below this module is a *capability*: [`discover`](crate::discover) can find a toolchain,
+//! Everything below this module is a *capability*: [`discover`](crate::project::discover) can find a toolchain,
 //! [`SummaryStore`] can cache a file's facts, [`Worklist`](crate::Worklist) knows the order that answers a user's
 //! question first, and the queries in [`crate::index`] answer about a name, a member or a cursor. Nothing joined
 //! them, which is why calls "opening a project" the shortest piece of product work left:
@@ -1811,17 +1811,35 @@ impl<F: FileProvider> crate::effect::Reads for SessionReads<'_, F> {
 }
 
 mod calls;
-mod completion;
+pub mod completion;
 mod constrained;
 mod cook;
+/// **What a file's words are**, for the highlighter: the query layer's own vocabulary, next to the request that
+/// wants it.
+pub mod cuda;
+/// **A missing member's definition as text** --- the code action behind a diagnostic, which is a session question
+/// because the class it belongs to may be declared in another file.
+pub mod definition;
 mod diagnostics;
+/// **What a documentation comment refers to** --- the names a hover draws as links.
+pub mod doc;
 mod edits;
+/// **The regions a file can hide** --- folds, read from the tree and the directives.
+pub mod folding;
+/// **The format string** --- which {...} and %... of a literal is what, for the hover that explains it.
+pub mod format;
 mod indexing;
+/// **The types a file does not write** --- inlay hints, from the reader the hover uses.
+pub mod inlay;
 mod lifecycle;
 mod memory;
 mod navigation;
 mod pump;
 mod queries;
+/// **What each name in a file is** --- the classification the highlighter is drawn from.
+pub mod semantic;
+/// **Call signatures** --- which function is being called, and which of its parameters the cursor is in.
+pub mod signature;
 mod units;
 mod views;
 

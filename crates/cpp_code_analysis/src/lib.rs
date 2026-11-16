@@ -67,31 +67,11 @@ extern crate rust_i18n;
 // same way, and one call to `cpp_parser::set_locale` switches both: rust-i18n's current locale is process-wide.
 rust_i18n::i18n!("./locales", fallback = "en");
 
-pub mod align;
-pub mod alloc;
 pub mod cache;
-pub mod completion;
-pub mod cuda;
-pub mod definition;
-pub mod doc;
-pub mod effect;
 pub mod file;
-pub mod folding;
-pub mod format;
 pub mod index;
-pub mod inlay;
-pub mod memory;
-/// **Where a read's allocations go**, when the `perf-probe` feature is on — see the module.
-#[cfg(feature = "perf-probe")]
-pub mod perf;
 pub mod sema;
-pub mod semantic;
 pub mod session;
-pub mod signature;
-pub mod summary;
-pub mod summary_codec;
-pub mod surface;
-pub mod unit_codec;
 
 // **The toolchain and the preprocessor live in `cpp_toolchain`** — the layer below this one, which finds a
 // translation unit, configures it, walks it and renders one file of it. The re-exports are deliberate and are the
@@ -102,16 +82,35 @@ pub mod unit_codec;
 // index what a name means.
 pub use cpp_toolchain::{include, preprocess, probes, project};
 
+// **The layers hold the files; the root holds the names.** Everything that used to be a top-level module is a
+// layer's now — a cached reading is `cache::…`, the effect a file has on the macro table is `index::…`, a feature a
+// cursor asks for is `session::…` — and these re-exports keep every path that was written before the move resolving.
+// Two of them are said from outside this crate: `cpp_ls` calls `cpp_code_analysis::alloc::live()` on every stage it
+// measures, and `inspect` reaches `TypeHintKind` through the root.
+#[cfg(feature = "perf-probe")]
+pub use cache::perf;
+pub use cache::{align, alloc, memory, summary, summary_codec, unit_codec};
+pub use index::{effect, surface};
+pub use session::{completion, cuda, definition, doc, folding, format, inlay, semantic, signature};
+
 // The folders are the *organisation*; the modules inside them keep their own names, and they are re-exported here so
 // that every path written before a reorganisation still resolves. The four that moved down a layer keep their
 // re-export as well — `include`, `preprocess`, `project`, `probes` — so a consumer that already says
 // `cpp_code_analysis::include::config::CompilerConfig` needs no change; a new one should reach for `cpp_toolchain::…`
 // directly and skip the hop.
 //
-// * `file`     — one file analysed, the VFS holding it, and a view of it parsed
-// * `index`    — the summaries, the store, and the queries over them
-// * `session`  — a project opened: the pump, the caches, the reads
-// * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
+// The five layers this crate is made of, bottom up:
+//
+// * `sema`     — names, scopes, types, overloads: what the parsed text *means*
+// * `file`     — one file analysed: the VFS holding texts, a view parsed, and the coordinates between them
+// * `cache`    — the on-disk store and **what it stores**: a summary, its two codecs, and the byte counter
+// * `index`    — the summaries in memory, the store, and every query over them (plus a file's macro `effect`)
+// * `session`  — a project opened: the pump, the caches, the reads, and **every request a client can make**
+//
+// A request module under `session` is a *feature*: `completion`, `inlay`, `signature`, `semantic`, `folding`,
+// `definition`, `doc`, and the format-string reader the hover uses. What such a module shares with the layers below
+// does not live in it — reading a call's arguments is `sema::call_syntax` — because a feature the index depends on is
+// a dependency pointing the wrong way.
 pub use cache::{
     CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,
 };

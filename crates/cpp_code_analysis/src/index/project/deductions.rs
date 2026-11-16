@@ -194,7 +194,7 @@ pub(crate) fn element_of_a_range_expression(
         let written = written.trim();
         let name = written.rsplit("::").next().unwrap_or(written);
         if name == "iota" {
-            let arguments = crate::inlay::arguments_of(expression).unwrap_or_default();
+            let arguments = crate::sema::call_syntax::arguments_of(expression).unwrap_or_default();
             let first = arguments.first()?;
             return Some(
                 match type_of_expression_memoed(
@@ -215,7 +215,7 @@ pub(crate) fn element_of_a_range_expression(
         }
         // **`std::ranges::subrange(begin, end)`** — the element of the range a `begin()` came from.
         if name == "subrange" {
-            let arguments = crate::inlay::arguments_of(expression).unwrap_or_default();
+            let arguments = crate::sema::call_syntax::arguments_of(expression).unwrap_or_default();
             let first = arguments.first()?;
             if let Some(element) = element_of_an_iterator_expression(
                 memo,
@@ -354,7 +354,7 @@ pub(crate) fn the_element_a_lambda_parameter_receives(
     if !is_a_standard_callable {
         return None;
     }
-    let arguments = crate::inlay::arguments_of(&call)?;
+    let arguments = crate::sema::call_syntax::arguments_of(&call)?;
     let lambda_at = arguments
         .iter()
         .position(|argument| argument.text_range() == lambda.syntax().text_range())?;

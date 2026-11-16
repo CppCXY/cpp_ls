@@ -2,7 +2,7 @@
 //!
 //! Moved here from `session/mod.rs` without a change.
 
-use super::*;
+use super::super::*;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// What to offer after a member access at `offset`: the object's type, its members, and the edit.

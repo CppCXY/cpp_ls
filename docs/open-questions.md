@@ -1249,3 +1249,45 @@ second program with the same list does no work, and a query never asks for a coo
 what it knows and the misses it needs, and the scheduler serves the focused document only. The budget is not a byte
 ceiling read from a counter that only adds: it is `idle ⇒ zero allocations`, `a drained queue ⇒ zero cooks`, and a
 peak per program read, all three asserted by tests.
+
+
+## The crate is five layers, and every feature lives in `session`
+
+The reorganisation after the crate split, and the same rule applied one level down: a file belongs to the layer that
+*owns the question*, not to the layer that happened to call it.
+
+```text
+sema      35 653   names, scopes, types, overloads
+file       1 781   one file analysed: the VFS, a parsed view, the coordinates between them
+cache     12 146   the store and what it stores: summary, its two codecs, the byte counter, the alignment report
+index     37 087   the summaries in memory, the store, the queries --- plus a file's macro effect and surface
+session   29 683   a project opened, and every request a client can make
+```
+
+**What moved where.** `summary`, `summary_codec`, `unit_codec`, `memory`, `alloc`, `align` and `perf` are the cache
+(what it holds, what it writes, and the numbers it reports); `effect` and `surface` are the index (what a file does to
+the macro table, and the directives that do it); `completion`, `semantic`, `signature`, `inlay`, `definition`,
+`folding`, `doc`, `format` and `cuda` are the session (they answer a cursor, and nothing below them asks them
+anything).
+
+**Two seams were not moves.** A file at the top level is not always a feature, and the test is the dependency:
+
+1. **`inlay` was also a syntax reader.** The index asked it for a call's arguments (to choose an overload), `sema`
+   asked it for a parameter list and its one-line text, and the completion layer asked it to read a list out of a
+   fact. A feature module that the index depends on is a dependency pointing the wrong way, and it was invisible while
+   both shared a crate. The five readers moved to `sema::call_syntax` --- the one place in this crate that reads the
+   tree for its shape alone --- and `session::inlay` kept the hint layer. The style suite caught the one thing a move
+   must not carry: `CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator`, which became
+   `CppDeclarator::can_cast`, and `ArgumentList`, which has no typed wrapper and is now in the allowlist with that
+   reason beside it.
+2. **`session/completion` needed two halves in one directory.** The feature is the vocabulary and the answers
+   (`completion/mod.rs` and its four submodules); the `impl Session` methods a handler calls are
+   `completion/request.rs`, `use super::super::*` because one `super` is now the feature rather than the crate.
+
+**What did not change**: no behaviour, no test assertion beyond the style allowlist above. 145 toolchain tests, 3 039
+in 200 suites for the workspace, clippy clean, and `cargo check` green with and without `perf-probe` --- which is the
+one feature that would notice a module being declared in the wrong place.
+
+**Next** is the same "next" as the section above, and this reorganisation exists to make it a small change: the cache
+and the index are rewritten in place. A request returns what it knows plus the misses it needs; a program read becomes
+a list of `(content hash, environment fingerprint)` keys; and the budget is `idle ⇒ zero allocations`, asserted.

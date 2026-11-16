@@ -34,6 +34,9 @@ const NO_TYPED_NODE: &[&str] = &[
     "MacroCall",
     "TranslationUnit",
     "BuiltinType",
+    // A macro's balanced argument group: the parser keeps it as tokens, not as an expression list, and there is no
+    // typed wrapper for it. See `sema::call_syntax::arguments_of`.
+    "ArgumentList",
     "TemplateArgumentList",
     // A template header, which declares nothing on its own — the declaration it heads is its sibling.
     "TemplateDecl",

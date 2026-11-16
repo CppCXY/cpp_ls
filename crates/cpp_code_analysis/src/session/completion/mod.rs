@@ -60,6 +60,11 @@ pub mod includes;
 pub mod matching;
 pub mod table;
 
+// **The `Session` half of this feature** — the methods a handler calls, in a file of their own so that the
+// vocabulary here and the answers there stay apart. `request` rather than `session`, because a module named
+// `session` inside `session::completion` reads as if it were the session itself.
+mod request;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1716,7 +1721,7 @@ fn doc_comments(
                     .cloned()
                     .collect();
                 if let Some(list) = &fact.parameter_list
-                    && let Some(found) = crate::inlay::parameter_names_from_text(list)
+                    && let Some(found) = crate::sema::call_syntax::parameter_names_from_text(list)
                 {
                     names.extend(found.into_iter().flatten());
                 }

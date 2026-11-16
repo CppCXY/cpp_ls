@@ -12,6 +12,10 @@ pub mod deduction;
 pub mod overload;
 
 pub mod builtins;
+/// **The syntax of a call and of a parameter list** --- the one place in this crate that reads the tree for its
+/// shape alone, so that the index, the declaration reader and the hint layer share it instead of importing a
+/// feature module. See [call_syntax].
+pub mod call_syntax;
 pub mod check;
 pub mod constant;
 pub mod constraint;

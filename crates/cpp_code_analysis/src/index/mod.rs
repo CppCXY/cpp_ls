@@ -39,11 +39,13 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
+pub mod effect;
 pub mod environment;
 mod names;
 pub mod project;
 pub mod references;
 pub mod store;
+pub mod surface;
 pub mod walk_census;
 pub mod watch;
 pub mod worklist;
