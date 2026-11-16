@@ -766,6 +766,13 @@ impl<F: FileProvider + Clone> Session<F> {
             return Vec::new();
         };
         let mut found: Vec<WrittenAttribute> = Vec::new();
+        // **Only a run written against the declaration belongs to it.** A macro on an earlier line with a blank line
+        // or a comment in between is a statement of its own: `_GLIBCXX_END_NAMESPACE_CXX11` stands above
+        // `std::string`'s declaration past a blank line and the doc comment, and the walk that ignored the gap took it
+        // as an annotation — the hover then drew the macro in front of the declaration. The gap is measured in the
+        // file's own text, where comments and blank lines are visible.
+        let source = view.written_text().unwrap_or(&view.source);
+        let mut boundary = usize::from(declaration.syntax().text_range().start());
         let mut sibling = declaration.syntax().prev_sibling();
         while let Some(node) = sibling {
             let kind = cpp_parser::CppSyntaxKind::from(node.kind());
@@ -773,7 +780,25 @@ impl<F: FileProvider + Clone> Session<F> {
             if !is_a_macro && kind != cpp_parser::CppSyntaxKind::AttributeList {
                 break;
             }
+            let start = usize::from(node.text_range().start());
+            let end = usize::from(node.text_range().end());
             let written = node.text().to_string().trim().to_string();
+            // **A node whose text carries a comment is not just the macro.** The tree files a macro invocation and the
+            // documentation of the declaration *below* it as one node — `stringfwd.h` has
+            // `_GLIBCXX_END_NAMESPACE_CXX11\n\n  /// A string of @c char` as the sibling before `std::string`'s
+            // declaration — so the comment's presence says the macro is a statement of its own. Left in, it is read as
+            // a specifier and drawn in front of the declaration.
+            if written.contains("//") || written.contains("/*") || written.contains("\n\n") {
+                break;
+            }
+            let between = source
+                .get(end..boundary)
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
+            if between.contains("\n\n") || between.contains("//") || between.contains("/*") {
+                break;
+            }
+            boundary = start;
             let expansion = is_a_macro
                 .then(|| {
                     self.the_expansion_of_a_macro(

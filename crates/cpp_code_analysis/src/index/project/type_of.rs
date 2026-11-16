@@ -299,6 +299,18 @@ pub(crate) fn type_of_expression_inner(
     let text = expression.text().to_string();
     let written = text.trim();
 
+    // **A lambda's closure type is unique and unnamed**, so there is nothing a card could write in its place —
+    // and the honest sentence is the answer, not the expression's text. Before this, the initializer fell through
+    // to the spelling-carrying fallback and the card printed the whole lambda body as if it were a type: measured
+    // on `auto show_division = [](double a, double b) { … if (const auto result = safe_divide(a, b)) … };`, whose
+    // hover read "the type of `[](double a, double b) { … }` is not known here" over five lines.
+    //
+    // It is not "not implemented": every lambda is a distinct type with no spelling, and a reader asking what the
+    // variable is wants to hear exactly that.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::LambdaExpr {
+        return Known::Unknown(UnknownReason::UnnamedLambda);
+    }
+
     // **A bound on the recursion, not a policy about types.** Every arm below can ask the same question about a
     // *smaller* expression, and one of them asks it about a *different declaration* — which is what makes a file
     // like `auto a = *b; auto b = *a;` a loop rather than a walk. Nobody writes that, and a language server meets

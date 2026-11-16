@@ -68,7 +68,7 @@ server knows; the detector around it still requires a parenthesised width follow
 | Feature | What it gives for C |
 | --- | --- |
 | `textDocument/completion` | names in scope (locals → the file → included headers), `.`/`->` members, macros, keywords, `#include` file names; with the range to replace, a `sortText` that is the analysis's own order, snippets when the client supports them, and `completionItem/resolve` for documentation |
-| `textDocument/hover` | macros first (a `#define` **is** its value), then the declaration (signature/type), then the type of the expression; the comment next to the declaration comes with it; a struct also says what it costs in memory, and an attribute or a macro written before a declaration is drawn above its signature with the macro expanded |
+| `textDocument/hover` | macros first (a `#define` **is** its value), then the declaration (signature/type), then the type of the expression; the comment next to the declaration comes with it, its Doxygen inline commands (`@c`, `@p`) rendered; a struct also says what it costs in memory, and an attribute or a macro written **against** a declaration is drawn above its signature with the macro expanded — a macro that is a statement of its own is not |
 | `textDocument/signatureHelp` | the list of overloads with `activeParameter` — the position of the argument being typed |
 | `textDocument/definition` | the declaration of a macro, type, function or variable, across files through the index |
 | `textDocument/implementation` | a function declaration → its definition, across files |

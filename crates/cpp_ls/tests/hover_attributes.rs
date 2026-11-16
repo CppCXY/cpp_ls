@@ -133,3 +133,31 @@ fn a_declaration_without_attributes_has_one_line() {
         "the block is the declaration and nothing else: {card}"
     );
 }
+
+/// **A macro that ends a scope is not the annotation of the declaration below it.**
+///
+/// `stringfwd.h` writes `_GLIBCXX_END_NAMESPACE_CXX11` — a macro that expands to `}` — above `std::string`'s
+/// declaration, with a blank line and the doc comment between them. The declaration's previous sibling is a node whose
+/// text is the macro **and** that doc comment, and the card drew the macro in front of the signature:
+/// `_GLIBCXX_END_NAMESPACE_CXX11 using string = basic_string<char>;`. The macro is left **undefined** here on purpose:
+/// that is the shape the real header has when the file is read on its own, and it is why the expansion cannot be what
+/// rules the node out.
+#[test]
+fn a_macro_that_ends_a_scope_is_not_an_annotation() {
+    let card = the_card(
+        "namespace std {\n\
+         inline namespace cxx11 {\n\
+         class basic_string {};\n\
+         }\n\
+         END_NAMESPACE\n\
+         \n\
+         /// A string of @c char\n\
+         typedef basic_string<char> string;\n",
+        "typedef basic_string<char> string",
+    );
+    assert!(
+        !card.contains("END_NAMESPACE"),
+        "a macro two lines up, past a blank line and the doc comment, is a statement of its own: {card}"
+    );
+    assert!(card.contains("basic_string<char>"), "{card}");
+}

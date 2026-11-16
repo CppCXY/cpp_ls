@@ -1820,7 +1820,17 @@ fn the_annotations_as_the_card_shows_them(
         let expanded = annotation.expansion.as_deref().filter(|expanded| {
             !expanded.contains(';') && !expanded.contains('{') && !expanded.contains('}')
         });
-        let text = expanded.unwrap_or(annotation.written.as_str());
+        // **A macro whose expansion is a statement is not this declaration's annotation.**
+        // `_GLIBCXX_END_NAMESPACE_CXX11` expands to `}`, and it stands above `stringfwd.h`'s `typedef … string`; the
+        // filter drops that expansion, and the fallback below used to draw the **written** name instead — measured on
+        // `std::string`, whose card read `_GLIBCXX_END_NAMESPACE_CXX11 using string = basic_string<char>;`. An
+        // expansion that is known and is not a specifier is evidence the macro is something else entirely, so it is
+        // skipped; only a macro with no known expansion keeps its written spelling (there is nothing else to show).
+        let text = match (expanded, &annotation.expansion) {
+            (Some(expanded), _) => expanded,
+            (None, Some(_)) => continue,
+            (None, None) => annotation.written.as_str(),
+        };
         let (their_attributes, their_specifiers) =
             cpp_code_analysis::sema::render::attributes_and_specifiers(text);
         attributes.extend(their_attributes);
@@ -2001,7 +2011,60 @@ fn render_documentation(text: &str) -> String {
 
     end_prose(&mut blocks, &mut prose);
     end_list(&mut blocks, &mut list);
-    blocks.join("\n\n")
+    blocks
+        .into_iter()
+        .map(|block| the_inline_commands_as_markdown(&block))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// **Doxygen's inline commands, as markdown** — `@c char` and `\c char` are `char` set as code, and `@e slow` is
+/// *slow*.
+///
+/// The block commands are handled above; these are the ones that name a word inside a sentence, and the standard
+/// library writes them heavily: `stringfwd.h`'s whole documentation for `std::string` is `/// A string of @c char`.
+/// Left as written, the card said exactly that, tag and all — a reader sees `@c` and thinks the comment is broken.
+///
+/// Only the **tag plus one word** is converted, which is what the commands mean; text after the word is prose again.
+fn the_inline_commands_as_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(['@', '\\']) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        // **`em` before `e`**: `@em` starts with the same byte as `@e`, and the longer tag is the one that applies.
+        let mut matched: Option<(&str, &str, &str)> = None;
+        for (command, mark) in [("c", "`"), ("p", "`"), ("em", "*"), ("e", "*")] {
+            if let Some(after) = tail.strip_prefix(command)
+                && after.starts_with(|character: char| character.is_whitespace())
+            {
+                matched = Some((command, after.trim_start(), mark));
+                break;
+            }
+        }
+        let Some((command, after, mark)) = matched else {
+            out.push(rest.as_bytes()[at] as char);
+            rest = tail;
+            continue;
+        };
+        let end = after
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, ',' | ';' | '.' | ')' | '(')
+            })
+            .unwrap_or(after.len());
+        if end == 0 {
+            out.push(rest.as_bytes()[at] as char);
+            out.push_str(command);
+            rest = after;
+            continue;
+        }
+        out.push_str(mark);
+        out.push_str(&after[..end]);
+        out.push_str(mark);
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The direction a parameter command carries, and the rest — `@param[in] p` is `(Some("in"), "p")`.
@@ -2783,6 +2846,31 @@ fn an_unknown_command_stays_in_the_text() {
         "and a parameter's direction is kept beside its name: {rendered}"
     );
 }
+
+/// **`@c` and `@p` are the word they annotate**, not a tag the reader has to decode.
+///
+/// `stringfwd.h` documents `std::string` with `/// A string of @c char`; the card showed the tag. Both spellings of a
+/// Doxygen command are accepted, and only the one word after the tag is set as code — the sentence continues normally.
+#[test]
+fn a_c_command_is_the_word_it_names() {
+    let rendered = render_documentation(
+        "A string of @c char, and of \\c wchar_t.\n@note Use @p string instead.",
+    );
+    assert!(
+        rendered.contains("A string of `char`, and of `wchar_t`."),
+        "the word is code and the sentence continues: {rendered}"
+    );
+    assert!(
+        rendered.contains("Use `string` instead."),
+        "`@p` is the same rendering: {rendered}"
+    );
+    assert!(
+        !rendered.contains("@c") && !rendered.contains("\\c") && !rendered.contains("@p"),
+        "no tag survives: {rendered}"
+    );
+}
+
+///
 /// **The offset a `::` points at** — the segment after the operator, or the same offset when the cursor is elsewhere.
 ///
 /// A hover is about a *name*, and a name is an identifier; `std::meta::f` has three of them and two operators between

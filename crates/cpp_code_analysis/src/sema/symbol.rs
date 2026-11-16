@@ -212,6 +212,13 @@ pub enum UnknownReason {
     /// reasons because the fix is different — nothing is missing from the index, the analysis simply does not
     /// infer types for this shape yet.
     UnknownType(Box<str>),
+    /// The initializer is a lambda, whose closure type is unique and cannot be written.
+    ///
+    /// Its own reason rather than [`UnknownReason::UnknownType`] carrying the lambda's text: a reader asking what
+    /// `auto f = [](double a, double b) { … };` is gets the whole body back as if it were a type — measured on a
+    /// reported hover, whose card printed five lines of the lambda inside a code span. There is nothing to resolve
+    /// here and nothing to shorten: the type has no name in the program, so a sentence saying that is the answer.
+    UnnamedLambda,
 }
 
 impl UnknownReason {
@@ -262,6 +269,10 @@ impl UnknownReason {
             UnknownReason::UnknownType(written) => format!(
                 "the type of `{written}` is not known here, so what its members are is not known either"
             ),
+            UnknownReason::UnnamedLambda => {
+                "the initializer is a lambda, whose closure type has no name that could be written"
+                    .to_string()
+            }
         }
     }
 }

@@ -433,3 +433,64 @@ struct Widget {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A lambda's closure type has no name, and the card says so instead of printing the body.**
+///
+/// Reported with a screenshot of `auto show_division = [](double a, double b) { … };`: the card read
+/// "the type of `[](double a, double b) { … }` is not known here" over five lines — the initializer's whole text inside
+/// a code span. A lambda's type is unique and cannot be written, so it has its own reason
+/// (`UnknownReason::UnnamedLambda`), which carries no text: there is nothing to shorten.
+#[test]
+fn a_lambda_initializer_is_explained_rather_than_printed() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-lambda");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "void f() {\n\
+                      auto show_division = [](double a, double b) {\n\
+                          int lambda_body_marker = 1;\n\
+                          (void)lambda_body_marker;\n\
+                      };\n\
+                      show_division(10.0, 4.0);\n\
+                  }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("show_division =").expect("the declaration") + "show_divisi".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("the declaration has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("lambda") && text.contains("closure type"),
+        "the reason names the lambda and says why it has no type: {text}"
+    );
+    assert!(
+        !text.contains("lambda_body_marker"),
+        "the body is not the answer: {text}"
+    );
+    assert!(
+        !text.contains("the type of `[]"),
+        "and it is not printed as a type spelling: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
