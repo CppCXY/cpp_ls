@@ -3191,7 +3191,7 @@ fn begins_an_exported_region(node: &CppSyntaxNode) -> bool {
 /// **The parameter list a declaration at `offset` was written with**, as the file spells it — parentheses included.
 ///
 /// The **innermost `Declarator` ancestor** of the name, and *its* `ParameterList` child, which is the same reading
-/// [`crate::sema::call_syntax::parameter_list_of`] makes for a call's parameters: a variable declared inside a function body has
+/// `call_syntax::parameter_list_of` makes for a call's parameters: a variable declared inside a function body has
 /// the enclosing function's list above it, and `void (*f(int a))(int b)` has two lists in one declaration. The
 /// declarator the name is a name *of* is the one whose list says what the name's parameters are.
 ///
