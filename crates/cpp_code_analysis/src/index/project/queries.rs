@@ -416,6 +416,14 @@ pub fn definitions_across_files(
             if let Some((qualifier, last)) = name.rsplit_once("::")
                 && !qualifier.is_empty()
                 && !last.is_empty()
+                // **A *class*, and not a namespace.** `members_of` answers a class's member list, and it reads the
+                // members of the file that declares the class; a namespace is every file that opens it, and there is
+                // no one file whose member list is `std`'s. Measured on a project importing `std`: `std::println`
+                // hovered with **two** declarations, both from `<ostream>` — the declarations of whichever file the
+                // member list was built from — while the index holds all six (four more in `<print>`, under `#ifdef
+                // __cpp_lib_print`). Without this guard the branch answers before the name lookup (the fallthrough
+                // below) is ever asked, which is why the visibility walk never even ran for this name.
+                && index.scope_names_a_class(qualifier, path)
                 && let Known::Yes(list) = members_of(index, scopes, root, path, qualifier)
             {
                 let inherited: Vec<ProjectDefinition> = list

@@ -1897,6 +1897,20 @@ impl ProjectIndex {
                 Some(cooked) if cooked.declarations.iter().any(&accepts) => {
                     (cooked.declarations.as_slice(), reading)
                 }
+                // **A reading with no declaration at all is a cook that produced nothing**, and the summary is the
+                // file's own text. The gate below ("the asking program's own reading answers alone") is about a
+                // reading that *has* declarations and lacks this name — `#if 0 struct Dead`, which that program did not
+                // compile. A reading that holds nothing compiled nothing, and its cause is a cook or a parse that went
+                // wrong, not the file. Measured on a MinGW project importing `std`: the program's parse nested
+                // `<print>` inside a `<mutex>` function body (a brace paired across two files), so the file's four
+                // `println` overloads were missing from its reading while its summary held all forty-one declarations;
+                // letting that reading speak deleted six of `std::println`'s six overloads from the hover.
+                Some(cooked)
+                    if cooked.declarations.is_empty()
+                        && summary.declarations.iter().any(&accepts) =>
+                {
+                    (summary.declarations.as_slice(), 0)
+                }
                 // **The summary's postings carry reading `0`** — measured, not guessed: `[names]` printed
                 // `file 172 id 0 index 2` for `iostream`'s `cout`, while `Readings::ON_ITS_OWN` is `1`, so a fallback
                 // that claimed `1` matched no posting and answered nothing. `0` is what `insert_at` files a summary's

@@ -1076,39 +1076,46 @@ CPPLS_NO_PROGRAM_READ on that run   511 MB flat for 60 s
 Left open: the first programme read of a standard-heavy file still peaks around 600 MB, which is the feature's own
 cost (one parse of the whole program) rather than a leak; a project with twenty tabs open now pays for one such
 program and keeps its own reading for the rest.
-## `std::println` shows two declarations, both from `<ostream>` — open
 
-Reported from `test_module`'s `std_module_demo.cpp` (GCC 15 / MinGW). Hovering `std::println("…")` draws
+## `std::println` shows only two declarations, both from `<ostream>` — **fixed**
+
+Reported from `test_module`'s `std_module_demo.cpp` (GCC 15 / MinGW): hovering `std::println("…")` drew
+`→ inline void println(ostream& __os)` out of the standard library's six overloads, and the parameter hints labelled a
+string literal `__os`. Three faults stacked, and each rule is now stated where the question is asked.
+
+1. **A class query was asked about a namespace.** The answer came through `members_of(index, …, "std")` — a *class*
+   member list, which returned the declarations of whichever file declared `std` first (two, both `<ostream>`). The
+   branch exists for `Derived::instances`, a class member reached through a base; it now asks
+   `ProjectIndex::scope_names_a_class` first, and a namespace falls through to the name lookup.
+2. **A reading that compiled nothing shadowed the summary.** With the branch skipped, the walk still answered two:
+   `the_reading_for` selected the asking program's reading of `<print>`, and that reading held **zero** declarations
+   (the program's parse nested `<print>` inside a `<mutex>` function body — the file's own text balances, the pairing is
+   what a cross-file `{` … `}` can still do; the parse is one stream and the boundary rule only closes what a block
+   loop reaches). The summary held all forty-one. The reading-selection rule is now: an **empty** reading cannot
+   answer — the asking-program-wins policy is about a reading that *has* declarations and lacks this name
+   (`#if 0 struct Dead`), not about one that holds nothing.
+3. **The conversion relation kept every pointer overload a candidate.** With all six found, `println("…")` still
+   matched `println(ostream&)` and `println(FILE*)`, so the selection was ambiguous and the card listed five candidates
+   with no `→`. `Type::convertible_to` now refuses two shapes it can decide: a pointer against a non-const lvalue
+   reference (a temporary cannot bind to one), and a pointer to a builtin against a pointer to a different class or
+   builtin (`const char*` is not `FILE*`; class-to-class stays `Unknown`, because a derived pointer converts). One
+   viable candidate remains — `println(format_string<_Args...>, _Args&&...)`.
+
+Measured through the real server over stdio (`hover_probe`, `test_module`), after the three:
 
 ```text
-→ inline void println(ostream& __os)
-`std::println` — 2 declarations. The `→` one is what this call means: its parameter list accepts the arguments …
+→ inline void println(format_string<_Args...> __fmt, _Args&&... __args)
+
+`std::println` — 6 declarations. The `→` one is what this call means: its parameter list accepts the arguments, and the
+others cannot. `go to definition` lists them all.
+
+Declared in `print:130:5` and 1 other file(s)
 ```
 
-and the parameter hints label the string literal `__os:`. The standard library the file imports has **six** `println`
-overloads: two in `<ostream>` (`ostream&`, and `ostream&, format_string<…>, _Args&&...`) and four in `<print>`
-(`format_string<…>, _Args&&...`, `FILE*, format_string<…>, _Args&&...`, `FILE*`, and `()`). `inspect facts` on `<print>`
-lists all four, and the program's rendering of `<print>` — dumped with `CPPLS_DUMP_RENDERING_DIR` — contains them; the
-hover sees only the two.
-
-Measured, in the order that named the layers:
-
-* the index's `println` postings **do** include `<print>` — `(file 11, reading 0, index 26/29/37/40)` beside
-  `<ostream>`'s — so the declarations are indexed and narrowed to;
-* the answer came through `members_of(index, …, "std")`: a **class** member list asked about a **namespace**, which
-  returned the declarations of whichever file declared `std` first. A namespace's members are every file that opens
-  it, so the query cannot answer this question at all. The branch exists for `Derived::instances` (a class member
-  through a base) and needs a `scope_names_a_class` guard before `members_of`;
-* with that branch skipped by hand, the lookup falls through to `definitions_in_scope` → the visibility walk, and still
-  answers **two**. The walk's files include `<print>` (the module closure records it, 384 files), and its postings are
-  filed under the **summary** reading (`id 0`), while `the_reading_for` selects a **cooked** reading for that file —
-  the program's reading of `<print>`, which is where the four declarations should come from. Which reading id it picks,
-  and whether that reading holds `println`, is the next measurement; a temporary trace in `visible_declarations_upto`
-  for that file did not fire, so the loop never reached it, and that is the first number to produce.
-
-The consequence is not only the count. With `println(ostream&)` the only arity-viable candidate, `choose` returns it, the
-card says its parameter list *accepts* the argument, and `inlayHint` labels a `const char*` `__os`. The card's sentence
-is only as good as the set it was given.
+and the parameter hints are `__fmt:` on every `println` call in the file (the `inlay` query lists six hints), where they
+were `__os:`. The conversion rules have their own test —
+`sema::types::tests::a_pointer_does_not_bind_to_a_non_const_reference_or_to_another_pointers_class`; the other two rules
+are covered by the existing hover and visibility suites (996 analysis tests, the whole workspace green).
 
 Also fixed in the same round: the two declaration sentences in `overloads_markdown` carried a literal `\` and the next
 line's indentation — `\\` in a Rust string is an escaped backslash, not a line continuation — so the reported card read

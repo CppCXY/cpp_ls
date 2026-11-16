@@ -189,6 +189,20 @@ pub enum Type {
     },
 }
 
+/// **A pointee without its qualifiers**, and whether it had any — the shape a pointer-conversion question asks.
+///
+/// `const char*` is a pointer to a *qualified* `char`, and the qualification is the whole difference between that and
+/// `char*`: the first converts to the second and not the other way. Nothing else about a pointee is peeled here.
+fn a_pointee_without_its_qualifiers(type_of: &TypeOf) -> (&Type, bool) {
+    let mut current: &Type = type_of;
+    let mut qualified = false;
+    while let Type::Qualified { of } = current {
+        qualified = true;
+        current = of;
+    }
+    (current, qualified)
+}
+
 impl Type {
     pub fn builtin(spelling: impl Into<String>) -> Type {
         Type::Builtin {
@@ -303,6 +317,22 @@ impl Type {
         use crate::sema::symbol::Known;
 
         let from = self.decay();
+        // **A pointer does not bind to a non-const lvalue reference.** The peel below judges a reference by its
+        // referent, which is right for values and wrong for a pointer: `void println(ostream& __os)` called with a
+        // string literal is not a conversion to `ostream` at all, because the temporary a converting constructor could
+        // build cannot bind to a non-const reference. Left `Unknown`, the overload ranking kept
+        // `println(ostream&)` as a candidate for `println("…")` and the hover offered it as the call's meaning.
+        // A **`const`** reference is left alone: there a temporary may be built, which is a class's constructors'
+        // question and not this relation's.
+        if let Type::Reference {
+            to: referent,
+            rvalue: false,
+        } = target
+            && matches!(from, Type::Pointer { .. })
+            && matches!(**referent, Type::Named { .. })
+        {
+            return Known::No;
+        }
         // **The target is not decayed**, and that is the whole of a measured false positive: MSVC's
         // `__msvc_formatter.hpp` declares `_CharT _Fill[]`, whose type is an **array** of a template parameter, and
         // decaying the target turned it into `_CharT*` — so `int` met "a pointer" and the relation answered `No` for
@@ -347,6 +377,40 @@ impl Type {
             // than its case: a caller that knows the initialiser was the literal `0` does not ask.
             (Type::Pointer { .. }, b) if b.is_arithmetic() => Known::No,
             (a, Type::Pointer { .. }) if a.is_arithmetic() => Known::No,
+
+            // **Two pointers to different *builtin* pointees do not convert.** This one is decided by the shapes, which
+            // is why it belongs here: no class hierarchy is involved, so `const char*` cannot become `FILE*` — and the
+            // relation's silence made every pointer-taking overload a candidate for every pointer argument. Measured on
+            // `std::println("…")`: `println(ostream&)` (a pointer does not bind to a non-const reference — the rule
+            // above) and `println(FILE*)` (this rule) were offered as meanings of the call, while the one overload that
+            // takes a format string was one candidate among three. Class-to-class stays `Unknown` (a derived pointer
+            // converts), and a `void` pointee stays `Unknown` (the qualification rules around `void*` are their own).
+            (Type::Pointer { to: from_pointee }, Type::Pointer { to: to_pointee }) => {
+                let (from_core, from_qualified) = a_pointee_without_its_qualifiers(from_pointee);
+                let (to_core, to_qualified) = a_pointee_without_its_qualifiers(to_pointee);
+                let is_void = |type_of: &Type| matches!(type_of, Type::Builtin { spelling } if spelling == "void");
+                if is_void(from_core) || is_void(to_core) {
+                    Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+                        "a conversion through `void*` is not decided here",
+                    )))
+                } else if from_core == to_core {
+                    // **Qualification is the one difference that converts**: `char*` → `const char*` is implicit, the
+                    // other direction is not (it drops the `const`).
+                    if from_qualified && !to_qualified {
+                        Known::No
+                    } else {
+                        Known::Yes(())
+                    }
+                } else if matches!(from_core, Type::Builtin { .. })
+                    || matches!(to_core, Type::Builtin { .. })
+                {
+                    Known::No
+                } else {
+                    Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+                        "a conversion between two class pointers is a hierarchy question",
+                    )))
+                }
+            }
 
             _ => Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
                 "a conversion between these two types is not decided by their shapes",
@@ -2907,6 +2971,74 @@ mod tests {
             matches!(a_string.convertible_to(&a_string_target), Known::Unknown(_)),
             "a class with a conversion constructor is not this layer's answer: {:?}",
             a_string.convertible_to(&a_string_target)
+        );
+    }
+
+    /// **A pointer does not bind to a non-const reference, and two pointers to different builtin pointees do not
+    /// convert** — the two rules that stopped `println(ostream&)` and `println(FILE*)` from being offered as the
+    /// meaning of `println("…")`.
+    ///
+    /// Each direction is pinned, because the rules are about what the language refuses and an over-wide `No` would
+    /// silence a real call: a `const` class reference stays `Unknown` (a converting constructor may build a temporary),
+    /// a class-to-class pointer stays `Unknown` (a derived pointer converts), and `void*` stays `Unknown`.
+    #[test]
+    fn a_pointer_does_not_bind_to_a_non_const_reference_or_to_another_pointers_class() {
+        let string_pointer = parse_type_spelling("const char*");
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("std::ostream&")),
+                Known::No
+            ),
+            "a pointer cannot bind to a non-const reference"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("const std::ostream&")),
+                Known::Unknown(_)
+            ),
+            "a const reference may bind to a temporary a constructor builds"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("FILE*")),
+                Known::No
+            ),
+            "a pointer to a builtin is not a pointer to a class"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("int*")),
+                Known::No
+            ),
+            "two different builtin pointees do not convert"
+        );
+        assert!(
+            matches!(
+                parse_type_spelling("char*").convertible_to(&parse_type_spelling("const char*")),
+                Known::Yes(())
+            ),
+            "adding a qualification is a conversion"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("char*")),
+                Known::No
+            ),
+            "dropping one is not"
+        );
+        assert!(
+            matches!(
+                parse_type_spelling("Foo*").convertible_to(&parse_type_spelling("Widget*")),
+                Known::Unknown(_)
+            ),
+            "two class pointers are a hierarchy question"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("void*")),
+                Known::Unknown(_)
+            ),
+            "the `void*` rules are their own"
         );
     }
 }
