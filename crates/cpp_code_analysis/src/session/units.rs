@@ -1183,6 +1183,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // units is two readings, and a lookup asks for the asking file's one
             // (`ProjectIndex::the_reading_for`). See `Readings` in `index/project.rs`.
 
+            // **And the file's own record, under its closure key.** The program id is the in-session half of the
+            // reading; this is the disk's: the same record a per-file cook writes, and the one a warm start's
+            // 	ake_the_stored_refinements serves instead of re-reading the program. Without it the per-file
+            // readings of a whole program were written nowhere, so the next session rebuilt every one of them.
+            self.store.put_the_cooked_reading(&path, &cooked);
             self.store
                 .index_mut()
                 .insert_cooked_in_a_program(&path, program, cooked);

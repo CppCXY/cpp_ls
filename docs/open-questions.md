@@ -1339,3 +1339,16 @@ lexing each text). It runs once per file per program read, against the 2.7–4.4
 **Next**: the per-file cook asks the summary store for this key before it renders. A hit means the rendering, the parse
 and the facts are already on disk; a miss is a cook, filed under the same key. That turns a program read into "one key
 per file, and only the misses are work".
+
+**A program read now files each of its per-file readings on the disk**, under the file's own closure key — the record
+`take_the_stored_refinements` serves on a warm start, and the one a per-file cook will ask for. Until this, the
+readings lived only under the program's id inside the session, so nothing could serve them later: the next session
+re-read the whole program to get back facts that had already been computed and dropped. (`put_the_cooked_reading` and
+its read half were written for *refinements*, and were never called by the program path.)
+
+The cost is one closure fingerprint and one database row per file. Measured on `test_cpp` (`unit_read_probe`,
+`src/containers.cpp`): the program is **131 files, 2 367 587 bytes, 514 205 tokens**, its render is **64 ms**, and the
+whole read is **187 ms** with zero parse errors and 13 283 declarations the per-file reading cannot see (the
+difference between a header read alone and read in this program). A second read of the same program is **185 ms** —
+the same order, because this program is small and its unit is already the cache's unit. The number to watch is the
+*other* program: the 116 shared files' records are now on the disk, which is what the per-file cook's hit will read.

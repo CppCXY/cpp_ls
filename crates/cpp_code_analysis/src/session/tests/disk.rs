@@ -424,3 +424,59 @@ pub(crate) fn a_file_whose_program_has_not_been_read_yet_is_still_read_as_text()
         "and the file's own text is what was read: {step:?}"
     );
 }
+
+/// **A program read files every file's reading under the file's own key.** The reading used to live only under the
+/// program's id, so nothing could serve it afterwards: a second session re-read the whole program to get back facts
+/// that had been computed and thrown away with the first. The disk record this tests is what
+/// `take_the_stored_refinements` serves on a warm start, and what a per-file cook will ask for when the cache hit
+/// lands.
+#[test]
+pub(crate) fn a_program_read_files_each_files_reading_on_the_disk() {
+    let project = Project::new("program-writes-per-file");
+    project.write("main.cpp", "#include \"api.h\"\nHWND h;\n");
+    project.write("api.h", "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n");
+    project.write(
+        "handle.h",
+        "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \\\n\
+         typedef struct name##__ *name\n",
+    );
+
+    let documents = OpenDocuments::new();
+    let providers = SessionFiles::new(documents, DiskFiles);
+    let mut session = Session::with_config(
+        &project.root,
+        providers,
+        WatchFilter::new(&project.root),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([project.root.join("main.cpp")]);
+    session.index_everything();
+
+    let reading = session
+        .read_the_unit(&project.root.join("main.cpp"))
+        .expect("the program reads");
+    assert_eq!(
+        reading.files, 3,
+        "the program is main.cpp, api.h and handle.h"
+    );
+
+    // **The record, under the included file's own key** — not under the program's, which is the in-session half.
+    let api = project.root.join("api.h");
+    let stored = session
+        .store
+        .the_stored_cooked_reading(&api)
+        .expect("the program's reading of api.h is filed under api.h");
+    let in_the_index = session
+        .index()
+        .cooked_declarations(&api)
+        .expect("and in the index, under the program");
+    assert_eq!(
+        stored.declarations.len(),
+        in_the_index.len(),
+        "the disk record and the index hold one reading"
+    );
+    assert!(
+        !stored.declarations.is_empty(),
+        "the reading is the program's, so it has the macro's declaration"
+    );
+}
