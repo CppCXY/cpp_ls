@@ -1120,3 +1120,30 @@ are covered by the existing hover and visibility suites (996 analysis tests, the
 Also fixed in the same round: the two declaration sentences in `overloads_markdown` carried a literal `\` and the next
 line's indentation — `\\` in a Rust string is an escaped backslash, not a line continuation — so the reported card read
 "and the others \ cannot".
+## The program parse can nest one file inside another file's function body — open
+
+Measured while chasing `std::println`. One parse of a 5 MB `std` program (5 054 878 bytes, 1 631 frames, braces
+balanced, `unbalanced` empty) placed `<print>`'s `namespace std { … }` inside a `<mutex>` `if constexpr` body:
+
+```text
+Syntax(Declaration) "template<typename... _Args> inline void println(FILE* __stream, …"
+Syntax(CompoundStat) " { inline void vprint_nonunicode(FILE* __stream, …"
+Syntax(NamespaceDecl) "namespace std { inline void vprint_nonunicode(…"
+Syntax(CompoundStat) " { template<typename _Key, …"
+Syntax(NamespaceDecl) "namespace std { template<typename _Key, …"
+Syntax(IfStat) "if constexpr (is_same_v<_L1, _L2> && …)"
+Syntax(CompoundStat) " { if constexpr (…) { …"
+```
+
+The consequence was that the four `<print>` declarations never became facts: `[attr]` saw **two** `println`
+declarations, both from `<ostream>`, and the file got a cooked reading of 0 declarations against a summary of 41. The
+hover is right now because an empty reading no longer shadows the summary (see the fixed section above), **not** because
+the parse is right: a file that loses *some* declarations to the same pairing has a non-empty reading, and that reading
+still speaks alone.
+
+Why the file-boundary rule does not close it: `parse_stats` stops at a boundary it has crossed, but the statement
+being parsed when the crossing happens — here the `if constexpr` and its body — consumes the next file's text before
+the loop can ask again. The check sits at the top of the loop, and the damage is done inside one iteration. A fix has to
+be a boundary rule no *construct* can consume across (a token-level barrier) or a rule in the statement recursion, not
+another tree-builder rule; `RenderedUnit::file_boundaries` records the earlier attempt and why closing nodes does not
+move the shape.
