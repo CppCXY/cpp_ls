@@ -1365,14 +1365,18 @@ path, because a module is a *dependency* rather than a document.
 Measured on `test_cpp` with the same harness (twenty files open, no request, twenty seconds idle, private bytes
 sampled from outside):
 
-| | before | ask-once | + focused schedule |
-| --- | --- | --- | --- |
-| private bytes, peak | 1 196 MB | 870 MB | **758 MB** |
-| whole-program reads | 18 | 19 | **1** |
-| per-file readings inserted | 2 028 | 2 170 | **232** |
-| idle churn | 4 505 MB | 3 568 MB | **2 603 MB** |
-| live at the end | 371 MB | 413 MB | **186 MB** |
+| | before | ask-once | + focused schedule | + focused closure |
+| --- | --- | --- | --- | --- |
+| private bytes, peak | 1 196 MB | 870 MB | 758 MB | **720 MB** |
+| whole-program reads | 18 | 19 | 1 | **1** |
+| per-file readings inserted | 2 028 | 2 170 | 232 | **179** |
+| idle churn | 4 505 MB | 3 568 MB | 2 603 MB | **1 283 MB** |
+| live at the end | 371 MB | 413 MB | 186 MB | **175 MB** |
 
+The closure sweep follows the same rule now: `advance` cooks the **focused** document's closure, not every open
+file's. Twenty tabs used to be twenty closures cooked — the same headers once per tab. That is the last column:
+churn 2 603 → **1 283 MB** and the plateau 705 MB. What is left is the cold start's own indexing (372 files read
+once), not a repetition.
 Two tests changed with the contract, and both say why in their own words: `the_focused_document_gets_its_program`
 (was `every_open_file_gets_its_program`) and the two-program fixture that now asks `read_the_unit` by name, because its
 subject is two programs disagreeing about one header rather than which tab is in front.

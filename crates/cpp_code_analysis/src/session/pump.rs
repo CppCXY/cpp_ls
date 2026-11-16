@@ -1165,7 +1165,19 @@ impl<F: FileProvider + Clone> Session<F> {
             // [`Session::want_the_closure_cooked`] for the measurement that narrowed this down from the whole
             // closure — 11.7 s of every startup for one declaration in a thousand — and
             // [`Session::want_everything_cooked`] for the caller that still wants the whole project read that way.
-            for open in self.documents.paths() {
+            //
+            // **One closure, for the document in front.** Every open file used to be a closure, and twenty files open
+            // measured as **232 per-file readings inserted in a twenty-second idle window** on `test_cpp` — the same
+            // headers cooked once per tab. The rule is the program schedule's, for the same reason: a request that
+            // names a header asks for that header itself (`want_cooked_reading`), and a background tab keeps the
+            // reading its own text gives it.
+            let focused = self
+                .focused_document
+                .lock()
+                .ok()
+                .and_then(|focused| focused.clone())
+                .filter(|path| self.documents.is_open(path));
+            for open in focused.into_iter() {
                 self.want_the_closure_cooked(&open);
             }
 

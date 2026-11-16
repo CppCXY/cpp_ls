@@ -573,6 +573,13 @@ pub(crate) fn editing_a_header_invalidates_the_readings_that_depend_on_it() {
         );
     }
 
+    // **And asked for again.** A file nobody is looking at is rebuilt when a request names it — the rule the focused
+    // schedule keeps for every background file, and the reason this test has to name the dependent rather than wait
+    // for a sweep of every open tab's closure. Two rounds, because the dependent's environment is the *edited*
+    // header's, and a cook claimed before the index has re-read it would render the old macro.
+    session.index_everything();
+    session.want_cooked_reading(Path::new("/p/api.h"));
+    session.want_cooked_reading(Path::new("/p/other.cpp"));
     session.index_everything();
     assert!(
         matches!(
