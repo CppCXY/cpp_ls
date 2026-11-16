@@ -1339,8 +1339,20 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some(unit);
         }
 
-        let open = self.documents.paths().into_iter().find(|path| {
-            !self.units_read.contains(&queue_key(path))
+        // **The focused document, and only it.** Every open document used to be a candidate, and twenty files open was
+        // measured as **19 whole-program reads in a twenty-second idle window** on `test_cpp` — each re-parsing the
+        // same 116 headers, ~90 MB of churn apiece, for tabs nobody was looking at. A program read is the most
+        // expensive thing this session does, and the file that was just opened, edited or saved is the one whose
+        // answers the next request needs. Everything else keeps the reading its own text gives it, which is what
+        // every file nobody has open gets already.
+        let focused = self
+            .focused_document
+            .lock()
+            .ok()
+            .and_then(|focused| focused.clone());
+        let open = focused.into_iter().find(|path| {
+            self.documents.is_open(path)
+                && !self.units_read.contains(&queue_key(path))
                 // **A file that imports a module is not read as a program.** Its `import std;` is not an `#include`:
                 // the unit walk would read the file *alone* — measured, 1 file and 33 tokens — and replace its
                 // rendering with one that has no `std` in it at all, after which every completion in the file is

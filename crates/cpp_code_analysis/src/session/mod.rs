@@ -1047,6 +1047,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// could not tell the asker it had ever been cooked. Keyed by (path, content hash) because the asker is looking
     /// at one text; cleared wherever a file's text moves, like the set above.
     renderings_asked: std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, u64)>>,
+    /// **The document the reader is looking at** — the one a whole-program read is for.
+    ///
+    /// Set by every `did_open`/`did_change`/`did_save`, because that is the file a request has just named. It used to
+    /// be *every* open document: twenty files open was twenty programs read, measured as **19 whole-program reads in a
+    /// twenty-second idle window** on `test_cpp`, each re-parsing the same 116 headers. A program read is the most
+    /// expensive thing this session does, and a background tab is not a reason to do it — the same trade
+    /// `the_program_to_read` already states for files nobody has open.
+    focused_document: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read

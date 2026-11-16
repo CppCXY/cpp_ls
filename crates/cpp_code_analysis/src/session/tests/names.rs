@@ -631,49 +631,60 @@ pub(crate) fn a_rendering_view_survives_twelve_buffer_views() {
     );
 }
 
-/// **Every open file gets its program, and nothing prices one.**
+/// **The document the reader is looking at gets its program, and a background tab does not.**
 ///
-/// This replaces three tests that measured a ceiling which no longer exists — a source-size limit and a session-wide
-/// byte budget, both of which refused to read a program and left the file with the per-file reading. Their number was
+/// This replaces a test that measured a ceiling which no longer exists — a source-size limit and a session-wide byte
+/// budget, both of which refused to read a program and left the file with the per-file reading. Their number was
 /// "5 GB of private bytes", read off a counter that only ever **added**: measured with one that counts frees, a cold
 /// index of `test_cpp` holds 147 MB, seventeen open files with the pump drained hold 250 MB, and seventeen
 /// whole-program reads take it to 478 MB (peak 528) — about 13 MB each. See `tests/cold_start_memory_probe.rs` and
 /// `docs/open-questions.md`.
 ///
-/// What is left to hold a session to is the contract the schedule always had: one program per open file, in the order
-/// the client opened them, and each one marked read so it is not chosen again.
+/// The contract the schedule holds now is the one the measurement named: one program per *focused* document. Every
+/// open document used to be a candidate, and twenty files open was measured as **19 whole-program reads in a
+/// twenty-second idle window** — the same 116 headers parsed once per tab. A program read is the most expensive thing
+/// this session does, and the answers a request needs are about the file it just named.
+///
+/// Every open document used to be a candidate, and twenty files open was measured as **19 whole-program reads in a
+/// twenty-second idle window** on `test_cpp` — the same 116 headers parsed once per tab, ~90 MB of churn each, for
+/// files nobody was looking at. A program read is the most expensive thing this session does, and the answers a
+/// request needs are about the file it just named.
 #[test]
-pub(crate) fn every_open_file_gets_its_program() {
+pub(crate) fn the_focused_document_gets_its_program() {
     let main = "#include \"api.h\"\nApi a;\n";
     let second = "#include \"api.h\"\nApi b;\n";
     let files = MemoryFiles::new()
         .with_file("/p/api.h", "struct Api { int x; };\n")
         .with_file("/p/main.cpp", main)
         .with_file("/p/second.cpp", second);
-    let fixture = Memory::new("every-open-file-gets-its-program", &files);
+    let fixture = Memory::new("the-focused-document-gets-its-program", &files);
     let mut session = fixture.session();
     session.did_open("/p/main.cpp", main);
     session.did_open("/p/second.cpp", second);
     session.index_everything();
     session.pretend_a_pause(std::time::Duration::from_millis(1_100));
 
-    let first = session
-        .the_program_to_read()
-        .expect("the first open file's program is next");
+    assert_eq!(
+        session.the_program_to_read().as_deref(),
+        Some(Path::new("/p/second.cpp")),
+        "the document the reader opened last is the one whose program is next"
+    );
     assert!(
         session.read_a_program_now().is_some(),
         "and it is read when the session gets the chance"
     );
-
-    let next = session
-        .the_program_to_read()
-        .expect("the second open file's program is next, with no budget in the way");
-    assert_ne!(first, next, "a read file is not chosen twice");
-
-    session.read_a_program_now();
     assert_eq!(
         session.the_program_to_read(),
         None,
-        "both were read, and the schedule is empty rather than refusing anything"
+        "the background tab is not a program to read"
+    );
+
+    // **Focusing the other tab makes it the next one** — and only then.
+    session.did_change("/p/main.cpp", main);
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+    assert_eq!(
+        session.the_program_to_read().as_deref(),
+        Some(Path::new("/p/main.cpp")),
+        "the file that was just typed into is the one whose program is next"
     );
 }

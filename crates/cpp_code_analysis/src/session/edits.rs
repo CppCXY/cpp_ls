@@ -170,6 +170,12 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn did_close(&mut self, path: impl AsRef<Path>) {
         self.changed_input();
         let path = path.as_ref();
+        // **The focused document goes with it**, so the next program read is not for a file nobody is looking at.
+        if let Ok(mut focused) = self.focused_document.lock()
+            && focused.as_deref() == Some(path)
+        {
+            *focused = None;
+        }
         self.forget_refinement(path);
         self.documents.close(path);
         // The text the analysis was holding was the *buffer's*, and the disk may never have seen it. Dropping the
@@ -291,6 +297,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// anything can ask a question about the file — and the summary is dropped with it, because the old one
     /// describes text that no longer exists.
     pub(crate) fn buffer_changed(&mut self, path: &Path, text: &str) {
+        // **The file the reader is looking at**, which is the only document a whole-program read is worth doing for:
+        // every `did_open`/`did_change`/`did_save` names it, and a background tab names nothing.
+        if let Ok(mut focused) = self.focused_document.lock() {
+            *focused = Some(path.to_path_buf());
+        }
         self.changed_input();
 
         // **Every stored-refinement miss is about a text, and a text just moved.**

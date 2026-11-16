@@ -1352,3 +1352,34 @@ whole read is **187 ms** with zero parse errors and 13 283 declarations the per-
 difference between a header read alone and read in this program). A second read of the same program is **185 ms** —
 the same order, because this program is small and its unit is already the cache's unit. The number to watch is the
 *other* program: the 116 shared files' records are now on the disk, which is what the per-file cook's hit will read.
+
+**The schedule reads the focused document's program, and only its.** Every open document used to be a candidate, and
+that is where the measured repetition lived: twenty files open was **19 whole-program reads in a twenty-second idle
+window**, each re-parsing the same 116 headers. A program read is the most expensive thing a session does, and a
+request names one file.
+
+`Session` now records `focused_document` — set by every `did_open`/`did_change`/`did_save`, cleared by `did_close` —
+and `the_next_unit_to_read` returns that document's root and nothing else. The module interface units keep their own
+path, because a module is a *dependency* rather than a document.
+
+Measured on `test_cpp` with the same harness (twenty files open, no request, twenty seconds idle, private bytes
+sampled from outside):
+
+| | before | ask-once | + focused schedule |
+| --- | --- | --- | --- |
+| private bytes, peak | 1 196 MB | 870 MB | **758 MB** |
+| whole-program reads | 18 | 19 | **1** |
+| per-file readings inserted | 2 028 | 2 170 | **232** |
+| idle churn | 4 505 MB | 3 568 MB | **2 603 MB** |
+| live at the end | 371 MB | 413 MB | **186 MB** |
+
+Two tests changed with the contract, and both say why in their own words: `the_focused_document_gets_its_program`
+(was `every_open_file_gets_its_program`) and the two-program fixture that now asks `read_the_unit` by name, because its
+subject is two programs disagreeing about one header rather than which tab is in front.
+
+**One thing was tried and reverted**: serving a *stored* cooked reading from the pump's slice when the disk has it.
+It looked free — `the_stored_cooked_reading` is validated the same way — and it made every `sema::check` fixture
+report nothing, because the checks run on the **rendering** (`Session::view`) and a stored record carries the facts
+and the diagnostics but not the spans a rendering view is made of. The hit needs a record that rebuilds an
+`IndexedRendering` — text, spans, diagnostics — which is the next piece of the cache, not a switch on the existing
+one.

@@ -311,6 +311,17 @@ pub(crate) fn a_program_is_read_before_its_root_has_a_summary() {
     }
     assert_eq!(
         read.len(),
+        1,
+        "the focused document is read, and the background tab is not: {read:?}"
+    );
+    // **Focus the other tab**, which has no summary either: the same question, one document at a time.
+    session.did_change("/p/a.cpp", a);
+    let reading = session
+        .read_a_looked_at_unit()
+        .expect("the newly focused document is read");
+    read.push(reading.root.clone());
+    assert_eq!(
+        read.len(),
         2,
         "both open files are read, summary or not: {read:?}"
     );
@@ -337,12 +348,16 @@ pub(crate) fn a_header_read_in_two_programs_answers_each_its_own_way() {
     session.did_open("/p/b.cpp", b);
     session.index_everything();
 
-    // **Both programs**, one per call — the schedule reads one at a time and the two roots are both open.
+    // **Both programs, asked for by name.** The schedule reads the focused document only now; this test is about two
+    // programs disagreeing about one header, not about which tab the reader is looking at.
     let mut read = Vec::new();
-    while let Some(reading) = session.read_a_looked_at_unit() {
+    for root in ["/p/a.cpp", "/p/b.cpp"] {
+        let reading = session
+            .read_the_unit(Path::new(root))
+            .unwrap_or_else(|| panic!("{root} reads"));
         read.push(reading.root.clone());
     }
-    assert!(read.len() >= 2, "both translation units are read: {read:?}");
+    assert_eq!(read.len(), 2, "both translation units are read: {read:?}");
 
     let from_a = session.index().definitions("X", Path::new("/p/a.cpp"));
     let from_b = session.index().definitions("X", Path::new("/p/b.cpp"));
