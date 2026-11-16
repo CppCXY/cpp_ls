@@ -179,11 +179,44 @@ impl<F: FileProvider + Clone> Session<F> {
                         file.open
                     );
                 }
-                if let Ok(mut work) = self.macro_work.lock() {
-                    work.want(&file.path);
-                }
+                self.ask_for_a_rendering(&file.path, &file.text);
                 None
             }
+        }
+    }
+
+    /// **Forget every cached rendering** — the test's stand-in for eviction, which the real cache does by size.
+    #[cfg(test)]
+    pub(crate) fn forget_the_renderings(&self) {
+        if let Ok(mut known) = self.renderings.lock() {
+            known.clear();
+        }
+    }
+
+    /// **Ask for a file's rendering, once per text** — see [`Session::renderings_asked`].
+    ///
+    /// The callers are queries that could not answer from the rendering cache, and the distinction this makes is
+    /// between "nobody has cooked this" and "the cook was evicted": the second is not a reason to cook again. A rule
+    /// that could not tell them apart cooked the same header once per drain — the measured shape of a server that
+    /// never goes idle. A file whose text moves forgets its ask ([`Session::buffer_changed`]), because the rendering
+    /// the cache lost may be of a text nobody has any more.
+    fn ask_for_a_rendering(&self, path: &Path, text: &str) {
+        // **A file the index cannot describe is still asked for**, because the ask is also the signal that something
+        // wants it read — `Session::view`'s contract for a file nobody has indexed. It is only *remembered* when the
+        // cook can be served; otherwise a later query, after the index has read it, must be free to ask again.
+        if self.store.index().summary(path).is_some() {
+            let key = (path.to_path_buf(), crate::cache::content_hash(text));
+            let first = self
+                .renderings_asked
+                .lock()
+                .map(|mut asked| asked.insert(key))
+                .unwrap_or(true);
+            if !first {
+                return;
+            }
+        }
+        if let Ok(mut work) = self.macro_work.lock() {
+            work.want(path);
         }
     }
 
@@ -264,10 +297,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // (`crates/cpp_ls/tests/loop_probe.rs`): ten diagnostics pulls caused **five** cooks, the same two headers
         // each time (`types.h`, `stl_vector.h`), each a render and a parse — and raising the cache from 8 to 64
         // entries changed the count **not at all**, which is what named the cause: the ask, not the eviction.
-        if self.known_rendering_of(&file.path, &file.text).is_none()
-            && let Ok(mut work) = self.macro_work.lock()
-        {
-            work.want(&file.path);
+        if self.known_rendering_of(&file.path, &file.text).is_none() {
+            self.ask_for_a_rendering(&file.path, &file.text);
         }
 
         // **And the plain view, which this used to leave out - the whole of the answer.**

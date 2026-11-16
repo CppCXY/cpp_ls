@@ -1691,7 +1691,10 @@ fn file_what_was_found(
     files: &mut [(std::path::PathBuf, crate::CookedFile)],
     unplaced: &mut usize,
 ) {
-    let tracing = std::env::var("CPPLS_TRACE_ATTRIBUTION").is_ok();
+    // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
+    // read here is a lock of the process environment plus an `OsString` built for an answer that cannot change
+    // during a run.
+    let tracing = crate::probes::attribution();
     let interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
     if tracing {
         eprintln!("[attr] {} declaration(s) to place", declarations.len());

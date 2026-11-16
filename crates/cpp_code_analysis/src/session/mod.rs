@@ -1038,6 +1038,15 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// asks for it itself ([`Session::want_cooked_reading`], [`Session::view`]), and that is the asking side this loop
     /// is not. Cleared for a file in [`Session::buffer_changed`], which is the one place its text moves.
     cooked_or_wanted: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// **The renderings a query has already asked for, by text** --- so an evicted reading is not asked for again.
+    ///
+    /// [Session::cooked_or_wanted] is the pump's half of this rule and is keyed by file, because it is asked once
+    /// per open document per drain. This is the query's half: iew (and iew_of_the_file) miss whenever the
+    /// rendering cache does not hold the reading, and asking again on every miss was the measured shape of a server
+    /// that never goes idle --- the pump cooked the same header once per drain, because a cache that had evicted it
+    /// could not tell the asker it had ever been cooked. Keyed by (path, content hash) because the asker is looking
+    /// at one text; cleared wherever a file's text moves, like the set above.
+    renderings_asked: std::sync::Mutex<std::collections::HashSet<(std::path::PathBuf, u64)>>,
     /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
     ///
     /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read

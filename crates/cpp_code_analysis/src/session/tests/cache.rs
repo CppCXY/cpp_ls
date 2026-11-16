@@ -217,3 +217,48 @@ pub(crate) fn the_sharing_cache_survives_a_restart() {
         );
     }
 }
+
+/// **A rendering is asked for once per text.** A query that misses holds no rendering, and a cache lookup cannot
+/// tell "nobody has cooked this" from "the cook was evicted" — asking on every miss is what made the pump cook the
+/// same header once per drain. A file whose text moves is askable again (see `buffer_changed`).
+#[test]
+fn a_rendering_is_asked_for_once_per_text() {
+    let source = "#include \"b.h\"\nint main() { return 0; }\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/b.h", "#define B 1\n")
+        .with_file("/p/a.cpp", source);
+    let fixture = Memory::new("asked-once-per-text", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", source);
+    session.index_everything();
+
+    let asks = |session: &crate::session::Session<MemoryFiles>| asks_of(session);
+
+    // **What eviction looks like.** The rendering the index had built is dropped, and the next query cannot answer:
+    // it asks, once.
+    session.forget_the_renderings();
+    assert!(
+        session.view(Path::new("/p/a.cpp")).is_none(),
+        "nothing has a rendering after the cache was dropped"
+    );
+    assert_eq!(asks(&session), 1, "the miss asks once");
+
+    // The ask is taken and served, and the cache loses the rendering again.
+    session.advance(8);
+    session.forget_the_renderings();
+    assert!(session.view(Path::new("/p/a.cpp")).is_none());
+    assert_eq!(
+        asks(&session),
+        1,
+        "an evicted reading is not asked for a second time by the same text"
+    );
+}
+
+/// How many renderings a query has asked for, for a session of any provider.
+fn asks_of(session: &crate::session::Session<MemoryFiles>) -> usize {
+    session
+        .renderings_asked
+        .lock()
+        .map(|asked| asked.len())
+        .unwrap_or(0)
+}

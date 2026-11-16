@@ -334,6 +334,10 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Ok(mut asked) = self.cooked_or_wanted.lock() {
             asked.remove(&queue_key(path));
         }
+        // **And the rendering this text was asked for**, so the next query asks for the new one.
+        if let Ok(mut asked) = self.renderings_asked.lock() {
+            asked.retain(|(known, _)| known != path);
+        }
         // **The translation unit of *this* file, and only this file's.** A unit is a timeline over a closure, so an
         // edit that moves a directive has changed the one rooted here; it has not changed the one rooted at a file
         // that merely *includes* this one, whose timeline is still the same sequence of directives at the same
@@ -460,6 +464,9 @@ impl<F: FileProvider + Clone> Session<F> {
             // asked-once set that outlived an invalidation would leave the file on the old macro for the session.
             if let Ok(mut asked) = self.cooked_or_wanted.lock() {
                 asked.remove(&queue_key(&dependent));
+            }
+            if let Ok(mut asked) = self.renderings_asked.lock() {
+                asked.retain(|(known, _)| known != &dependent);
             }
 
             // **The named rendering too.** `renderings` is keyed by the *dependent's* own text, which did not
