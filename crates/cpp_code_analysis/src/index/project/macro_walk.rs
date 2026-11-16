@@ -350,17 +350,24 @@ impl ProjectIndex {
         // Only an **interface unit** is recorded: an implementation unit declares the module and is not what an
         // importer sees, so pointing `import m;` at one would attribute its declarations to a module that never
         // exported them. A file that declares no module, or declares one as an implementation, records nothing.
+        //
+        // **A partition is recorded under its full name**, `geometry:shapes`. It is not the file `import geometry;`
+        // reaches — that is the primary interface, and the rule above is about that question — but it *is* the file
+        // `import :shapes;` reaches from inside the module, and a partition unit was previously absent from this map
+        // altogether: `export import :shapes;` and `export import :area;` then resolved to nothing (or, worse, to a
+        // module that happened to be called `shapes`), which is the reported pair of adjacent document links with one
+        // underline and not the other. The key is the full name, so the two questions stay apart.
 
         self.module_interfaces
             .retain(|_, declaring| declaring != &path);
         if summary.modules.is_interface
             && let Some(module) = &summary.modules.module
-            && summary.modules.partition.is_none()
         {
-            // A partition interface unit exports to its own module only — nothing outside may `import m:part;` —
-            // so it is not the file an `import m;` in another module reaches.
-            self.module_interfaces
-                .insert(module.to_string(), path.clone());
+            let full = match &summary.modules.partition {
+                Some(partition) => format!("{module}:{partition}"),
+                None => module.to_string(),
+            };
+            self.module_interfaces.insert(full, path.clone());
         }
 
         self.names

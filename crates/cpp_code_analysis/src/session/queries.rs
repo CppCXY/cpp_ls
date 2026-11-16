@@ -857,6 +857,17 @@ impl<F: FileProvider + Clone> Session<F> {
             crate::paths::parent_normalized(&view.path, self.files.is_case_insensitive());
         let mut interner = PathInterner::new(self.files.is_case_insensitive());
         let mut scanner: Option<ModuleScanner<'_, OverlayFiles<OpenDocuments, F>>> = None;
+        // **A partition is named against the module its unit declares.** `export import :area;` names
+        // `geometry:area`, not a module called `area` — and asking for the bare name is not a miss, it is the *wrong
+        // module*: a project with a `shapes` module of its own had `export import :shapes;` resolve to that file while
+        // `export import :area;` resolved to nothing, which is the reported pair of adjacent lines with a link on one
+        // and not the other. The file's own module is what the leading `:` is relative to.
+        let declared = self
+            .store
+            .index()
+            .summary(&view.path)
+            .and_then(|summary| summary.modules.module.clone());
+        let written = view.written_text().unwrap_or(&view.source);
 
         for node in view.root.descendants() {
             if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ImportDecl
@@ -875,6 +886,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             }
             let range = cpp_parser::source_range(name_node.text_range());
+            let name = match (
+                a_partition_is_written_before(written, range.start_offset),
+                &declared,
+            ) {
+                (true, Some(module)) => format!("{module}:{name}"),
+                _ => name,
+            };
 
             let resolved = match self.store.index().interface_unit_of(&name) {
                 Some(path) => Some(PathBuf::from(path)),
@@ -967,4 +985,19 @@ impl<F: FileProvider + Clone> Session<F> {
             ReferenceBudget::default(),
         )
     }
+}
+
+/// **Is the module name at `at` a partition** — the `:area` of `export import :area;`?
+///
+/// The tree keeps the partition's name without its colon (`ModuleName "area"`), and the colon is a token before it;
+/// so the question is answered by the nearest non-whitespace byte before the name (`import : shapes;` is the same
+/// import with a space in it). A module's own name is written with dots, never a colon, so a `:` here is the
+/// partition marker and nothing else.
+fn a_partition_is_written_before(written: &str, at: usize) -> bool {
+    let bytes = written.as_bytes();
+    let mut cursor = at.min(bytes.len());
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    cursor > 0 && bytes[cursor - 1] == b':'
 }

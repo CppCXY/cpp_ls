@@ -302,6 +302,68 @@ mod tests {
         );
     }
 
+    /// **A partition import is a link to the partition's file** — `export import :area;` names
+    /// `geometry_area.cppm` exactly as `export import :shapes;` names `geometry_shapes.cppm`.
+    ///
+    /// Reported from an editor: the first partition of a module underlined and the second did not, in one pair of
+    /// adjacent lines. The two imports are spelled alike; the difference is the name each carries.
+    #[test]
+    fn every_partition_import_becomes_a_link() {
+        let text = "export module geometry;\nexport import :shapes;\nexport import :area;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/geometry.cppm", text)
+            .with_file(
+                "/p/geometry_shapes.cppm",
+                "export module geometry:shapes;\nexport struct Rect {};\n",
+            )
+            .with_file(
+                "/p/geometry_area.cppm",
+                "export module geometry:area;\nexport double rect_area();\n",
+            );
+        let providers = SessionFiles::new(OpenDocuments::new(), files);
+        let mut session = Session::with_config(
+            "/p",
+            providers,
+            WatchFilter::new("/p"),
+            CompilerConfig::default(),
+        );
+        session.add_project_files([
+            PathBuf::from("/p/geometry.cppm"),
+            PathBuf::from("/p/geometry_shapes.cppm"),
+            PathBuf::from("/p/geometry_area.cppm"),
+        ]);
+        session.index_everything();
+
+        let view = session
+            .view_of_the_file("/p/geometry.cppm")
+            .expect("the file's own reading is held");
+        let file = session
+            .files()
+            .held("/p/geometry.cppm")
+            .expect("the file is held");
+        let imports = session.module_imports_of(&view);
+        assert_eq!(
+            imports.len(),
+            2,
+            "the file imports two partitions: {imports:?}"
+        );
+
+        let links: Vec<DocumentLink> = imports
+            .iter()
+            .filter_map(|import| module_link_of(file, import))
+            .collect();
+        assert_eq!(links.len(), 2, "both partitions name a file: {imports:?}");
+        for (link, partition) in links.iter().zip(["shapes", "area"]) {
+            let target = link.target.as_ref().expect("the target is the unit");
+            assert!(
+                target
+                    .path()
+                    .ends_with(&format!("geometry_{partition}.cppm")),
+                "`:{partition}` points at its own partition: {target:?}"
+            );
+        }
+    }
+
     /// **A directive with no header name in it still gets a link over the directive.**
     ///
     /// `#include HEADER` is a macro include — the target is a name, and the tree has no `HeaderName` token for it —
