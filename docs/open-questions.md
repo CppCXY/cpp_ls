@@ -1291,3 +1291,51 @@ one feature that would notice a module being declared in the wrong place.
 **Next** is the same "next" as the section above, and this reorganisation exists to make it a small change: the cache
 and the index are rewritten in place. A request returns what it knows plus the misses it needs; a program read becomes
 a list of `(content hash, environment fingerprint)` keys; and the budget is `idle ⇒ zero allocations`, asserted.
+
+
+## The identity of a rendering is its text and its reachable environment — measured
+
+The cache rewrite starts from one number: **what two readings of the same file share**. A file's rendering is a
+function of its own text and of the `#define`s in force where it sits, so the unit a cache can key is
+`(content hash, environment fingerprint)`. `MacroView::environment_fingerprint` is that second half, and the design
+question it answers is *which* macros count:
+
+```text
+the file's own identifier tokens   ->  the names it can mention
+each name's definition in force    ->  name, function-like, parameters, body
+each name inside that body         ->  the closure: `#define A(x) B(x)` means B's definition is part of A's meaning
+```
+
+A parameter of the macro is not one of those names (`#define B(y) y + 1` says nothing about a macro called `y`). The
+seed — `-D` and the compiler's predefines — is deliberately not hashed: it is a property of the compilation, which the
+key already carries as its context hash.
+
+**Three properties, each with a test** (`tests/translation_unit.rs`):
+
+1. two programs that include a header in the same state agree on its fingerprint, and one that defines what the header
+   uses *before* including it does not;
+2. a macro the file never mentions does not move the fingerprint, even when it is defined before the include in both
+   programs — this is what makes sharing possible at all;
+3. a definition reached through another definition counts: `chain.h` writes `A`, `A` stands for `B`, and a different
+   `B` renders a different line — so hashing only `A`'s body would be the unsound half of the shortcut.
+
+**Measured on `test_cpp`** (`tests/unit_identity_probe.rs`, one project indexed, two programs walked):
+
+```text
+src/containers.cpp   131 files, 131 distinct keys, 75 ms to fingerprint the program
+src/basics.cpp       118 files, 118 distinct keys, 57 ms
+shared               116 files in both closures, and 116 of them with the same text and environment
+together             249 per-file readings collapse to 133 distinct keys
+```
+
+So the second program's reading would reuse **116 of its 118 files**; only two — its own source and one header
+`containers.cpp` does not include — would be new. That is the number the rewrite is worth: the repetition measured at
+the start of this session (the same `<vcruntime_new.h>` parsed once per program) is not inherent to the program
+being a program; it is a cache whose key was the program.
+
+The cost of the fingerprint is **0.5 ms per file** at this size (75 ms for a 131-file program, including reading and
+lexing each text). It runs once per file per program read, against the 2.7–4.4 s the cook and parse cost.
+
+**Next**: the per-file cook asks the summary store for this key before it renders. A hit means the rendering, the parse
+and the facts are already on disk; a miss is a cook, filed under the same key. That turns a program read into "one key
+per file, and only the misses are work".

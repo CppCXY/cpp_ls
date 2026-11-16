@@ -145,7 +145,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// included, so **the file a person was typing into could never be reused** — its own hash moved on every
     /// keystroke — and every cook of it paid a walk of its whole closure. See [`crate::tu_cache::RootKey`]: the
     /// root is keyed on everything a walk can read out of it, which its body is not.
-    pub(crate) fn translation_unit_of(
+    ///
+    /// **The timeline of one program** — public for the probes and tests that measure a reading by its environment
+    /// rather than by a request. A caller that merely wants an answer wants a query instead: this walks (or loads)
+    /// the whole unit, which is the most expensive thing this crate does.
+    pub fn translation_unit_of(
         &self,
         path: &Path,
     ) -> Option<std::sync::Arc<crate::TranslationUnit>> {

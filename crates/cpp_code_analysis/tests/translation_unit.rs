@@ -1566,3 +1566,92 @@ fn a_header_the_stream_holds_twice_declares_its_member_once() {
     assert_eq!(named("EndCol"), 1, "and its neighbours are not lost either");
     assert_eq!(cooked.declarations.len(), 3, "{:?}", cooked.declarations);
 }
+
+/// **The environment fingerprint of one file in one unit** — the number the rendering cache is keyed by.
+fn fingerprint_of(unit: &Unit, timeline: &TranslationUnit, path: &str) -> u64 {
+    let path = Path::new(path);
+    let text = unit.sources.get(path).expect("the file has text");
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    let view = timeline.environment_of(path).expect("the unit reaches it");
+    view.environment_fingerprint(text, &tokens)
+}
+
+/// **Two programs that include the same header in the same state agree about it** — and a program that changes what
+/// the header can see does not. This is what makes a header's rendering shareable between translation units, which is
+/// the whole point of keying one by its environment.
+#[test]
+fn a_header_has_one_fingerprint_per_environment() {
+    let unit = Unit::new(&[
+        (
+            "/p/shared.h",
+            "#define SHARED 1\nstruct Shared { int x; };\n",
+        ),
+        ("/p/a.cpp", "#include \"shared.h\"\n#define A_ONLY 1\n"),
+        ("/p/b.cpp", "#include \"shared.h\"\n#define B_ONLY 2\n"),
+        ("/p/c.cpp", "#define SHARED 2\n#include \"shared.h\"\n"),
+    ]);
+    let mut definitions = MacroDefinitions::default();
+    let a = unit.timeline_of("/p/a.cpp", &mut definitions);
+    let b = unit.timeline_of("/p/b.cpp", &mut definitions);
+    let c = unit.timeline_of("/p/c.cpp", &mut definitions);
+
+    let in_a = fingerprint_of(&unit, &a, "/p/shared.h");
+    let in_b = fingerprint_of(&unit, &b, "/p/shared.h");
+    assert_eq!(
+        in_a, in_b,
+        "two programs that include the header in the same state must share its reading"
+    );
+    assert_ne!(
+        in_a,
+        fingerprint_of(&unit, &c, "/p/shared.h"),
+        "a program that defines SHARED before including it renders the header differently"
+    );
+}
+
+/// **A macro the file cannot reach is not part of its environment.** Hashing the whole table would make every
+/// header unique to its program; the closure starts at the names the file writes.
+#[test]
+fn a_macro_the_file_never_mentions_does_not_change_its_fingerprint() {
+    // The macro is defined *before* the include, in both programs, and mentioned by neither — the environment
+    // differs and the reading cannot.
+    let unit = Unit::new(&[
+        ("/p/shared.h", "struct Shared { int x; };\n"),
+        ("/p/a.cpp", "#define UNUSED 1\n#include \"shared.h\"\n"),
+        ("/p/b.cpp", "#define UNUSED 2\n#include \"shared.h\"\n"),
+    ]);
+    let mut definitions = MacroDefinitions::default();
+    let a = unit.timeline_of("/p/a.cpp", &mut definitions);
+    let b = unit.timeline_of("/p/b.cpp", &mut definitions);
+    assert_eq!(
+        fingerprint_of(&unit, &a, "/p/shared.h"),
+        fingerprint_of(&unit, &b, "/p/shared.h"),
+        "`UNUSED` is not a name `shared.h` writes, so it cannot change its rendering"
+    );
+}
+
+/// **A definition reached through another definition counts.** `chain.h` writes `A`, `A` stands for `B`, and `B`
+/// differs: the expansion of `A` differs, so the reading does. Hashing only `A`'s own body — which is the same text
+/// `B` in both — would be the unsound half of the shortcut this design must not take.
+#[test]
+fn a_macro_reached_through_a_body_is_part_of_the_environment() {
+    let unit = Unit::new(&[
+        ("/p/chain.h", "int x = A;\n"),
+        (
+            "/p/h1.cpp",
+            "#define B 1\n#define A B\n#include \"chain.h\"\n",
+        ),
+        (
+            "/p/h2.cpp",
+            "#define B 2\n#define A B\n#include \"chain.h\"\n",
+        ),
+    ]);
+    let mut definitions = MacroDefinitions::default();
+    let one = unit.timeline_of("/p/h1.cpp", &mut definitions);
+    let two = unit.timeline_of("/p/h2.cpp", &mut definitions);
+
+    assert_ne!(
+        fingerprint_of(&unit, &one, "/p/chain.h"),
+        fingerprint_of(&unit, &two, "/p/chain.h"),
+        "`A`'s body is `B`, and `B` renders `1` in one program and `2` in the other"
+    );
+}

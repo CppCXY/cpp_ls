@@ -3071,6 +3071,112 @@ impl<'unit> MacroView<'unit> {
         })
         .map(|(_, index)| index)
     }
+
+    /// **The part of a file's rendering that is its environment, as one number** — the identity of a reading.
+    ///
+    /// # What a rendering depends on
+    ///
+    /// A file's rendering is a function of two things: its own text, and the `#define`s in force where it sits. The
+    /// text is [`crate::cache::content_hash`]; this is the second half, and it has to be **exact in one direction**:
+    /// two readings that would render the same text must agree, and two whose environment differs in a macro the
+    /// file can reach must not be taken for one another.
+    ///
+    /// # Why the closure, and not the whole table
+    ///
+    /// The whole table is not *this file's* environment. Two translation units that both include `<vector>` differ in
+    /// a hundred macros defined after it, and hashing all of them would make every header's rendering unique to its
+    /// program — which is the repetition this number exists to remove. What can affect the file is the definition of
+    /// each name it writes, and the definition of each name those definitions mention: `_STD_BEGIN` stands for
+    /// `namespace std {`, and a name inside a body is one the expansion of that body will look up.
+    ///
+    /// ```text
+    /// #define A(x) B(x)        the file writes A  →  A's body mentions B  →  B's definition is part of the
+    /// #define B(y) y + 1       environment too, because expanding A reaches it
+    /// ```
+    ///
+    /// So the names come from the file's own identifier tokens and the closure is walked from there, by name.
+    /// Sorting by name is what makes the number independent of the order the walk took.
+    ///
+    /// # What is deliberately not hashed
+    ///
+    /// The **seed** (`-D`, the compiler's predefines): it is a property of the compilation, and the compilation is
+    /// already the key's other half ([`SummaryKey::context_hash`]). A name the environment does not define
+    /// contributes nothing — "not defined here" is the same fact however the absence came about.
+    pub fn environment_fingerprint(
+        &self,
+        source: &str,
+        tokens: &[cpp_parser::CppTokenData],
+    ) -> u64 {
+        let mut pending: Vec<&str> = tokens
+            .iter()
+            .filter(|token| token.kind == cpp_parser::CppTokenKind::Identifier)
+            .map(|token| &source[token.range.start_offset..token.range.end_offset()])
+            .collect();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // `(name, function-like, parameters, body)`, the four facts that make up a definition.
+        let mut entries: Vec<(&str, Option<bool>, Option<&str>, Option<&str>)> = Vec::new();
+
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name) {
+                continue;
+            }
+            let Some((_at, event)) = self.the_binding(name) else {
+                continue;
+            };
+            entries.push((
+                name,
+                event.function_like,
+                event.parameters.as_deref(),
+                event.body_text.as_deref(),
+            ));
+            // **What the body mentions is part of the environment too.** The body is text, and the expander lexes it
+            // before it substitutes anything, so this is the same lexer reading the same bytes.
+            let Some(body) = event.body_text.as_deref() else {
+                continue;
+            };
+            let parameters = event.parameters.as_deref();
+            for token in cpp_parser::lex(body, &cpp_parser::LexerConfig::default()).0 {
+                if token.kind != cpp_parser::CppTokenKind::Identifier {
+                    continue;
+                }
+                let word = &body[token.range.start_offset..token.range.end_offset()];
+                // A parameter is the macro's own piece of text, not a name the environment answers: `#define B(y)
+                // y + 1` says nothing about a macro called `y`.
+                if parameters.is_some_and(|list| mentions_a_word(list, word)) {
+                    continue;
+                }
+                pending.push(word);
+            }
+        }
+
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        let mut bytes: Vec<u8> = Vec::new();
+        for (name, function_like, parameters, body) in entries {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.push(match function_like {
+                Some(true) => b'f',
+                // A definition whose replacement list the walk could not read is still a fact about the name, and a
+                // different one from the same name being a macro with a body.
+                Some(false) => b'o',
+                None => b'u',
+            });
+            for part in [parameters, body] {
+                bytes.extend_from_slice(part.unwrap_or("").as_bytes());
+                bytes.push(0);
+            }
+        }
+        crate::cache::fnv1a64(&bytes)
+    }
+}
+
+/// **Does this parameter list name `word`?** — asked by [`MacroView::environment_fingerprint`] of a body's
+/// identifiers, and deliberately a word comparison: `x` is a parameter of `f(x)`, while `max` is not a parameter of
+/// `f(x)` however much of `max` it shares.
+fn mentions_a_word(parameter_list: &str, word: &str) -> bool {
+    parameter_list
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .any(|candidate| candidate == word)
 }
 
 impl cpp_parser::MacroFacts for MacroView<'_> {
