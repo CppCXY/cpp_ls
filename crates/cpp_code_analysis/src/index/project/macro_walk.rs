@@ -696,8 +696,8 @@ impl ProjectIndex {
             .clear();
 
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
-        let tracing = std::env::var("CPPLS_TRACE_NAMES").is_ok()
-            && (path.ends_with("stl_map.h") || path.ends_with("iostream"));
+        let tracing =
+            crate::probes::names() && (path.ends_with("stl_map.h") || path.ends_with("iostream"));
         if tracing {
             eprintln!(
                 "[names] insert_a_reading {}: sequence {:?} id {id} declarations {} diagnostics {:?}",
@@ -726,7 +726,7 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
-        if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        if crate::probes::allocs() {
             eprintln!(
                 "[cook] inserted {path}, cooked map now {}",
                 self.cooked.len()
@@ -1767,7 +1767,7 @@ impl ProjectIndex {
             }
         };
 
-        if std::env::var("CPPLS_TRACE_NAMES").is_ok()
+        if crate::probes::names()
             && let Narrow::Named(names) = narrow
             && names.iter().any(|name| *name == "cout" || *name == "map")
         {
@@ -3414,7 +3414,7 @@ impl ProjectIndex {
         const ALIAS_DEPTH: usize = 4;
 
         let mut rewritten = name.to_string();
-        let tracing = std::env::var("CPPLS_TRACE_ALIAS").is_ok();
+        let tracing = crate::probes::alias();
 
         for _ in 0..ALIAS_DEPTH {
             let segments: Vec<&str> = rewritten.split("::").collect();

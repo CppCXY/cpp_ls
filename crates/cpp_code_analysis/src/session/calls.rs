@@ -340,7 +340,7 @@ impl<F: FileProvider + Clone> Session<F> {
         });
         // **The environment a member's type is read in** — the class's parameters, the arguments the use wrote (or
         // the declaration's own defaults), and the class's own members, which is where a member alias lives.
-        if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+        if crate::probes::layout() {
             eprintln!(
                 "[layout] class {head:?} arguments {arguments:?} as-written {:?} members {}",
                 as_written
@@ -537,13 +537,13 @@ impl<F: FileProvider + Clone> Session<F> {
             None => spelling.to_string(),
         };
         let spelled = spelled.trim();
-        if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+        if crate::probes::layout() {
             eprintln!("[layout] depth {depth} size of {spelled:?}");
         }
         if let Some(environment) = instantiation
             && mentions_a_parameter(spelled, environment.parameters)
         {
-            if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+            if crate::probes::layout() {
                 eprintln!("[layout]   still a parameter");
             }
             return None;
@@ -593,12 +593,12 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             if let Some(target) = self.the_target_of_an_alias_template(&head, &resolved, &view.path)
             {
-                if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+                if crate::probes::layout() {
                     eprintln!("[layout]   alias template {head} -> {target}");
                 }
                 return self.the_size_of_a_type_in(view, &target, depth + 1, None);
             }
-            if std::env::var_os("CPPLS_TRACE_LAYOUT").is_some() {
+            if crate::probes::layout() {
                 eprintln!("[layout]   no class and no alias template for {head} with {resolved:?}");
             }
             return None;

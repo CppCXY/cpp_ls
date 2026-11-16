@@ -619,7 +619,7 @@ impl AnalysisState {
         let started = std::time::Instant::now();
         let permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
         let waited_for_a_permit = started.elapsed().as_millis() as u64;
-        let traced = std::env::var_os("CPPLS_TRACE_ALLOCS").is_some();
+        let traced = crate::probes::allocations();
 
         let inner = self.inner.clone();
         let gate = self.gate.clone().read_owned().await;

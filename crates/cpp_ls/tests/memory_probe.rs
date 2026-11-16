@@ -268,7 +268,12 @@ fn a_long_session_does_not_grow_without_bound() {
     // does: a language client asks for the outline, the lenses, the folds, the tokens, the hints and the pull, and
     // each of those is a different query over the same closure. The `containers.cpp` report is about *opening* the
     // file, so the probe has to make the same requests the client does, or it measures a smaller program.
-    if std::env::var_os("CPPLS_MEMORY_EDITOR").is_some() {
+    //
+    // **One of them, by name** — `CPPLS_MEMORY_EDITOR=inlayHint` — because the burst answers "the server grows" and
+    // not *which request* grows: each is a different path over the same closure, so isolating one is the only way to
+    // attribute a slope to a request rather than to the file being open.
+    let editor = std::env::var("CPPLS_MEMORY_EDITOR").ok();
+    if let Some(only) = &editor {
         let Some(target) = opened.first() else { return };
         let target_uri = uri_of(target);
         let position = json!({ "line": 20, "character": 8 });
@@ -311,6 +316,14 @@ fn a_long_session_does_not_grow_without_bound() {
             ),
         ];
         for (offset, (method, params)) in requests.into_iter().enumerate() {
+            // The switch is either the word `1`/`all` or the last segment of the method, so a run can ask for one.
+            let wanted = only.is_empty()
+                || only == "1"
+                || only == "all"
+                || method.ends_with(only.trim_start_matches("textDocument/"));
+            if !wanted {
+                continue;
+            }
             let started = Instant::now();
             client.request(500 + offset as i64, method, params);
             eprintln!(

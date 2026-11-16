@@ -19,10 +19,11 @@ const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[allow(unused)]
 pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send>> {
     // **The allocation counter, on only when a run is being read for it** — see `cpp_ls::note_allocation`.
-    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
-        crate::COUNT_ALLOCATIONS.store(true, std::sync::atomic::Ordering::Relaxed);
-        cpp_code_analysis::alloc::turn_on_from_the_environment();
-    }
+    //
+    // Read here, once, and everything that gates a memory trace on it asks the counter itself
+    // (`probes::allocations`), which is an atomic load: the pump loop reads this switch on every round, and a
+    // `std::env::var_os` there was a lock plus an `OsString` per round.
+    cpp_code_analysis::alloc::turn_on_from_the_environment();
     let (connection, threads) = match cmd_args.communication {
         cmd_args::Communication::Stdio => ::lsp_server::Connection::stdio(),
         cmd_args::Communication::Tcp => {

@@ -84,6 +84,19 @@ switch! {
     share => "CPPLS_WALK_SHARE", "Turn the walk cache's cross-walk contribution sharing **on** — an experiment switch, and off by default because the order is wrong: a contribution is replayed at the position it was recorded at in a *different* walk, which drops include edges. Measured on `import std;`: `<limits>` lost its `<cwchar>` and `<xstddef>` includes, so the `_MEMBER_CALL_*` macros were undefined where `<xtr1common>` uses them, and the standard module's rendering kept their invocations as text.";
     semantic => "CPPLS_TRACE_SEMANTIC", "Where one semantic-token request's milliseconds went: the phase, the encoding and how many tokens came out.";
     trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/parser-review.md` §4.";
+
+    // **The four that were read at a use site on a hot path** — the same defect this module removes, found in this
+    // crate by auditing for it rather than by waiting for a profile.
+    //
+    // `names` was the worst: `macro_walk` asked the environment **once per name** to decide whether to trace it, and
+    // `alias` did the same for the alias pass. `layout` is per call-layout question and `hover` is per view answer.
+    // None of them can change during a run, so the answer is now the same atomic load as every other switch.
+    names => "CPPLS_TRACE_NAMES", "One name, through the macro walk's own tables, at every lookup.";
+    alias => "CPPLS_TRACE_ALIAS", "One alias, through the alias pass.";
+    layout => "CPPLS_TRACE_LAYOUT", "Why a call's layout question answered what it answered.";
+    hover => "CPPLS_TRACE_HOVER", "Which rendering a hover card was answered from, and what it was built from.";
+    no_cooks => "CPPLS_NO_COOKS", "Do not cook anything, so a run measures the per-file index alone.";
+    allocs => "CPPLS_TRACE_ALLOCS", "Count every allocation and every free, so a stage's *held* bytes can be reported — see [`crate::alloc`]. The counter itself is what decides this; the switch exists so the code that turns it on reads the variable once.";
 }
 
 /// **Where the index writes the text it parses**, when the variable names a directory — `CPPLS_DUMP_RENDERING_DIR`.
@@ -93,7 +106,17 @@ switch! {
 /// `Session::render_the_unit` (a different rendering — measured: correct for the 28-line reproducer in
 /// `docs/buglist.md` §31, while the summary built here is wrong). One `.rendering` file per indexed file, named after
 /// it, written only when asked.
-pub const DUMP_RENDERING_DIR: &str = "CPPLS_DUMP_RENDERING_DIR";
+///
+/// **Read once**, like every switch: a directory's name cannot change during a run, and this is asked per indexed file.
+pub fn dump_rendering_dir() -> Option<&'static std::path::Path> {
+    static HELD: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        std::env::var_os("CPPLS_DUMP_RENDERING_DIR")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    })
+    .as_deref()
+}
 
 /// **Do not filter a candidate whose declaration is written in a `#if` region.**
 ///

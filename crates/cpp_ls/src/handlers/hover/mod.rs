@@ -429,7 +429,7 @@ fn hover_of_the_rendering(
     view: &FileView,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
-    let traced = std::env::var("CPPLS_TRACE_HOVER").is_ok();
+    let traced = crate::probes::hover();
     let mapped = session.the_rendering_offset(&view.path, in_the_file.get());
     if traced {
         eprintln!(
@@ -629,7 +629,7 @@ fn hover_of_the_program(
                 // template parameters** is the general one — a partial specialization is a narrower shape
                 // (`vector<bool>`'s pattern has one parameter, the primary's two), so the general one is what a
                 // spelling that did not write the specialization means.
-                if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
+                if crate::probes::hover() {
                     eprintln!(
                         "[types] {:?}",
                         found
@@ -1475,7 +1475,7 @@ fn declaration_markdown(
     } else {
         None
     };
-    if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
+    if crate::probes::hover() {
         eprintln!(
             "[card] heard {} local {} type_of {:?} => indexed {}",
             found.fact.name,
@@ -1570,7 +1570,7 @@ fn declaration_markdown(
         corrected.reflection = the_files.reflection.clone();
     }
     let fact = &corrected;
-    if std::env::var_os("CPPLS_DEBUG_CARD").is_some() {
+    if crate::probes::debug_card() {
         eprintln!(
             "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
             fact.name, fact.kind, fact.scope, fact.returns, fact.parameter_list, fact.range

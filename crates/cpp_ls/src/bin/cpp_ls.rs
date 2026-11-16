@@ -6,28 +6,30 @@ use std::error::Error;
 
 /// **mimalloc, plus a byte counter the pump can read** — see `cpp_ls::note_allocation` and `CPPLS_TRACE_ALLOCS`.
 /// The counting is off unless that variable is set, and the check is one relaxed load.
+///
+/// **Both halves are reported.** A counter that only sees allocations is a running total: it answers "how much churn
+/// did this stage cause", not "how much is it holding", and the two differ by an order of magnitude on a parse. The
+/// difference is the whole of [`cpp_code_analysis::alloc`]'s module documentation, and the reason the frees are here.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         cpp_ls::note_allocation(layout.size());
-        cpp_code_analysis::alloc::note(layout.size());
         unsafe { MiMalloc.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        cpp_ls::note_release(layout.size());
         unsafe { MiMalloc.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        cpp_ls::note_allocation(new_size);
-        cpp_code_analysis::alloc::note(new_size);
+        cpp_ls::note_reallocation(layout.size(), new_size);
         unsafe { MiMalloc.realloc(pointer, layout, new_size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         cpp_ls::note_allocation(layout.size());
-        cpp_code_analysis::alloc::note(layout.size());
         unsafe { MiMalloc.alloc_zeroed(layout) }
     }
 }

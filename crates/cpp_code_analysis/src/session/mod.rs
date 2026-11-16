@@ -224,8 +224,8 @@ const MACRO_SLICE: usize = 1;
 ///
 /// So it is deferred by an idle period, and the number is a person's typing rhythm rather than a benchmark: at 1 s, a
 /// reader who is mid-sentence defers it indefinitely (each keystroke pushes it out), and a reader who has stopped
-/// gets the whole closure queryable a second later. The *bound* on what a keystroke can then wait for is
-/// [`THE_LARGEST_PROGRAM_READ_AT_ONCE`], not this.
+/// gets the whole closure queryable a second later. What a keystroke can then wait for is the *walk*, which holds the
+/// read lock for 44 ms on the measured program — the cook and the parse come after it and hold no lock at all.
 const UNTIL_A_UNIT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// **How often a root's whole-program read is attempted before the session gives up on it.**
@@ -237,47 +237,20 @@ const UNTIL_A_UNIT_MAY_BE_READ: std::time::Duration = std::time::Duration::from_
 /// fourth would not learn anything the third did not.
 const PROGRAM_READ_ATTEMPTS: u8 = 3;
 
-/// **The largest program this session reads in one piece, in bytes of the source text it is made of.**
-///
-/// A unit read is linear in its program: **5.09 s for 7.07 MB of source** (159 files, 737 525 tokens; measured in
-/// `tests/unit_read_probe.rs` on a real project), i.e. 0.72 s per megabyte. Since the *reading* was split so that only
-/// its 44 ms walk holds a lock (`Session::gather_a_unit_read` → [`UnitReadMaterials::read_the_program`] →
-/// `Session::commit_a_unit_reading`), what this bounds is **background CPU and memory**, not a reader's keystroke:
-/// the middle phase needs no lock, so a keystroke during it is answered beside it.
-///
-/// Eight megabytes is ~5.8 s of one core, which is the largest that stays in the same order as the index itself — and
-/// it is deliberately **above** the program this was measured on (7.07 MB, MSVC's STL from one source), so a real
-/// translation unit of a real project is covered. A closure larger than this is either pathological or a mistake
-/// (a generated file included everywhere), and it keeps the per-file reading, which never blocks and never runs away.
-const THE_LARGEST_PROGRAM_READ_AT_ONCE: usize = 8 * 1024 * 1024;
-
-/// **What a program read costs in memory for each byte of the source it is made of** — the parse tree of the whole
-/// cooked stream, plus the facts the sweep files, plus the rendered text the sweep's spans point into. The tree alone
-/// is `docs/parser-review.md`'s 8–24× the source; measured on `test_cpp`, **one read of a 6 MB standard-heavy closure
-/// left the server ~280 MB of private bytes heavier**, which is ~48× the source — so the tree is not the only thing
-/// the read allocates, and the estimate has to cover all of it to be a budget rather than a wish.
-const PROGRAM_READ_BYTES_PER_SOURCE_BYTE: usize = 48;
-
-/// **How much a session may spend on whole-program reads before the rest of the files keep their own reading.**
-///
-/// A program read is the one operation that allocates hundreds of megabytes at once: the cooked stream of a
-/// `<iostream>` closure is a few megabytes of text, its tree is tens of times that, and the facts are another pass
-/// over it. Measured on `C:\Users\zc\Desktop\test_cpp` (sixteen small `.cpp` files, each including a handful of
-/// standard headers): **opening eight files left the server at 608 MB of private bytes while its own tables held
-/// 150 MB, and opening nineteen reached 5 GB** — the process's heap never gives back what one read's parse took, so
-/// every further open added another peak. The session's tables are all bounded; this is the allocation that is not.
-///
-/// So the reads are budgeted rather than counted: a reader opening one file (the ordinary case) always gets its
-/// program, and a client that opens twenty tabs gets the compiler's reading for the first ~500 MB of them and the
-/// per-file reading — which is what every file nobody has opened gets anyway — for the rest. `units_read` still says
-/// once per program, so a file refused here is not re-considered until the session restarts, unlike the size budget
-/// above.
-///
-/// **Five hundred and twelve megabytes is about one standard-heavy program**: a `<iostream>` closure is ~6 MB of
-/// source, ~288 MB by the estimate above, so two of them do not fit and the second file keeps its own reading. That
-/// is deliberate: one whole-program read is the useful unit (`the_program_to_read` reads one at a time), and the
-/// report this constant exists for was **5 GB from nineteen opened files**.
-const PROGRAM_READ_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+// **There were three size ceilings here, and all three were answering a question nobody had measured.**
+//
+// `THE_LARGEST_PROGRAM_READ_AT_ONCE` (8 MB of source) and `PROGRAM_READ_BUDGET_BYTES / PROGRAM_READ_BYTES_PER_TOKEN`
+// (1 342 177 tokens) refused to read a program at all, and the file kept the per-file reading; the byte estimate
+// `PROGRAM_READ_BYTES_PER_SOURCE_BYTE = 48` priced one before the walk. Their justification was "5 GB of private
+// bytes", read off a counter that only ever **added** — no free was subtracted — so it measured churn.
+//
+// Measured with a counter that counts both sides (`cpp_code_analysis::alloc`, and
+// `tests/cold_start_memory_probe.rs` which drives a whole session with it): a cold index of `test_cpp` holds 147 MB,
+// seventeen open files with the pump drained hold 250 MB (peak 281), and seventeen whole-program reads take it to
+// 478 MB (peak 528) — about 13 MB each, and 2.7–4.4 s each for 340 000–594 000 tokens. Churn does not inflate the
+// resident set at all: forty reads of a 218 KB header churn 1 723 MB in 32 million allocations and the working set
+// never leaves **11 MB**. The 4.5 GB was one request path — `docs/open-questions.md` has the measurement — and no
+// program is too large to read.
 
 /// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
 ///
@@ -757,9 +730,6 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
-    /// **What this session's whole-program reads have cost, in the same estimate as the budget above** — see
-    /// [`PROGRAM_READ_BUDGET_BYTES`]. Only grows; a read cannot be un-had.
-    program_read_bytes: usize,
     /// **Translation units the session has been told to read as programs** that are not open documents — the module
     /// interface units, in practice.
     ///

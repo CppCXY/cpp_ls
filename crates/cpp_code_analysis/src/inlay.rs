@@ -363,6 +363,22 @@ where
         // **Where a hint's milliseconds go**, when asked. One line per call separates them, and a
         // repeated callee spelling is visible in it.
         let trace = crate::probes::inlay();
+        // **Printed before the resolution, not only after it.** A call that never finishes never reaches the report
+        // below — measured: `inlayHint` on `containers.cpp` sat in one call for sixteen seconds and a gigabyte, and the
+        // last line the trace had printed was the call *before* it. This line is what names it.
+        if trace {
+            eprintln!(
+                "[inlay] resolving {}",
+                call.text()
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
+            );
+        }
         let started = std::time::Instant::now();
         // **The parameters of the call's declaration** — a function's own, or, when the callee names a **class**, the
         // constructor's. `Widget(3, 4)` is a temporary of `Widget`: the class's scope holds fields, but the class also

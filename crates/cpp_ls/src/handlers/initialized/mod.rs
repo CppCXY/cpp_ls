@@ -132,7 +132,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
             }
             // **`CPPLS_NO_WATCH` is an A/B switch, not a setting**: with it set no OS watcher runs, which is how a
             // run can tell whether the watcher's own loop is what burns a core and grows the process.
-            if std::env::var_os("CPPLS_NO_WATCH").is_some() {
+            if crate::probes::no_watch() {
                 log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
@@ -166,7 +166,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
     // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
     // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
     // counters stand still is neither of them.
-    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+    if crate::probes::allocations() {
         let watched = context.clone();
         tokio::spawn(async move {
             loop {
@@ -388,7 +388,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         loop {
             rounds += 1;
 
-            if rounds.is_multiple_of(1000) && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+            if rounds.is_multiple_of(1000) && crate::probes::allocations() {
                 eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
             }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
@@ -397,9 +397,9 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // manager" from "blocked on the analysis" from "blocked in the drain", and they cost nothing when the
             // level is not `trace`.
             log::trace!("pump: round");
-            let allocs_at_round_start = crate::allocated_bytes();
+            let live_at_round_start = crate::live_bytes();
             #[allow(unused_assignments)]
-            let mut allocs_after_wave = allocs_at_round_start;
+            let mut live_after_wave = live_at_round_start;
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -412,7 +412,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .with_snapshot(|session| session.next_open_file_to_read())
                 .flatten();
             if let Some(path) = &open_file
-                && std::env::var_os("CPPLS_TRACE_ALLOCS").is_some()
+                && crate::probes::allocations()
             {
                 eprintln!("[read] next open file to read: {}", path.display());
             }
@@ -458,7 +458,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
-            allocs_after_wave = crate::allocated_bytes();
+            live_after_wave = crate::live_bytes();
             log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held, committed)) = context
@@ -571,7 +571,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 drain_was_empty,
                 asked.len()
             );
-            let allocs_before_the_drain = crate::allocated_bytes();
+            let live_before_the_drain = crate::live_bytes();
             let (prepared_drain, cooks, cooking_revision) = context
                 .analysis()
                 .run_blocking("prepare the drain", move |session| {
@@ -584,9 +584,9 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 })
                 .await
                 .unwrap_or_default();
-            let allocs_after_the_drain = crate::allocated_bytes();
+            let live_after_the_drain = crate::live_bytes();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;
-            let allocs_after_the_renders = crate::allocated_bytes();
+            let live_after_the_renders = crate::live_bytes();
             let built: Vec<std::path::PathBuf> = rendered_cooks
                 .iter()
                 .map(|rendered| rendered.indexed.summary.path.clone())
@@ -596,7 +596,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
             // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
             log::trace!("pump: commit starts");
-            let allocs_after_the_commits = crate::allocated_bytes();
+            let live_after_the_commits = crate::live_bytes();
             let (re_read, cooked) = context
                 .analysis()
                 .update_session("index slice", |session| {
@@ -718,17 +718,29 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 }
             }
 
-            if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
-                let end = crate::allocated_bytes();
+            if crate::probes::allocations() {
+                let end = crate::live_bytes();
                 let sizes = context
                     .analysis()
                     .with_snapshot(|session| (session.cache_sizes(), session.memory_report()));
+                // **Live bytes, not churn.** Every previous version of this line subtracted a *running total*, so a
+                // stage that allocated 600 MB and freed it read the same as one that kept it, and the numbers were
+                // used to justify byte budgets that were regulating nothing. See
+                // [`cpp_code_analysis::alloc`]: a delta is signed here because a stage that frees is an answer too.
+                let delta = |from: usize, to: usize| (to as i64 - from as i64) / (1024 * 1024);
                 eprintln!(
-                    "[allocs] wave {} MB, drain {} MB, renders {} MB, commit {} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, prefetched {} ({} MB), session tables {} MB (until end {} MB)",
-                    (allocs_after_wave - allocs_at_round_start) / (1024 * 1024),
-                    (allocs_before_the_drain - allocs_after_wave) / (1024 * 1024),
-                    (allocs_after_the_renders - allocs_after_the_drain) / (1024 * 1024),
-                    (allocs_after_the_commits - allocs_after_the_renders) / (1024 * 1024),
+                    "[memory] live {} MB (peak {} MB, churn {} MB) | wave {:+} MB, drain {:+} MB, renders {:+} MB, \
+                     commit {:+} MB, tail {:+} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, \
+                     re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, prefetched {} ({} \
+                     MB), session tables {} MB",
+                    end / (1024 * 1024),
+                    crate::peak_bytes() / (1024 * 1024),
+                    crate::allocated_bytes() / (1024 * 1024),
+                    delta(live_at_round_start, live_after_wave),
+                    delta(live_after_wave, live_before_the_drain),
+                    delta(live_after_the_drain, live_after_the_renders),
+                    delta(live_after_the_renders, live_after_the_commits),
+                    delta(live_after_the_commits, end),
                     sizes.as_ref().map_or(0, |(sizes, _)| sizes.summaries),
                     sizes.as_ref().map_or(0, |(_, report)| report.prefetched),
                     sizes
@@ -743,11 +755,10 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                             + report.rendering_bytes)
                             / (1024 * 1024)
                     }),
-                    (end - allocs_after_the_commits) / (1024 * 1024),
                 );
                 // **Which table grew**, when the question is a leak rather than a stage: the one line above names the
                 // total, and a total that climbs with `pending 0` and nothing cooked is the report this exists for.
-                if std::env::var_os("CPPLS_TRACE_MEMORY").is_some()
+                if crate::probes::memory_tables()
                     && let Some((_, report)) = &sizes
                 {
                     eprintln!("[tables] {report}");
@@ -978,7 +989,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // **An experiment switch**: a whole-program read is the session's largest single piece of work, and
                 // `CPPLS_NO_PROGRAM_READ` is how a run tells its cost from the pump's — the same shape as
                 // `CPPLS_NO_COOKS`.
-                && std::env::var_os("CPPLS_NO_PROGRAM_READ").is_none()
+                && !crate::probes::no_program_read()
                 && let Some(wait) = context
                     .analysis()
                     .with_snapshot(
@@ -986,7 +997,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     )
                     .flatten()
             {
-                if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+                if crate::probes::allocations() {
                     eprintln!(
                         "[program] a program read is owed (wait zero: {})",
                         wait.is_zero()

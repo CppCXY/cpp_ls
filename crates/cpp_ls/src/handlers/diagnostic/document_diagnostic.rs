@@ -21,7 +21,7 @@ pub async fn on_pull_document_diagnostic(
             message: format!("diagnostics require a file URI: {}", uri.as_str()),
         };
     };
-    let allocs_at_the_pull = cpp_code_analysis::alloc::bytes();
+    let live_at_the_pull = cpp_code_analysis::alloc::live();
     let prepared = tokio::select! {
         _ = cancel_token.cancelled() => return RequestOutcome::Cancelled(CancelSource::Client),
         prepared = context.analysis().prepare_for_a_diagnostic(&path) => prepared,
@@ -33,38 +33,38 @@ pub async fn on_pull_document_diagnostic(
         };
     }
 
-    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+    if crate::probes::allocations() {
         eprintln!(
             "[pull] prepare done, {} MB",
-            (cpp_code_analysis::alloc::bytes() - allocs_at_the_pull) / (1024 * 1024)
+            signed(live_at_the_pull, cpp_code_analysis::alloc::live())
         );
     }
-    let allocs_before_the_query = cpp_code_analysis::alloc::bytes();
+    let live_before_the_query = cpp_code_analysis::alloc::live();
     let for_the_query = path.clone();
     let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
-        let before = cpp_code_analysis::alloc::bytes();
+        let before = cpp_code_analysis::alloc::live();
         let answer = super::diagnose_file(session, &for_the_query).map(|(_, items)| items);
-        if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+        if crate::probes::allocations() {
             eprintln!(
                 "[pull] diagnose_file asked for {} MB",
-                (cpp_code_analysis::alloc::bytes() - before) / (1024 * 1024)
+                signed(before, cpp_code_analysis::alloc::live())
             );
         }
         // **A pull is where a session's tables are biggest**, so it is where the breakdown is worth printing: the
         // report is the session's own accounting, not the resident set, and the two differ by the allocator's slack —
         // which is the number a "memory keeps growing" report is about. `CPPLS_TRACE_MEMORY=1` in the server's
         // environment.
-        if std::env::var_os("CPPLS_TRACE_MEMORY").is_some() {
+        if crate::probes::memory_tables() {
             eprintln!("[memory] pull: {}", session.memory_report());
         }
         answer
     })
     .await;
 
-    if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+    if crate::probes::allocations() {
         eprintln!(
             "[pull] query returned, {} MB after the prepare",
-            (cpp_code_analysis::alloc::bytes() - allocs_before_the_query) / (1024 * 1024)
+            signed(live_before_the_query, cpp_code_analysis::alloc::live())
         );
     }
     match outcome {
@@ -79,6 +79,12 @@ pub async fn on_pull_document_diagnostic(
         RequestOutcome::Cancelled(source) => RequestOutcome::Cancelled(source),
         RequestOutcome::Failed { code, message } => RequestOutcome::Failed { code, message },
     }
+}
+
+/// **The change in live bytes between two points, in megabytes and signed** — a stage that frees is an answer too, and
+/// the trace this feeds used to subtract a running total, which cannot be negative and so could not say so.
+fn signed(from: usize, to: usize) -> i64 {
+    (to as i64 - from as i64) / (1024 * 1024)
 }
 
 fn full_report(items: Vec<Diagnostic>) -> DocumentDiagnosticReportResult {

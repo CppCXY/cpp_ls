@@ -472,6 +472,9 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     // query the deduction walks anyway, and every member of a class template carries the class's parameters
     // (`DeclFact::parameters` is what pairs them with a use's arguments), so the fallback is not a second guess: it is the
     // same field, read from a fact that is in hand.
+    //
+    // **Two lookups, and no walk, before the standard's own guides are consulted** — see below for why the order is the
+    // whole of this change.
     let declared = index
         .definitions(name, path)
         .value()
@@ -486,6 +489,25 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         Some(declaration) => declaration.fact.qualified_name(),
         None => name.clone(),
     };
+
+    // **The standard's own guides, before the walk that reads a class's members.** The library's constructors are
+    // constrained templates (`tuple(_UElements&&...) requires …`), which no pairing of the class's parameters can read;
+    // the guide is a fact about the standard rather than about the text, so it needs neither the declaration's
+    // parameters nor the member list.
+    //
+    // **It used to sit below `members_of`, and that is the defect this fixes.** `members_of` is the one call here that
+    // costs more than a query: measured on `std::tuple tuple{1, 2.5, std::string{"three"}}` in a nine-line file, listing
+    // the members of a class template whose base is written in the pack (`tuple` inherits `_Tuple_impl<0, _Elements...>`,
+    // which inherits `_Tuple_impl<1, …>`) took the server **16–20 seconds and 1–2 GB** for one inlay hint, and the
+    // request never came back inside the client's deadline. The answer the table holds was available before the walk
+    // started: a table that exists so that a walk is unnecessary cannot be read after it.
+    if let Some(deduced) = the_deduction_the_standard_fixes(name, &class_as_written, &element_types)
+    {
+        return Some(crate::sema::types::Type::Named {
+            name: class_as_written,
+            arguments: deduced,
+        });
+    }
     let constructor_name = class_as_written
         .rsplit("::")
         .next()
@@ -502,16 +524,6 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
             .find(|member| !member.fact.parameters.is_empty())
             .map(|member| member.fact.parameters.clone())?,
     };
-    // **The standard's own guides, before the constructors are walked.** The library's constructors are constrained
-    // templates (`tuple(_UElements&&...) requires …`), which no pairing of the class's parameters can read; the guide is a
-    // fact about the standard rather than about the text. See [`the_deduction_the_standard_fixes`].
-    if let Some(deduced) = the_deduction_the_standard_fixes(name, &class_as_written, &element_types)
-    {
-        return Some(crate::sema::types::Type::Named {
-            name: class_as_written,
-            arguments: deduced,
-        });
-    }
 
     if parameters.is_empty() {
         return None;
@@ -1397,12 +1409,23 @@ pub(crate) fn members_of_inner(
                 // kept `A`, so the trait was asked about the parameter instead of `allocator<int>`, matched no
                 // specialization, and took the primary `false_type` branch — `size_type` came from
                 // `_Normal_allocator_traits` where the right answer was `_Default_allocator_traits`'s.
-                .map(|written| {
-                    (
-                        substitute_a_base_clause(index, path, &with_arguments, &written),
-                        class.to_string(),
-                    )
-                })
+                .map(|written| substitute_a_base_clause(index, path, &with_arguments, &written))
+                // **A clause that is not a type is a gap, not a level** — the same rule the walk below applies, and
+                // it has to be applied here too: `std::tuple`'s own base is `_Tuple_impl<0, _Elements...>`, so this is
+                // the clause that started the unbounded walk. See [`why_a_clause_cannot_be_walked`].
+                .filter(
+                    |substituted| match why_a_clause_cannot_be_walked(substituted) {
+                        Some(reason) => {
+                            list.unlisted.push(UnlistedBase {
+                                spelling: substituted.clone(),
+                                reason,
+                            });
+                            false
+                        }
+                        None => true,
+                    },
+                )
+                .map(|substituted| (substituted, class.to_string()))
                 .collect(),
             Known::Unknown(reason) => {
                 list.unlisted.push(UnlistedBase {
@@ -1431,6 +1454,13 @@ pub(crate) fn members_of_inner(
             };
             if !visited.insert(shown.clone()) {
                 continue;
+            }
+            // **Every level, when the walk is being read.** A member list that never returns is a walk whose *spellings*
+            // never repeat, and the spellings are the thing to look at: `_Tuple_impl<0, _Elements...>` is a base that
+            // becomes `_Tuple_impl<0 + 1, _Elements...>` one level down, which is a new type every time and therefore an
+            // unbounded number of levels. `CPPLS_TRACE_MEMBERS=1`.
+            if crate::probes::members() {
+                eprintln!("[members] {class} level {depth}: {shown}");
             }
 
             // **A base clause whose head is an *alias template* is not a class.** `conditional_t<…>` is a Type fact
@@ -1519,7 +1549,18 @@ pub(crate) fn members_of_inner(
                         .filter(|clause| {
                             !names_a_template_parameter(base_type_name(clause), &parameters)
                         })
-                        .map(|clause| (clause, base.clone())),
+                        // **The same rule as the first level** — see [`why_a_clause_cannot_be_walked`], which is
+                        // where the measurement that makes this necessary is written down.
+                        .filter_map(|clause| match why_a_clause_cannot_be_walked(&clause) {
+                            Some(reason) => {
+                                list.unlisted.push(UnlistedBase {
+                                    spelling: clause,
+                                    reason,
+                                });
+                                None
+                            }
+                            None => Some((clause, base.clone())),
+                        }),
                 ),
                 Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
                     spelling: base,
@@ -1609,6 +1650,45 @@ pub(crate) fn the_base_clauses_of(
         return Known::Yes(candidates[at].fact.bases.clone());
     }
     bases_of(index, scopes, root, path, class)
+}
+
+/// **Why a substituted base clause cannot be walked into** — the two shapes substitution produces that are not types.
+///
+/// The base walk terminates on a **repeated spelling**: a level is skipped when `visited` already holds it. That is a
+/// proof of termination only if the spellings a level can produce are finite, and substitution can produce an *unbounded
+/// family* of them:
+///
+/// ```text
+/// level 1  std::_Tuple_impl<0, _Elements...>
+/// level 2  std::_Tuple_impl<0 + 1, _Tail...>
+/// level 3  std::_Tuple_impl<0 + 1 + 1, _Tail...>
+/// level 4  std::_Tuple_impl<0 + 1 + 1 + 1, _Tail...>     …
+/// ```
+///
+/// — the log of `members_of("std::tuple")` on `test_cpp/src/containers.cpp`, one `_Head_base<0 + 1 + 1, _Head>` beside
+/// each level. The two reasons the walk cannot stop are also the two reasons it should never have started:
+///
+/// * **`_Elements...` is a pack with nothing to expand it.** The clause names a type per argument, and a class asked
+///   about **without** its arguments has none: no level of this walk will ever supply them, so the clause is unwritable
+///   at every depth.
+/// * **`0 + 1` is an expression where a type belongs.** `_Idx + 1` was substituted as *text*, because this layer does
+///   not constant-fold, and each level then writes one more `+ 1` into the spelling. (Substitution joins with spaces, so
+///   the operator is spelled ` + `; no *type* argument has one.)
+///
+/// Both are recorded as a gap — [`UnlistedBase`] is the field that exists to say where an answer stops — instead of
+/// being walked. This is not a bound on the work: it is the observation that the clause names nothing, so there is no
+/// level to enter. Measured before it: `inlayHint` on a nine-line file containing `std::tuple tuple{1, 2.5, s}` never
+/// returned (120 s, the client's deadline) and the server reached **2 GB**; `members_of("std::tuple")` was still walking
+/// **ten minutes** in with **843 MB** held and no answer.
+fn why_a_clause_cannot_be_walked(clause: &str) -> Option<UnknownReason> {
+    if clause.contains("...") {
+        return Some(UnknownReason::UnknownType(Box::from(clause)));
+    }
+    const OPERATORS: [&str; 6] = [" + ", " - ", " * ", " / ", " % ", " << "];
+    if OPERATORS.iter().any(|operator| clause.contains(operator)) {
+        return Some(UnknownReason::UnknownType(Box::from(clause)));
+    }
+    None
 }
 
 /// **A base clause with the current level's arguments substituted into it** — `_Vector_base<_Tp, _Alloc>` asked of

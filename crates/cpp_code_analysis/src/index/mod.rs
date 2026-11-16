@@ -411,9 +411,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `Session::render_the_unit` is a different rendering (measured: correct for the 28-line reproducer in
         // `docs/buglist.md` §31, while the summary this function builds is wrong). So the one text that matters gets a
         // way out, off unless asked for, like this crate's other traces.
-        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
-            let directory = std::path::PathBuf::from(directory);
-            let _ = std::fs::create_dir_all(&directory);
+        if let Some(directory) = crate::probes::dump_rendering_dir() {
+            let _ = std::fs::create_dir_all(directory);
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -638,9 +637,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **The whole stream, its file boundaries and its file list**, when a dump directory is named: the only way
         // to see which file's text a wrong scope came from — the rendering has no file markers in it, and the
         // boundaries are what say where one file stops.
-        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
-            let directory = std::path::PathBuf::from(directory);
-            let _ = std::fs::create_dir_all(&directory);
+        if let Some(directory) = crate::probes::dump_rendering_dir() {
+            let _ = std::fs::create_dir_all(directory);
             let _ = std::fs::write(directory.join("unit.stream"), &stream.text);
             let boundaries: Vec<String> = stream
                 .file_boundaries()
@@ -804,9 +802,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The text this summary is built from, when `CPPLS_DUMP_RENDERING_DIR` names a directory — the companion of the
         // same hook in [`FileIndexer::index_rendering`], and the only way to see which reading a wrong answer came
         // from when the file's own text parses correctly.
-        if let Some(directory) = std::env::var_os(crate::probes::DUMP_RENDERING_DIR) {
-            let directory = std::path::PathBuf::from(directory);
-            let _ = std::fs::create_dir_all(&directory);
+        if let Some(directory) = crate::probes::dump_rendering_dir() {
+            let _ = std::fs::create_dir_all(directory);
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())

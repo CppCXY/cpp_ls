@@ -1241,13 +1241,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// fact lost. The cause was the one `index_unit_rendering`'s crossing fence now quarantines — a file whose
     /// unclosed scope used to swallow the rest of the program.
     pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
-        let cost = self.the_cost_of_reading_a_program(root);
         let gathering = std::time::Instant::now();
         let prepared = self.prepare_a_unit_reading(root)?;
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
         let reading = self.commit_a_unit_reading(prepared)?;
-        self.program_read_bytes = self.program_read_bytes.saturating_add(cost);
         if crate::probes::units() {
             eprintln!(
                 "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
@@ -1295,17 +1293,15 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// **The next file whose whole program is worth reading** — an open file the program of which nobody has read,
-    /// whose program is small enough that reading it cannot make a keystroke wait
-    /// ([`THE_LARGEST_PROGRAM_READ_AT_ONCE`]), and — the clock — which nothing has been typed into for a moment.
+    /// and — the clock — which nothing has been typed into for a moment.
     ///
     /// Open files only, in the order the client sent them: a project with two hundred translation units does not
     /// read two hundred programs because one file is open. `units_read` is what makes it once per program, and it is
     /// keyed by the root rather than by the program's bytes because the root is what the schedule iterates.
     ///
-    /// A file that is open but **over budget** is never marked read, so it is re-considered on every drain — that is
-    /// a closure walk of hash lookups (the texts are held), and it is what lets the program be read later if the file
-    /// is edited down or the configuration shrinks it. The alternative — marking it read — would make the budget
-    /// permanent for a file that merely started large.
+    /// **Nothing here prices a program.** Two bounds used to — a source size and a session-wide byte budget — and both
+    /// were removed when a counter that counts frees showed what they were bounding: seventeen whole-program reads take
+    /// a session from 250 MB to 478 MB of live bytes. See the note where the constants were, in `session/mod.rs`.
     ///
     /// [`Session::the_next_unit_to_read`] is the same question without the clock, for a caller that is itself the
     /// signal that now is a good moment (`Session::read_a_looked_at_unit`).
@@ -1331,17 +1327,11 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
         wanted.sort();
         if let Some(unit) = wanted.into_iter().next() {
-            // The size budget does not apply to a module unit: its closure is the standard library and is larger than
-            // the budget by construction, so refusing it is refusing the module.
             return Some(unit);
         }
 
         let open = self.documents.paths().into_iter().find(|path| {
             !self.units_read.contains(&queue_key(path))
-                && !self.the_program_is_too_large_to_read_at_once(path)
-                // **And the memory budget**, which is what stops twenty open tabs from costing twenty programs'
-                // worth of heap: see [`PROGRAM_READ_BUDGET_BYTES`].
-                && self.program_read_bytes + self.the_cost_of_reading_a_program(path) <= PROGRAM_READ_BUDGET_BYTES
                 // **A file that imports a module is not read as a program.** Its `import std;` is not an `#include`:
                 // the unit walk would read the file *alone* — measured, 1 file and 33 tokens — and replace its
                 // rendering with one that has no `std` in it at all, after which every completion in the file is
@@ -1358,11 +1348,8 @@ impl<F: FileProvider + Clone> Session<F> {
             return open;
         }
 
-        // **Then the module interface units**, which are units of the project too and are nobody's open document. The
-        // size budget does not apply to them: it exists to keep a *keystroke* from waiting for a program the reader is
-        // not looking at, and a module unit's read is what `import std;` answers from — `bits/std.cc`'s closure is
-        // larger than the budget by construction (it is the whole standard library), so refusing it is refusing the
-        // module.
+        // **Then the module interface units**, which are units of the project too and are nobody's open document — the
+        // same list the walk above started from, and answered here for a root that a document did not supply.
         let mut wanted: Vec<PathBuf> = self
             .programs_wanted
             .iter()
@@ -1382,32 +1369,11 @@ impl<F: FileProvider + Clone> Session<F> {
     // What is lost is only ⑲'s widest case — the same header read two ways by two programs *neither of which is
     // open*. Everything a reader can look at keeps its per-program reading.
 
-    /// **Is this program over [`THE_LARGEST_PROGRAM_READ_AT_ONCE`]?** — asked before the read, so a keystroke never
-    /// waits for one that is too big.
-    ///
-    /// The size is the source text of the closure, which is what the read is linear in and what is cheap to know: the
-    /// walks the index already did give the file list, and the VFS is holding the texts (a file it is not holding is
-    /// counted as empty here and read by the walk itself). A file the index cannot describe has no closure and is
-    /// therefore not too large — the read will fail on its own terms.
-    /// **What reading this program is expected to allocate** — the same closure sum the size budget walks, times
-    /// [`PROGRAM_READ_BYTES_PER_SOURCE_BYTE`].
-    pub(crate) fn the_cost_of_reading_a_program(&self, root: &Path) -> usize {
-        let bytes: usize = self
-            .closure_paths_from(root, None)
-            .iter()
-            .map(|path| self.text(path).map_or(0, |text| text.len()))
-            .sum();
-        bytes.saturating_mul(PROGRAM_READ_BYTES_PER_SOURCE_BYTE)
-    }
-
-    pub(crate) fn the_program_is_too_large_to_read_at_once(&self, root: &Path) -> bool {
-        let bytes: usize = self
-            .closure_paths_from(root, None)
-            .iter()
-            .map(|path| self.text(path).map_or(0, |text| text.len()))
-            .sum();
-        bytes > THE_LARGEST_PROGRAM_READ_AT_ONCE
-    }
+    // **The two questions that priced a program are gone** — `the_program_is_too_large_to_read_at_once` and
+    // `the_cost_of_reading_a_program`. They summed the closure's source bytes and compared that against an eight-megabyte
+    // ceiling and a session-wide 512 MB budget, and their justification was a counter that only ever added: measured
+    // with one that counts frees as well, seventeen whole-program reads take a session from 250 MB to 478 MB of live
+    // bytes. Nothing prices a program now; `docs/open-questions.md` records the measurement that removed them.
 
     /// **The project's translation units, read once each** — what the pump calls when its queue drains.
     ///

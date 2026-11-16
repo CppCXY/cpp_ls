@@ -433,7 +433,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     path.display()
                 );
             }
-            if std::env::var_os("CPPLS_TRACE_ALLOCS").is_some() {
+            if crate::probes::allocs() {
                 eprintln!(
                     "[cook] committing {} with {} declaration(s)",
                     path.display(),
@@ -481,7 +481,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn claim_cooking(&mut self, how_many: usize) -> Vec<PathBuf> {
         // **An A/B for the measurement, not a setting**: with `CPPLS_NO_COOKS` set the pump cooks nothing, which
         // is how much of the `containers.cpp` growth is the cooking pass itself rather than the indexing.
-        if std::env::var_os("CPPLS_NO_COOKS").is_some() {
+        if crate::probes::no_cooks() {
             return Vec::new();
         }
         self.cooking.take(how_many)

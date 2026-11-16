@@ -1305,16 +1305,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
         let committed = self.commit_a_unit_reading(prepared)?;
-        // **The budget is charged here, which is the one place every path goes through.** It used to be charged in
-        // [`Session::read_the_unit`] only, and the pump does not take that path — it takes
-        // `AnalysisState::read_a_program`, which calls [`Session::commit_a_program`] directly. So
-        // [`PROGRAM_READ_BUDGET_BYTES`], the ceiling that exists so twenty open tabs do not cost twenty programs'
-        // worth of heap, was never paid by the only caller that reads in bulk: measured on `test_cpp` with twenty
-        // files open and **no request at all**, 1 094 MB in 34 s (killed by a 1 GB cap) with the session's own
-        // tables at ~75 MB, and the same run flat at **511 MB for 60 s** with `CPPLS_NO_PROGRAM_READ=1`.
-        self.program_read_bytes = self
-            .program_read_bytes
-            .saturating_add(self.the_cost_of_reading_a_program(root));
+        // **Nothing is charged for it.** This used to add the read's priced cost to `program_read_bytes`, the session's
+        // budget for whole-program reads — and the number that budget existed for (1 094 MB in 34 s on `test_cpp` with
+        // twenty files open) came from a counter that only ever added, so it was churn. The budget and the pricing are
+        // both gone; see the note where the constants were in `session/mod.rs`.
         self.units_read.insert(queue_key(root));
         #[cfg(feature = "perf-probe")]
         crate::perf::mark("commit");

@@ -419,68 +419,6 @@ pub(crate) fn a_conditional_macros_value_is_folded_when_every_definition_agrees(
     );
 }
 
-/// **A program read is charged to a memory budget, not only counted** — see [`PROGRAM_READ_BUDGET_BYTES`].
-///
-/// The measurement this guards: opening nineteen files left the server at **5 GB of private bytes**, because each
-/// opened file's program read allocates ~280 MB of parse tree and facts at once and the heap never gives it back.
-/// The budget refuses further reads once it is spent, and the file keeps the per-file reading — the same reading
-/// every file nobody has opened has.
-#[test]
-pub(crate) fn a_session_stops_reading_programs_once_its_memory_budget_is_spent() {
-    let main = "#include \"api.h\"\nApi a;\n";
-    let second = "#include \"api.h\"\nApi b;\n";
-    let files = MemoryFiles::new()
-        .with_file("/p/api.h", "struct Api { int x; };\n")
-        .with_file("/p/main.cpp", main)
-        .with_file("/p/second.cpp", second);
-    let fixture = Memory::new("a-program-read-budget", &files);
-    let mut session = fixture.session();
-    session.did_open("/p/main.cpp", main);
-    session.did_open("/p/second.cpp", second);
-    session.index_everything();
-    session.pretend_a_pause(
-        crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1),
-    );
-
-    assert!(
-        session.the_program_to_read().is_some(),
-        "nothing has been read yet, so one file's program is next"
-    );
-    session.program_read_bytes = crate::session::PROGRAM_READ_BUDGET_BYTES;
-    assert_eq!(
-        session.the_program_to_read(),
-        None,
-        "the budget is spent, so no file's program is read"
-    );
-    session.program_read_bytes = 0;
-    assert!(
-        session.the_program_to_read().is_some(),
-        "and the budget is what refused it, not something about these files"
-    );
-}
-
-/// **And a read is what spends it** — the other half of the gate: a budget nothing charges is a budget that never
-/// fires, which would read every program the client opens.
-#[test]
-pub(crate) fn a_program_read_is_charged_to_the_budget() {
-    let main = "#include \"api.h\"\nApi a;\n";
-    let files = MemoryFiles::new()
-        .with_file("/p/api.h", "struct Api { int x; };\n")
-        .with_file("/p/main.cpp", main);
-    let fixture = Memory::new("a-program-read-is-charged", &files);
-    let mut session = fixture.session();
-    session.did_open("/p/main.cpp", main);
-    session.index_everything();
-    assert_eq!(session.program_read_bytes, 0, "nothing read yet");
-
-    let read = session.read_the_unit(Path::new("/p/main.cpp"));
-    assert!(read.is_some(), "the fixture's program is readable");
-    assert!(
-        session.program_read_bytes > 0,
-        "and what the read cost is charged to the budget"
-    );
-}
-
 /// **A header is read in one translation unit's context, and it is the same one every time.**
 ///
 /// Nothing in the language says which translation unit a header is "in": the analysis reads it with the macros of
@@ -693,58 +631,49 @@ pub(crate) fn a_rendering_view_survives_twelve_buffer_views() {
     );
 }
 
-/// **A program read charges the budget that bounds it** — the ceiling that keeps twenty open tabs from costing
-/// twenty programs' worth of heap.
+/// **Every open file gets its program, and nothing prices one.**
 ///
-/// The charge used to live in `Session::read_the_unit` only, and the pump does not take that path: it calls
-/// `Session::commit_a_program` directly (`AnalysisState::read_a_program`), so `PROGRAM_READ_BUDGET_BYTES` was never
-/// paid by the only caller that reads in bulk. Measured on `test_cpp` with twenty files open and **no request at
-/// all**: 1 094 MB in 34 s (killed by a 1 GB cap) against **511 MB flat for 60 s** with `CPPLS_NO_PROGRAM_READ=1`.
+/// This replaces three tests that measured a ceiling which no longer exists — a source-size limit and a session-wide
+/// byte budget, both of which refused to read a program and left the file with the per-file reading. Their number was
+/// "5 GB of private bytes", read off a counter that only ever **added**: measured with one that counts frees, a cold
+/// index of `test_cpp` holds 147 MB, seventeen open files with the pump drained hold 250 MB, and seventeen
+/// whole-program reads take it to 478 MB (peak 528) — about 13 MB each. See `tests/cold_start_memory_probe.rs` and
+/// `docs/open-questions.md`.
+///
+/// What is left to hold a session to is the contract the schedule always had: one program per open file, in the order
+/// the client opened them, and each one marked read so it is not chosen again.
 #[test]
-pub(crate) fn a_program_read_charges_the_budget_that_bounds_it() {
-    let a = "#include \"a.h\"\nint main() { return 0; }\n";
+pub(crate) fn every_open_file_gets_its_program() {
+    let main = "#include \"api.h\"\nApi a;\n";
+    let second = "#include \"api.h\"\nApi b;\n";
     let files = MemoryFiles::new()
-        .with_file("/p/a.cpp", a)
-        .with_file("/p/a.h", "struct Widget { int size; };\n");
-    let fixture = Memory::new("a-program-read-is-priced", &files);
+        .with_file("/p/api.h", "struct Api { int x; };\n")
+        .with_file("/p/main.cpp", main)
+        .with_file("/p/second.cpp", second);
+    let fixture = Memory::new("every-open-file-gets-its-program", &files);
     let mut session = fixture.session();
-    session.add_project_files([PathBuf::from("/p/a.cpp")]);
-    session.did_open("/p/a.cpp", a);
+    session.did_open("/p/main.cpp", main);
+    session.did_open("/p/second.cpp", second);
     session.index_everything();
     session.pretend_a_pause(std::time::Duration::from_millis(1_100));
 
-    assert_eq!(session.program_read_bytes, 0, "nothing was read yet");
-    let reading = session
-        .read_a_program_now()
-        .expect("the reader's own program is read");
-    assert_eq!(reading.root, Path::new("/p/a.cpp"));
-    let priced = session.the_cost_of_reading_a_program(Path::new("/p/a.cpp"));
-    assert!(priced > 0, "a program with a closure costs something");
-    assert_eq!(
-        session.program_read_bytes, priced,
-        "the read is charged what it costs, which is what makes the budget a budget"
-    );
-}
-
-/// **A program read that never happens is never charged** — the other half of the rule above, and the reason a
-/// declined read cannot exhaust the budget the next file needs.
-#[test]
-pub(crate) fn a_program_read_that_declines_charges_nothing() {
-    let files = MemoryFiles::new()
-        .with_file("/p/a.cpp", "int main() { return 0; }\n")
-        .with_file("/p/b.cpp", "int other() { return 0; }\n");
-    let fixture = Memory::new("a-declined-program-read-is-free", &files);
-    let mut session = fixture.session();
-    session.add_project_files([PathBuf::from("/p/a.cpp"), PathBuf::from("/p/b.cpp")]);
-    session.index_everything();
-    // Nothing is open and the project declined its unopened roots, so no program is owed at all.
+    let first = session
+        .the_program_to_read()
+        .expect("the first open file's program is next");
     assert!(
-        session.the_program_to_read().is_none(),
-        "nothing is owed without an open file"
+        session.read_a_program_now().is_some(),
+        "and it is read when the session gets the chance"
     );
-    assert!(session.read_a_program_now().is_none());
+
+    let next = session
+        .the_program_to_read()
+        .expect("the second open file's program is next, with no budget in the way");
+    assert_ne!(first, next, "a read file is not chosen twice");
+
+    session.read_a_program_now();
     assert_eq!(
-        session.program_read_bytes, 0,
-        "a read that never happened is not charged"
+        session.the_program_to_read(),
+        None,
+        "both were read, and the schedule is empty rather than refusing anything"
     );
 }

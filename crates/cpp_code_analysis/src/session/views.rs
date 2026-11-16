@@ -206,7 +206,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(requested)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| requested.to_path_buf());
-        let traced = std::env::var("CPPLS_TRACE_HOVER").is_ok();
+        let traced = crate::probes::hover();
         let file = self.vfs.held(&key)?;
         let rendered = self.known_rendering_of(&file.path, &file.text);
         if traced {

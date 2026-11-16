@@ -603,24 +603,22 @@ pub(crate) fn a_program_is_read_when_the_reader_stops_editing() {
     );
 }
 
-/// **A program too large to read inside a keystroke's budget is left to the per-file reading.**
-///
-/// The other half of the schedule above. A unit read is linear in its program — 0.72 s per megabyte of source
-/// measured — and its preparing half holds the read lock, so a program over
-/// [`THE_LARGEST_PROGRAM_READ_AT_ONCE`] would make a keystroke wait longer than the server's own write budget. Such a
-/// program is not read as one piece: it keeps the per-file reading, which answers for the file a query names and
-/// never blocks anybody.
-///
-/// The fixture is the same shape with one big comment-only header in the middle, so the *choice* is the only thing
-/// that differs between the two tests.
+/// **A program of any size is the program to read.** This used to be the other half of the schedule: a program over
+/// eight megabytes of source was refused, because a unit read is linear in its program and its preparing half held the
+/// read lock. Measured with a counter that counts frees as well as allocations, the size was never the problem — a
+/// 159-file program is 5.09 s and ~28 MB of live bytes — and the ceiling only made a reader's file keep the per-file
+/// reading. The fixture is the same shape as the test above, with one large comment-only header in the closure, so the
+/// schedule is the only thing that differs between them.
 #[test]
-pub(crate) fn a_program_too_large_to_read_at_once_is_left_alone() {
-    // A comment block just over the budget: the file is in the program's closure and contributes nothing but bytes,
-    // which is exactly what the budget is about. Sized from the constant rather than written out, so that raising the
-    // budget cannot quietly turn this test into the one above.
+pub(crate) fn a_program_of_any_size_is_the_program_to_read() {
+    // Bigger than the old ceiling, and sized from the text rather than from a constant that no longer exists.
     let line = "// padding padding padding padding\n";
-    let big = line.repeat(crate::session::THE_LARGEST_PROGRAM_READ_AT_ONCE / line.len() + 1);
-    assert!(big.len() > crate::session::THE_LARGEST_PROGRAM_READ_AT_ONCE);
+    let big = line.repeat((9 * 1024 * 1024) / line.len() + 1);
+    assert!(
+        big.len() > 8 * 1024 * 1024,
+        "larger than the ceiling that was: {} bytes",
+        big.len()
+    );
 
     let handle = "#include \"big.h\"\n#include \"mid.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                   typedef struct name##__ *name\n";
@@ -632,29 +630,18 @@ pub(crate) fn a_program_too_large_to_read_at_once_is_left_alone() {
         .with_file("/p/handle.h", handle)
         .with_file("/p/api.h", "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n")
         .with_file("/p/main.cpp", main);
-    let fixture = Memory::new("a-program-too-large", &files);
+    let fixture = Memory::new("a-program-of-any-size", &files);
     let mut session = fixture.session();
 
     session.did_open("/p/main.cpp", main);
     session.index_everything();
-    std::thread::sleep(
-        crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(100),
+    session.pretend_a_pause(
+        crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1),
     );
-    session.advance(1);
 
-    assert!(
-        !session
-            .index()
-            .cooked_declarations(Path::new("/p/deep.h"))
-            .is_some(),
-        "the program is over the budget, so it is not read in one piece"
-    );
-    // …and the reading the file *does* have is there: the open file and its direct includes are cooked as always.
-    assert!(
-        session
-            .index()
-            .cooked_declarations(Path::new("/p/api.h"))
-            .is_some(),
-        "the per-file reading is unaffected by the budget"
+    assert_eq!(
+        session.the_program_to_read().as_deref(),
+        Some(Path::new("/p/main.cpp")),
+        "the reader's program is the one to read, whatever its closure weighs"
     );
 }

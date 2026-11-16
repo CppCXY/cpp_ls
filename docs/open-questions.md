@@ -1147,3 +1147,50 @@ the loop can ask again. The check sits at the top of the loop, and the damage is
 be a boundary rule no *construct* can consume across (a token-level barrier) or a rule in the statement recursion, not
 another tree-builder rule; `RenderedUnit::file_boundaries` records the earlier attempt and why closing nodes does not
 move the shape.
+
+## The 4.5 GB is one inlay-hint request, and every ceiling above was aimed at the wrong thing
+
+Every memory bound in this codebase was justified by a number read off a counter that **only ever added** — no free was
+subtracted — so it measured *churn* and was compared against the resident set. `cpp_code_analysis::alloc` counts both
+sides now (`live`, `peak`, `total`), the pump's trace prints live bytes with signed stage deltas, and
+`crates/cpp_code_analysis/tests/cold_start_memory_probe.rs` drives a whole session with the honest counter.
+
+**What the session actually holds** (`test_cpp`, live bytes, not churn):
+
+| run | live | peak | the session's own tables |
+| --- | --- | --- | --- |
+| cold index (from the database) | 147 MB | 147 MB | 65 MB summaries + 10 MB index |
+| 17 files open, pump drained | 250 MB | 281 MB | 98 MB |
+| + 17 whole-program reads | 478 MB | 528 MB | 196 MB |
+
+A program read costs **2.7–4.4 s**, 340 000–594 000 tokens and 163–213 files, and adds ~13 MB to live — bounded by the
+caches. **Churn does not inflate the resident set**: forty reads of a 218 KB header churn **1 723 MB** in 32 million
+allocations and the working set never left **11 MB**. So neither the indexer nor the program read is the spike, and
+`WAVE_PREPARE_BYTES`, `PROGRAM_READ_BUDGET_BYTES`, the program-read token ceiling, the `IndexedUnit` memo cap and
+`SLICE_ALLOCATION_CAP` were all bounding a number that is ~0.5 GB at worst. `SLICE_ALLOCATION_CAP` is deleted.
+
+**What the spike is.** `crates/cpp_ls/tests/memory_probe.rs`, one file open (`src/containers.cpp`), a client's own
+requests, the server's working set sampled from outside:
+
+```text
+semanticTokens/full       66 MB max
+inlayHint                 99 MB → 2 059 MB, no answer for 22 s   (killed at 2 GB)
+```
+
+and with `CPPLS_TRACE_INLAY=1` the request is one call in `parameter_hints`:
+
+```text
+[inlay] resolving std::get<0>(tuple)      ← and nothing after it
+```
+
+The five calls before it resolve in microseconds to milliseconds. During all of this the session's own accounting reads
+`live 19 MB, peak 67 MB, churn 167 MB, tables 3 MB` — so the gigabyte is inside *that one name resolution*, not in the
+index and not in a program parse. It is also the shape an editor amplifies: a client sends an inlay-hint request per
+visible-range change, so a request that takes 22 s and a gigabyte stacks up.
+
+**Next.** Resolve a call with explicit template arguments (`std::get<0>(tuple)` against libstdc++'s overload set) in
+time proportional to the candidates, and pin it with a test that asserts the answer *and* that the work is bounded (no
+ceiling: the candidate set is finite and the answer is one of them). The `PROGRAM_READ_BUDGET_BYTES` pair is dead
+weight and goes with the same change.
+
+

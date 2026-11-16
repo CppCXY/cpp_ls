@@ -3935,3 +3935,122 @@ auto result = f();
         "a cycle is refused at the recursion bound rather than walked forever"
     );
 }
+
+/// **A braced initialisation of a standard class template is answered from the standard's own guide.**
+///
+/// `std::tuple tuple{1, 2.5}` is `std::tuple<int, double>` — a fact the standard fixes, not one the constructors say
+/// (`tuple`'s constructors are constrained variadic templates) and not one a member list can say either. This asserts
+/// the answer; the *cost* of getting it is the other half and is written where the code is: the table that holds the
+/// fact used to be consulted **after** `members_of`, and on a class template whose base is written in its pack that
+/// walk does not terminate (`_Tuple_impl<0, _Elements...>` → `_Tuple_impl<0 + 1, _Tail...>` → … — a different spelling
+/// every level, and the walk stops only on a repeated spelling).
+///
+/// Measured before both changes: `textDocument/inlayHint` on a nine-line file containing `std::tuple tuple{1, 2.5, s}`
+/// never returned (120 s — the client's own deadline) and the server reached **2 GB**; after, the request took **8 ms**
+/// and the whole `containers.cpp` request **154 ms / 132 MB**.
+#[test]
+fn a_braced_initialisation_of_a_standard_class_template_is_answered_without_walking_its_members() {
+    let source = "\
+namespace std {
+
+template <int N, typename... Elements> struct impl;
+
+template <int N, typename Head, typename... Tail>
+struct impl<N, Head, Tail...> : impl<N + 1, Tail...> {
+    Head head;
+};
+
+template <int N> struct impl<N> {};
+
+template <typename... Elements> struct tuple : impl<0, Elements...> {
+    int own;
+};
+
+}  // namespace std
+
+void f() {
+    auto made = std::tuple{1, 2.5};
+}
+";
+    assert_eq!(
+        type_of_use(source, "made").as_deref(),
+        Some("std::tuple<int, double>"),
+        "the standard's own guide answers the deduction, and it is consulted before any member list is built"
+    );
+}
+
+/// **A member list of a class template whose base is its own pack stops, and says where it stopped.**
+///
+/// The same shape as the test above, asked the other way: a *member list* of the uninstantiated class, which is what a
+/// hover on `std::tuple` or a member completion asks for. The walk cannot enter the base — `impl<0, Elements...>` names
+/// one type per argument and this class was asked about without any — so the clause is a **gap** in `unlisted` rather
+/// than a level to walk, which is the field that exists to say an answer is incomplete instead of pretending it is not.
+///
+/// Measured before: `members_of("std::tuple")` was still walking **ten minutes** in, holding **843 MB**, one
+/// `_Head_base<0 + 1 + 1, _Head>` per level. After: **298 ms, 110 members, one named gap** on the standard library's own
+/// `std::tuple`.
+#[test]
+fn a_member_list_of_a_class_template_whose_base_is_its_pack_stops_and_says_so() {
+    let source = "\
+namespace lib {
+
+template <int N, typename... Elements> struct impl;
+
+template <int N, typename Head, typename... Tail>
+struct impl<N, Head, Tail...> : impl<N + 1, Tail...> {
+    Head head;
+};
+
+template <int N> struct impl<N> {};
+
+template <typename... Elements> struct tuple : impl<0, Elements...> {
+    int own;
+};
+
+}  // namespace lib
+
+void f() {
+    lib::tuple<int, double> value{};
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is held");
+
+    let bare = session.members_of(&view, "lib::tuple");
+    let cpp_code_analysis::Known::Yes(bare) = bare else {
+        panic!("a class this file declares answers a member list: {bare:?}");
+    };
+    assert!(
+        bare.members.iter().any(|member| member.fact.name == "own"),
+        "the class's own members are listed: {:?}",
+        bare.members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        bare.unlisted.len(),
+        1,
+        "the base it could not spell is named rather than silently dropped: {:?}",
+        bare.unlisted
+    );
+    assert!(
+        bare.unlisted[0].spelling.contains("Elements..."),
+        "the gap names the clause, which is the only way a reader can tell what is missing: {:?}",
+        bare.unlisted[0]
+    );
+
+    // **The instantiated form terminates too**, one level further: `impl<0, int, double>` can be spelled, its own base
+    // (`impl<N + 1, Tail...>`) cannot — the same gap, one level down. Before the rule this walk did not terminate
+    // either, so a test that returned at all is the measurement.
+    let instantiated = session.members_of(&view, "lib::tuple<int, double>");
+    let cpp_code_analysis::Known::Yes(instantiated) = instantiated else {
+        panic!("an instantiated class this file declares answers a member list: {instantiated:?}");
+    };
+    assert!(
+        !instantiated.members.is_empty(),
+        "the members of the first base level that could be spelled are listed: {instantiated:?}"
+    );
+}
