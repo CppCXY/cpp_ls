@@ -3288,6 +3288,26 @@ pub(crate) fn declared_type(
         return element;
     }
 
+    // **A generic lambda's parameter takes its argument's type.** `[](auto value)` is the placeholder because the
+    // declaration has no initializer to deduce from — the argument is the lambda's *invoker*, and for the standard
+    // adaptors and algorithms that invoker hands the range's element to the callable's first parameter. See
+    // [`the_element_a_lambda_parameter_receives`], which is the table of the spellings this is proven for.
+    if let NamedDeclaration::Here(binding) = named
+        && let Some(the_type) = the_element_a_lambda_parameter_receives(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            binding,
+            &placeholder,
+            depth,
+        )
+    {
+        return Known::Yes(crate::sema::types::parse_type_spelling(&the_type));
+    }
+
     let Some((as_written, initializer)) = deduction_inputs(root, named) else {
         return unknown();
     };

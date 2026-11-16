@@ -114,6 +114,8 @@ pub(crate) fn element_of_a_range_expression(
     expression: &cpp_parser::CppSyntaxNode,
     depth: usize,
 ) -> Option<Known<(Type, PathBuf)>> {
+    use cpp_parser::CppAstNode;
+
     // **A pipe chain**: the element of the left, adapted by the right.
     if let Some((left, right)) = the_two_operands_of_a_pipe(expression)
         && let Some(left_element) = element_of_a_range_expression(
@@ -152,6 +154,31 @@ pub(crate) fn element_of_a_range_expression(
             crate::sema::types::parse_type_spelling(&element),
             file,
         )));
+    }
+
+    // **A pipeline a reader gave a name.** `auto ids = items | std::views::filter(pred);` binds the view, and a
+    // view's type is a class template over a closure type nothing spells — so every later use of `ids` asked its
+    // *type* and found no element, while the same pipe written in a `for` head has always answered one. The
+    // initializer is the expression the in-place case reads, so a name whose own type yields no element is looked
+    // through once: the same walk on the initializer, with the depth bound shared so a reference cycle stops.
+    //
+    // **A name only**: `end_of_the_written_name` is defined for the four name shapes, and asking it of a call or a
+    // binary expression would place its cursor at the next token — whose declaration is not this expression's.
+    if depth <= MAX_TYPE_DEPTH
+        && cpp_parser::CppNameExpr::cast(expression.clone()).is_some()
+        && let Some(initializer) = the_initializer_a_name_binds(expression, scopes, root)
+        && let Some(element) = element_of_a_range_expression(
+            memo,
+            index,
+            declaring,
+            scopes,
+            root,
+            path,
+            &initializer,
+            depth + 1,
+        )
+    {
+        return Some(element);
     }
 
     // **`std::views::iota(1, 6)`** — a counted range of the first argument's type.
@@ -201,6 +228,157 @@ pub(crate) fn element_of_a_range_expression(
     None
 }
 
+/// **The expression a name is initialized with**, when the name is a variable of this file.
+///
+/// The one step that lets [`element_of_a_range_expression`] see a pipeline a reader bound first
+/// (`auto ids = items | std::views::filter(pred);`): the view's own type has no element to ask, and the initializer
+/// is the expression the in-place case already reads. [`deduction_inputs`] is the reader of a declaration's
+/// initializer and takes the declaration the way the `auto` path does; a name that resolves to a parameter, to a
+/// declaration of another file, or to one with no initializer answers `None` — the fallback the caller has either way.
+fn the_initializer_a_name_binds(
+    expression: &cpp_parser::CppSyntaxNode,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let at = end_of_the_written_name(expression);
+    let Known::Yes(binding) = crate::sema::resolve::definition_at(scopes, root, at) else {
+        return None;
+    };
+    let named = NamedDeclaration::Here(binding);
+    deduction_inputs(root, &named).map(|(_, initializer)| initializer)
+}
+
+/// **The type a generic lambda's parameter receives from the standard view or algorithm it is handed to.**
+///
+/// `views::transform([](auto n) { return n * n; })` has no declaration that says what `n` is: the parameter is the
+/// placeholder, and the only thing that knows is the call the lambda is an argument of. For the standard adaptors and
+/// algorithms the rule is fixed — the callable's **first** parameter receives the range's **element**:
+///
+/// ```text
+/// items | views::filter([](auto v) { … })          v is the element of `items`
+/// items | views::transform([](auto v) { … })       the same
+/// std::ranges::for_each(items, [](auto v) { … })   the same
+/// ```
+///
+/// Only a spelling the standard fixes is read. The adaptor's name must be written with `views::` and the algorithm's
+/// with `ranges::` (a project's own `filter` is not this), the parameter must be the callable's first (a comparator
+/// taking two elements is a question this table does not answer), and the range's element must be known — otherwise
+/// `None`, which is the answer the caller had before.
+///
+/// The reference a range yields is treated as an **lvalue** ([`auto_substituted`]'s last argument): a container's
+/// element is one, which is what makes `auto&` a `T&`. A view that yields **prvalues** (`iota | transform(…)`) is the
+/// case where that is not known to hold — `auto&&` there would be `T&&` — and the value category is not part of
+/// [`Type`]; `auto` and `const auto&` are unaffected, because copying and binding to const are the same either way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn the_element_a_lambda_parameter_receives(
+    memo: &TypeMemo,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    binding: &crate::Binding,
+    written: &str,
+    depth: usize,
+) -> Option<String> {
+    use cpp_parser::CppAstNode;
+
+    if depth > MAX_TYPE_DEPTH {
+        return None;
+    }
+
+    // **The lambda this name is a parameter of, and which parameter it is.** The element goes to the callable's first
+    // argument; any other position is a shape this table does not answer (`sort`'s comparator takes two elements).
+    let token = cpp_parser::token_at(root, binding.name_range.start_offset)?;
+    let lambda = token
+        .parent_ancestors()
+        .find_map(cpp_parser::CppLambdaExpr::cast)?;
+    let list = lambda.get_params()?;
+    let at = binding.name_range.start_offset;
+    let mut position = None;
+    for (index, parameter) in list.get_params().enumerate() {
+        let range = parameter.syntax().text_range();
+        if usize::from(range.start()) <= at && at < usize::from(range.end()) {
+            if !parameter.is_auto() {
+                return None;
+            }
+            position = Some(index);
+            break;
+        }
+    }
+    if position? != 0 {
+        return None;
+    }
+
+    // **The call the lambda is an argument of**, and the range it is applied to. A one-argument call takes its range
+    // from the pipe it is written on (`items | views::filter(pred)`); a two-argument one writes the range first
+    // (`std::ranges::for_each(items, f)`).
+    let call = lambda
+        .syntax()
+        .ancestors()
+        .skip(1)
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr)?;
+    let callee = call.children().next()?;
+    let callee_text = callee.text().to_string();
+    let callee_text = callee_text.trim();
+    // **The spellings the standard fixes** — the adaptors, whose range is the pipe they are written on, and the
+    // algorithms, whose range is the call's first argument. The comparison is the same one [`adapted_element`] makes
+    // for `views::transform`/`keys`/`values`/`join`: a suffix of the callee's text, so `std::views::filter` and
+    // `views::filter` are one spelling. A project's own `myviews::filter` would match too, which is the same allowance
+    // the element table already makes and the reason this is documented as a spelling rather than as a resolved name.
+    const ADAPTORS: [&str; 4] = [
+        "views::filter",
+        "views::transform",
+        "views::take_while",
+        "views::drop_while",
+    ];
+    const ALGORITHMS: [&str; 6] = [
+        "ranges::for_each",
+        "ranges::find_if",
+        "ranges::any_of",
+        "ranges::all_of",
+        "ranges::none_of",
+        "ranges::count_if",
+    ];
+    let is_a_standard_callable = ADAPTORS
+        .iter()
+        .chain(ALGORITHMS.iter())
+        .any(|suffix| callee_text.ends_with(suffix));
+    if !is_a_standard_callable {
+        return None;
+    }
+    let arguments = crate::inlay::arguments_of(&call)?;
+    let lambda_at = arguments
+        .iter()
+        .position(|argument| argument.text_range() == lambda.syntax().text_range())?;
+    let range = match arguments.len() {
+        1 => {
+            let parent = call.parent()?;
+            let (left, right) = the_two_operands_of_a_pipe(&parent)?;
+            if right.text_range() != call.text_range() {
+                return None;
+            }
+            left
+        }
+        2 if lambda_at == 1 => arguments[0].clone(),
+        _ => return None,
+    };
+
+    let Some(Known::Yes((element, _))) = element_of_a_range_expression(
+        memo,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        &range,
+        depth + 1,
+    ) else {
+        return None;
+    };
+    auto_substituted(written, &element, true)
+}
+
 /// **The two operands of `a | b`**, when the expression is one.
 ///
 /// The operator is a **token** between two nodes, so the two children are the operands — the same shape every
@@ -246,9 +424,9 @@ pub(crate) fn adapted_element(
         let lambda = adaptor
             .descendants()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr);
-        return match lambda
-            .and_then(|lambda| crate::sema::declarations::a_lambdas_return_type(&lambda, &[]))
-        {
+        return match lambda.and_then(|lambda| {
+            crate::sema::declarations::a_lambdas_return_type(&lambda, std::slice::from_ref(element))
+        }) {
             Some(label) => Known::Yes((
                 crate::sema::types::parse_type_spelling(&label),
                 file.clone(),

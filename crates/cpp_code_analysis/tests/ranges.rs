@@ -59,6 +59,143 @@ int main() {
     );
 }
 
+/// **A pipeline a reader names keeps the element the pipe yields.**
+///
+/// `element_of_a_range_expression` answers a pipe written in place, and `for (auto v : items | …)` has always worked.
+/// The ordinary style binds the view first — `auto ids = items | …` — and every later use of `ids` asked its *type*,
+/// which a view has no spelling for. Measured before this: the in-place loop was `Item` and the named one `auto`.
+#[test]
+fn a_named_pipeline_keeps_the_element_of_its_range() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct Item { int id; };
+int main() {
+    std::vector<Item> items;
+    auto ids = items | std::views::filter([](const Item& item) { return item.id > 0; });
+    for (auto value : ids) {
+        value.id = 0;
+    }
+}
+";
+    assert_eq!(
+        type_after(source, "value :"),
+        Some("Item".to_string()),
+        "`ids` is the view the in-place pipe makes, so its element is `Item`"
+    );
+}
+
+/// **A pipeline of two adaptors a reader names also keeps it** — the look-through is one variable, not one adaptor.
+#[test]
+fn a_named_pipeline_of_two_adaptors_keeps_it_too() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct Item { int id; };
+int main() {
+    std::vector<Item> items;
+    auto ids = items | std::views::filter([](const Item& item) { return item.id > 0; }) | std::views::take(2);
+    for (auto value : ids) {
+        value.id = 0;
+    }
+}
+";
+    assert_eq!(type_after(source, "value :"), Some("Item".to_string()));
+}
+
+/// **A generic lambda's parameter takes the element of the range it is handed.**
+///
+/// `[](auto value)` has no declaration that says what `value` is: the lambda's parameter is the placeholder, and the
+/// adaptor call is the only thing that knows. Measured before this: `value` was `auto`/unknown, so `value.id` resolved
+/// nothing and completion inside the lambda offered nothing.
+#[test]
+fn a_generic_lambdas_parameter_takes_the_ranges_element() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct Item { int id; };
+int main() {
+    std::vector<Item> items;
+    auto ids = items | std::views::filter([](auto value) { return value.id > 0; });
+    for (auto item : ids) {
+        item.id = 0;
+    }
+}
+";
+    assert_eq!(
+        type_after(source, "value.id"),
+        Some("Item".to_string()),
+        "`value` receives what `items` yields"
+    );
+}
+
+/// **And the parameter's type is what makes a transform's element answerable** — `[](auto n)` is `int` over
+/// `iota(1, 6)`, so `n * n` is an `int` and the loop variable is one too.
+#[test]
+fn a_generic_lambdas_parameter_feeds_the_transform_element() {
+    let source = "
+#include <ranges>
+int main() {
+    for (auto value : std::views::iota(1, 6) | std::views::transform([](auto n) { return n * n; })) {
+        value = 0;
+    }
+}
+";
+    assert_eq!(type_after(source, "value :"), Some("int".to_string()));
+}
+
+/// **The parameter's reference shape is the declaration's, not the element's** — `auto&` over a container's element
+/// is a `T&`, which is what the lambda body writes through.
+#[test]
+fn a_generic_lambdas_parameter_keeps_the_reference_it_wrote() {
+    let source = "
+#include <ranges>
+#include <vector>
+struct Item { int id; };
+int main() {
+    std::vector<Item> items;
+    auto ids = items | std::views::filter([](auto& value) { return value.id > 0; });
+    for (auto item : ids) {
+        item.id = 0;
+    }
+}
+";
+    assert_eq!(type_after(source, "value.id"), Some("Item&".to_string()));
+}
+
+/// **A lambda handed to something else keeps the placeholder.** The table is the standard adaptors and algorithms
+/// only: a project's own `apply(f)` says nothing about what `f` receives, and a guess there would type the body
+/// against the wrong class. Measured before the table existed, and re-pinned here so a later widening has to say so.
+#[test]
+fn a_lambda_outside_the_standard_adaptors_keeps_its_placeholder() {
+    let source = "
+#include <vector>
+struct Item { int id; };
+struct applier { template <class F> void operator()(F f) const; };
+void use(std::vector<Item> items) {
+    applier{}([](auto value) { value.id = 0; });
+}
+";
+    assert_eq!(type_after(source, "value.id"), None);
+}
+
+/// **The algorithm form writes the range first** — `std::ranges::find_if(items, f)` — and the element is the
+/// first argument's, not a pipe's.
+#[test]
+fn a_generic_lambdas_parameter_in_an_algorithm_takes_the_first_arguments_element() {
+    let source = "
+namespace std {
+template <class T> struct vector { };
+namespace ranges { void find_if(); }
+}
+struct Item { int id; };
+void use(std::vector<Item> items) {
+    std::ranges::find_if(items, [](auto value) { value.id = 0; });
+}
+";
+    assert_eq!(type_after(source, "value.id"), Some("Item".to_string()));
+}
+
 /// **`views::iota` yields the type of its first argument.**
 #[test]
 fn a_counted_range_yields_its_bound() {
