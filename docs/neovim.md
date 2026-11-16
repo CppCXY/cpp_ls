@@ -240,6 +240,12 @@ platform's headers. `env.c` — the other file — parses clean.
 
 ## 6. What is left
 
+**Update 2026-11-16:** the header-context defect this section opens with is fixed — measured: `Visual` in `cursor.c` now
+hovers as `VisualState`, declared in `globals.h:453:20`, where `9aaccc40` still measured it unanswered.
+`docs/usability.md` has the re-measurement (21 findings over 20 files, one `undefined-name`) and leaves the bisection of
+*which* reading change moved it open rather than guessing. The sections below are kept as the record of how the reading
+was found.
+
 One reading is still wrong on this checkout, and it is not a grammar rule that is missing a case.
 
 **A header is read in another translation unit's context — the *choice* is fixed, the *source* is not.** `src/nvim/grid.h:20` is

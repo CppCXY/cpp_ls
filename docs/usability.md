@@ -77,6 +77,9 @@ context of the file that included it).
 
 ## What to fix next, in order
 
+**Updated 2026-11-16:** item 1 is done (the re-measurement at the end of this file), and the order of what remains is
+2, then 3, then 4.
+
 1. **The header context above.** One fix, ~90 % of the false diagnostics on this project, and the missing hovers for
    its globals.
 2. **`macro-redefined` on headers** — 11 findings in the 20-file sample, all on headers read as their own unit, where
@@ -86,3 +89,36 @@ context of the file that included it).
    a Windows build; the warning is true and useless. Demote it when the file has no command of its own.
 4. **The misses that are a reading question, not a bug** — items 2 and 5 above. Documenting them is the honest fix;
    making them resolve needs a rendering per open file, which is the editor's 0.7 s first request.
+
+## Re-measured 2026-11-16, after the unit work
+
+The header reading has changed since the numbers above, and the defect is gone. Measured directly, with `inspect hover`
+on the checkout:
+
+```text
+cursor.c:104:22  `Visual`  ->  `VisualState Visual`, declared in `globals.h:453:20`
+```
+
+— the globals are read, so the 135 `undefined-name` findings that dominated the batch run are no longer the shape of the
+project. The fix this document asked for is the one landed in `Session::the_unit_that_reads` (a header is read in the
+context of a unit that includes it); **which of the reading changes moved this number is not bisected here**, and the
+record of the earlier measurements — `9aaccc40` shows `Visual` still unanswered after its own change — is why the
+attribution is left open rather than guessed.
+
+A fresh 20-file sample (every 23rd source, up to 10 uses per file, the probe's own defaults) reads:
+
+```text
+diagnostics: 21 finding(s) over 20 file(s), 2 with at least one error
+     11  macro-redefined
+      3  syntax-error
+      2  braces-around-statements
+      2  else-after-return
+      2  macro-parentheses
+      1  undefined-name
+completion: 57/66 non-empty (86 %), 2 862 item(s)
+```
+
+So fix #1 above is **done**, and the dominant category is now #2 (`macro-redefined` on headers read as their own unit).
+The hover misses are the classes *"What does not answer"* already names (compiler attributes and the macros wrapping
+them, macro-fragment headers, a member whose type is declared later, a call whose declaration arrives through another
+header).

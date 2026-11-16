@@ -35,7 +35,7 @@ percent-encoding = "2.3"
 log = "0.4.33"
 fern = "0.7.1"
 chrono = "0.4.45"
-# **The cache is one embedded database, not 1 800 files** — see `docs/refactor-cache-and-startup.md`.
+# **The cache is one embedded database, not 1 800 files** — see `crates/cpp_code_analysis/src/cache/cache_db.rs`.
 # Pure Rust, single file, MVCC, ordered keys: reading does not take the lock writing takes, and a
 # range delete is how a generation is collected.
 redb = "4.4.0"

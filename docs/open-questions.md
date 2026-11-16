@@ -547,7 +547,7 @@ differently — the member list is honest about the ambiguity and the trait has 
 That means evaluating `_Is_default_allocator<std::allocator<int>>::value`: match (2) selects the specialization, and
 the answer is the `true_type`/`false_type` base it inherits. That is the next round.
 
-## A partial specialization whose first slot is a template-id gets no fact — open
+## A partial specialization whose first slot is a template-id gets no fact — **fixed**
 
 Found while closing the `size_type` chain, and **corrected twice**, so the wrong readings are recorded here too:
 
@@ -593,6 +593,19 @@ template <class _Ty>
 struct _Is_default_allocator<allocator<_Ty>, void_t<typename allocator<_Ty>::_From_primary>>
     : is_same<typename allocator<_Ty>::_From_primary, allocator<_Ty>>::type {};
 ```
+
+**Fixed, measured 2026-11-16.** The head shape now produces its fact: `inspect facts` on the installed `<xmemory>`
+reports both declarations, the principal and the specialization.
+
+```text
+483:8  _Is_default_allocator        type over [_Alloc, ]
+486:8  _Is_default_allocator        type over [_Ty]
+```
+
+The minimal shapes from the table above answer too — a fixture with the two `void_t<typename A<T>::From>` specializations
+reports `3 of 6 declaration(s)`, the primary and both specializations. Which change fixed it is not recorded here (the
+section above is the record of the readings that did *not*); the red it describes no longer reproduces, so the
+`size_type` chain it blamed is a separate question, not this one.
 
 — and the index holds no fact for it (`17000` is the principal, `17304` is the next declaration: nothing between).
 `the_bool_a_trait_has` therefore falls back to the principal's `false_type`, `allocator_traits` takes the

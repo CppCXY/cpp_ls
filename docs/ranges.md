@@ -2,9 +2,9 @@
 
 The question: `std::views::` completes, but a **pipeline's result** cannot be inferred — no type on
 `auto r = v | std::views::filter(f)`, no inlay hint for it, and a lambda written `[](auto x) { … }` leaves `x`
-unknown.
+unknown. (The last of the three is answered now for the standard views and algorithms; see *What replaced it*.)
 
-The fixture (`target/bench/case_ranges/main.cpp`):
+The fixture (a scratch `target/bench/case_ranges/main.cpp`, rebuilt from the listing when it is needed):
 
 ```cpp
 #include <ranges>
@@ -438,59 +438,102 @@ hover std::views::filter(1)   -> `_Range_closure<_Filter_fn, decay_t<int>> a_clo
 from the body, the class template named, the argument substituted. `decay_t<int>` is the alias template the deduced
 spelling still leaves unresolved, which is the separate item recorded above.
 
-**What is left in the objective:** `operator|` (the pipeline `items | std::views::filter(…)`), then the lambda's
-`auto` parameters.
+**What is left in the objective:** the pipeline `items | std::views::filter(…)`, then the lambda's `auto` parameters. The
+first half has since been re-scoped — the corrected reading of the closure, and what replaced the plan, are below.
 
-### `operator|`: what was tried, and the one step it needs
+### `operator|`: what was tried, and what the real closure needs
 
-The pipe's rule is C++'s own: `v | closure` calls `closure(v)` (the free `operator|` in `<ranges>` is
-`operator|(_Rng&&, _Closure&&)` whose body is `_Closure_{forward<_Rng>(_Range)}`). An arm was written on exactly that
-reading — when the left operand is a class and the right one is a class, ask the right's `operator()` with the left as
-its argument, which is the deduction the niebloid call already goes through.
+The pipe's rule is C++'s own: `v | closure` calls `closure(v)` (MSVC's `_Pipe::operator|` overload for a range and a
+closure is `forward<_Right>(_r)(forward<_Left>(_l))`; the closure-and-closure overload builds a `_Pipeline`). An arm was
+written on exactly that reading — when the left operand is a class and the right one is a class, ask the right's
+`operator()` with the left as its argument, which is the deduction the niebloid call already goes through.
 
-Measured: `auto ids = items | std::views::filter(…)` came back **`void`** — a *wrong* type rather than none. The
-reason is one level deeper than the arm could see: `_Range_closure<_Filter_fn, decay_t<_Pr>>`'s `operator()` is
+Measured: `auto ids = items | std::views::filter(…)` came back **`void`** — a *wrong* type rather than none. An arm was
+written on the pipe rule, and it was removed. **The reading of the closure that this section then adopted was wrong, and it
+is corrected here**; the measured `void` and the removed arm are still the true record of that round.
+
+### The real `_Range_closure`, measured twice
+
+This section described the closure's `operator()` as
 
 ```cpp
 template <viewable_range _Rng> constexpr auto operator()(_Rng&& _Range) const { return _Fn(_Range); }
 ```
 
-— its body calls `_Fn`, a **member variable whose type is the closure's template argument** (`_Filter_fn`). Nothing in
-this layer substitutes a member variable's type from the class template's arguments, so `_Fn(_Range)` has no type,
-the deduction answers `void`, and a wrong type is worse than a refusal: the arm was removed.
-
-**So the next step for this stage is that substitution**, not another operator rule: when a member's body names
-`this`-member variables, their types come from the class's template arguments the call was made on — the same pairing
-`member_bindings`/`TypeBindings` already performs for members, applied inside the body deduction.
-
-A first attempt at that was made and failed, which narrows it: merging the class's parameter names into the
-`TypeSubstitutions` the body deduction receives (`_Closure` → `_Filter_fn` alongside the function's own) does **not**
-reach the member's type — the body reader resolves a name, not a `TypeSubstitutions` entry. The red test that pins the
-shape is
+with `_Fn` a **member variable**. Neither installed MSVC STL writes that shape — `return _Fn(_Range)` appears nowhere under
+`Program Files`, and both toolchains write (`14.29.30133`'s `<ranges>` and `14.51.36231`'s `__msvc_ranges_to.hpp`):
 
 ```cpp
-template <class Fn> struct closure {
-    Fn _Fn;
-    template <class Rng> auto operator()(Rng&& rng) const { return _Fn(rng); }
+template <class _Fn, class... _Types>
+class _Range_closure : public _Pipe::_Base<_Range_closure<_Fn, _Types...>> {
+    …
+    template <class _Ty> requires invocable<_Fn, _Ty, _Types&...>
+    constexpr decltype(auto) operator()(_Ty&& _Arg) & { return _Call(*this, _STD forward<_Ty>(_Arg), _Indices{}); }
+    …
+    template <class _SelfTy, class _Ty, size_t... _Idx>
+    static constexpr decltype(auto) _Call(_SelfTy&& _Self, _Ty&& _Arg, index_sequence<_Idx...>) {
+        return _Fn{}(_STD forward<_Ty>(_Arg), _STD get<_Idx>(_STD forward<_SelfTy>(_Self)._Captures)...);
+    }
 };
-closure<adaptor> c;
-auto r = c(1);           // Unknown today; `view` when the member's type is read with the class's argument
 ```
 
-so what the body reader needs is what `member_fact` + `TypeBindings::applied_to` already do for a member *outside* a
-body: the enclosing class **and** the arguments the call was made with.
+`_Fn` is a **class template parameter**, not a member variable; the predicate is in `_Captures`; the return type is
+`decltype(auto)`; and the body calls a **static member function** of the same class, whose body constructs `_Fn{}` (a class
+template parameter) and calls it. A "member variable's type from the class's arguments" arm would therefore type a shape the
+real adaptor never writes: the synthetic `closure<adaptor>` test would go green and the real pipeline would stay `Unknown`.
+That is the failure mode this objective has already been through once (unit tests green, live red), which is why the arm
+was **not** written this round.
 
-**And the reason the merge did nothing is now known:** the body reader has no `CallExpr` arm at all. Its match
-(`sema/declarations.rs`, `type_a_return_states_with`) covers `ParenExpr`, `NameExpr`, `BinaryExpr`, `CastExpr`,
-`InitListExpr` and `LiteralExpr` — a `return _Fn(_Range);` matches none of them and answers `None` before any
-substitution is consulted. A name arm would read `_Fn` correctly (it asks `a_data_member_type` among its four sources
-and substitutes), which is why the fix is not in the substitution lists but in this match.
+### What the real chain would cost
 
-The arm cannot be written there, though: `type_a_return_states_with` is **index-free** by design (syntax and
-substitutions only), and typing `_Fn(_Range)` needs `adaptor::operator()` from the index. So the call belongs one
-level up, in `deduced_returns_of_the_member`, which has the index, the `declaring` closure and the class's bindings:
-recognise a body that is a single `return <call>;`, type its callee as a member/parameter spelling with the class's
-arguments substituted, and ask that class for the operator's return. That is the remaining work for this stage.
+```text
+_Pipe::operator|(range, closure)        decltype(auto) → closure(range)            its body is exactly that call
+_Range_closure::operator()(range)       decltype(auto) → _Call(*this, range, indices)
+_Range_closure::_Call                   decltype(auto) → _Fn{}(range, captures…)
+_Filter_fn::operator()(range, pred)     auto → filter_view(forward(range), forward(pred))
+filter_view<views::all_t<vector<Item>&>, lambda>
+```
+
+Typing it needs three capabilities this layer does not have:
+
+1. **Substitutions inside expression typing** — the class's `_Fn`/`_Types...`, the function's `_Ty`, and a pack over
+   `_Idx`. `type_of_expression_memoed` takes no `TypeSubstitutions` at all; substitutions exist only in the *spelling*
+   path (`deduced_returns_of_substituted`) and the member path (`TypeBindings::applied_to`).
+2. **Recursion through `decltype(auto)` member functions**, including a `static` one, with the caller's argument types
+   substituted — the existing body-call deduction (`the_return_the_body_gives_back`) is deliberately restricted to the
+   file the cursor is in, measured at 75.6 s → 26.7 s on the neovim sample when the cross-file half was removed.
+3. **A representation for an unnamed type.** `filter_view`'s second argument is the lambda's type, which nothing can
+   spell; `Type` has no variant for it, so the best a complete chain could print is `filter_view<…, Pred>` — a spelling
+   that reads like a type and designates nothing, the answer the project refuses elsewhere.
+
+So the stage is **deferred as a design item**, not half-done as an arm.
+
+### What replaced it: the view a reader names
+
+1. **A pipeline a reader names keeps its element.** Before: `for (auto v : items | views::filter(pred))` bound `v` to
+   `Item`, while `auto ids = items | views::filter(pred); for (auto v : ids)` bound it to `auto`. The view's own type is a
+   class template over a closure nothing spells, so the element was asked of a type that has none; the **initializer** is
+   the expression the in-place case already reads. `element_of_a_range_expression` now looks through a variable's
+   initializer once (`the_initializer_a_name_binds`), sharing the depth bound so a reference cycle stops.
+2. **A generic lambda's parameter takes the element of the range it is handed.** `views::filter([](auto v) { … })`,
+   `views::transform([](auto n) { return n * n; })` and `std::ranges::find_if(items, [](auto v) { … })` are spellings the
+   standard fixes: the callable's **first** parameter receives the range's element.
+   `the_element_a_lambda_parameter_receives` pairs it with the declaration's own reference shape (`auto&` → `T&`) and
+   refuses every other spelling — a project's own `apply(f)` says nothing about what `f` receives. The transform's element
+   follows from it: `n * n` is an `int`.
+
+Pinned in `crates/cpp_code_analysis/tests/ranges.rs`:
+`a_named_pipeline_keeps_the_element_of_its_range`, `a_named_pipeline_of_two_adaptors_keeps_it_too`,
+`a_generic_lambdas_parameter_takes_the_ranges_element`, `a_generic_lambdas_parameter_keeps_the_reference_it_wrote`,
+`a_generic_lambdas_parameter_feeds_the_transform_element`,
+`a_generic_lambdas_parameter_in_an_algorithm_takes_the_first_arguments_element`, and the refusal
+`a_lambda_outside_the_standard_adaptors_keeps_its_placeholder`.
+
+**What is still not answered:** the pipeline's own type — hover on `auto ids` still says its initializer could not be typed
+— and therefore an inlay hint for it. That is the design item above. One smaller gap is worth naming: a `transform` whose
+generic lambda returns a **member** of its parameter (`[](auto item) { return item.id; }`) still has no element. The
+parameter is `Item` now, so the piece that is missing is the lambda's *return*, which the syntax-only path types
+(`type_with_the_auto_parameters`) — it has no member lookup, so `n * n` is answered and `item.id` is not.
 
 ## Where the objective stands
 
@@ -498,27 +541,27 @@ arguments substituted, and ask that class for the operator's return. That is the
 | --- | --- |
 | (1) the C++20 fixture | done |
 | (2) `std::views::filter` resolves, and a call of it has a type | **done, measured in the live server**: `_Range_closure<_Filter_fn, decay_t<int>>` |
-| (3) `operator|` | **not done** — one step short: a member variable's type inside a deduced body (above) |
-| (4) a lambda's `auto` parameters from its invoker | not done; it needs (3)'s result to know what the range yields |
+| (3) `operator|` | **deferred** — the member-variable model it was planned on does not match the installed STL (measured); the real chain needs expression-level substitutions and a representation for an unnamed lambda |
+| (3a) a named pipeline keeps its element | **done** — pinned by the tests above |
+| (3b) a generic lambda's parameter takes the element | **done for the standard adaptors and algorithms**; a lambda handed to a project's own function stays unknown |
+| (4) a lambda's `auto` parameters from its invoker | **the bounded form is (3b)**; what remains is the invoker a project writes itself, which no table can decide |
 | (5) this document and the README | kept up to date |
 
-Everything that *is* done is measured and pinned by tests, and the failing pieces have a red test's worth of shape
-written down here rather than a guess. There the callee is `std::views::filter`, and
-whether the call arm reaches `operator_returns_of` depends on the *cooked* `<ranges>` facts being in the index — the
-live server has them (its hovers resolve `std::views::transform`), a reloaded cache does not, because the summary on
-disk was built by the previous parser. So the next measurement is the live server's own answer for
-`items | std::views::filter(…)` after a cache-clear, and after that `operator|`.
+The pipeline's own type is the one question left, and it is a design item with a measured cost above — not the "one step
+short" this document claimed before the closure was read from the real header.
 
 ## What it answers today
 
-## What it answers today
+Updated to what the tests and the live server answer now; the paragraphs below are the record of the stages as they were
+found and fixed, in the order they were measured.
 
 ```text
-type of `items`            std::vector<Item>                     ✓
-type of `ids`              UnknownType("ids")
-hover on `ids`' declaration `ids(…)` — a function, declared in a function body
-define on `std::views`      NotDeclaredHere("std::views")
-inlay hints                 12:63 type -> `bool` (the lambda's deduced return); nothing for `ids`
+type of `items`                          std::vector<Item>                                  ✓
+type of `ids`                            not known — the view's own type has no spelling    (stage 3, deferred)
+element of `ids`                         `Item`, so `for (auto v : ids)` binds `Item`       ✓ (3a)
+`views::filter([](auto v) { … })`'s `v`  `Item`                                             ✓ (3b)
+`views::transform([](auto n) { … })`     its element is the lambda's `n * n`, an `int`      ✓ (3b)
+inlay hint for `ids`                     nothing — it needs the view's type                (stage 3)
 ```
 
 ## The first blocker is not the pipe, and not the niebloid
@@ -548,6 +591,10 @@ still a `Function` (`a_lambda_in_an_initializer_does_not_make_the_declaration_a_
 
 ## Why the rest still needs work, in order
 
+**Kept as the record of what was believed when stage (1) was done.** Items (1)–(3) are answered above (the alias, the
+call of an object, and the adaptor call's type); item (4) is answered in its bounded form (3b); item (5) follows what
+(3b) makes known.
+
 1. **`std::views` does not resolve by name.** The index holds `namespace views in ranges` (seven of them in MSVC's
    `<ranges>`) and `variable filter in ranges::views` — the `std::` prefix is lost on the raw reading, and the
    alias `namespace views = ranges::views;` is not among the facts. A qualified lookup for `std::views::filter`
@@ -575,6 +622,8 @@ still a `Function` (`a_lambda_in_an_initializer_does_not_make_the_declaration_a_
    inside a lambda shows once (4) is.
 
 ## What is worth doing first, measured
+
+**The record of why the order was what it was**; it was followed, and the table above is where each item landed.
 
 | Step | What it unblocks | Size |
 | --- | --- | --- |
