@@ -154,4 +154,26 @@ fn what_a_summary_costs_and_why() {
         total / files.len().max(1) * 10_000 / (1024 * 1024),
         total / files.len().max(1) * 100_000 / (1024 * 1024),
     );
+
+    // **Is every file's summary keyed by its own macro environment?** — the question a cache's hit rate is: the disk
+    // entry is keyed by `(path, env_hash, context_hash)`, so N distinct environments over the same closure means N
+    // copies on disk and no reuse of a summary built under a different one.
+    let mut envs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut contexts: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut paths: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+    let mut keys: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    for summary in session.index().summaries() {
+        envs.insert(summary.key.env_hash);
+        contexts.insert(summary.key.context_hash);
+        paths.insert(&summary.path);
+        keys.insert((summary.key.env_hash, summary.key.context_hash));
+    }
+    println!(
+        "\n# the keys the summaries are stored under\n{} distinct file(s), {} distinct env hash(es), \
+         {} distinct context hash(es), {} distinct (env, context) pair(s)",
+        paths.len(),
+        envs.len(),
+        contexts.len(),
+        keys.len(),
+    );
 }
