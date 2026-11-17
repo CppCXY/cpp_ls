@@ -57,16 +57,67 @@ fn the_three_reported_places() {
         session.pending_work()
     );
 
+    // **What is left, and of what kind.** The queue is two queues — files still to *read* and files to re-read for the
+    // compiler's view — and the reports that follow are about names in headers, which only exists once the header has
+    // been read through its macros. A count that never reaches zero is the reason a header stays at its raw reading.
+    println!(
+        "queue: {} to read, {} in all; units {:?}",
+        session.pending(),
+        session.pending_work(),
+        session.unit_stats()
+    );
+    let variant = root.join(
+        "C:/Users/zc/Desktop/mingw/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/variant",
+    );
+    let _ = variant;
+    for named in [
+        "C:/Users/zc/Desktop/mingw/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/variant",
+        "C:/Users/zc/Desktop/mingw/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/bits/stl_bvector.h",
+    ] {
+        let path = std::path::Path::new(named);
+        println!(
+            "{:<12} summary {}, cooked reading {}",
+            std::path::Path::new(named)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            session.index().summary(path).is_some(),
+            session.index().cooked_declarations(path).is_some()
+        );
+    }
+
     let view = session
         .view_of_the_file(&file)
         .expect("the reported file has a view");
     let names = session.classified_names(&view);
 
     // The places as the report wrote them: the needle, and how far into it the name is.
-    let places: [(&str, usize, &str); 6] = [
+    let places: [(&str, usize, &str); 12] = [
         ("std::to_string(value)", 5, "hover was missing"),
         ("Value{1}.describe()", 0, "`Value` should be a type"),
         ("list.remove(1);", 5, "`remove` is drawn as a macro"),
+        ("variant.index()", 8, "`variant` has no member `index`"),
+        (
+            "std::holds_alternative<double>(variant)",
+            5,
+            "no hover for `holds_alternative`",
+        ),
+        ("left.begin()", 5, "should be the `const` `begin` only"),
+        (
+            "vector.begin()",
+            7,
+            "four overloads, two of them duplicates",
+        ),
+        (
+            "std::size_t operator()",
+            11,
+            "the `operator` keyword, not the function",
+        ),
+        (
+            "std::hash<std::string>{}",
+            5,
+            "for comparison: a type used as a constructor",
+        ),
         (
             "list.sort();",
             5,

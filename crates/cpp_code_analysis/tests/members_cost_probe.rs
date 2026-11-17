@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 fn project() -> PathBuf {
     PathBuf::from(
@@ -81,9 +81,31 @@ fn what_a_member_list_of_a_class_template_costs() {
         let started = Instant::now();
         let members = session.members_of(&view, &class);
         let (count, gaps) = members
+            .clone()
             .value()
             .map(|list| (list.members.len(), list.unlisted.len()))
             .unwrap_or((0, 0));
+        // **A name that appears twice is the reported defect**: `vector.begin` hovered with four declarations, two of
+        // them the same pair again. Printed here, with the file and offset of each, because a duplicate that differs by
+        // its offset is two *readings* of one file and one that agrees on both is one fact collected twice.
+        if let Known::Yes(list) = &members
+            && let Ok(wanted) = std::env::var("CPPLS_MEMBERS_NAME")
+            && !wanted.is_empty()
+        {
+            for member in list
+                .members
+                .iter()
+                .filter(|member| member.fact.name == wanted.as_str())
+            {
+                println!(
+                    "    {wanted} at {}:{} (declared in {}), depth {}",
+                    member.file.display(),
+                    member.fact.name_range.start_offset,
+                    member.declared_in,
+                    member.depth
+                );
+            }
+        }
         println!(
             "{class:<20} {:>9.1} ms  {:>4} member(s), {} unnamed base(s)  live {:>5} MB -> {:>5} MB  churn {:>6} MB",
             started.elapsed().as_secs_f64() * 1000.0,

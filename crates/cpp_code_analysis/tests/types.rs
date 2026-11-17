@@ -4054,3 +4054,62 @@ void f() {
         "the members of the first base level that could be spelled are listed: {instantiated:?}"
     );
 }
+
+/// **A partial specialization's members are not the primary template's.**
+///
+/// Both file their facts under the **primary's name**: a member of `std::vector<bool>` has `scope: "std::vector"`,
+/// because that is the class template's qualified name and a specialization has no name of its own. So a member list
+/// built by "every fact whose scope is this class" answers with the union of two class bodies.
+///
+/// Measured on `test_cpp/src/containers.cpp:28`, `vector.begin()`: the hover card listed **four** declarations —
+/// `begin()` and `begin() const` twice each, the second pair from `stl_bvector.h`. After this: `std::vector<int>` has
+/// **165** members instead of 280, and `begin` is written twice, both from the primary's `stl_vector.h`.
+///
+/// The body a use names is the one the index's own rule picks ([`ProjectIndex::definitions`]): a definition, and among
+/// several the one with the most template parameters.
+#[test]
+fn a_partial_specializations_members_are_not_the_primary_templates() {
+    let files = [
+        (
+            "/p/vector.h",
+            "template <typename T> struct vector {\n    T* begin();\n    const T* begin() const;\n};\n",
+        ),
+        (
+            "/p/bvector.h",
+            "template <> struct vector<bool> {\n    void begin();\n    void begin() const;\n};\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"vector.h\"\n#include \"bvector.h\"\nvoid f() { vector<int> v; v.begin(); }\n",
+        ),
+    ];
+    let session = session_with(&files);
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is held");
+
+    let members = session.members_of(&view, "vector<int>");
+    let cpp_code_analysis::Known::Yes(members) = members else {
+        panic!("a class these headers declare answers a member list: {members:?}");
+    };
+    let begins: Vec<(String, usize)> = members
+        .members
+        .iter()
+        .filter(|member| member.fact.name == "begin")
+        .map(|member| {
+            (
+                member.file.display().to_string(),
+                member.fact.range.start_offset,
+            )
+        })
+        .collect();
+    assert_eq!(
+        begins.len(),
+        2,
+        "the primary template declares `begin` twice and the specialization's two are someone else's: {begins:?}"
+    );
+    assert!(
+        begins.iter().all(|(file, _)| file.ends_with("vector.h")),
+        "and both are the primary's own body: {begins:?}"
+    );
+}

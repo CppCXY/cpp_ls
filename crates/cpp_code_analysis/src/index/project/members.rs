@@ -1691,6 +1691,42 @@ fn why_a_clause_cannot_be_walked(clause: &str) -> Option<UnknownReason> {
     None
 }
 
+/// **The one file a class's own body is written in** — `None` when nothing the index can see declares it.
+///
+/// The question a member list asks when several files answer with facts whose `scope` is the class's name. That
+/// happens for exactly one reason in C++: a **partial specialization of a class template shares the primary's name**,
+/// so `std::vector`'s members are written in `stl_vector.h` and `std::vector<bool>`'s in `stl_bvector.h` while both
+/// file every fact under the string `std::vector`. Measured: `vector.begin()` hovered with four declarations, two of
+/// them the `vector<bool>` specialization's — the primary's `begin()` and `begin() const` twice.
+///
+/// The choice is the index's own rule for "which declaration of a type does a use mean"
+/// ([`ProjectIndex::definitions`]: a **definition** beats a forward declaration, and among several definitions the one
+/// with the **most template parameters** is the primary template). No new rule is invented here; it is the same one
+/// [`definition_across_files`] applies, asked for its *file*.
+///
+/// `None` is not "no body": it is "the index cannot name the class", and the caller then keeps every fact it was given
+/// rather than emptying a member list over a spelling the index does not hold.
+fn the_file_of_a_class_body(index: &ProjectIndex, path: &Path, class: &str) -> Option<String> {
+    let decl = index.definitions(class, path).value()?;
+    let mut types: Vec<&ProjectDefinition> = decl
+        .found
+        .iter()
+        .filter(|one| one.fact.kind == crate::DeclKind::Type)
+        .collect();
+    if types.is_empty() {
+        return None;
+    }
+    // A definition beats a declaration, and the general template beats a specialization.
+    types.sort_by_key(|one| {
+        (
+            !one.fact.definition,
+            std::cmp::Reverse(one.fact.parameters.len()),
+        )
+    });
+    Some(normalize(&types[0].file))
+}
+
+/// [`direct_members`]' answer, **restricted to the class body the spelling names** — see [`the_file_of_a_class_body`].
 /// **A base clause with the current level's arguments substituted into it** — `_Vector_base<_Tp, _Alloc>` asked of
 /// `vector<int>` is `_Vector_base<int, allocator<int>>`.
 ///
@@ -2035,6 +2071,24 @@ pub(crate) fn direct_members(
 
     let found = index.declarations_in(class, path);
     if !found.is_empty() {
+        // **A partial specialization's members are not the primary template's.** Both write `scope: "std::vector"`
+        // into their facts — the scope is the class's *qualified name*, and a specialization of a class template has
+        // the primary's name — so `declarations_in` answers with the union of two class bodies when a header in the
+        // closure declares a specialization. Measured on `test_cpp/src/containers.cpp`, `vector.begin()`: the hover
+        // card listed **four** declarations, `begin()`/`begin() const` twice each, the second pair from
+        // `stl_bvector.h`'s `vector<bool>` specialization.
+        //
+        // A class body is written in exactly one place, so the fix is the body the class's own declaration names: see
+        // [`the_file_of_a_class_body`], whose rule is the index's existing "a type is the definition, and among several
+        // the one with the most template parameters".
+        let own_body = the_file_of_a_class_body(index, path, class);
+        let found: Vec<_> = match &own_body {
+            Some(body) => found
+                .into_iter()
+                .filter(|declaration| normalize(&declaration.file) == *body)
+                .collect(),
+            None => found,
+        };
         return Known::Yes(
             found
                 .into_iter()
