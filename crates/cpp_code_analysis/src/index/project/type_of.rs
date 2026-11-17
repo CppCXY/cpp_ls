@@ -5,6 +5,7 @@
 //! expensive so that a completion or a diagnostic asking twice pays once.
 
 use super::*;
+use smol_str::SmolStr;
 
 /// How deep the type question may ask itself before it gives up.
 ///
@@ -1895,7 +1896,7 @@ pub(crate) fn operator_returns_of_with_arguments(
         .fact
         .returns
         .clone()
-        .or(found.fact.returns_in_the_class().map(str::to_string))?;
+        .or(found.fact.returns_in_the_class().map(SmolStr::from))?;
 
     // **An operator inherited from a base answers in the base's spelling.** `template <class T> struct Base { T*
     // operator->(); }; template <class T> struct Ptr : Base<T> {};` — `Ptr<S>`'s arrow is `Base<S>::operator->`,
@@ -1950,7 +1951,7 @@ fn the_members_return(
     let returns = fact
         .returns
         .clone()
-        .or(fact.returns_in_the_class().map(str::to_string));
+        .or(fact.returns_in_the_class().map(SmolStr::from));
     if returns.as_deref().is_none_or(is_a_placeholder)
         && let Some(deduced) = deduced_returns_of_the_member(
             declaring,

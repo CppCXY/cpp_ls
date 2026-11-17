@@ -140,6 +140,26 @@ fn what_a_summary_costs_and_why() {
         }
     }
     println!(
+        "\n# the hot structs, and how many of each\ndeclaration facts: {} at {} bytes\nmacro facts: {} at {} bytes\n\
+         include facts: {} at {} bytes\nfiles: {} at {} bytes (a summary)",
+        total_declarations,
+        struct_bytes,
+        session
+            .index()
+            .summaries()
+            .map(|summary| summary.macros.len())
+            .sum::<usize>(),
+        std::mem::size_of::<cpp_code_analysis::MacroFact>(),
+        session
+            .index()
+            .summaries()
+            .map(|summary| summary.includes.len())
+            .sum::<usize>(),
+        std::mem::size_of::<cpp_code_analysis::IncludeFact>(),
+        session.index().summaries().count(),
+        std::mem::size_of::<cpp_code_analysis::FileSummary>(),
+    );
+    println!(
         "\n# the fact itself\nsize_of::<DeclFact>() = {struct_bytes} bytes ({}, {:.0}% of the total), the structs alone \
          = {} MB\nnames: {inline_names} inline (no allocation), {heap_names} on the heap",
         struct_bytes * total_declarations / (1024 * 1024),

@@ -309,14 +309,14 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
                 && fact.scope.as_deref() == scope.as_deref()
                 && fact.kind == crate::DeclKind::Function
         }) {
-            return Some(fact.frees);
+            return Some(u64::from(fact.frees));
         }
         let spelling = match scope.as_deref() {
             Some(scope) if !scope.is_empty() => format!("{scope}::{name}"),
             _ => name,
         };
         if let crate::Known::Yes(found) = context.index().definition(&spelling, context.path) {
-            return Some(found.fact.frees);
+            return Some(u64::from(found.fact.frees));
         }
     }
     // **The spelling alone**, for a helper the reading cannot resolve. Only a free function: a member call's name is
@@ -326,7 +326,7 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
     }
     let name = super::callee_name_of(&cpp_parser::CppExpr::cast(callee.clone())?)?;
     match context.index().definition(&name, context.path) {
-        crate::Known::Yes(found) => Some(found.fact.frees),
+        crate::Known::Yes(found) => Some(u64::from(found.fact.frees)),
         _ => None,
     }
 }

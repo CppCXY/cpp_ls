@@ -2295,7 +2295,7 @@ mod tests {
             kind: DeclKind::Function,
             modifiers: crate::DeclModifiers::VIRTUAL,
             type_of: None,
-            returns: returns.map(str::to_string),
+            returns: returns.map(smol_str::SmolStr::from),
             range: cpp_parser::SourceRange::new(0, 0),
             name_range: cpp_parser::SourceRange::new(0, 0),
             clean: true,

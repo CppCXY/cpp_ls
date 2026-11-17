@@ -1695,7 +1695,7 @@ fn declaration_markdown(
     if let Some(returns) = corrected.returns.clone()
         && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)
     {
-        corrected.returns = Some(better);
+        corrected.returns = Some(better.into());
     }
     // **The annotation the file writes, when the index has not recorded it yet.** `UCLASS(Blueprintable)` is read into
     // the fact from the file's text, and the summary that holds it is built by the pump — a hover can arrive first.
@@ -2826,7 +2826,7 @@ mod tests {
         // fact's spelling rather than reconstructing anything.
         let other = DeclFact {
             enumerator: false,
-            returns: Some("std::size_t".to_string()),
+            returns: Some("std::size_t".into()),
             ..fact.clone()
         };
         assert_eq!(

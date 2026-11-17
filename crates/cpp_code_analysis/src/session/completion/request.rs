@@ -685,8 +685,11 @@ impl<F: FileProvider + Clone> Session<F> {
                         .value()
                 });
                 indexed
-                    .and_then(|found| found.fact.returns)
-                    .or_else(|| local.and_then(|found| found.fact.returns))
+                    .and_then(|found| found.fact.returns.map(|returns| returns.to_string()))
+                    .or_else(|| {
+                        local
+                            .and_then(|found| found.fact.returns.map(|returns| returns.to_string()))
+                    })
             },
         );
         for hint in &mut hints {

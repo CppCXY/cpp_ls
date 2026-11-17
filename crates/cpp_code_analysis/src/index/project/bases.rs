@@ -321,7 +321,8 @@ pub(crate) fn fact_from_binding_with(
         // **The other answer the index writes**, and for the same reason: a member function's body is where a
         // `delete` lives, so a call site that asks "does this free my argument" must not depend on which path built
         // the fact.
-        frees: crate::sema::declarations::freed_parameters_of(root, binding),
+        frees: crate::sema::declarations::freed_parameters_of(root, binding)
+            .min(u64::from(u16::MAX)) as u16,
         // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
         // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding)
@@ -348,7 +349,8 @@ pub(crate) fn fact_from_binding_with(
         // returns — the wrapper declared_returns_of would build a whole declaration table to say the same thing,
         // and that fallback was measured at 1 000 builds for one 901-line diagnostic pass.
         returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-            .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding)),
+            .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding))
+            .map(SmolStr::from),
         // **The same residue the index records**, because a member query is exactly the reader that has the class:
         // `parameters` and the class's file are both in hand here. See [`crate::DeclFact::returns_in_the_class`].
         //

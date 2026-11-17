@@ -249,7 +249,8 @@ pub fn substituted_members(
                     spelling,
                     &alias_names,
                     &alias_targets,
-                );
+                )
+                .into();
             }
         }
         // **`type_of` is a `SmolStr`**, so it takes the same rewrite and converts its own result back.
@@ -270,7 +271,8 @@ pub fn substituted_members(
         if let Some(spelling) = member.fact.returns.as_mut() {
             *spelling = crate::sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
-            );
+            )
+            .into();
         }
         if let Some(spelling) = member.fact.type_of.as_mut() {
             *spelling = crate::sema::types::substituted_spelling_with_defaults(

@@ -58,7 +58,7 @@ fn a_split_return_type_is_read_from_the_rendering() {
         .index()
         .summary(&header)
         .expect("the header is read");
-    let filed: Vec<(Option<String>, bool)> = summary
+    let filed: Vec<(Option<smol_str::SmolStr>, bool)> = summary
         .declarations
         .iter()
         .filter(|fact| fact.name == "emplace_back")
@@ -270,7 +270,7 @@ fn the_rendering_is_the_reading() {
         "the compiled branch's type, with no fallback: {emplace_back:?}"
     );
     assert!(
-        !insert.contains(&Some("void".to_string())),
+        !insert.contains(&Some(smol_str::SmolStr::new("void"))),
         "the `#else` branch is not in the rendering: {insert:?}"
     );
     assert!(

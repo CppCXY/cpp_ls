@@ -1267,7 +1267,7 @@ mod tests {
                     // A function declares no `type_of` — the name has no type — and its `returns` is what a *call*
                     // has. Both halves of that distinction are in this fixture on purpose.
                     type_of: None,
-                    returns: Some("ns::Container<int>".to_string()),
+                    returns: Some("ns::Container<int>".into()),
                     // No access level — a free function is not a member — and not exported: the `false` side of
                     // both fields, which the class above covers the other way round.
                     access: None,
@@ -1591,7 +1591,7 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
     // version is what makes the whole entry unreachable, but appending keeps the diff honest.
     put_u32(out, fact.modifiers.bits());
     // And the effects, which are the same kind of answer: what this declaration does, decided once at index time.
-    put_u64(out, fact.frees);
+    put_u64(out, u64::from(fact.frees));
     // **The reflection annotation**, when there is one: its macro and its specifiers, as the file wrote them. A
     // presence byte first, so the common unannotated declaration costs one byte.
     match &fact.reflection() {
@@ -1660,7 +1660,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
     let access = access_from(reader.u8()?);
     let exported = reader.u8()? != 0;
     let modifiers = crate::DeclModifiers::from_bits(reader.u32()?);
-    let frees = reader.u64()?;
+    let frees = reader.u64()?.try_into().unwrap_or(u16::MAX);
     let reflection = match reader.u8()? {
         0 => None,
         _ => {
@@ -1688,7 +1688,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
         modifiers,
         frees,
         type_of,
-        returns,
+        returns: returns.map(SmolStr::from),
         split_by_a_directive,
         range,
         name_range,
@@ -2029,7 +2029,7 @@ fn a_cooked_reading_round_trips() {
                 scope: None,
                 kind: DeclKind::Function,
                 type_of: Some("int".into()),
-                returns: Some("void".to_string()),
+                returns: Some("void".into()),
                 range: SourceRange::new(40, 30),
                 name_range: SourceRange::new(44, 1),
                 local: true,

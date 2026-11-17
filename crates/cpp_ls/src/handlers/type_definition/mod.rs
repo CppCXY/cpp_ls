@@ -314,7 +314,8 @@ fn the_members_type<F: FileProvider + Clone>(
     member
         .fact
         .returns
-        .clone()
+        .as_deref()
+        .map(str::to_string)
         .or_else(|| member.fact.type_of.clone().map(|ty| ty.to_string()))
 }
 #[cfg(test)]

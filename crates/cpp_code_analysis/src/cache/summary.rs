@@ -191,7 +191,7 @@ pub struct DeclFact {
     /// The first is a limit of *when* the summary is built: a file's fact is written while the project is being read,
     /// so the fact of a callee in another file may not exist yet. A second pass could close it, and until then this
     /// answers the case that matters — the helper whose whole job is to free.
-    pub frees: u64,
+    pub frees: u16,
     /// The type a variable-like declaration was written with, as the file spells it.
     ///
     /// The first field in a fact that is not simply "what the file says about this name" but "what the file says
@@ -228,7 +228,7 @@ pub struct DeclFact {
     /// alone: `auto make() -> Widget` spells the type after the parameter list, so the specifiers say `auto`.
     /// `None` for a return type the file does not state — `auto make() { … }` is deduced, and `auto` is not a
     /// class anything can be looked up in.
-    pub returns: Option<String>,
+    pub returns: Option<SmolStr>,
     /// **Does the file's own text state this declaration's type across a directive?**
     ///
     /// `bits/stl_bvector.h` writes `emplace_back`'s return type as `#if __cplusplus > 201402L … reference … #else

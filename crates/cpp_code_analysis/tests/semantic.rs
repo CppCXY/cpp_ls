@@ -1474,7 +1474,8 @@ fn a_function_with_no_written_return_type_states_one_in_its_body() {
             .find(|fact| fact.name == name)
             .unwrap_or_else(|| panic!("`{name}` is declared"))
             .returns
-            .clone()
+            .as_deref()
+            .map(str::to_string)
     };
 
     assert_eq!(

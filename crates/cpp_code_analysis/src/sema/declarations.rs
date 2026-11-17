@@ -1927,7 +1927,7 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
         }
         let mut mask = 0u64;
         scan_unconditional_statements(body, parameters, &mut mask);
-        fact.frees = mask;
+        fact.frees = mask.min(u64::from(u16::MAX)) as u16;
     }
 }
 
@@ -3918,7 +3918,7 @@ fn fact_for(
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
         type_of: type_of.map(SmolStr::from),
-        returns,
+        returns: returns.map(SmolStr::from),
         split_by_a_directive,
         detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
             in_namespace,
