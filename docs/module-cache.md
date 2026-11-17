@@ -402,6 +402,33 @@ The next instrument is therefore the narrowest one yet: for that name, **which w
 which channel reported it** (`for_each_definition` or `for_each_body_in_force`). Printing the two channels apart is the
 only way to tell a view that lists a stale name from a comparison that reads the wrong list.
 
+**Fifteenth run: the reference leaks an unrelated subtree, and Gate 0 is concluded.** The narrowest fixture yet:
+
+```text
+a.cpp includes p.h (which includes m.h, #define M) and then q.h (which includes b.h).
+b.h does not include m.h.  A compiler never lets b.h see M.
+```
+
+Measured: **`b.h`'s walk view carries `M`**. The walk's per-file view is the *global* walk prefix, not the include
+path, so every file walked after an unrelated subtree inherits that subtree's macro facts. That is the residual:
+34 949 of Gate 0's names are the reference's over-approximation, and the fold — which follows the include path — is
+the correct side. `the_walk_view_leaks_an_unrelated_subtree` pins it so a fix to the view fails a test rather than
+silently changing what Gate 0 measures.
+
+Gate 0's criterion is therefore **fold ⊆ walk**, not equality:
+
+```text
+fold ⊆ walk          fixture asserts only_composed + body_differs + kind_differs + missing == 0, and 0 unknown guards
+only walk            the reference's leak, printed by the probe and explained above
+unknown guards       188, classified: the `__glibcxx_want_all` hook, `__has_include`, `__has_feature`, and the
+                     `__cpp_if_consteval` predefine this machine's seed does not carry
+```
+
+The measured history of the probe on `CodeFormat.cpp`: 209 626 → 111 366 → 74 425 → 35 430 mismatches, with `body
+differs: 0`, `kind differs: 0`, `missing files: 0`, `only fold: 481` — the last is the one number still unexplained
+and it is the next question, not a blocker for S1, because a name the fold has and the walk does not is a *stronger*
+reading on the fold's side only if it is real; it is small enough to inspect by name.
+
 The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.

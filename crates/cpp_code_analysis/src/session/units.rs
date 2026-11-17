@@ -710,7 +710,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // has (an `_STD_BEGIN`-shaped `#define` inside a conditional region). A consumer reading the environment
             // reads both, so Gate 0 compares both.
             let mut bindings: Vec<(String, Option<bool>, String)> = Vec::new();
+            let wanted = crate::probes::step_name();
             cpp_parser::MacroFacts::for_each_definition(&view, &mut |facts| {
+                if wanted.is_some_and(|name| facts.name == name) {
+                    eprintln!("[walk] definition {} in {}", facts.name, file.display());
+                }
                 bindings.push((
                     facts.name.to_string(),
                     Some(facts.function_like),
@@ -723,6 +727,9 @@ impl<F: FileProvider + Clone> Session<F> {
             let definitions = bindings.len();
             cpp_parser::MacroFacts::for_each_body_in_force(&view, &mut |facts| {
                 let name = facts.name.to_string();
+                if wanted.is_some_and(|wanted| wanted == name) {
+                    eprintln!("[walk] body-in-force {} in {}", name, file.display());
+                }
                 if bindings[..definitions].iter().any(|known| known.0 == name) {
                     return;
                 }

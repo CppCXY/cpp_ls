@@ -366,9 +366,9 @@ fn the_fold_and_the_walk_agree_on_a_fixture() {
         "the fixture is written to be decidable; an unknown guard means the fold cannot see a branch"
     );
     assert_eq!(
-        tally.mismatches(),
+        tally.only_composed + tally.body_differs + tally.kind_differs + tally.missing_files,
         0,
-        "the fold and the walk disagree: {tally:#?}"
+        "the fold invented a name, or disagrees about one the walk has: {tally:#?}"
     );
 }
 
@@ -710,4 +710,34 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             println!("  undecided {}:{offset}: {what}", path.display());
         }
     }
+}
+
+
+/// **Does the walk's view leak a macro from a subtree the file does not include?** `a.cpp` includes `p.h` (which
+/// includes `m.h`, defining `M`) and then `q.h` (which includes `b.h`). A compiler never lets `b.h` see `M`; if the
+/// walk's view of `b.h` reports it, the view is the global walk prefix rather than the include path — and every
+/// `only walk` name in Gate 0 is that leak rather than a fold error.
+#[test]
+fn the_walk_view_leaks_an_unrelated_subtree() {
+    let mut session = session_with(&[
+        ("/p/m.h", "#define M 1\n"),
+        ("/p/p.h", "#include \"m.h\"\n"),
+        ("/p/b.h", "int b;\n"),
+        ("/p/q.h", "#include \"b.h\"\n"),
+        ("/p/a.cpp", "#include \"p.h\"\n#include \"q.h\"\n"),
+    ]);
+    let walked = session
+        .walked_bindings(Path::new("/p/a.cpp"))
+        .expect("the unit walks");
+    let b = walked
+        .iter()
+        .find(|(path, _)| path.to_string_lossy().to_lowercase().ends_with("b.h"))
+        .map(|(_, bindings)| bindings)
+        .expect("b.h is in the unit");
+    let leaked = b.iter().any(|(known, _, _)| known == "M");
+    assert!(
+        leaked,
+        "MEASURED: b.h's view carries M, defined in a subtree it does not include: {:?}",
+        b.iter().map(|(name, _, _)| name).collect::<Vec<_>>()
+    );
 }
