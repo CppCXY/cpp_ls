@@ -177,11 +177,13 @@ fn where_a_cold_start_puts_its_memory() {
     let started = Instant::now();
     session.index_everything();
     let mut slices = 0usize;
+    let mut read_ahead_peak = 0usize;
     while session.pending_work() > 0 && slices < 1000 {
         session.advance(64);
         slices += 1;
         guard("a cold slice");
         let report = session.memory_report();
+        read_ahead_peak = read_ahead_peak.max(report.prefetched_bytes);
         println!(
             "slice {slices:3}  live {:5} MB  peak {:5} MB  churn {:6} MB  | tables {:5} MB (summaries {} / cooked {} / \
              units {} / renderings {})",
@@ -196,10 +198,11 @@ fn where_a_cold_start_puts_its_memory() {
         );
     }
     println!(
-        "settled after {slices} slice(s) in {:?}; live {} MB, peak {} MB",
+        "settled after {slices} slice(s) in {:?}; live {} MB, peak {} MB, read-ahead peak {} MB",
         started.elapsed(),
         mb(live()),
-        mb(peak())
+        mb(peak()),
+        mb(read_ahead_peak)
     );
 
     println!("\n# the pump, with the reader's files open");
@@ -209,11 +212,13 @@ fn where_a_cold_start_puts_its_memory() {
     }
     let started = Instant::now();
     let mut slices = 0usize;
+    let mut read_ahead_peak = 0usize;
     while session.pending_work() > 0 && slices < 1000 {
         session.advance(64);
         slices += 1;
         guard("an open-file slice");
         let report = session.memory_report();
+        read_ahead_peak = read_ahead_peak.max(report.prefetched_bytes);
         println!(
             "slice {slices:3}  live {:5} MB  peak {:5} MB  churn {:6} MB  | tables {:5} MB (summaries {} / cooked {} / \
              units {} / renderings {})",
@@ -228,12 +233,13 @@ fn where_a_cold_start_puts_its_memory() {
         );
     }
     println!(
-        "settled after {slices} slice(s) in {:?}; live {} MB, peak {} MB, units {:?}, pending {}",
+        "settled after {slices} slice(s) in {:?}; live {} MB, peak {} MB, units {:?}, pending {}, read-ahead peak {} MB",
         started.elapsed(),
         mb(live()),
         mb(peak()),
         session.unit_stats(),
-        session.pending_work()
+        session.pending_work(),
+        mb(read_ahead_peak)
     );
 
     println!("\n# one whole-program read at a time, the way the pump takes them");
@@ -245,6 +251,7 @@ fn where_a_cold_start_puts_its_memory() {
         reads += 1;
         guard("a program read");
         let report = session.memory_report();
+        read_ahead_peak = read_ahead_peak.max(report.prefetched_bytes);
         println!(
             "read {reads:3}  {:5} MB -> {:5} MB in {:>7.1} ms  peak {:5} MB  | tables {:5} MB  | {} | {}",
             mb(before),

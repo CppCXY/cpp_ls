@@ -426,6 +426,12 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
 
+        // **The read-ahead is trimmed before it is added to**, so the budget is a ceiling on what this call holds and
+        // not something the call can overshoot. Measured on `EmmyLuaCodeStyle`: a session that had indexed the
+        // project held **183 MB** of prepared-but-uncommitted slices, because the bound on the read-ahead was a
+        // *count* (`steps * 4` entries) and one entry of a standard-library header is a megabyte.
+        self.trim_the_read_ahead();
+
         // **What the last round of queries asked to have refined** — see `ProjectIndex::ask_for_refinement`. A query
         // cannot walk a closure, so it leaves the file here; the pump serves it in `finish_a_slice` when idle, the
         // same way it serves a file a request named. Measured on `EmmyLuaCodeStyle`: `std::allocator_traits` answered
@@ -509,7 +515,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     );
                 }
                 for (path, made) in made {
-                    self.prefetched.insert(queue_key(&path), made);
+                    self.remember_a_prepared(path, made);
                 }
             }
 
@@ -532,7 +538,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // Nothing left to read means nothing left to read *ahead*: what is still here was prepared for a queue that
         // has since been emptied by something else, and would be stale by the next time it is looked at.
         if self.queue.pending() == 0 {
-            self.prefetched.clear();
+            self.forget_the_read_ahead();
         }
 
         // **The units are the drain's, and `finish_a_slice` builds them for exactly the slice it takes.** This used
@@ -773,6 +779,63 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **Throw the read-ahead away**, because what it was prepared for no longer holds: an edit, a close, a
+    /// filesystem event, an emptied queue. The two halves go together — a key left in the order is harmless (the trim
+    /// skips it), but a map with no order would let a later trim drop entries it cannot account for.
+    pub(crate) fn forget_the_read_ahead(&mut self) {
+        self.prefetched.clear();
+        self.prefetched_order.clear();
+    }
+
+    /// **How much read-ahead this session may hold**, in bytes of prepared summaries.
+    ///
+    /// The bound used to be a *count*: `steps * 4` entries, which on a 64-step slice is 256 files. That is a bound on
+    /// the number of answers and not on their size, and a standard-library header's prepared summary is a megabyte —
+    /// measured on `EmmyLuaCodeStyle`, a session with the project indexed held **183 MB** of prepared-but-uncommitted
+    /// slices. A read-ahead exists to make the *next* slice cheap; it does not have to be a slice and a half ahead of
+    /// anything, and 32 MB is several slices' worth of the files a reader is likely to reach.
+    const READ_AHEAD_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+    /// Put a prepared slice in the read-ahead, remembering when it was made.
+    fn remember_a_prepared(
+        &mut self,
+        path: std::path::PathBuf,
+        made: crate::index::store::Prepared,
+    ) {
+        let key = queue_key(&path);
+        if self.prefetched.insert(key.clone(), made).is_none() {
+            self.prefetched_order.push_back(key);
+        }
+    }
+
+    /// **Drop the files furthest ahead until the read-ahead is inside its budget.**
+    ///
+    /// The newest entries go first: the order is the order the waves were prepared in, so the entry made last is the
+    /// one the queue reaches last, and a later wave will prepare it again if it is still wanted. Nothing about the
+    /// answer changes — a file with no prepared slice is read when its turn comes, which is the same path a file
+    /// outside the read-ahead already takes.
+    fn trim_the_read_ahead(&mut self) {
+        let mut total = self
+            .prefetched
+            .values()
+            .map(crate::index::store::Prepared::heap_bytes)
+            .sum::<usize>();
+        while total > Self::READ_AHEAD_BUDGET_BYTES {
+            let Some(newest) = self.prefetched_order.pop_back() else {
+                break;
+            };
+            if let Some(dropped) = self.prefetched.remove(&newest) {
+                total = total.saturating_sub(dropped.heap_bytes());
+            }
+        }
+        // **And the paths already served leave the order**, so a long session does not grow a key list it never reads.
+        // The map is the authority: a key that is no longer in it is exactly one this loop has nothing to do for.
+        if self.prefetched_order.len() > self.prefetched.len().saturating_mul(2) {
+            let known = &self.prefetched;
+            self.prefetched_order.retain(|key| known.contains_key(key));
+        }
+    }
+
     /// **Put what [`Session::prepare_a_wave`] prepared into the index**, and queue what it includes.
     ///
     /// The cheap half: no parsing, no reading, no walking — `SummaryStore::commit` per file and `Worklist::add` for
@@ -804,8 +867,12 @@ impl<F: FileProvider + Clone> Session<F> {
             revision: _,
         } = wave;
         for (path, made) in prepared {
-            self.prefetched.insert(queue_key(&path), made);
+            self.remember_a_prepared(path, made);
         }
+        // **And the read-ahead is trimmed here too**, because this is the path the *server's* pump takes — `advance`
+        // is the in-process one. Trimming only in `advance` would leave a budget that nothing on the real path
+        // enforced, which is the shape of a fix that measures well and changes nothing.
+        self.trim_the_read_ahead();
         // **The readings that came from the cache are applied here**, and their files leave the second pass's backlog:
         // there is nothing left to refine in them.
         for summary in refinements {
@@ -844,7 +911,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         if self.queue.pending() == 0 {
-            self.prefetched.clear();
+            self.forget_the_read_ahead();
         }
 
         let drain = self.finish_a_slice(&done, units);

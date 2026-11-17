@@ -188,6 +188,7 @@ impl<F: FileProvider + Clone> Session<F> {
             last_edit: std::time::Instant::now(),
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
+            prefetched_order: std::collections::VecDeque::new(),
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
             parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),

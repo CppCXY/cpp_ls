@@ -850,6 +850,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// text the file no longer has: an edit, a close, a filesystem event. It is a read-ahead, never a source of
     /// truth: an entry that is not here is simply read when its turn comes.
     prefetched: HashMap<String, crate::index::store::Prepared>,
+    /// **The order the prepared slices were made in**, oldest first — what a budget drops from.
+    ///
+    /// The map has no order, and the order is the whole question a bound asks: the entries made *last* are the ones
+    /// furthest ahead of the queue, so they are the ones to let go when the read-ahead is over its budget. A key here
+    /// that is no longer in `prefetched` is stale and skipped.
+    prefetched_order: std::collections::VecDeque<String>,
     /// **The translation unit each cooked file was read in**, kept across cooks.
     ///
     /// The one-walk timeline ([`crate::TranslationUnit`]) is what makes a *file's* environment a position in a walk

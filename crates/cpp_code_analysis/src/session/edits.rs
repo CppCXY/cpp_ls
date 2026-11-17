@@ -183,7 +183,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // knows any more, and a view built on it would answer about an edit nobody saved.
         self.vfs.close(path);
         self.store.forget(path);
-        self.prefetched.clear();
+        self.forget_the_read_ahead();
         self.directive_signatures.remove(&queue_key(path));
         self.units
             .lock()
@@ -218,7 +218,7 @@ impl<F: FileProvider + Clone> Session<F> {
             self.changed_input();
         }
         // Anything read ahead was read before this batch said the world moved.
-        self.prefetched.clear();
+        self.forget_the_read_ahead();
 
         // **What the batch's files said, before the store takes their summaries away**: a watched change is the same
         // event as an edit as far as a dependent's reading is concerned, and the reverse walk needs the edges and the
@@ -321,7 +321,7 @@ impl<F: FileProvider + Clone> Session<F> {
             self.directive_signatures.insert(queue_key(path), before);
         }
         let moved = self.directives_moved(path, Some(text));
-        self.prefetched.clear();
+        self.forget_the_read_ahead();
 
         self.documents.open(path, text);
         self.vfs.insert(path, text, true);
