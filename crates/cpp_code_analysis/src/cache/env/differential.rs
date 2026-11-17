@@ -55,6 +55,8 @@ struct Tally {
     skipped_own: usize,
     /// Names excluded because they are the compilation's, not a file's.
     skipped_seed: usize,
+    /// The first few names that were only walk --- what a definer search is run on.
+    missing_names: Vec<String>,
     examples: Vec<String>,
 }
 
@@ -72,6 +74,11 @@ impl Tally {
         for example in other.examples {
             if self.examples.len() < 20 {
                 self.examples.push(example);
+            }
+        }
+        for name in other.missing_names {
+            if self.missing_names.len() < 8 {
+                self.missing_names.push(name);
             }
         }
     }
@@ -126,6 +133,9 @@ fn compare_file(
         match file.at_entry.get(name) {
             None => {
                 tally.only_walked += 1;
+                if tally.missing_names.len() < 8 {
+                    tally.missing_names.push((*name).to_string());
+                }
                 tally.examples.push(format!(
                     "{}: `{name}` is in the walk only",
                     file.path.display()
@@ -460,6 +470,14 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             tally.skipped_seed,
             started.elapsed(),
         );
+        for name in tally.missing_names.iter().take(6) {
+            let definer = composition
+                .files
+                .iter()
+                .find(|file| file.at_exit.get(name).is_some())
+                .map(|file| file.path.display().to_string());
+            println!("  missing {name}: definer {definer:?}");
+        }
         for example in tally.examples.iter().take(10) {
             println!("  {example}");
         }
