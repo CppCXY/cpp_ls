@@ -1512,3 +1512,15 @@ the only-walk residual measured to be the reference view leaking an unrelated su
 Not landed: the walk budget that would make `advance(64)` bound its closures (two attempts, both blocked by the
 stale-closure test that the ready-closure arm now covers), the `SiteKey` memoisation, and the record key moving to a
 reachable `EnvId`.
+## Status at the end of this pass
+
+Re-measured after the ready-closure arm: `LuaCheck.cpp` cook **0.4 / 0.3 / 0.2 ms**, `walked 0`, 50 declarations — the
+arm does not touch a ready closure, which is the case a cook meets in practice. Gates: `cargo fmt --check` silent,
+`clippy --workspace --all-targets` silent, `cargo test -p cpp_code_analysis` all binaries green (865 in the lib), and
+`cargo test --release --workspace` failing only the pre-existing
+`a_member_declared_twice_shows_both_declarations_and_their_clauses`.
+
+Not achieved, and stated as such: `advance(64)` with 82 open documents is 5.2 GB, because the current contract counts
+roots and each root is a whole-program walk; the walk budget that would bound it was attempted twice and each attempt
+left the stale-closure test red, so it is not landed. The `SiteKey` memoisation and the record key moving to a reachable
+`EnvId` are also not landed.
