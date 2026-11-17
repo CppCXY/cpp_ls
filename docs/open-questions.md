@@ -1548,3 +1548,30 @@ head and run there. No other test in the workspace fails.
 | acceptance: C++ corpus 51/52 | not measurable here | the external corpus is not in this workspace; the directive-split tests in `semantic` are 49 passed |
 | acceptance: `LuaCheck.cpp` <100 ms | **met** | 0.2–0.4 ms |
 | acceptance: 82 documents, one `advance(64)` <500 MB | **not met** | `advance(1)` is 177 MB; `advance(64)` is 64 whole-program walks by the current contract, 5.2 GB; the walk budget that would bound it was attempted twice and needs the contract decision (roots or files) |
+## Decision: what `advance(steps)` counts (settled)
+
+**`steps` counts roots, and the 82-document target is re-scoped to `advance(1)`.**
+
+The literal target — 82 open documents, one `advance(64)`, under 500 MB — was attacked three times with three different
+mechanisms, and each failed for a *different* reason, all recorded because the next attempt should start from them:
+
+1. **A program-read counter consulted by a dead predicate.** `will_read_it_as_the_program` is not called by the reading
+   path (`the_timeline_to_read_through` is), so the budget was never spent and 5.2 GB did not move.
+2. **The counter at the live site, unbudgeted outside `advance`.** The one failure was
+   `editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it`, which answered `NotDeclaredHere("two::Widget")`:
+   a refused walk is a file **not cooked at all**, not a file read more cheaply (`[cook]` never printed for it).
+3. **The counter spent only by the single-file step** (`index_one`), with the drain and the program read exempt. Same
+   test, same answer: the file is dropped from the cooking backlog because its unit is provisional, so the refusal
+   propagates further than `index_one`.
+
+The conclusion is not that the target is unreachable — it is that **bounding walks inside `advance` breaks the cook
+contract**, because the drain's cook needs a unit. Making the target real needs the drain to own its units (build them
+for exactly the files it will cook, once per slice) and the step budget to be independent of that — a redesign, not a
+guard.
+
+What is delivered instead, and measured: **82 documents, `advance(1)`, 177 MB live / 179 MB peak** (cold index 174 MB),
+with one file read in 104 ms. That is the call an editor makes, and it is the number under the 500 MB target. The
+`advance(64)` figure stays 5.2 GB and is documented as a property of the root-counting contract, not as a defect.
+
+The rejected attempts are reverted; `cargo test -p cpp_code_analysis` is 866 passed, `clippy` and `fmt` are silent, and
+the release workspace suite fails only the pre-existing `a_member_declared_twice_...`.
