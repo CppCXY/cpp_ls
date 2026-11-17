@@ -45,7 +45,11 @@ fern.workspace = true
 chrono.workspace = true
 
 clap = { workspace = true, optional = true }
-mimalloc = { version = "0.1", optional = true, default-features = false }
+# **`mimalloc-safe` in place of `mimalloc`.** The wrapper is the same `MiMalloc` type with the same `GlobalAlloc`
+# implementation, so nothing that uses it changes; what differs is who maintains it — `mimalloc-safe` ships 0.1.70 on
+# `libmimalloc-sys2`, while `mimalloc`'s last release is 0.1.52. The byte counter the pump reads is
+# `cpp_ls/src/bin/cpp_ls.rs`, which is the only reason this crate is a dependency at all.
+mimalloc-safe = { version = "0.1.70", optional = true }
 
 [[bin]]
 name = "cpp_ls"
@@ -53,4 +57,4 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:mimalloc"]
+cli = ["dep:clap", "dep:mimalloc-safe"]

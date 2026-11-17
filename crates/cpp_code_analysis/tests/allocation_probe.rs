@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use mimalloc::MiMalloc;
+use mimalloc_safe::MiMalloc;
 
 struct Counting;
 

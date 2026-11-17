@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use mimalloc::MiMalloc;
+use mimalloc_safe::MiMalloc;
 
 /// **The allocator the server actually runs with.** `cpp_ls` installs mimalloc as its global allocator, and a probe
 /// that measures the same work on the default Windows heap is measuring a different program: the same cold read of

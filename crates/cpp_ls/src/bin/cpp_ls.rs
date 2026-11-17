@@ -1,6 +1,6 @@
 use clap::Parser;
 use cpp_ls::cmd_args::CmdArgs;
-use mimalloc::MiMalloc;
+use mimalloc_safe::MiMalloc;
 use std::alloc::{GlobalAlloc, Layout};
 use std::error::Error;
 
