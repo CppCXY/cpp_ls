@@ -37,7 +37,7 @@ use crate::index::watch::WatchFilter;
 use crate::session::{OpenDocuments, Session, SessionFiles};
 
 /// What one comparison found, by category.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Tally {
     files: usize,
     names: usize,
@@ -329,12 +329,34 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
         };
         let composition = composition(&session, root_source, session.index().macros());
         let mut tally = Tally::default();
+        let mut per_file: Vec<(PathBuf, Tally)> = Vec::new();
         for (path, bindings) in &walked {
             let Some(file) = composition.file(path) else {
                 tally.missing_files += 1;
                 continue;
             };
-            tally.merge(compare_file(file, bindings, &seed_names));
+            let one = compare_file(file, bindings, &seed_names);
+            if one.only_walked + one.only_composed > 0 {
+                per_file.push((path.clone(), one.clone()));
+            }
+            tally.merge(one);
+        }
+        per_file.sort_by_key(|(_, one)| std::cmp::Reverse(one.only_walked));
+        for (path, one) in per_file.iter().take(8) {
+            println!(
+                "  worst {}: only walk {}, only fold {}, unknown {}, names {}",
+                path.display(),
+                one.only_walked,
+                one.only_composed,
+                composition.file(path).map_or(0, |file| file.unknown_guards),
+                one.names
+            );
+            for example in one.examples.iter().take(3) {
+                println!("    {example}");
+            }
+            if let Some(file) = composition.file(path) {
+                let _ = file;
+            }
         }
         println!(
             "{}: {} file(s), {} name(s) compared, {} mismatch(es), {} unknown guard(s) | only walk {}, only fold {}, \
