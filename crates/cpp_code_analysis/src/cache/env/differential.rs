@@ -712,7 +712,6 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
     }
 }
 
-
 /// **Does the walk's view leak a macro from a subtree the file does not include?** `a.cpp` includes `p.h` (which
 /// includes `m.h`, defining `M`) and then `q.h` (which includes `b.h`). A compiler never lets `b.h` see `M`; if the
 /// walk's view of `b.h` reports it, the view is the global walk prefix rather than the include path — and every

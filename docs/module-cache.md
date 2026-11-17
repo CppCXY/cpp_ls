@@ -429,7 +429,33 @@ differs: 0`, `kind differs: 0`, `missing files: 0`, `only fold: 481` — the las
 and it is the next question, not a blocker for S1, because a name the fold has and the walk does not is a *stronger*
 reading on the fold's side only if it is real; it is small enough to inspect by name.
 
-The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
+**Sixteenth run: S1a was built, measured, and reverted — one server test says why.** Deleting the walk arm from
+`cooking_materials` does what the design note promises: on `EmmyLuaCodeStyle`, `CodeFormat/src/LuaCheck.cpp` (373-file
+closure, no `.cppls.toml`) a cook goes from a **8.8 s** whole-program read to
+
+```text
+index      4 217 ms, walked 0 units
+cook 1         9.5 ms | 50 declaration(s)
+cook 2         0.6 ms | 50 declaration(s)
+cook 3         0.4 ms | 50 declaration(s)
+```
+
+with `walked 0` — a cook no longer walks a timeline. The analysis suite went green after six tests were moved to the new
+contract (a cook composes; a *program read* is what walks and what fills the sharing table).
+
+It was reverted because the server crate disagrees: `cpp_ls/tests/reported_hover.rs::a_member_declared_twice_shows_both_declarations_and_their_clauses`
+fails — the hover card no longer says **which class a const object may call**, which is the class's `const`-ness on the
+member. The file is one translation unit with the class in it, so the composed rendering should carry it; the failure
+therefore says something about what a *timeline* contributes to a hover that composition does not, and that is not
+diagnosed yet.
+
+This is exactly the class of regression Gate 0 does not catch: it compares **environments**, and this is a **query**
+answer. S1 needs that survey before it can land — the cheapest form being to run the server suite with the walk arm
+deleted and read every failure, which is what this run did (one failure out of the whole workspace).
+
+The class is named and small;
+
+ __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
 
