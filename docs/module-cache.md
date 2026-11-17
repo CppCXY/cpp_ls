@@ -625,6 +625,27 @@ is a measured 177 MB) or it counts files (a call reads at most `steps` files and
 queue; the design note's preference, and the only reading under which 500 MB is reachable). The next round is that
 change, not another measurement of the same two numbers.
 
+**Twenty-sixth run: the budget at the live site, and the one test that stops it.** The per-call walk budget was moved
+where it belongs — `the_timeline_to_read_through`, the function that actually walks (`will_read_it_as_the_program` is
+dead code, measured last round). Outside `advance` the budget does not apply, so the two keystroke contracts are
+untouched; inside it, one walk per call. The suite says exactly one test disagrees, and the same one as before:
+
+```text
+session::tests::programs::editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it
+  and the new reading is the one in the index: Unknown(NotDeclaredHere("two::Widget"))
+```
+
+That is the **semantic gap of S1 stated as a test**: after `did_change` on a header, the header's summary is dropped and
+queued, and the file that includes it is re-read **before the index catches up**. A walk was self-contained — it read the
+overlay text itself — while a composed environment reads the index. So the budget is reverted (again, and for the last
+time in this document) and the remaining S1 work is named precisely:
+
+> **compose must not answer from an index that is behind the overlay.** Either the closure's stale members are indexed
+> before the composition (a synchronous, bounded step), or the composition declines and the caller falls back to a walk.
+
+Closing that gap is what makes the walk budget safe, and the budget is what makes `advance(64)` with 82 open documents
+fit in the memory target. They are one change, not two, and it is the last one S1 needs.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
