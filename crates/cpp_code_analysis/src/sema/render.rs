@@ -34,7 +34,7 @@
 //! written, because that is the model's honest answer and not a copy of the line.
 
 use cpp_parser::CppAstNode;
-use cpp_parser::{CppDeclaration, CppTemplateDecl};
+use cpp_parser::{CppDeclaration, CppSyntaxNode, CppTemplateDecl};
 
 use crate::sema::types::parse_type_spelling;
 use crate::{DeclFact, DeclKind, DeclModifiers};
@@ -412,7 +412,34 @@ fn a_variable(fact: &DeclFact, value: Option<i64>, syntax: Option<&CppDeclaratio
 /// **`const ` and `volatile ` as the declaration wrote them**, from its specifier sequence — `""` when there are none or
 /// the declaration's syntax is not at hand.
 fn the_written_qualifiers(syntax: Option<&CppDeclaration>) -> &'static str {
-    let Some(specifiers) = syntax.and_then(|declaration| declaration.get_decl_specifiers()) else {
+    the_qualifiers_in(
+        syntax
+            .map(|declaration| declaration.syntax())
+            .map(|syntax| syntax as &CppSyntaxNode),
+    )
+}
+
+/// **[`the_written_qualifiers`] for any node that carries a specifier sequence** — a `Declaration` or a `Parameter`.
+///
+/// A parameter is the case the declaration union does not cover: `[](auto const& value)` keeps its `const` in the
+/// parameter's own `DeclSpecifierSeq`, and the nearest `CppDeclaration` above it is the function, whose specifiers say
+/// nothing about the parameter. Measured: the card printed `auto& value`, and the operator's card printed
+/// `std::string& left` for `std::string const& left`.
+pub fn the_qualifiers_of_node(syntax: Option<&CppSyntaxNode>) -> &'static str {
+    the_qualifiers_in(syntax)
+}
+
+fn the_qualifiers_in(syntax: Option<&CppSyntaxNode>) -> &'static str {
+    let specifiers = syntax.and_then(|syntax| {
+        syntax
+            .children()
+            .find(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+            })
+            .and_then(cpp_parser::CppDeclSpecifierSeq::cast)
+    });
+    let Some(specifiers) = specifiers else {
         return "";
     };
     use cpp_parser::CppTokenKind;
@@ -436,7 +463,97 @@ pub fn a_type(written: &str) -> String {
     if written.is_empty() {
         return String::new();
     }
-    parse_type_spelling(written).to_string()
+    // **The qualifiers are part of the spelling and the model does not carry them.** `Type` answers *which class* a
+    // spelling names, so `const std::string&` is the same `Type` as `std::string&` — right for a member lookup, and
+    // wrong for a popup, where the qualifier is the one word that says whether the object may be written through.
+    // Measured on the reported screen: `[](auto const& value)` hovered as `auto& value`, and
+    // `bool operator()(std::string const& left, …)` as `std::string& left`.
+    //
+    // Only a **top-level** qualifier is read here; a `const` inside a template argument (`std::vector<const int>`)
+    // belongs to that argument and stays where it is written — see [`the_top_level_qualifiers`].
+    let (qualifiers, core) = the_top_level_qualifiers(written);
+    let printed = parse_type_spelling(&core).to_string();
+    // **Not added twice.** The model keeps a *builtin*'s qualifier — `char*` is printed `const char*`, the one type it
+    // normalises that way — so a qualifier the printed type already carries is left to it.
+    if qualifiers.is_empty() || printed.starts_with("const") || printed.starts_with("volatile") {
+        return printed;
+    }
+    format!("{qualifiers}{printed}")
+}
+
+/// **The `const`/`volatile` words written at the top level of a type spelling**, and what is left of it.
+///
+/// `std::string const&` and `const std::string&` are the same type, and both are written — so both are found and both
+/// come back in front, where a reader expects them.
+///
+/// A qualifier **inside** a template argument is not one of these: `std::vector<const int>` holds `const int` as an
+/// argument, and moving that word out would print `const std::vector<int>`, which is a different type. The depth
+/// counter is what tells the two apart; `(`/`[` open a depth too, because a function's parameter list and an array
+/// bound are the same shape.
+fn the_top_level_qualifiers(written: &str) -> (String, String) {
+    let mut qualifiers = String::new();
+    let mut core = String::new();
+    let mut depth = 0i32;
+    let mut past_the_declarator = false;
+
+    let push_to_core = |core: &mut String, text: &str, glue: bool| {
+        if !glue
+            && !core.is_empty()
+            && !core.ends_with(|character: char| "<([:".contains(character))
+        {
+            core.push(' ');
+        }
+        core.push_str(text);
+    };
+
+    for word in written.split_whitespace() {
+        // `const&` is one word: the qualifier and the reference that follows it, and the reference belongs to the type.
+        let name_end = word
+            .find(|character: char| {
+                !(character.is_alphanumeric() || character == '_' || character == ':')
+            })
+            .unwrap_or(word.len());
+        let (name, punctuation) = word.split_at(name_end);
+
+        let opening = word
+            .bytes()
+            .filter(|byte| matches!(byte, b'<' | b'(' | b'['))
+            .count() as i32;
+        let closing = word
+            .bytes()
+            .filter(|byte| matches!(byte, b'>' | b')' | b']'))
+            .count() as i32;
+
+        if depth == 0 && !past_the_declarator && matches!(name, "const" | "volatile") {
+            if !qualifiers.is_empty() {
+                qualifiers.push(' ');
+            }
+            qualifiers.push_str(name);
+            // The punctuation the word carried (`&`, `*`) is the type's, and it goes where it was — glued.
+            if !punctuation.is_empty() {
+                push_to_core(&mut core, punctuation, true);
+            }
+        } else {
+            push_to_core(&mut core, word, false);
+            // **A `const` after a `*` or a `&` qualifies the pointer, not the type** — `Foo* const p` says the *pointer*
+            // cannot be reassigned, and a card that moved the word to the front would say the pointee cannot be
+            // written through. Everything after the first declarator operator is left where it is written, which is
+            // what the model's own `const char * const` → `const char*` already did.
+            if word.contains('*') || word.contains('&') {
+                past_the_declarator = true;
+            }
+        }
+        depth += opening - closing;
+    }
+
+    (
+        if qualifiers.is_empty() {
+            String::new()
+        } else {
+            format!("{qualifiers} ")
+        },
+        core,
+    )
 }
 
 /// **The parameters of a recorded `parameter_list`**, rebuilt — types canonical, names kept, defaults summarised.
@@ -854,6 +971,34 @@ mod tests {
         assert_eq!(
             rendered("static const Widget* first;\n", "first"),
             ["static const Widget* first"]
+        );
+    }
+
+    /// **A `const` written on a type is printed back**, whichever side of the name it is on.
+    ///
+    /// `Type` answers *which class* a spelling names, so `const std::string&` and `std::string&` are the same `Type` —
+    /// correct for a member lookup and wrong for a popup, where the qualifier is the one word that says whether the
+    /// object may be written through. Measured: `a_type("std::string const&")` printed `std::string&` and
+    /// `a_type("auto const&")` printed `auto&`, which is how `[](auto const& value)` hovered as `auto& value` and
+    /// `bool operator()(std::string const& left, …)` as `std::string& left`.
+    ///
+    /// Only a **top-level** qualifier moves: `std::vector<const int>&` keeps its argument as written, because
+    /// `const int` there is part of the type argument and not a qualifier of the outer type.
+    #[test]
+    fn a_typed_qualifier_is_printed_back() {
+        assert_eq!(a_type("std::string const&"), "const std::string&");
+        assert_eq!(a_type("const std::string&"), "const std::string&");
+        assert_eq!(a_type("auto const&"), "const auto&");
+        assert_eq!(a_type("const volatile Widget*"), "const volatile Widget*");
+        assert_eq!(
+            a_type("std::vector<const int>&"),
+            "std::vector<const int>&",
+            "a qualifier inside a template argument is part of the argument"
+        );
+        assert_eq!(
+            rendered("void f(std::string const& left);\n", "f"),
+            ["void f(const std::string& left)"],
+            "and a parameter list keeps it, which is where the report saw it lost"
         );
     }
 

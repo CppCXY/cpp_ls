@@ -155,6 +155,10 @@ fn whitespace_splitting_is_a_spelling_rule() {
         "declarations.rs",
         "deduction.rs",
         "model.rs",
+        // **`render.rs` normalises a type spelling**, which is what this list is for: `a_type` reads the
+        // `const`/`volatile` words a `Type` cannot carry out of the spelling and puts them back in front, so the words
+        // it splits are a spelling and not a node's text.
+        "render.rs",
         "overload.rs",
         "types.rs",
         "concept_not_satisfied.rs",

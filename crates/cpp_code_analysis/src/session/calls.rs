@@ -170,17 +170,28 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `None` when the file cannot be read (a header the project never loaded), when the offset is not inside a
     /// declaration, or when the declaration there is not the one asked about — all three are the caller's answer
     /// "render from the fact alone", never an error.
+    ///
+    /// # Why the answer is a syntax node and not a [`cpp_parser::CppDeclaration`]
+    ///
+    /// Because **a parameter is a declaration of a name this model does not accept as one**. The parser's declaration
+    /// union is `Declaration | UsingDecl | TypedefDecl` (it is what a list of declarations iterates), and a
+    /// `Parameter` node is none of them — so asking for the nearest `CppDeclaration` inside
+    /// `[](auto const& value)` answered the **enclosing function**, whose specifiers say nothing about `value`. A card
+    /// built from that printed `auto& value` for `auto const& value`, and `std::string& left` for
+    /// `std::string const& left`. The node is what has the specifiers; a caller that needs the declaration API casts.
     pub fn the_declaration_node(
         &self,
         file: &Path,
         offset: usize,
-    ) -> Option<cpp_parser::CppDeclaration> {
+    ) -> Option<cpp_parser::CppSyntaxNode> {
         let view = self.view_of_the_file(file)?;
         let token = cpp_parser::token_at(&view.root, offset)?;
         use cpp_parser::CppAstNode as _;
-        token
-            .parent_ancestors()
-            .find_map(cpp_parser::CppDeclaration::cast)
+        token.parent_ancestors().find(|node| {
+            let kind = cpp_parser::CppSyntaxKind::from(node.kind());
+            kind == cpp_parser::CppSyntaxKind::Parameter
+                || cpp_parser::CppDeclaration::can_cast(kind)
+        })
     }
 
     /// **The template arguments a call fixes**, for a declaration the caller already holds.

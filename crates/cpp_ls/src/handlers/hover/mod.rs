@@ -1670,7 +1670,7 @@ fn declaration_markdown(
     {
         corrected.reflection = the_files.reflection.clone();
     }
-    let fact = &corrected;
+    let fact = &mut corrected;
     if crate::probes::debug_card() {
         eprintln!(
             "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
@@ -1738,8 +1738,37 @@ fn declaration_markdown(
         session.the_attributes_before_a_declaration(&found.file, fact.range.start_offset);
     let (attributes, specifiers) = the_annotations_as_the_card_shows_them(&annotations);
     let node = session.the_declaration_node(&found.file, fact.range.start_offset);
-    let mut declaration =
-        cpp_code_analysis::sema::render::an_item(fact, node.as_ref(), constant_value);
+    // **The qualifiers a declaration keeps in its own specifier sequence.** They are not in the fact: `type_of` is a
+    // name for lookup and drops the specifier words on purpose (`static const Widget` records `Widget`, so a lookup by
+    // name finds the class). The node has them, and it is the *parameter's* node here even for a parameter — the
+    // parser's declaration union has no `Parameter` (it is not one of the shapes a list of declarations iterates), so
+    // asking for a `CppDeclaration` answered the enclosing function and the words were lost: measured,
+    // `[](auto const& value)` hovered as "a variable of type `auto&`" and `bool operator()(std::string const& left, …)`
+    // as `std::string& left`.
+    //
+    // Added to the *fact* rather than to the printed line, so the code block and the sentence beside it — "a variable of
+    // type `auto&`" is the same fact read once more — cannot disagree.
+    if matches!(fact.kind, DeclKind::Variable)
+        && let Some(qualifiers) = Some(cpp_code_analysis::sema::render::the_qualifiers_of_node(
+            node.as_ref(),
+        ))
+        .filter(|qualifiers| !qualifiers.is_empty())
+        && let Some(written) = fact.type_of.clone()
+        && !written.starts_with("const")
+        && !written.starts_with("volatile")
+    {
+        fact.type_of = Some(format!("{qualifiers}{written}"));
+    }
+    let mut declaration = cpp_code_analysis::sema::render::an_item(
+        fact,
+        node.as_ref()
+            .and_then(|node| {
+                use cpp_parser::CppAstNode as _;
+                cpp_parser::CppDeclaration::cast(node.clone())
+            })
+            .as_ref(),
+        constant_value,
+    );
     if !attributes.is_empty() {
         declaration.insert(0, attributes.join(" "));
     }
