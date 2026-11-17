@@ -221,6 +221,43 @@ Two known deviations that must stay deviations, and are documented where they ar
   that records a failed search must not be stored, because nothing in the key would notice the header appearing;
 * a summary built **from a rendering** is not stored under the raw key, for the reason store.rs already gives.
 
+## 6a. What exists (end of the first implementation round)
+
+`crates/cpp_code_analysis/src/cache/env/` — four files, and the test module inside the fourth:
+
+```text
+mod.rs        Env (a persistent chain with a Merkle id), Definition, EnvId, and `Over` — the table a
+              condition sees, the environment in front of the compilation's own definitions
+skeleton.rs   a file's directives in source order, bodies sliced from `body_range` and trimmed
+compose.rs    the fold, with the include recursion behind an `IncludeHandler` so the unit-wide
+              shape reuses it (`compose` and `compose_unit` are the two handlers)
+unit.rs       every file's entry and exit state from one traversal
+tests.rs      six tests: define reaches its includer, undef takes it away, `#if 0` is not composed,
+              a guard's second inclusion changes nothing, one file one id, a function-like body
+              starts after its parameters
+```
+
+Two things the implementation found that the design note had not:
+
+* **A guarded file contributes nothing when its own guard is not taken.** Its facts are stored
+  `Unconditional` (`deguard_the_files_own_guard`), so without `SummaryGuards::own_guard_holds` the second inclusion of
+  a guarded header applied its `#define` again and the two states hashed differently. The fixture measured it.
+* **`body_range` starts at the byte after the name**, so a replacement list slices with a leading space; trimmed,
+  because two spellings of one definition must be one environment.
+
+**Gate 0 is not yet proven.** The harness needs the *walk's* answer per file, and the two obvious routes do not give it:
+`Session::read_the_unit` may be served from a stored rendering (no timeline, `TranslationUnit::units` empty), and
+`gather_a_unit_read` answers from the cache for the same reason. The next step is a test-only accessor that forces a
+cold walk — `closure_with_text_from` + `TranslationUnit::walk`, the pair `read_the_program` itself uses — and compares
+`environment_of(file)` against `compose_unit`'s `at_entry` on the names the file's own subtree does not define. The
+comparison rule, the exclusions and the counters are written in the round's notes and in §8.
+
+A gap the fixture already caught, and the reason Gate 0 matters: `#if API_VERSION > 2` is **undecidable today**, because
+a `Definition` answers `Lookup::DefinedWithoutAValue` — the summary stores a body as a shape plus one literal, not the
+token list `macro_value` reads. With `Over` in front of the compiler's own table the seed's values are decided, and the
+file-defined ones are the piece `docs/module-cache.md` §8 lists. A fold that meets an undecidable guard applies
+nothing and counts it, so Gate 0 must report `unknown_guards` beside its mismatches rather than pretending they are
+zero.
 ## 7. Staged plan, with the number that decides each stage
 
 **Gate 0 (a day).** A differential probe: for 20 files of `EmmyLuaCodeStyle`, `compose` vs `walk`, with 50 probes per

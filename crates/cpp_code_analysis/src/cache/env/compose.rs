@@ -12,6 +12,13 @@
 //! unknown_guards        directives whose region could not be decided (see below)
 //! ```
 //!
+//! # The two shapes of recursion
+//!
+//! [`compose`] answers "the state at the end of this file", recursing through includes by composing each one. The
+//! unit-wide question — "the state at *every* file's entry", which is what a differential test against the walk asks
+//! — is the same fold with a different include handler ([`crate::cache::env::compose_unit`]). Both go through
+//! [`fold`], so the guard rule, the depth limit and the conservative arm below exist once.
+//!
 //! # The guard rule, and the one honest gap
 //!
 //! A directive inside `#if` is applied only when its region is in force, decided with the environment **as of the
@@ -37,6 +44,9 @@ use std::path::Path;
 
 use crate::Visibility;
 use crate::cache::summary::SummaryGuards;
+use crate::preprocess::condition::MacroValues;
+
+use super::Over;
 
 use super::{Env, Skeleton, Step, skeleton::Action};
 
@@ -58,6 +68,15 @@ pub struct Composed {
     pub depth_exceeded: usize,
 }
 
+/// **What a fold does when it reaches an `#include`** — the two shapes of recursion, behind one trait.
+///
+/// The answer is the state *after* the include, or `None` when the file cannot be read (the include is dropped, as a
+/// compiler would drop a missing header it was told to skip). Implemented by [`Nested`] — compose it and carry on —
+/// and by `cache::env::unit`'s recorder — compose it, remember every file's entry state, carry on.
+pub trait IncludeHandler {
+    fn include(&mut self, path: &Path, env: &Env, depth: usize) -> Option<Env>;
+}
+
 /// **Compose the environment a file leaves behind**, starting from `incoming`.
 ///
 /// `look_up` answers a path with the skeleton and the guards of the file it names — the two things a fold needs from
@@ -66,7 +85,40 @@ pub fn compose(
     skeleton: &Skeleton,
     guards: &SummaryGuards,
     incoming: &Env,
+    seed: &dyn MacroValues,
     look_up: &mut impl FnMut(&Path) -> Option<(Skeleton, SummaryGuards)>,
+) -> Composed {
+    fold(
+        skeleton,
+        guards,
+        incoming,
+        seed,
+        &mut Nested { seed, look_up },
+        0,
+    )
+}
+
+/// The plain recursion: an include is another fold, and its final state is what the caller continues from.
+struct Nested<'a> {
+    seed: &'a dyn MacroValues,
+    look_up: &'a mut dyn FnMut(&Path) -> Option<(Skeleton, SummaryGuards)>,
+}
+
+impl IncludeHandler for Nested<'_> {
+    fn include(&mut self, path: &Path, env: &Env, depth: usize) -> Option<Env> {
+        let (skeleton, guards) = (self.look_up)(path)?;
+        Some(fold(&skeleton, &guards, env, self.seed, self, depth + 1).final_env)
+    }
+}
+
+/// **The fold itself** — the one loop both shapes of recursion share.
+pub(crate) fn fold(
+    skeleton: &Skeleton,
+    guards: &SummaryGuards,
+    incoming: &Env,
+    seed: &dyn MacroValues,
+    handler: &mut dyn IncludeHandler,
+    depth: usize,
 ) -> Composed {
     Fold {
         env: incoming.clone(),
@@ -74,9 +126,11 @@ pub fn compose(
         after_each_include: Vec::new(),
         unknown_guards: 0,
         depth_exceeded: 0,
-        look_up,
+        seed,
+        handler,
+        depth,
     }
-    .run(skeleton, guards, 0)
+    .run(skeleton, guards)
 }
 
 struct Fold<'a> {
@@ -87,32 +141,26 @@ struct Fold<'a> {
     after_each_include: Vec<(usize, Env)>,
     unknown_guards: usize,
     depth_exceeded: usize,
-    look_up: &'a mut dyn FnMut(&Path) -> Option<(Skeleton, SummaryGuards)>,
+    seed: &'a dyn MacroValues,
+    handler: &'a mut dyn IncludeHandler,
+    depth: usize,
 }
 
-impl<'a> Fold<'a> {
-    fn run(mut self, skeleton: &Skeleton, guards: &SummaryGuards, depth: usize) -> Composed {
+impl Fold<'_> {
+    fn run(mut self, skeleton: &Skeleton, guards: &SummaryGuards) -> Composed {
         // **A file whose own include guard is not taken contributes nothing** — not even its `#define`s, which the
         // summary stores as unconditional (see `SummaryGuards::own_guard_holds`). This is what makes the second
         // `#include` of a guarded header leave the environment exactly as the first did.
-        match guards.own_guard_holds(&self.env) {
-            Some(true) => {}
-            held => {
-                if held.is_none() {
-                    self.unknown_guards += 1;
-                }
-                return Composed {
-                    final_env: self.env,
-                    after_each_include: self.after_each_include,
-                    unknown_guards: self.unknown_guards,
-                    unresolved_includes: skeleton.unresolved_includes(),
-                    depth_exceeded: self.depth_exceeded,
-                };
+        let held = guards.own_guard_holds(&self.env);
+        if held != Some(true) {
+            if held.is_none() {
+                self.unknown_guards += 1;
             }
+            return self.finish(skeleton);
         }
         for step in skeleton.steps() {
             let visibility = guards.visibility_of(step.guard, step.at, |condition_at| {
-                self.env_at(condition_at)
+                Over::new(self.env_at(condition_at), self.seed)
             });
             match visibility {
                 Visibility::Active => {}
@@ -122,9 +170,13 @@ impl<'a> Fold<'a> {
                     continue;
                 }
             }
-            self.apply(step, depth);
+            self.apply(step);
             self.history.push((step.at, self.env.clone()));
         }
+        self.finish(skeleton)
+    }
+
+    fn finish(self, skeleton: &Skeleton) -> Composed {
         Composed {
             final_env: self.env,
             after_each_include: self.after_each_include,
@@ -134,7 +186,7 @@ impl<'a> Fold<'a> {
         }
     }
 
-    fn apply(&mut self, step: &Step, depth: usize) {
+    fn apply(&mut self, step: &Step) {
         match &step.action {
             Action::Define(definition) => {
                 self.env = self.env.define(definition.clone());
@@ -143,26 +195,14 @@ impl<'a> Fold<'a> {
                 self.env = self.env.undef(name);
             }
             Action::Include(include) => {
-                if depth >= MAX_DEPTH {
+                if self.depth >= MAX_DEPTH {
                     self.depth_exceeded += 1;
                     return;
                 }
-                let Some((child, child_guards)) = (self.look_up)(&include.path) else {
-                    return;
-                };
-                let composed = Fold {
-                    env: self.env.clone(),
-                    history: vec![(0, self.env.clone())],
-                    after_each_include: Vec::new(),
-                    unknown_guards: 0,
-                    depth_exceeded: 0,
-                    look_up: self.look_up,
+                if let Some(after) = (self.handler).include(&include.path, &self.env, self.depth) {
+                    self.env = after.clone();
+                    self.after_each_include.push((step.at, after));
                 }
-                .run(&child, &child_guards, depth + 1);
-                self.unknown_guards += composed.unknown_guards;
-                self.depth_exceeded += composed.depth_exceeded;
-                self.env = composed.final_env;
-                self.after_each_include.push((step.at, self.env.clone()));
             }
         }
     }

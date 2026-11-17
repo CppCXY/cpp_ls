@@ -44,11 +44,17 @@ fn composed(session: &Session<MemoryFiles>, root: &str) -> Composed {
     let text = session.text(path).expect("the text is here");
     let skeleton = Skeleton::of(summary, &text);
     let guards = summary.guards.clone();
-    compose(&skeleton, &guards, &Env::empty(), &mut |target| {
-        let summary = session.index().summary(target)?;
-        let text = session.text(target)?;
-        Some((Skeleton::of(summary, &text), summary.guards.clone()))
-    })
+    compose(
+        &skeleton,
+        &guards,
+        &Env::empty(),
+        &crate::NoMacros,
+        &mut |target| {
+            let summary = session.index().summary(target)?;
+            let text = session.text(target)?;
+            Some((Skeleton::of(summary, &text), summary.guards.clone()))
+        },
+    )
 }
 
 /// **A definition in an included header is in force after the include**, with its body.

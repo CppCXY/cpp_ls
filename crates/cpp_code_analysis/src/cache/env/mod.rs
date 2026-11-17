@@ -43,9 +43,11 @@ mod compose;
 mod skeleton;
 #[cfg(test)]
 mod tests;
+mod unit;
 
 pub use compose::{Composed, compose};
 pub use skeleton::{Skeleton, Step};
+pub use unit::{ComposedFile, UnitComposition, compose_unit};
 
 /// **The number that identifies an environment** — a hash of the chain of changes, in the order they were applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -324,10 +326,41 @@ impl Default for Env {
     }
 }
 
-/// **What a condition sees.** An environment knows which names are macros and nothing about their values — the
-/// summary stores a body as a *shape* plus the one literal a condition may read, and turning that into the tokens the
-/// evaluator wants is the next step (`docs/module-cache.md` §8). So `defined(X)`, `#ifdef` and `#ifndef` are answered,
-/// and a condition that needs a value is [`Lookup::DefinedWithoutAValue`]'s honest "defined, value unknown".
+/// **What a condition sees.**: an environment knows which names are macros, and behind it the compilation's own
+/// definitions answer what only *they* can — the values.
+///
+/// Without the second half, `#if _MSC_VER >= 1930` is [`Lookup::DefinedWithoutAValue`]'s honest "defined, value
+/// unknown" and every branch gated on a predefine is undecidable. With it, a fold decides exactly the conditions the
+/// walk decides: a name the environment `#undef`ed answers `Undefined` and does **not** fall through to the seed (that
+/// is what `#undef` means), a name the environment defines answers `DefinedWithoutAValue` (its body is a shape plus
+/// one literal, not the token list the evaluator wants — `docs/module-cache.md` §8), and everything else is the
+/// seed's answer.
+pub struct Over<'a> {
+    env: Env,
+    seed: &'a dyn MacroValues,
+}
+
+impl<'a> Over<'a> {
+    /// The table for one point of a fold: `env` in front of `seed`.
+    pub fn new(env: Env, seed: &'a dyn MacroValues) -> Self {
+        Over { env, seed }
+    }
+}
+
+impl MacroValues for Over<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
+        match self.env.find(name) {
+            Some(Some(_)) => Lookup::DefinedWithoutAValue,
+            Some(None) => Lookup::Undefined,
+            None => self.seed.lookup(name),
+        }
+    }
+
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::Value> {
+        self.seed.builtin_operator(name, operand)
+    }
+}
+
 impl MacroValues for Env {
     fn lookup(&self, name: &str) -> Lookup<'_> {
         match self.find(name) {
