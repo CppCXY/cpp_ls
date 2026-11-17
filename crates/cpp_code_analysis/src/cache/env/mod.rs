@@ -112,29 +112,7 @@ impl Definition {
             None => None,
         };
         let hash = hash_definition(fact.name.as_str(), fact.function_like, body.as_deref());
-        let evaluable = fact
-            .value
-            .as_deref()
-            .and_then(|value| value.trim().parse::<i128>().ok())
-            .map(|number| {
-                let definition = crate::macros::MacroDef {
-                    name: Box::from(fact.name.as_str()),
-                    // **Object-like only.** A function-like macro cannot be a value, and its parameter list is not
-                    // in the summary; the value cache below is what answers the conditions that matter.
-                    params: None,
-                    body: crate::macros::MacroBody {
-                        tokens: Vec::new(),
-                        stringize: Vec::new(),
-                        paste: Vec::new(),
-                    },
-                    range: fact.range,
-                    name_range: fact.range,
-                    written_in: None,
-                    value: std::sync::OnceLock::new(),
-                };
-                let _ = definition.value.set(Some(number));
-                Box::new(definition)
-            });
+        let evaluable = build_macro_def(fact, text, body.as_deref()).map(Box::new);
         Some(Self {
             name: Arc::from(fact.name.as_str()),
             function_like: fact.function_like,
@@ -485,4 +463,96 @@ impl Change {
 
 fn hash_name(name: &str) -> u64 {
     crate::cache::fnv1a64(name.as_bytes())
+}
+
+/// **The definition a condition evaluator can expand**, built from the facts a summary keeps.
+///
+/// A value is one integer literal, and for `#define _GLIBCXX_HOSTED __STDC_HOSTED__` that is enough. A *function-like*
+/// alias — `#define _GLIBCXX_HAS_BUILTIN(B) __has_builtin(B)` — is not a value at all: the evaluator can only follow it
+/// if it has the parameter list and the body's tokens, and `MacroDef` is the shape that carries both. The summary
+/// stores neither, but both are in the text it was built from: the parameter list sits between the name and the body,
+/// and the body is the text `body_range` names. Building them here is what makes the `_GLIBCXX_HAS_BUILTIN` family
+/// decidable, and with it most of libstdc++'s feature-test headers.
+///
+/// A macro with no body and no parameters (`#define FLAG`) has nothing to evaluate and stays
+/// `Lookup::DefinedWithoutAValue` — answering `Defined` there would hand the evaluator an empty token list and a
+/// syntax error where the standard says `0`.
+fn build_macro_def(
+    fact: &MacroFact,
+    text: &str,
+    body: Option<&str>,
+) -> Option<crate::macros::MacroDef> {
+    if body.is_none() && !fact.function_like {
+        return None;
+    }
+    let params = if fact.function_like {
+        let start = fact.range.end_offset();
+        let end = fact.body_range.map_or(start, |range| range.start_offset);
+        Some(parameters_in(text.get(start..end).unwrap_or("")))
+    } else {
+        None
+    };
+    let body_text = body.unwrap_or("");
+    let (lexed, _) = cpp_parser::lex(body_text, &cpp_parser::LexerConfig::default());
+    let tokens: Vec<crate::token::Token> = lexed
+        .iter()
+        .map(|data| {
+            let piece = body_text
+                .get(data.range.start_offset..data.range.end_offset())
+                .unwrap_or("");
+            crate::token::Token::new(data.kind, piece, data.range)
+        })
+        .collect();
+    let mut definition = crate::macros::MacroDef {
+        name: Box::from(fact.name.as_str()),
+        params,
+        body: crate::macros::MacroBody {
+            tokens,
+            stringize: Vec::new(),
+            paste: Vec::new(),
+        },
+        range: fact.range,
+        name_range: fact.range,
+        written_in: None,
+        value: std::sync::OnceLock::new(),
+    };
+    if let Some(number) = fact
+        .value
+        .as_deref()
+        .and_then(|value| value.trim().parse::<i128>().ok())
+    {
+        let _ = definition.value.set(Some(number));
+    }
+    Some(definition)
+}
+
+/// **The parameters between a function-like macro's name and its body** — `"(a, b)"` or `"()"`.
+///
+/// Text rather than a parsed list because that is what the summary leaves behind: it records that the macro *is*
+/// function-like and where its body starts, and the bytes between are the parameters. A variadic tail becomes
+/// `__VA_ARGS__`, which is the spelling a body uses for it.
+fn parameters_in(list: &str) -> Vec<crate::macros::Parameter> {
+    let inner = list.trim();
+    let inner = inner.strip_prefix('(').unwrap_or(inner);
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|part| {
+            let part = part.trim();
+            if part == "..." {
+                crate::macros::Parameter {
+                    name: Box::from("__VA_ARGS__"),
+                    kind: crate::macros::ParameterKind::Variadic,
+                }
+            } else {
+                crate::macros::Parameter {
+                    name: Box::from(part),
+                    kind: crate::macros::ParameterKind::Ordinary,
+                }
+            }
+        })
+        .collect()
 }

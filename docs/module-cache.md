@@ -306,7 +306,22 @@ traversal, and it has to be resolved before anything is concluded from either nu
 
 **Fourth run: the 778 are headers that do not exist, not a resolver gap.** With the resolver instrumented: 6 222 includes asked, 5 444 cached, **0 rescued** by suffix, 778 unresolved --- and the missed spellings are `machine/ansi.h` and `sys/_types.h`, which are in `bits/c++config.h`'s `#if __has_include(...)` blocks: BSD headers this mingw snapshot does not have. The walk cannot follow them either, so the 778 are not why the fold reaches 251 of the walk's 1 053 files.
 
-The remaining question is instrumentable: **for every include step the fold skips, which `Visibility` did it get?** An `Inactive` hides a whole subtree without adding to `unknown_guards`, and 527 unknown directives cannot hide 800 files. **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
+The remaining question is instrumentable: **for every include step the fold skips, which `Visibility` did it get?** An `Inactive` hides a whole subtree without adding to `unknown_guards`, and 527 unknown directives cannot hide 800 files. **Seventh run: the definitions expand, and the residual is one small class.** Definition now builds the MacroDef a condition can *expand* — parameters sliced from between the name and the body, body tokens re-lexed from the body text — so a function-like alias (#define _GLIBCXX_HAS_BUILTIN(B) __has_builtin(B)) is evaluable. The numbers collapsed:
+
+``text
+                    before      after
+mismatches          74 425     35 430
+only walk           61 028     34 949
+only fold            8 353        481
+body differs         5 041          0
+unknown guards         527        188
+missing files            3          0
+walk-only files         3          0
+`` 
+
+ody 0 and only fold 481 say the two implementations now agree on **what a definition says**; what is left is 188 undecided directives (__has_include, __has_feature, __cpp_if_consteval) whose skipped #defines are invisible to ~350 files each — 35 000 names, the same multiplication as before. The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
+
+**Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
 
 The name gap is therefore **inside the files both sides reach**: for a file, the fold's `at_entry` lacks names the walk's view has, while the file itself is composed. The next instrument attributes a few missing names to the file that defines them (from the composition's own files, by scanning their `at_exit`) and prints the guard the fold decided for that definition --- `Inactive` there would mean a condition decided the wrong way, `Active` would mean a definition that never entered the environment at all.
 
