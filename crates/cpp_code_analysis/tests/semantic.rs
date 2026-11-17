@@ -2476,3 +2476,36 @@ Colour c = Colour::Red;
         "and a scoped one, used as `Colour::Red`: {kinds:?}"
     );
 }
+
+/// **A type declared in an unnamed namespace is a type where it is used.**
+///
+/// C++ gives an unnamed namespace an implicit using-directive in the enclosing scope ([namespace.unnamed]), so
+/// `Value` written at file scope means the `Value` inside `namespace { … }`. The scope tree does not model that rule,
+/// so the resolution at the *use* answers `NotHere` — and the classifier used to answer **nothing** for any name this
+/// file declares but cannot resolve here, on the argument that an index keyed on bare names might mean a different
+/// declaration. The index answers only when every declaration of the spelling agrees on the kind
+/// ([`ProjectIndex::kind_of`]), so it is the right layer to ask.
+///
+/// Measured on `test_cpp/src/containers.cpp:135`, `Value{1}.describe()`: the editor drew `Value` with its own grammar
+/// (`variable.other.unknown`, from `variable.other.unknown.Value.cpp` in the theme inspector) while the hover on the
+/// same byte answered `struct Value` — one name, two layers, two answers.
+#[test]
+fn a_type_from_an_unnamed_namespace_is_a_type_where_it_is_used() {
+    let source = "\
+namespace {
+struct Value {
+    int data;
+};
+}
+
+void use() {
+    auto one = Value{1};
+}
+";
+    assert_eq!(
+        all_of(source, "Value"),
+        vec![(NameKind::Type, true), (NameKind::Type, false)],
+        "the declaration and the use are both the type: {:#?}",
+        classified(source)
+    );
+}

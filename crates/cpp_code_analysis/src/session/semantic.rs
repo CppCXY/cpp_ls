@@ -393,13 +393,19 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 continue;
             }
 
-            // **The index is not asked about a name this file declares but cannot see here.** Either the
-            // declaration the scope chain found is in a class or a namespace, in which case an index keyed on bare
-            // names is answering about some *other* declaration that shares the spelling — or the resolution failed
-            // for a reason the index would fail for too (a local of a function this position is not inside, a
-            // member of a class the file has). The index is for the case it exists for: a name nothing here
-            // declares.
-            continue;
+            // **A name this file declares but whose scope does not reach here still has a kind.** This used to `continue`
+            // — no token at all — on the argument that an index keyed on bare names could be answering about some
+            // *other* declaration that shares the spelling. That argument is real, but the answer to it is the query
+            // below rather than silence: [`ProjectIndex::kind_of`] answers only when **every** declaration the index
+            // holds for the spelling agrees on the kind, and `Ambiguous` draws nothing. Silence is the one answer that
+            // cannot be right when a reader can see the declaration.
+            //
+            // Measured on `test_cpp/src/containers.cpp:135`, `Value{1}.describe()`: `Value` is declared in that file
+            // inside an **unnamed namespace**, whose names are visible in the enclosing scope through the implicit
+            // using-directive C++ gives an unnamed namespace ([namespace.unnamed]) — a rule the file's scope tree does
+            // not model, so the resolution here answers `NotHere`. There was no semantic token for the type, and the
+            // editor drew the name with its own grammar (`variable.other.unknown`), while the hover on the same byte
+            // answered `struct Value` from the index. One name, two layers, two answers.
         }
 
         // 3b. **A macro an `#include` brought in.** Asked here — before the index-wide name query below — for the same
