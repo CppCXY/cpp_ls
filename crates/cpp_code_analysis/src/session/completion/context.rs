@@ -114,6 +114,14 @@ pub enum CompletionContext {
         range: SourceRange,
         /// The macro's own parameter names, in the order the definition wrote them.
         parameters: Vec<String>,
+        /// **A `qualifier::` written in front of the name**, when there is one — `std::` in
+        /// `#define LOG(v) std::cout << v`.
+        ///
+        /// A replacement list is *preprocessor text*, but the names after a `::` are still written in the language:
+        /// `std::` is the namespace's members and `Widget::` is the class's, and a body that composes them is ordinary.
+        /// This used to be dropped, so the list was the macro's parameters and every macro — measured with
+        /// `inspect complete` at the cursor after `std::`: `scope ``, prefix ``, 22 item(s)`.
+        qualifier: String,
     },
     /// **Inside a documentation comment** — where the answer is Doxygen's own vocabulary, and then the name that
     /// command takes.
@@ -777,6 +785,23 @@ fn define_at(
 ) -> CompletionContext {
     let argument_at = directive_start + written_before_cursor - rest.len();
 
+    // **The body of the macro from `from`**, with the token at the cursor and the `qualifier::` in front of it.
+    //
+    // One closure rather than three copies: the three positions a replacement list can be reached from (an
+    // object-like macro, a parameterised one, and a parenthesis that turned out to be body text) differ only in where
+    // the body starts and which parameters are in scope, and a copy per position is how the qualifier would come to be
+    // dropped at two of them.
+    let body = |from: usize, at: usize, parameters: Vec<String>| {
+        let (written, range) = segment_written(&rest[from..], at, offset);
+        let qualifier = the_qualifier_before(&rest[from..], at, range);
+        CompletionContext::MacroBody {
+            written,
+            range,
+            parameters,
+            qualifier,
+        }
+    };
+
     // The macro's name: the first identifier of the directive.
     let name_length = rest
         .find(|character: char| !(character.is_alphanumeric() || character == '_'))
@@ -789,14 +814,7 @@ fn define_at(
             let (written, range) = segment_written(rest, argument_at, offset);
             return CompletionContext::DirectiveArgument { written, range };
         }
-        let parameters = Vec::new();
-        let (written, range) =
-            segment_written(&rest[name_length..], argument_at + name_length, offset);
-        return CompletionContext::MacroBody {
-            written,
-            range,
-            parameters,
-        };
+        return body(name_length, argument_at + name_length, Vec::new());
     };
 
     // The parameter list, if the parenthesis really follows the name: `#define F (x)` is an object-like macro whose
@@ -805,14 +823,7 @@ fn define_at(
         .chars()
         .any(|character| character.is_whitespace());
     if space_before_the_paren {
-        let parameters = Vec::new();
-        let (written, range) =
-            segment_written(&rest[name_length..], argument_at + name_length, offset);
-        return CompletionContext::MacroBody {
-            written,
-            range,
-            parameters,
-        };
+        return body(name_length, argument_at + name_length, Vec::new());
     }
 
     let Some(close) = after_the_name.find(')') else {
@@ -830,16 +841,47 @@ fn define_at(
         return CompletionContext::Nothing;
     }
 
-    let (written, range) = segment_written(
-        &rest[name_length + close + 1..],
+    body(
+        name_length + close + 1,
         argument_at + name_length + close + 1,
-        offset,
-    );
-    CompletionContext::MacroBody {
-        written,
-        range,
         parameters,
+    )
+}
+
+/// **The `qualifier::` written in front of the token at `range`** — `std` in `std::cou` and `ns::inner` in
+/// `ns::inner::Va`, read from the directive's own text.
+///
+/// There is no tree here: a replacement list is preprocessor text, and the parser reads it as one, so the only thing
+/// that says `std::` is a namespace is the text. An empty answer means the name is unqualified, which is the ordinary
+/// case and the one that keeps the macro's own vocabulary in front.
+fn the_qualifier_before(rest: &str, at: usize, range: SourceRange) -> String {
+    let is_a_name_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let end = range.start_offset.saturating_sub(at).min(rest.len());
+    let before = rest[..end].trim_end();
+
+    // Back over `ident::` groups: the last one first, so `ns::inner::` answers `ns::inner` and not `inner`.
+    let mut head = before;
+    let mut start = before.len();
+    while let Some(before_the_colons) = head.strip_suffix("::") {
+        let trimmed = before_the_colons.trim_end();
+        let mut begin = trimmed.len();
+        while begin > 0 && is_a_name_byte(trimmed.as_bytes()[begin - 1]) {
+            begin -= 1;
+        }
+        // A `::` with no identifier in front of it (`::` at file scope) is not a qualifier.
+        if begin == trimmed.len() {
+            break;
+        }
+        start = begin;
+        head = &trimmed[..begin];
     }
+
+    if start >= before.len() {
+        return String::new();
+    }
+    // The spelling the scope has, without the `::` that introduced the name: `std::cout`'s qualifier is `std`, which
+    // is the name the index and the scope tree answer to.
+    before[start..].trim_end_matches(':').to_string()
 }
 /// What follows a directive's name: a header name for `#include`, and an ordinary name for the rest.
 fn header_or_name(
@@ -901,23 +943,33 @@ fn header_or_name(
 /// the cursor, and what a client replaces is the whole token — a cursor in the middle of `ve|ctor` filters by `ve`
 /// and replaces `vector`.
 fn segment_written(rest: &str, at: usize, offset: usize) -> (String, SourceRange) {
-    // The token the cursor is in: up to the first character that cannot be part of a name.
-    let end_of_token = rest
-        .find(|character: char| {
-            !(character.is_alphanumeric()
-                || character == '_'
-                || character == '.'
-                || character == '/'
-                || character == '-')
-        })
-        .unwrap_or(rest.len());
+    // **The token the cursor is in**, found from the cursor rather than from the start of the text. It used to find
+    // the *first* token of `rest` and then clamp the cursor into it, which is right only while the cursor is in that
+    // one: a replacement list that begins with whitespace (`#define LOG(value) std::cout`) answered an empty prefix
+    // for every position in it — measured with `inspect complete` at the cursor after `std::`, `prefix \`\`` — and no
+    // directive's body is written without a space after the macro's parameter list.
+    let cursor = offset.saturating_sub(at).min(rest.len());
+    let bytes = rest.as_bytes();
+    let is_name = |byte: u8| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'.' | b'/' | b'-')
+            // A non-ASCII byte belongs to an identifier's spelling more often than not, and splitting one is worse
+            // than including a stray byte: the range would be half a character.
+            || byte >= 0x80
+    };
 
-    let token = &rest[..end_of_token];
-    let cursor_in_token = offset.saturating_sub(at).min(token.len());
+    let mut start = cursor;
+    while start > 0 && is_name(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < rest.len() && is_name(bytes[end]) {
+        end += 1;
+    }
 
     (
-        token[..cursor_in_token].to_string(),
-        SourceRange::new(at, token.len()),
+        rest[start..cursor].to_string(),
+        SourceRange::new(at + start, end - start),
     )
 }
 

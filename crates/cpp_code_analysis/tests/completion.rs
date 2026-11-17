@@ -3682,3 +3682,80 @@ void f(void) {
         "the list names the class it is about"
     );
 }
+
+/// **A `#define`'s replacement list completes a `qualifier::`** — `#define PICK(v) Thing::si` names a class, and the
+/// names after the `::` are its members, not the macro vocabulary.
+///
+/// Two halves, and neither worked before this:
+///
+/// * **The qualifier**: `CompletionContext::MacroBody` carried `written`, `range` and the parameters, and nothing about
+///   a qualifier, so every replacement list took the "macro's own parameters, then the macros" path. Measured with
+///   `inspect complete` at the cursor after `std::` in `#define LOG(value) std::cout << value`: `scope ``, prefix ``,
+///   22 item(s)` — the wrong list for a reader writing `std::cout`.
+/// * **The prefix**: `segment_written` answered the *first* token of the text it was given and then clamped the cursor
+///   into it, which is right only while the cursor is in that token. A replacement list always has a space after the
+///   parameter list, so its first token was the empty string and **every** body position had an empty prefix — the
+///   filter had never run there.
+///
+/// The panel's answer for a namespace declared in the same file is still empty, and that is not this: the same
+/// `my::Thi` in a function body answers nothing either. What this pins is that a macro body and a function body now
+/// answer the *same* question.
+#[test]
+fn a_macro_body_completes_a_qualified_name() {
+    let source = "\
+struct Thing {
+    int size;
+};
+
+#define MEMBER(v) Thing::si
+#define COMPOSED(a, b) MEMBER(a) ME
+";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    let view = cooked_view(&mut session, "/p/a.cpp");
+
+    let offered_at = |at: usize| {
+        session.completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        )
+    };
+    let labels = |offered: &cpp_code_analysis::CompletionSet| {
+        offered
+            .items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<String>>()
+    };
+
+    // A class's members, filtered by what has been typed of the name.
+    let at = source.find("Thing::si").expect("the fixture") + "Thing::si".len();
+    let found = offered_at(at);
+    assert_eq!(found.scope, "Thing", "the qualifier is the scope");
+    assert_eq!(found.prefix, "si", "and the prefix is the name being typed");
+    assert_eq!(
+        labels(&found),
+        vec!["size".to_string()],
+        "{:?}",
+        labels(&found)
+    );
+
+    // An unqualified body keeps the macro vocabulary — and its prefix is what has been typed too, which is the half
+    // that made every earlier prefix empty.
+    let at = source.find("MEMBER(a) ME").expect("the fixture") + "MEMBER(a) ME".len();
+    let found = offered_at(at);
+    assert_eq!(found.scope, "", "no qualifier, so the macro vocabulary");
+    assert_eq!(found.prefix, "ME");
+    assert!(
+        labels(&found).iter().any(|name| name == "MEMBER"),
+        "filtered by the prefix: {:?}",
+        labels(&found)
+    );
+}

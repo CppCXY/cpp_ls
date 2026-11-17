@@ -536,11 +536,33 @@ pub fn completion_with(
         } => headers_for(headers, &written, closed, range),
         // **A `#define`'s replacement list**: the macro's own parameters first, then the macros already defined.
         // Nothing else belongs here — the body is preprocessor text, where a class member or a local cannot appear.
+        //
+        // **Unless a `qualifier::` is written.** `#define LOG(v) std::cout << v` names a namespace, and the names
+        // after the `::` are its members; a body that composes them (`Widget::make(…)`, `std::to_string(…)`) is
+        // ordinary, and the list of macros there is a list of the wrong thing. A qualified body asks the same question
+        // a `std::` in a function body asks, so it goes through the same `names` call the name position uses — one
+        // implementation, two positions. A namespace's members are not in the tree at a `#define` (there is no tree
+        // there), which is why the qualifier is read from the directive's text — see `the_qualifier_before`.
         CompletionContext::MacroBody {
             written,
             range,
             parameters,
-        } => macro_body(index, path, &written, range, &parameters),
+            qualifier,
+        } => {
+            if qualifier.is_empty() {
+                macro_body(index, path, &written, range, &parameters)
+            } else {
+                let position = crate::sema::resolve::NamePosition {
+                    scope: qualifier,
+                    written,
+                    range,
+                };
+                names(
+                    index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
+                    None,
+                )
+            }
+        }
         // **A preprocessor condition** — `#if`, `#elif`, `#ifdef`, `#undef`: the macros, and the operators on them.
         CompletionContext::Condition { written, range } => condition(index, path, &written, range),
         // **Inside a documentation comment**: Doxygen's vocabulary, or the name the command takes. Both are read
