@@ -178,6 +178,10 @@ fn where_a_cold_start_puts_its_memory() {
     session.index_everything();
     // **A bound the operator sets**: the loop exits on pending_work(), and a backlog holding a file no cook can
     // serve never reaches zero. The bound makes the memory question answerable without waiting out the livelock.
+    let steps: usize = std::env::var("CPPLS_PROBE_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(64);
     let limit: usize = std::env::var("CPPLS_PROBE_SLICES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -185,7 +189,7 @@ fn where_a_cold_start_puts_its_memory() {
     let mut slices = 0usize;
     let mut read_ahead_peak = 0usize;
     while session.pending_work() > 0 && slices < limit {
-        session.advance(64);
+        session.advance(steps);
         slices += 1;
         guard("a cold slice");
         let report = session.memory_report();
@@ -226,7 +230,7 @@ fn where_a_cold_start_puts_its_memory() {
     let mut slices = 0usize;
     let mut read_ahead_peak = 0usize;
     while session.pending_work() > 0 && slices < limit {
-        session.advance(64);
+        session.advance(steps);
         slices += 1;
         guard("an open-file slice");
         let report = session.memory_report();

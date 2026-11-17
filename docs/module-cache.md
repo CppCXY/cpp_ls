@@ -575,6 +575,40 @@ The probe now takes `CPPLS_PROBE_SLICES` and prints the pending breakdown (`queu
 identified), so either reading can be measured. The preference in the design note is (1): an editor pump at 60 Hz must
 advance one file at a time, and a root's closure is what the *wave* prefetches under budget, not what a step owes.
 
+**Twenty-fourth run: the 82-document measurement, both readings.** The probe now takes `CPPLS_PROBE_STEPS` as well as
+`CPPLS_PROBE_SLICES`, so the same session can be driven the two ways the pump is called.
+
+**As one file step (`advance(1)`)** — the call an editor makes at 60 Hz:
+
+```text
+project E:\EmmyLuaCodeStyle (82 source(s))
+cold index   919 ms, live 174 MB
+slice 1       live 177 MB, peak 179 MB, tables 44 MB, 1 file read in 104 ms
+breakdown     queue 81, cooking 82, refinements 0
+```
+
+**177 MB live, 179 MB peak** — comfortably under the 500 MB target, and the peak is the cold index's own 174 MB.
+
+**As 64 steps (`advance(64)`)** the same session reaches 5.2 GB and does not finish in two minutes. That is not a leak
+and not a cost of composition: each step pops one queued root and, for a root the reader has open, `index_one` reads it
+**as the program** — a whole closure, ~250 files. Sixty-four steps are therefore ~16 000 file reads and the index that
+holds their summaries. The number is a property of what `steps` means, and the two ways to read the acceptance differ
+by two orders of magnitude:
+
+1. **`steps` = files advanced** (the design note's preference): one `advance(64)` is 64 files plus a bounded read-ahead,
+   and the target is met.
+2. **`steps` = whole-program reads**: 64 of them cannot be under 500 MB by construction — 8 files of this project
+   already index to 1 687 summaries and 47 MB of tables.
+
+Two candidate fixes were built and **reverted**, each with a reason:
+* **cap the number of waves per call** (`.max(1)` instead of `.max(wave.len())` and at most 8 waves): the 5.2 GB did
+  not move, because the cost is the per-root program read, not the prefetch;
+* **gate the walk on the focused document** (`will_read_it_as_the_program` answered `true` for *every* open document,
+  which is how 82 tabs became 82 closures): this is the right idea and the suite says one test disagrees —
+  `editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it` gets `NotDeclaredHere("two::Widget")` after
+  an edit, because the re-cook composes from an index that has not caught up where the walk was self-contained. That
+  test is the next round's question, and it is a *semantic* one, not memory.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
