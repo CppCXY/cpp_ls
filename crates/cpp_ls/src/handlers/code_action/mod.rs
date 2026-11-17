@@ -444,7 +444,7 @@ fn the_class_at_the_cursor<F: FileProvider + Clone>(
     let is_a_template = summary.declarations.iter().any(|declared| {
         declared.kind == cpp_code_analysis::DeclKind::Type
             && declared.name == class
-            && !declared.parameters.is_empty()
+            && !declared.parameters().is_empty()
     });
     Some((class, is_a_template))
 }

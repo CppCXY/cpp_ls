@@ -2371,7 +2371,10 @@ int f() {
         for fact in &summary.declarations {
             eprintln!(
                 "[fact] name={:?} scope={:?} kind={:?} params={:?}",
-                fact.name, fact.scope, fact.kind, fact.parameter_list
+                fact.name,
+                fact.scope,
+                fact.kind,
+                fact.parameter_list()
             );
         }
     }
@@ -3479,7 +3482,7 @@ template <class T> struct B<A<T>, void_t<typename A<T>::From>> : A<T> {
         .into_iter()
         .map(|(_, fact)| fact.clone())
         .collect();
-    let patterns: Vec<Option<&str>> = facts.iter().map(|fact| fact.pattern.as_deref()).collect();
+    let patterns: Vec<Option<&str>> = facts.iter().map(|fact| fact.pattern()).collect();
     assert!(
         facts.len() >= 2,
         "the principal and its specialization are two declarations: {patterns:?}"

@@ -29,8 +29,8 @@ impl Check for UseOverride {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Type && !fact.bases.is_empty())
-            .map(|fact| (fact.name.to_string(), fact.bases.clone()))
+            .filter(|fact| fact.kind == crate::DeclKind::Type && !fact.bases().is_empty())
+            .map(|fact| (fact.name.to_string(), fact.bases().to_vec()))
             .collect();
 
         // **One `members_of` per base, not one per member.** The first version asked for a base's members inside the member

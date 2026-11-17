@@ -219,7 +219,7 @@ pub(crate) fn a_member_of_the_enclosing_class(
             .any(|word| {
                 member
                     .fact
-                    .parameters
+                    .parameters()
                     .iter()
                     .any(|parameter| !parameter.is_empty() && parameter == word)
             })
@@ -482,7 +482,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
             found
                 .found
                 .into_iter()
-                .find(|declaration| !declaration.fact.parameters.is_empty())
+                .find(|declaration| !declaration.fact.parameters().is_empty())
         })
         .or_else(|| index.definition(name, path).value());
     let class_as_written = match &declared {
@@ -517,12 +517,14 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         return None;
     };
     let parameters = match declared {
-        Some(declaration) if !declaration.fact.parameters.is_empty() => declaration.fact.parameters,
+        Some(declaration) if !declaration.fact.parameters().is_empty() => {
+            declaration.fact.parameters().to_vec()
+        }
         _ => listed
             .members
             .iter()
-            .find(|member| !member.fact.parameters.is_empty())
-            .map(|member| member.fact.parameters.clone())?,
+            .find(|member| !member.fact.parameters().is_empty())
+            .map(|member| member.fact.parameters().to_vec())?,
     };
 
     if parameters.is_empty() {
@@ -538,7 +540,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     {
         let deduced = deduce_the_parameters(
             &parameters,
-            constructor.fact.parameter_list.as_deref(),
+            constructor.fact.parameter_list(),
             &element_types,
         );
         // Every parameter must have been replaced: one left standing is not a deduction.
@@ -1647,7 +1649,7 @@ pub(crate) fn the_base_clauses_of(
         .position(|declared| is_a_type(declared) && declared.fact.definition)
         .or_else(|| candidates.iter().position(is_a_type));
     if let Some(at) = chosen {
-        return Known::Yes(candidates[at].fact.bases.clone());
+        return Known::Yes(candidates[at].fact.bases().to_vec());
     }
     bases_of(index, scopes, root, path, class)
 }
@@ -1720,7 +1722,7 @@ fn the_file_of_a_class_body(index: &ProjectIndex, path: &Path, class: &str) -> O
     types.sort_by_key(|one| {
         (
             !one.fact.definition,
-            std::cmp::Reverse(one.fact.parameters.len()),
+            std::cmp::Reverse(one.fact.parameters().len()),
         )
     });
     Some(normalize(&types[0].file))
@@ -1765,7 +1767,7 @@ pub(crate) fn substitute_a_base_clause(
     };
     // **The arguments written are the first parameters, in order** — the same positional rule
     // `substituted_members` applies for a defaulted parameter list.
-    let mut names = declared.fact.parameters.clone();
+    let mut names = declared.fact.parameters().to_vec();
     names.truncate(arguments.len());
     arguments.truncate(names.len());
     if names.is_empty() {
@@ -1865,7 +1867,7 @@ pub(crate) fn the_classes_a_base_clause_names(
                 .files_declaring(&head, path)
                 .into_iter()
                 .find(|declared| declared.fact.kind == crate::DeclKind::Type)
-                .map(|declared| declared.fact.parameters.clone())
+                .map(|declared| declared.fact.parameters().to_vec())
                 .unwrap_or_default();
             let scope = index
                 .definition(bare, path)
@@ -1904,7 +1906,7 @@ pub(crate) fn the_classes_a_base_clause_names(
             };
             let substituted = crate::sema::types::substituted_spelling(
                 &target,
-                &alias.fact.parameters,
+                alias.fact.parameters(),
                 &arguments,
             );
             if substituted == spelling {
@@ -1960,10 +1962,10 @@ pub(crate) fn the_bool_a_trait_has(
         .collect();
 
     let matches = |declared: &&&VisibleDeclaration<'_>| {
-        declared.fact.pattern.is_some()
+        declared.fact.pattern().is_some()
             && a_pattern_matches(
-                declared.fact.pattern.as_deref(),
-                &declared.fact.parameters,
+                declared.fact.pattern(),
+                declared.fact.parameters(),
                 Some(&arguments),
             )
     };
@@ -1973,11 +1975,11 @@ pub(crate) fn the_bool_a_trait_has(
         .or_else(|| {
             declarations
                 .iter()
-                .find(|declared| declared.fact.pattern.is_none())
+                .find(|declared| declared.fact.pattern().is_none())
         })
         .copied()?;
 
-    for base in &chosen.fact.bases {
+    for base in chosen.fact.bases() {
         match base.rsplit("::").next().unwrap_or(base).trim() {
             "true_type" => return Some(true),
             "false_type" => return Some(false),

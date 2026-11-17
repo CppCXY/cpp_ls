@@ -247,7 +247,7 @@ fn what_one_file_costs() {
                         fact.scope,
                         fact.returns,
                         fact.type_of,
-                        fact.parameters
+                        fact.parameters()
                     );
                 }
             }

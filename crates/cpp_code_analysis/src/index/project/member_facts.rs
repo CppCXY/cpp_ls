@@ -882,7 +882,7 @@ pub(crate) fn alias_target_of(
                     (
                         crate::sema::types::substituted_spelling(
                             &target,
-                            &declaration.fact.parameters,
+                            declaration.fact.parameters(),
                             &written_arguments,
                         ),
                         declaration

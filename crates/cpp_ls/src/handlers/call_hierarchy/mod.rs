@@ -158,7 +158,7 @@ fn item_of<F: FileProvider + Clone>(
         position_in_file(held, fact.name_range.start_offset)?,
         position_in_file(held, fact.name_range.end_offset())?,
     );
-    let detail = match (&fact.returns, &fact.parameter_list) {
+    let detail = match (&fact.returns, &fact.parameter_list()) {
         (Some(returns), Some(parameters)) => Some(format!("{returns} {}{parameters}", fact.name)),
         (None, Some(parameters)) => Some(format!("{}{parameters}", fact.name)),
         _ => None,

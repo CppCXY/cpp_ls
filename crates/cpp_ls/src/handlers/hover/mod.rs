@@ -736,7 +736,7 @@ fn hover_of_the_program(
                                 "{} definition {} pattern {:?}",
                                 definition.file.display(),
                                 definition.fact.definition,
-                                definition.fact.pattern
+                                definition.fact.pattern()
                             ))
                             .collect::<Vec<_>>()
                     );
@@ -748,12 +748,15 @@ fn hover_of_the_program(
                         matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
                     })
                     .max_by_key(|definition| {
-                        // **More template parameters is the more general declaration** — `fact.parameters` is the
+                        // **More template parameters is the more general declaration** — `fact.parameters()` is the
                         // template head's own names, and it is what says which fact a partial specialization is:
                         // the primary's are `[_Tp, _Alloc]`, `vector<bool>`'s are `[_Alloc]`, and a forward
                         // declaration's are the empty names of `template <typename, typename>`. (`pattern` is `None`
                         // for all three here, so it cannot separate them — measured, not assumed.)
-                        (definition.fact.definition, definition.fact.parameters.len())
+                        (
+                            definition.fact.definition,
+                            definition.fact.parameters().len(),
+                        )
                     })
                 {
                     return Some(markdown(declaration_markdown(
@@ -877,7 +880,7 @@ fn member_markdown(
         .then(|| {
             let parameter_lists: Vec<Option<String>> = candidates
                 .iter()
-                .map(|candidate| candidate.fact.parameter_list.clone())
+                .map(|candidate| candidate.fact.parameter_list().map(str::to_string))
                 .collect();
             let template_parameters: Vec<Vec<String>> = candidates
                 .iter()
@@ -1064,7 +1067,7 @@ fn overloads_markdown(
         let parameter_lists: Vec<Option<String>> = found
             .found
             .iter()
-            .map(|declaration| declaration.fact.parameter_list.clone())
+            .map(|declaration| declaration.fact.parameter_list().map(str::to_string))
             .collect();
         // One `text` read per declaration, and the files are held afterwards.
         let template_parameters: Vec<Vec<String>> = found
@@ -1146,8 +1149,7 @@ fn overloads_markdown(
             );
             let (parameters, _) = declaration
                 .fact
-                .parameter_list
-                .as_deref()
+                .parameter_list()
                 .map(cpp_code_analysis::sema::overload::parameters_in)
                 .unwrap_or_default();
             if let Some(arguments) =
@@ -1605,8 +1607,8 @@ fn declaration_markdown(
         // `||`. A conjunction asks exactly the question the comment asks — "does this fact have nothing at all".
         && found.fact.type_of.is_none()
         && found.fact.returns.is_none()
-        && found.fact.parameter_list.is_none()
-        && found.fact.reflection.is_none()
+        && found.fact.parameter_list().is_none()
+        && found.fact.reflection().is_none()
     {
         session
             .index()
@@ -1650,7 +1652,7 @@ fn declaration_markdown(
     // errors). A class is exactly the fact the index holds best; nothing here can complete it.
     if corrected.type_of.is_none()
         && corrected.returns.is_none()
-        && corrected.parameter_list.is_none()
+        && corrected.parameter_list().is_none()
         && !(corrected.definition && matches!(corrected.kind, DeclKind::Type | DeclKind::Namespace))
         && let Some(the_view) = if found.file == view.path {
             Some(view.clone())
@@ -1699,7 +1701,7 @@ fn declaration_markdown(
     // the fact from the file's text, and the summary that holds it is built by the pump — a hover can arrive first.
     // The declaring file's own view is right here (the node below is taken from it), and its facts are the same facts
     // the summary would hold, so the card reads them rather than showing a class with no annotation.
-    if corrected.reflection.is_none()
+    if corrected.reflection().is_none()
         && let Some(facts) = session
             .view_of_the_file(&found.file)
             .map(|view| session.facts_of_the_view(&view))
@@ -1707,13 +1709,18 @@ fn declaration_markdown(
             .iter()
             .find(|theirs| theirs.name_range.start_offset == corrected.name_range.start_offset)
     {
-        corrected.reflection = the_files.reflection.clone();
+        corrected.detail_mut().reflection = the_files.reflection().cloned();
     }
     let fact = &mut corrected;
     if crate::probes::debug_card() {
         eprintln!(
             "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
-            fact.name, fact.kind, fact.scope, fact.returns, fact.parameter_list, fact.range
+            fact.name,
+            fact.kind,
+            fact.scope,
+            fact.returns,
+            fact.parameter_list(),
+            fact.range
         );
     }
     let mut out = String::new();
@@ -1725,7 +1732,7 @@ fn declaration_markdown(
     // editor, on `LuaLexer.cpp`'s `LuaReserved`). So the written spelling becomes the signature line and the
     // subject of the sentence, and the face the fact describes follows it.
     let subject = match written {
-        Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters.is_empty() => {
+        Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters().is_empty() => {
             written
         }
         _ => "",
@@ -1905,7 +1912,7 @@ fn declaration_markdown(
     // `UPROPERTY(EditAnywhere, Category="Game")` are empty macros: the tree has nothing of them, and the card a reader
     // gets for a member said only its type. The specifiers are what the engine's build tool acts on — the reason the
     // declaration is what it is to the editor — so the card shows them exactly as the file wrote them.
-    if let Some(reflection) = &fact.reflection {
+    if let Some(reflection) = &fact.reflection() {
         out.push_str(&format!(
             "\n\n`{}({})`",
             reflection.macro_name,
@@ -2425,7 +2432,7 @@ fn kind_words(fact: &DeclFact) -> String {
     // entry (its slot is kept so arguments pair with names by position — see `template_parameters_in`), and a name
     // the reader cannot write is not shown at all.
     let named: Vec<&str> = fact
-        .parameters
+        .parameters()
         .iter()
         .filter(|name| !name.is_empty())
         .map(String::as_str)
@@ -2462,8 +2469,8 @@ fn kind_words(fact: &DeclFact) -> String {
         (None, None) => {}
     }
 
-    if !fact.bases.is_empty() {
-        words.push_str(&format!(" derived from `{}`", fact.bases.join("`, `")));
+    if !fact.bases().is_empty() {
+        words.push_str(&format!(" derived from `{}`", fact.bases().join("`, `")));
     }
 
     if fact.local {

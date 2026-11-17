@@ -50,7 +50,13 @@ impl Check for FinalHierarchy {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type)
-            .map(|fact| (fact.name.to_string(), fact.bases.clone(), fact.name_range))
+            .map(|fact| {
+                (
+                    fact.name.to_string(),
+                    fact.bases().to_vec(),
+                    fact.name_range,
+                )
+            })
             .collect();
 
         for (class, bases, name_range) in &classes {

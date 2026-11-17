@@ -559,7 +559,7 @@ fn what_a_size_call_returns() {
                         "[size-probe] `{spelling}` fact: kind {:?}, scope {:?}, bases {:?}, cooked file {}",
                         one.fact.kind,
                         one.fact.scope,
-                        one.fact.bases,
+                        one.fact.bases(),
                         session.index().cooked_reading(&one.file).is_some()
                     );
                 }
@@ -575,9 +575,9 @@ fn what_a_size_call_returns() {
             "[size-probe] trait in {}: kind {:?}, pattern {:?}, bases {:?}, parameters {:?}",
             path.file_name().unwrap_or_default().to_string_lossy(),
             fact.kind,
-            fact.pattern,
-            fact.bases,
-            fact.parameters
+            fact.pattern(),
+            fact.bases(),
+            fact.parameters()
         );
     }
 
@@ -592,7 +592,11 @@ fn what_a_size_call_returns() {
         {
             eprintln!(
                 "[size-probe] xmemory fact: name {:?}, pattern {:?}, bases {:?}, kind {:?}, at {}",
-                fact.name, fact.pattern, fact.bases, fact.kind, fact.range.start_offset
+                fact.name,
+                fact.pattern(),
+                fact.bases(),
+                fact.kind,
+                fact.range.start_offset
             );
         }
         // **Every fact near the two declarations**, not only the named ones: the specialization is written at line
@@ -607,7 +611,12 @@ fn what_a_size_call_returns() {
         for fact in near {
             eprintln!(
                 "[size-probe] near {}: {:?}, kind {:?}, scope {:?}, pattern {:?}, bases {:?}",
-                fact.range.start_offset, fact.name, fact.kind, fact.scope, fact.pattern, fact.bases
+                fact.range.start_offset,
+                fact.name,
+                fact.kind,
+                fact.scope,
+                fact.pattern(),
+                fact.bases()
             );
         }
     }

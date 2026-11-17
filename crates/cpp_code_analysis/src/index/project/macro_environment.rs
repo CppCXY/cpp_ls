@@ -293,7 +293,7 @@ impl IndexedKind {
             // member has *no* scope and so was not one, and an untyped scoped variable was one wrongly. See
             // [`DeclFact::enumerator`].
             enumerator: found.enumerator,
-            template: !found.parameters.is_empty(),
+            template: !found.parameters().is_empty(),
             constructor: found.kind == DeclKind::Function
                 && found.returns.is_none()
                 && found
@@ -466,14 +466,13 @@ impl ProjectDefinition {
                 // The effects belong to the summary the index writes, and this answer is a *place to jump to*: a
                 // caller that wants `frees` asks the fact, which is the same rule `in_namespace` below follows.
                 frees: 0,
-                reflection: None,
+                detail: None,
                 name: binding.name.identifier_text().unwrap_or_default().into(),
                 scope: scope.map(SmolStr::from),
                 local,
                 // `None` for the same reason `type_of` below is: this answer is a **place to jump to**, built
                 // from a binding, and the namespaces around a body are a fact about the file's text that lives in
                 // its summary. See [`DeclFact::in_namespace`].
-                in_namespace: None,
                 kind: crate::DeclKind::from_binding_kind(binding.kind),
                 // Unknown here, and harmlessly so: this answer is a **place to jump to**, never a candidate a member
                 // query picks between definitions. See [`DeclFact::definition`].
@@ -484,20 +483,10 @@ impl ProjectDefinition {
                 // not this answer.
                 type_of: None,
                 returns: None,
-                returns_in_the_class: None,
                 split_by_a_directive: false,
-                bases: Vec::new(),
-                parameters: Vec::new(),
-                constraints: Vec::new(),
                 // Same reason as `constraints` above: a clause is the declaration's text, and this is a place to jump to.
-                requires_clause: None,
-                parameter_defaults: Vec::new(),
                 // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
                 // caller asked about. See [`DeclFact::pattern`].
-                pattern: None,
-                // Nor a parameter list, for exactly that reason: this fact is a place to jump to, and the file it
-                // points at has the summary that says what the declaration looks like.
-                parameter_list: None,
                 access: None,
                 exported: false,
                 range: binding.range,
@@ -734,9 +723,9 @@ pub(crate) fn the_same_declaration(one: &DeclFact, other: &DeclFact) -> bool {
         && one.kind == other.kind
         && one.type_of == other.type_of
         && one.returns == other.returns
-        && one.bases == other.bases
-        && one.parameters == other.parameters
-        && one.parameter_list == other.parameter_list
+        && one.bases() == other.bases()
+        && one.parameters() == other.parameters()
+        && one.parameter_list() == other.parameter_list()
 }
 
 /// Are these two candidates **one declaration recorded twice**, as far as this index can tell?
@@ -774,7 +763,7 @@ pub(crate) fn the_same_declaration_in_one_file(
         // A function: the parameter list, which is the field that separates overloads and the one this model reads
         // out of the declarator. `parameters` — the *template* parameter names — is not evidence about a function:
         // an ordinary function has none, so requiring it here would refuse to merge anything.
-        DeclKind::Function => one.fact.parameter_list.is_some(),
+        DeclKind::Function => one.fact.parameter_list().is_some(),
         // A namespace has its own, wider rule at the call site; a macro and an anonymous construct have nothing here
         // that could tell two of them apart.
         _ => false,

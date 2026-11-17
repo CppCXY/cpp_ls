@@ -108,8 +108,8 @@ pub(crate) fn direct_member(
         .find(|declaration| {
             declaration.fact.name == member
                 && a_pattern_matches(
-                    declaration.fact.pattern.as_deref(),
-                    &declaration.fact.parameters,
+                    declaration.fact.pattern(),
+                    declaration.fact.parameters(),
                     arguments,
                 )
         })
@@ -286,6 +286,7 @@ pub(crate) fn fact_from_binding_with(
     let _ = root;
     DeclFact {
         enumerator: binding.kind == crate::BindingKind::Enumerator,
+        split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
         // **The spelling, the same one the index stores** — `operator[]`, `~Widget`, `operator int`.
         //
         // This path used to answer an empty name for every declaration without an identifier, on the argument that
@@ -312,7 +313,6 @@ pub(crate) fn fact_from_binding_with(
         // namespaces enclose a body. It is unreachable in practice here, because this path exists for members
         // and a member is never a local; the caller that does need it asks the file's summary, where the reading
         // was made with the scopes in hand. See [`DeclFact::in_namespace`].
-        in_namespace: None,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
         // The same bits the index fills — a fact must say the same thing whichever path produced it.
         // **No rendering here**: this path is handed a node and no file text, and the attribute is a sibling of the
@@ -324,7 +324,6 @@ pub(crate) fn fact_from_binding_with(
         frees: crate::sema::declarations::freed_parameters_of(root, binding),
         // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
         // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
-        reflection: None,
         type_of: crate::sema::declarations::declared_type_of_with(shapes, binding)
             .or_else(|| {
                 // **A member whose type is an unnamed class body**, named the way the index names it — see
@@ -352,50 +351,61 @@ pub(crate) fn fact_from_binding_with(
             .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding)),
         // **The same residue the index records**, because a member query is exactly the reader that has the class:
         // `parameters` and the class's file are both in hand here. See [`crate::DeclFact::returns_in_the_class`].
-        returns_in_the_class: {
-            let returns = crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-                .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding));
-            if returns.is_some() {
-                None
-            } else {
-                crate::sema::declarations::the_returns_the_class_has_to_resolve(
-                    shapes, root, binding,
-                )
-            }
-        },
-        split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
-        bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
-        // **The same three fields the index fills**, because a fact must say the same thing whichever path produced it.
         //
-        // These were empty here, with the argument that "substitution is the caller's step".
-        // Substitution still is — what these fields carry is the *names* to substitute and the
-        // class's written **pattern**, and a caller that has the use's arguments cannot pair them
-        // without them.
-        parameters: crate::sema::declarations::declared_template_parameters_with(shapes, binding),
-        constraints: Vec::new(),
-        // **The clause the declaration writes**, from the same shape table the modifiers come from — the two paths that
-        // build a fact must say the same thing (a member queried from the file's own scopes went through this one, and
-        // its card showed the declaration without the `requires` the index had).
-        requires_clause: crate::sema::declarations::the_requires_clause_with(shapes, binding),
-        parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
-            shapes, binding,
-        ),
-        pattern: crate::sema::declarations::pattern_of(shapes, binding),
-        // …but the **parameter list as written** is here, because this is the path a member list's detail line is
-        // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this, and
-        // the declaration is in the buffer, so reading it costs one walk up the tree. See
-        // [DeclFact::parameter_list].
-        parameter_list: match binding.kind {
-            crate::BindingKind::Function
-            | crate::BindingKind::Constructor
-            | crate::BindingKind::Destructor
-            | crate::BindingKind::ConversionFunction
-            | crate::BindingKind::OperatorFunction
-            | crate::BindingKind::LiteralOperator => {
-                crate::sema::declarations::declared_parameters_with(shapes, binding)
-            }
-            _ => None,
-        },
+        // The rare fields are one box — see [`crate::summary::DeclDetail`] and the measurement there.
+        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+            // `None`, and it is a **gap rather than an answer** — this path is handed a node and no scope tree, so it
+            // cannot say which namespaces enclose a body. It is unreachable in practice here, because this path exists
+            // for members and a member is never a local. See [`DeclFact::in_namespace`].
+            in_namespace: None,
+            returns_in_the_class: {
+                let returns =
+                    crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
+                        .or_else(|| {
+                            crate::sema::declarations::declared_returns_of_with(shapes, binding)
+                        });
+                if returns.is_some() {
+                    None
+                } else {
+                    crate::sema::declarations::the_returns_the_class_has_to_resolve(
+                        shapes, root, binding,
+                    )
+                }
+            },
+            bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
+            reflection: None,
+            // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any
+            // other, and a hover on a `UPROPERTY` member should find its specifiers wherever it is declared.
+            // **The same three fields the index fills**, because a fact must say the same thing whichever path
+            // produced it. These were empty here, with the argument that substitution is the caller's step.
+            // Substitution still is — what these carry is the *names* to substitute and the class's written
+            // **pattern**, and a caller that has the use's arguments cannot pair them without them.
+            parameters: crate::sema::declarations::declared_template_parameters_with(
+                shapes, binding,
+            ),
+            constraints: Vec::new(),
+            // **The clause the declaration writes**, from the same shape table the modifiers come from — the two
+            // paths that build a fact must say the same thing.
+            requires_clause: crate::sema::declarations::the_requires_clause_with(shapes, binding),
+            parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
+                shapes, binding,
+            ),
+            pattern: crate::sema::declarations::pattern_of(shapes, binding),
+            // …but the **parameter list as written** is here, because this is the path a member list's detail line is
+            // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this.
+            // See [DeclFact::parameter_list].
+            parameter_list: match binding.kind {
+                crate::BindingKind::Function
+                | crate::BindingKind::Constructor
+                | crate::BindingKind::Destructor
+                | crate::BindingKind::ConversionFunction
+                | crate::BindingKind::OperatorFunction
+                | crate::BindingKind::LiteralOperator => {
+                    crate::sema::declarations::declared_parameters_with(shapes, binding)
+                }
+                _ => None,
+            },
+        }),
         // **Who may name it**, read the same way and for the same reason: a member list built from the buffer is
         // what a completion after `.` offers, and a `private:` member must not be in it. See [DeclFact::access].
         access: shapes.access_at(binding.name_range.start_offset),
@@ -534,7 +544,7 @@ pub(crate) fn bases_of_inner(
         Known::Yes(found) => {
             let mut bases: Vec<String> = Vec::new();
             for declaration in &found.found {
-                for base in lookup_names(&declaration.fact.bases) {
+                for base in lookup_names(declaration.fact.bases()) {
                     if !bases.contains(&base) {
                         bases.push(base);
                     }
@@ -547,7 +557,7 @@ pub(crate) fn bases_of_inner(
                     if fact.kind != crate::DeclKind::Type {
                         continue;
                     }
-                    for base in lookup_names(&fact.bases) {
+                    for base in lookup_names(fact.bases()) {
                         if !bases.contains(&base) {
                             bases.push(base);
                         }

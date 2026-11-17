@@ -668,7 +668,7 @@ fn dump_names(session: &Session<DiskFiles>, root: &Path) {
                         definition.file.file_name().unwrap_or_default(),
                         fact.kind,
                         fact.type_of.as_ref().map(|t| t.to_string()),
-                        fact.parameter_list,
+                        fact.parameter_list(),
                         fact.returns.as_ref().map(|t| t.to_string())
                     );
                 }

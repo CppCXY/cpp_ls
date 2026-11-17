@@ -224,7 +224,7 @@ pub fn implementations_of<F: FileProvider + Clone>(
     let mut derived: Vec<String> = Vec::new();
     for (path, summary) in &summaries {
         for fact in &summary.declarations {
-            let derives_from_the_name = fact.bases.iter().any(|base| {
+            let derives_from_the_name = fact.bases().iter().any(|base| {
                 let segment = last_segment(base);
                 segment == name || owners.iter().any(|owner| owner == segment)
             });

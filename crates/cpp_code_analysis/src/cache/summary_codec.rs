@@ -1201,16 +1201,6 @@ mod tests {
                     // two others say `false`. What the fixture's fact *is* is not a claim: it exists to exercise the format.
                     enumerator: true,
                     frees: 0,
-                    // **Both ends of the field**, like the rest of this fixture: this declaration has an annotation and
-                    // the two after it have none, which is what the presence byte distinguishes.
-                    reflection: Some(crate::summary::ReflectionFact {
-                        macro_name: "UCLASS".to_string(),
-                        specifiers: vec![
-                            "Blueprintable".to_string(),
-                            "Category = \"UI\"".to_string(),
-                            "meta=(DisplayName=\"W\", ToolTip=\"a, b\")".to_string(),
-                        ],
-                    }),
                     name: "Widget".into(),
                     scope: None,
                     kind: DeclKind::Type,
@@ -1219,21 +1209,6 @@ mod tests {
                     type_of: None,
                     // A class returns nothing either, so `None` — and the second fact below covers the other value.
                     returns: None,
-                    returns_in_the_class: None,
-                    // A base list, so that branch of the format is covered too: two bases, one of them qualified.
-                    bases: vec!["Base".to_string(), "ns::Other".to_string()],
-                    // And a parameter list, which is the other list-shaped field: a class template's parameter
-                    // names, in the order the declaration wrote them.
-                    parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
-                    // The constraint in front of each parameter — empty here, and carried by the round trip.
-                    constraints: vec![String::new(), "Integral".to_string()],
-                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
-                    requires_clause: None,
-                    parameter_defaults: Vec::new(),
-                    // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a partial
-                    // specialization from its primary template. The `None` branch is covered by the two facts below.
-                    pattern: Some("Widget<_Ty, _Alloc>".to_string()),
-                    parameter_list: Some("(int, int)".to_string()),
                     // A member of a class, with the level its class body gave it — the one field a completion
                     // filters on, so the round trip has to carry a *some* as well as the `None`s below.
                     access: Some(super::Access::Protected),
@@ -1247,17 +1222,44 @@ mod tests {
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
                     // only ever wrote one value of a `u8` flag would not notice a decoder that dropped it.
                     local: true,
-                    // The `Some` branch, which is the one only a **local** ever has — see
-                    // [`DeclFact::in_namespace`]. The two facts below cover `None`.
-                    in_namespace: Some("std::ranges".to_string()),
                     clean: false,
                     split_by_a_directive: false,
                     guard: FactGuard::Unconditional,
+                    // **The rare half, every field filled at one end or the other** — see [`DeclFact::detail`].
+                    detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                        // This declaration has an annotation and the two after it have none, which is what the
+                        // presence byte distinguishes.
+                        reflection: Some(crate::summary::ReflectionFact {
+                            macro_name: "UCLASS".to_string(),
+                            specifiers: vec![
+                                "Blueprintable".to_string(),
+                                "Category = \"UI\"".to_string(),
+                                "meta=(DisplayName=\"W\", ToolTip=\"a, b\")".to_string(),
+                            ],
+                        }),
+                        returns_in_the_class: None,
+                        // A base list, so that branch of the format is covered too: two bases, one qualified.
+                        bases: vec!["Base".to_string(), "ns::Other".to_string()],
+                        // And a parameter list, which is the other list-shaped field: a class template's parameter
+                        // names, in the order the declaration wrote them.
+                        parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
+                        // The constraint in front of each parameter — empty here, and carried by the round trip.
+                        constraints: vec![String::new(), "Integral".to_string()],
+                        // A clause is the declaration's text, and this literal is a fixture with no text to read.
+                        requires_clause: None,
+                        parameter_defaults: Vec::new(),
+                        // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a
+                        // partial specialization from its primary template. `None` is covered by the facts below.
+                        pattern: Some("Widget<_Ty, _Alloc>".to_string()),
+                        parameter_list: Some("(int, int)".to_string()),
+                        // The `Some` branch, which is the one only a **local** ever has — see
+                        // [`DeclFact::in_namespace`]. The two facts below cover `None`.
+                        in_namespace: Some("std::ranges".to_string()),
+                    }),
                 },
                 DeclFact {
                     enumerator: false,
                     frees: 0,
-                    reflection: None,
                     name: "make".into(),
                     scope: Some("ns::Widget".into()),
                     kind: DeclKind::Function,
@@ -1266,19 +1268,6 @@ mod tests {
                     // has. Both halves of that distinction are in this fixture on purpose.
                     type_of: None,
                     returns: Some("ns::Container<int>".to_string()),
-                    // The residue is empty exactly when `returns` is not: the two are one answer, and a fixture with
-                    // both would be a fact no builder can produce.
-                    returns_in_the_class: None,
-                    bases: Vec::new(),
-                    parameters: Vec::new(),
-                    constraints: Vec::new(),
-                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
-                    requires_clause: None,
-                    parameter_defaults: Vec::new(),
-                    pattern: None,
-                    // The one field a completion's detail line reads: a function with no parameters is written
-                    // `()`, which is an answer, and `None` would be "nobody looked".
-                    parameter_list: Some("()".to_string()),
                     // No access level — a free function is not a member — and not exported: the `false` side of
                     // both fields, which the class above covers the other way round.
                     access: None,
@@ -1288,30 +1277,25 @@ mod tests {
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
-                    in_namespace: None,
                     clean: true,
                     split_by_a_directive: false,
                     guard: FactGuard::Region(3),
+                    // The one rare field this fact *has*: a function with no parameters is written `()`, which is an
+                    // answer, and `None` would be "nobody looked".
+                    detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                        parameter_list: Some("()".to_string()),
+                        ..Default::default()
+                    }),
                 },
                 DeclFact {
                     enumerator: false,
                     frees: 0,
-                    reflection: None,
                     name: SmolStr::default(),
                     scope: None,
                     kind: DeclKind::Other,
                     modifiers: crate::DeclModifiers::default(),
                     type_of: None,
                     returns: None,
-                    returns_in_the_class: None,
-                    bases: Vec::new(),
-                    parameters: Vec::new(),
-                    constraints: Vec::new(),
-                    // A clause is the declaration's text, and this literal is a fixture with no text to read.
-                    requires_clause: None,
-                    parameter_defaults: Vec::new(),
-                    pattern: None,
-                    parameter_list: None,
                     access: None,
                     exported: false,
                     // A round trip that always wrote one value would not notice a decoder that dropped the byte.
@@ -1319,10 +1303,12 @@ mod tests {
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,
-                    in_namespace: None,
                     clean: true,
                     split_by_a_directive: false,
                     guard: FactGuard::Unconditional,
+                    // **No detail at all**, which is the common case and therefore the one worth carrying: a fact
+                    // that needs none of the rare fields pays eight bytes and no allocation.
+                    detail: None,
                 },
             ],
             macros: vec![MacroFact {
@@ -1572,30 +1558,30 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
     put_opt_str(out, fact.returns.as_deref());
     // **The spelling `returns` refused** — see [`DeclFact::returns_in_the_class`]. Written beside it because the two
     // are one answer with two audiences, and a reader that wants the class-aware half must not have to guess.
-    put_opt_str(out, fact.returns_in_the_class.as_deref());
-    put_u32(out, fact.bases.len() as u32);
-    for base in &fact.bases {
+    put_opt_str(out, fact.returns_in_the_class());
+    put_u32(out, fact.bases().len() as u32);
+    for base in fact.bases() {
         put_str(out, base);
     }
-    put_u32(out, fact.parameters.len() as u32);
-    for parameter in &fact.parameters {
+    put_u32(out, fact.parameters().len() as u32);
+    for parameter in fact.parameters() {
         put_str(out, parameter);
     }
-    put_u32(out, fact.constraints.len() as u32);
-    for constraint in &fact.constraints {
+    put_u32(out, fact.constraints().len() as u32);
+    for constraint in fact.constraints() {
         put_str(out, constraint);
     }
-    put_opt_str(out, fact.requires_clause.as_deref());
-    put_u32(out, fact.parameter_defaults.len() as u32);
-    for default in &fact.parameter_defaults {
+    put_opt_str(out, fact.requires_clause());
+    put_u32(out, fact.parameter_defaults().len() as u32);
+    for default in fact.parameter_defaults() {
         put_str(out, default);
     }
-    put_opt_str(out, fact.parameter_list.as_deref());
-    put_opt_str(out, fact.pattern.as_deref());
+    put_opt_str(out, fact.parameter_list());
+    put_opt_str(out, fact.pattern());
     put_range(out, fact.range);
     put_range(out, fact.name_range);
     put_u8(out, u8::from(fact.local));
-    put_opt_str(out, fact.in_namespace.as_deref());
+    put_opt_str(out, fact.in_namespace());
     put_u8(out, u8::from(fact.clean));
     put_u8(out, u8::from(fact.split_by_a_directive));
     put_u32(out, guard_code(fact.guard));
@@ -1608,7 +1594,7 @@ fn put_declaration(out: &mut Vec<u8>, fact: &DeclFact) {
     put_u64(out, fact.frees);
     // **The reflection annotation**, when there is one: its macro and its specifiers, as the file wrote them. A
     // presence byte first, so the common unannotated declaration costs one byte.
-    match &fact.reflection {
+    match &fact.reflection() {
         Some(reflection) => {
             put_u8(out, 1);
             put_str(out, &reflection.macro_name);
@@ -1649,79 +1635,92 @@ fn put_macro(out: &mut Vec<u8>, fact: &MacroFact) {
 
 /// Read one declaration fact — the reader half of [`put_declaration`].
 fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
+    // **Read in the order the bytes are written, then assemble** — the rare fields are boxed as a group (see
+    // [`DeclFact::detail`]), and a struct literal cannot both stream and gather them.
+    let name = SmolStr::from(reader.string()?);
+    let scope = reader.optional_string()?.map(SmolStr::from);
+    let kind = decl_kind_from(reader.u8()?)?;
+    let type_of = reader.optional_string()?.map(SmolStr::from);
+    let returns = reader.optional_string()?;
+    let returns_in_the_class = reader.optional_string()?;
+    let bases = get_strings(reader)?;
+    let parameters = get_strings(reader)?;
+    let constraints = get_strings(reader)?;
+    let requires_clause = reader.optional_string()?;
+    let parameter_defaults = get_strings(reader)?;
+    let parameter_list = reader.optional_string()?;
+    let pattern = reader.optional_string()?;
+    let range = reader.range()?;
+    let name_range = reader.range()?;
+    let local = reader.u8()? != 0;
+    let in_namespace = reader.optional_string()?;
+    let clean = reader.u8()? != 0;
+    let split_by_a_directive = reader.u8()? != 0;
+    let guard = guard_from(reader.u32()?)?;
+    let access = access_from(reader.u8()?);
+    let exported = reader.u8()? != 0;
+    let modifiers = crate::DeclModifiers::from_bits(reader.u32()?);
+    let frees = reader.u64()?;
+    let reflection = match reader.u8()? {
+        0 => None,
+        _ => {
+            let macro_name = reader.string()?;
+            let count = reader.count()?;
+            let mut specifiers = Vec::with_capacity(count);
+            for _ in 0..count {
+                specifiers.push(reader.string()?);
+            }
+            Some(crate::summary::ReflectionFact {
+                macro_name,
+                specifiers,
+            })
+        }
+    };
+    let definition = reader.u8()? != 0;
+    let enumerator = reader.u8()? != 0;
+
     Ok(DeclFact {
-        // **The one field that is a SmolStr** — an identifier, and a short one costs no allocation. The bytes on disk
-        // are unchanged (a length-prefixed string either way), so an existing cache still decodes.
-        name: SmolStr::from(reader.string()?),
-        scope: reader.optional_string()?.map(SmolStr::from),
-        kind: decl_kind_from(reader.u8()?)?,
-        type_of: reader.optional_string()?.map(SmolStr::from),
-        returns: reader.optional_string()?,
-        returns_in_the_class: reader.optional_string()?,
-        bases: {
-            let mut bases = Vec::new();
-            for _ in 0..reader.count()? {
-                bases.push(reader.string()?);
-            }
-            bases
-        },
-        parameters: {
-            let mut parameters = Vec::new();
-            for _ in 0..reader.count()? {
-                parameters.push(reader.string()?);
-            }
-            parameters
-        },
-        constraints: {
-            let mut constraints = Vec::new();
-            for _ in 0..reader.count()? {
-                constraints.push(reader.string()?);
-            }
-            constraints
-        },
-        requires_clause: reader.optional_string()?,
-        parameter_defaults: {
-            let mut defaults = Vec::new();
-            for _ in 0..reader.count()? {
-                defaults.push(reader.string()?);
-            }
-            defaults
-        },
-        parameter_list: reader.optional_string()?,
-        pattern: reader.optional_string()?,
-        range: reader.range()?,
-        name_range: reader.range()?,
-        local: reader.u8()? != 0,
-        in_namespace: reader.optional_string()?,
-        clean: reader.u8()? != 0,
-        split_by_a_directive: reader.u8()? != 0,
-        guard: guard_from(reader.u32()?)?,
-        access: access_from(reader.u8()?),
-        exported: reader.u8()? != 0,
-        modifiers: crate::DeclModifiers::from_bits(reader.u32()?),
-        frees: reader.u64()?,
-        reflection: match reader.u8()? {
-            0 => None,
-            _ => {
-                let macro_name = reader.string()?;
-                let count = reader.count()?;
-                let mut specifiers = Vec::with_capacity(count);
-                for _ in 0..count {
-                    specifiers.push(reader.string()?);
-                }
-                Some(crate::summary::ReflectionFact {
-                    macro_name,
-                    specifiers,
-                })
-            }
-        },
-        // The last byte of the record — see [`DeclFact::definition`].
-        definition: reader.u8()? != 0,
-        // And the enumerator flag, after it — see [`DeclFact::enumerator`].
-        enumerator: reader.u8()? != 0,
+        enumerator,
+        name,
+        scope,
+        local,
+        kind,
+        modifiers,
+        frees,
+        type_of,
+        returns,
+        split_by_a_directive,
+        range,
+        name_range,
+        clean,
+        guard,
+        access,
+        exported,
+        definition,
+        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+            in_namespace,
+            returns_in_the_class,
+            bases,
+            reflection,
+            parameters,
+            constraints,
+            requires_clause,
+            parameter_defaults,
+            pattern,
+            parameter_list,
+        }),
     })
 }
 
+/// A count-prefixed list of strings — the shape four fields of a declaration share.
+fn get_strings(reader: &mut Reader<'_>) -> Result<Vec<String>, DecodeError> {
+    let count = reader.count()?;
+    let mut found = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        found.push(reader.string()?);
+    }
+    Ok(found)
+}
 /// Read one macro fact — the reader half of [`put_macro`].
 fn get_macro(reader: &mut Reader<'_>) -> Result<MacroFact, DecodeError> {
     Ok(MacroFact {
@@ -1996,18 +1995,9 @@ fn a_cooked_reading_round_trips() {
                 kind: DeclKind::Type,
                 type_of: None,
                 returns: None,
-                returns_in_the_class: None,
-                bases: vec!["Base".to_string()],
-                parameters: vec!["T".to_string()],
-                constraints: Vec::new(),
-                requires_clause: Some("sizeof(T) > 0".to_string()),
-                parameter_defaults: Vec::new(),
-                parameter_list: None,
-                pattern: Some("Widget<T>".to_string()),
                 range: SourceRange::new(10, 20),
                 name_range: SourceRange::new(16, 6),
                 local: false,
-                in_namespace: Some("std".to_string()),
                 clean: true,
                 split_by_a_directive: false,
                 guard: FactGuard::Unconditional,
@@ -2017,9 +2007,20 @@ fn a_cooked_reading_round_trips() {
                 definition: true,
                 modifiers: crate::DeclModifiers::default(),
                 frees: 0,
-                reflection: Some(crate::summary::ReflectionFact {
-                    macro_name: "UPROPERTY".to_string(),
-                    specifiers: vec!["EditAnywhere".to_string()],
+                detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                    returns_in_the_class: None,
+                    bases: vec!["Base".to_string()],
+                    parameters: vec!["T".to_string()],
+                    constraints: Vec::new(),
+                    requires_clause: Some("sizeof(T) > 0".to_string()),
+                    parameter_defaults: Vec::new(),
+                    parameter_list: None,
+                    pattern: Some("Widget<T>".to_string()),
+                    in_namespace: Some("std".to_string()),
+                    reflection: Some(crate::summary::ReflectionFact {
+                        macro_name: "UPROPERTY".to_string(),
+                        specifiers: vec!["EditAnywhere".to_string()],
+                    }),
                 }),
             },
             DeclFact {
@@ -2029,18 +2030,9 @@ fn a_cooked_reading_round_trips() {
                 kind: DeclKind::Function,
                 type_of: Some("int".into()),
                 returns: Some("void".to_string()),
-                returns_in_the_class: None,
-                bases: Vec::new(),
-                parameters: Vec::new(),
-                constraints: vec!["Copyable<T>".to_string()],
-                requires_clause: None,
-                parameter_defaults: vec!["0".to_string()],
-                parameter_list: Some("(int a)".to_string()),
-                pattern: None,
                 range: SourceRange::new(40, 30),
                 name_range: SourceRange::new(44, 1),
                 local: true,
-                in_namespace: None,
                 clean: false,
                 split_by_a_directive: true,
                 guard: FactGuard::Unconditional,
@@ -2050,7 +2042,18 @@ fn a_cooked_reading_round_trips() {
                 definition: false,
                 modifiers: crate::DeclModifiers::default(),
                 frees: 3,
-                reflection: None,
+                detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                    returns_in_the_class: None,
+                    bases: Vec::new(),
+                    parameters: Vec::new(),
+                    constraints: vec!["Copyable<T>".to_string()],
+                    requires_clause: None,
+                    parameter_defaults: vec!["0".to_string()],
+                    parameter_list: Some("(int a)".to_string()),
+                    pattern: None,
+                    in_namespace: None,
+                    reflection: None,
+                }),
             },
         ],
         macros: vec![crate::summary::MacroFact {
@@ -2078,18 +2081,17 @@ fn a_cooked_reading_round_trips() {
     assert_eq!(back.declarations.len(), 2);
     assert_eq!(back.declarations[0].name, "Widget");
     assert_eq!(back.declarations[0].scope.as_deref(), Some("std"));
-    assert_eq!(back.declarations[0].bases, ["Base"]);
+    assert_eq!(back.declarations[0].bases(), ["Base"]);
     assert_eq!(
-        back.declarations[0].requires_clause.as_deref(),
+        back.declarations[0].requires_clause(),
         Some("sizeof(T) > 0")
     );
-    assert_eq!(back.declarations[0].pattern.as_deref(), Some("Widget<T>"));
+    assert_eq!(back.declarations[0].pattern(), Some("Widget<T>"));
     assert_eq!(back.declarations[0].range, SourceRange::new(10, 20));
     assert_eq!(back.declarations[0].access, Some(Access::Public));
     assert_eq!(
         back.declarations[0]
-            .reflection
-            .as_ref()
+            .reflection()
             .map(|r| r.macro_name.as_str()),
         Some("UPROPERTY")
     );

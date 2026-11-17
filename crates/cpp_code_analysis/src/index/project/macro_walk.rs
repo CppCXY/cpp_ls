@@ -1424,17 +1424,17 @@ impl ProjectIndex {
         // purpose (a use that wrote fewer arguments — defaulted template parameters — keeps its candidates), and here a
         // mismatch is exactly what tells `vector<bool, _Alloc>` from `vector<_Ty, _Alloc>`.
         let of_the_same_arity = |found: &&VisibleDeclaration<'_>| {
-            let pattern = found.fact.pattern.as_deref().unwrap_or_default();
+            let pattern = found.fact.pattern().unwrap_or_default();
             let slots = arguments_in_a_spelling(pattern).unwrap_or_default();
-            slots.len() == arguments.len() && lists_usable_parameter_names(&found.fact.parameters)
+            slots.len() == arguments.len() && lists_usable_parameter_names(found.fact.parameters())
         };
         candidates
             .iter()
             .filter(of_the_same_arity)
             .find(|found| {
                 a_pattern_matches(
-                    found.fact.pattern.as_deref(),
-                    &found.fact.parameters,
+                    found.fact.pattern(),
+                    found.fact.parameters(),
                     Some(arguments),
                 )
             })
@@ -1443,13 +1443,13 @@ impl ProjectIndex {
             .or_else(|| {
                 candidates
                     .iter()
-                    .filter(|found| lists_usable_parameter_names(&found.fact.parameters))
-                    .max_by_key(|found| found.fact.parameters.len())
+                    .filter(|found| lists_usable_parameter_names(found.fact.parameters()))
+                    .max_by_key(|found| found.fact.parameters().len())
             })
             .map(|found| {
                 (
-                    found.fact.parameters.clone(),
-                    found.fact.parameter_defaults.clone(),
+                    found.fact.parameters().to_vec(),
+                    found.fact.parameter_defaults().to_vec(),
                 )
             })
     }
@@ -1465,9 +1465,9 @@ impl ProjectIndex {
 
         candidates
             .iter()
-            .map(|found| &found.fact.parameters)
+            .map(|found| found.fact.parameters())
             .find(|parameters| !parameters.is_empty())
-            .cloned()
+            .map(<[String]>::to_vec)
             .unwrap_or_default()
     }
     /// The files in which `name` is visible, in insertion order.
@@ -2796,7 +2796,7 @@ impl ProjectIndex {
                         .found
                         .iter()
                         .enumerate()
-                        .filter(|(_, declaration)| declaration.fact.pattern.is_none())
+                        .filter(|(_, declaration)| declaration.fact.pattern().is_none())
                         .map(|(at, _)| at)
                         .collect();
                     if plain.is_empty() {
@@ -3223,7 +3223,7 @@ impl ProjectIndex {
             && right.fact.kind == DeclKind::Function
             && left.fact.name == right.fact.name
             && left.fact.scope == right.fact.scope
-            && left.fact.parameter_list == right.fact.parameter_list
+            && left.fact.parameter_list() == right.fact.parameter_list()
             // **Only across files.** The rule this serves is "a header declares, the `.cpp` defines" — and inside one file
             // two declarations with the same parameter list can be two *overloads*: the two `describe`s differ only in
             // their `enable_if` condition, which is in the return type and therefore in no field this compares.

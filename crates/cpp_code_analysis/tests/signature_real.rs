@@ -127,7 +127,7 @@ fn a_call_site_answers_a_signature() {
                             "  fact: kind {:?} name {:?} parameter_list {:?} in {}",
                             declaration.fact.kind,
                             declaration.fact.name,
-                            declaration.fact.parameter_list,
+                            declaration.fact.parameter_list(),
                             declaration.file.display()
                         );
                     }

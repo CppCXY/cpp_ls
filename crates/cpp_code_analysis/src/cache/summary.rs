@@ -164,24 +164,6 @@ pub struct DeclFact {
     /// file's own scopes in hand (a completion in the open buffer) lists locals from there and never needs this
     /// field; a consumer listing *another* file's declarations uses it to leave them out.
     pub local: bool,
-    /// **The namespaces a local declaration sits inside** — what a type it writes has to be looked up from.
-    ///
-    /// The third of the three answers "where am I": [`DeclFact::scope`] is the qualified name of the scope a
-    /// declaration is in, and it is `None` for a local because **a function body contributes no segment to a
-    /// qualified name** — `void f() { Widget w; }` in `namespace app` declares `w` in no scope anything can
-    /// spell. So a type written there had nothing to be resolved from, and every local's type in the standard
-    /// library was unnameable: measured on one file's closure, `_Basic_format_specs`, `_Fmt_iterator_buffer` and
-    /// `_Ptr_t` were among **25 names no lookup could place**, each declared inside a namespace the fact did not
-    /// record.
-    ///
-    /// Written **only where `scope` cannot say it** — a local — and `None` everywhere else, because a
-    /// declaration whose own scope is `std::vector` is already qualified by it. Storing it for every fact would
-    /// be a second copy of what the scope chain already says, in a summary that is written to disk.
-    ///
-    /// The namespaces are the **file's own reading**, with the closure's macro bodies in hand — so `_STD_BEGIN`
-    /// opens `std` here even though the file spells no namespace at all. That is the difference from a view's
-    /// scope tree, which is built with no macro evidence and cannot answer this: see [`crate::FileView::parse`].
-    pub in_namespace: Option<String>,
     pub kind: DeclKind,
     /// **The modifiers the declaration writes** — see [`DeclModifiers`]. Answered once, at index time, from the
     /// tokens; the consumers that used to search the declaration's text (`use-override`, `unused`) read a bit now.
@@ -247,24 +229,6 @@ pub struct DeclFact {
     /// `None` for a return type the file does not state — `auto make() { … }` is deduced, and `auto` is not a
     /// class anything can be looked up in.
     pub returns: Option<String>,
-    /// **The return spelling [`DeclFact::returns`] refused, for a reader that has the class in hand.**
-    ///
-    /// An operator's return type is often the class's *own* name for something — libstdc++ writes
-    /// `reference operator[](size_type __n)`, and `reference` is `std::vector`'s typedef for `T&`. A fact is read by
-    /// consumers that have the declaration and **not** the class's scope, and handing them `reference` typed
-    /// `tokens[i]` as a class called that: 60 false positives over four files of a real project. So
-    /// [`DeclFact::returns`] is `None` for that declaration — see `an_operator_return_is_usable`.
-    ///
-    /// That decision is right for a *fact-only* reader and wrong for one holding the class, which is exactly the
-    /// reader that asks "what does this object's `operator[]` give me". Without the spelling it answered
-    /// `Unknown(UnknownType("events[Pos]"))` for `auto &events = p.GetEvents(); events[Pos]` on a
-    /// `std::vector<MarkEvent>` — reported, and the cause of the union member behind it being unknown too.
-    ///
-    /// So the spelling is kept here and read **only** by a consumer that resolves it inside the class
-    /// ([`crate::index::project::operator_returns_of`], which has the class's file). `None` whenever `returns` is
-    /// `Some` (nothing was refused), for every non-operator, and for every ordinary declaration: this is not a
-    /// second copy of `returns`, it is the residue of the one rule that drops a value.
-    pub returns_in_the_class: Option<String>,
     /// **Does the file's own text state this declaration's type across a directive?**
     ///
     /// `bits/stl_bvector.h` writes `emplace_back`'s return type as `#if __cplusplus > 201402L … reference … #else
@@ -278,136 +242,6 @@ pub struct DeclFact {
     /// three standard-library headers (`facts_vs_rendering`): 12 of 1589 facts disagreed with the rendering about the
     /// return type before this flag existed, every one of them this shape.
     pub split_by_a_directive: bool,
-    /// For a class-like declaration, the base classes it was written with, in declaration order.
-    ///
-    /// Spelled as written — `B`, `ns::C`, `Base<int>` — for the same reason [`DeclFact::type_of`] is: a consumer
-    /// resolves them with the machinery that already exists, and `Unknown` where it cannot go beats a guess.
-    ///
-    /// Empty for a class with no bases **and** for everything that is not a class, which is one answer because it
-    /// is the same answer to the question a consumer is asking: a member that is not here is not inherited from
-    /// anywhere this declaration knows about.
-    ///
-    /// Access and `virtual` are not recorded. They decide whether a member is *reachable* and how the class is
-    /// laid out, and this is a fact about the text rather than a semantic property — a lookup that used them would
-    /// be the first thing here to need real semantics, and it would need the whole of them.
-    ///
-    /// # What is *not* in a derived class's fact, and why
-    ///
-    /// The members `B` happens to have are **not** copied onto `D`. The list is walked at query time
-    /// (`index::project::members_of`), and the reason is the one thing a per-file key cannot catch: whether an
-    /// added member of `B` reaches `D` depends on `D`'s base list, and *which* `B` the spelling refers to depends
-    /// on macros and includes `D` never mentions. A stored copy would therefore go stale while `D`'s own text and
-    /// key stayed identical, so nothing would invalidate it. `bases` is a spelling; the chain is a query.
-    pub bases: Vec<String>,
-    /// **What a reflection annotation said** — `UCLASS(Blueprintable)`, `UPROPERTY(EditAnywhere, Category="Game")` — as
-    /// the file wrote it, or `None` for a declaration nothing annotates.
-    ///
-    /// Read from the file's own text, because the annotation is an **empty macro**: after preprocessing there is no
-    /// `UCLASS` left anywhere in the tree, so the rest of the analysis — a hover, a rule — could not see the specifiers
-    /// even though they are the whole meaning of the declaration to the engine's build tool.
-    pub reflection: Option<ReflectionFact>,
-    /// **The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`, empty
-    /// for anything that is not a class template.
-    ///
-    /// The one field in a fact that is not about the declaration's own name but about the types *inside* it, and it
-    /// is here because a member's type is written with those names: `std::vector`'s `reference` is declared `_Ty&`,
-    /// so a lookup of `std::vector<int>::reference` has a type that says `_Ty` and a binding that says `int`. Pairing
-    /// the two is [`crate::Type::substituted`], and the pairing is positional — first parameter with first argument
-    /// — which is why the order here is the declaration's order and not sorted.
-    ///
-    /// # Why it is stored rather than read when it is wanted
-    ///
-    /// Because a query holds one file and the parameters are written in another. `member_fact` is asked about
-    /// `std::vector<int>::reference` from a `.cpp` that includes `<vector>`; the parameter list is in `<vector>`,
-    /// whose text the index does not keep. Re-parsing that header per member query is the cost this field exists to
-    /// avoid — and it is a *name*, not a conclusion, so it goes stale exactly when its own file changes, like every
-    /// other field here.
-    ///
-    /// A **partial specialization** records its own list (`template <class T> struct vector<T*>` records `T`), which
-    /// is right for it and wrong for the primary template — see [`crate::ProjectIndex::template_parameters_of`],
-    /// which takes the first *template* it finds rather than the first declaration.
-    pub parameters: Vec<String>,
-    /// **The constraint written in front of each template parameter**, in the same order as [`DeclFact::parameters`]
-    /// — `["std::integral"]` for `template <std::integral T>`, and an empty string for an unconstrained one.
-    ///
-    /// Stored because a *check* needs it and the index is all it has: `template <std::integral T> T twice(T)`
-    /// declared in a header is the ordinary shape, and a call site in another file can only ask the summary. The
-    /// names alone cannot answer *is this argument's type constrained, and by what*.
-    pub constraints: Vec<String>,
-    /// **The `requires`-clause written after the parameter list**, as the declaration spells it — `requires (x > 0)`,
-    /// `requires requires { fn(*this); }`.
-    ///
-    /// Separate from [`DeclFact::constraints`], which is the **per-template-parameter** constraint list and is read
-    /// positionally beside [`DeclFact::parameters`] by `sema::check::concept_not_satisfied`; appending a trailing clause
-    /// there would shift every pair. `None` for a declaration that writes none, and for everything that has no parameter
-    /// list to put one after.
-    pub requires_clause: Option<String>,
-    /// **The default argument of each template parameter**, in the same order as [`DeclFact::parameters`], as the file
-    /// wrote it — `["", "allocator<_Ty>"]` for `template <class _Ty, class _Alloc = allocator<_Ty>>`.
-    ///
-    /// `""` for a parameter with no default, which is most of them; a parameter with no default and no argument is a
-    /// use this layer cannot substitute, and it says so by leaving the name standing.
-    ///
-    /// # The wrong answer this removes, measured
-    ///
-    /// A use writes fewer arguments than the declaration has parameters constantly: `std::vector<int>` names one of
-    /// two, `std::map<Key, Value>` names two of four. A member whose type is written with a defaulted parameter —
-    /// `std::vector::reference` is `_Alloc_traits::reference`, and `allocator_traits<_Alloc>::reference` is
-    /// `_Alloc::value_type&` — then answers a spelling that exists nowhere the reader is standing. Measured on
-    /// `auto lineStartOffset = _lineOffsetVec[line];`: the chain followed every alias correctly and stopped at
-    /// `_Alloc::value_type&`, because `_Alloc`'s default was not in the fact. With it, the same chain reaches
-    /// `std::size_t&` — see [`crate::substituted_spelling_with_defaults`]. `twice<float>` answering `U` is the same
-    /// gap.
-    ///
-    /// Stored rather than read when it is wanted, for the reason [`DeclFact::parameters`] gives: the declaration is in
-    /// another file and the index keeps summaries rather than the text they came from.
-    pub parameter_defaults: Vec<String>,
-    /// **The class's own name as the declaration wrote it, when that name carries a pattern** — `shared_ptr<_Ty>`
-    /// for `struct atomic<shared_ptr<_Ty>>`, and `None` for anything whose name is a single identifier.
-    ///
-    /// # What this exists to tell apart, and the wrong answer it removes
-    ///
-    /// A partial specialization is filed under the **same scope as its primary template**: both
-    /// `atomic<shared_ptr<_Ty>>` and `atomic<_Ty>` have `qualified_name() == "std::atomic"`, and every member of one
-    /// is a declaration in that scope. A member lookup that takes the first name match therefore takes a
-    /// *specialization's* member for an instantiation that does not match its pattern — and it gives a **wrong
-    /// type**, which is worse than none: a wrong type offers the wrong members and silently mis-navigates every
-    /// access built on it.
-    ///
-    /// Measured, and it is what this field was added for: `std::shared_ptr<int> sp; std::atomic<int> counter;
-    /// auto n = counter.load();` answered **`shared_ptr<int>`** — the return of `atomic<shared_ptr<_Ty>>::load` —
-    /// because `<memory>` is indexed before `<atomic>` and its specialization came first. Five declarations named
-    /// `std::atomic::load` are visible in that compilation; exactly one of them is the primary's.
-    ///
-    /// With the pattern recorded, a lookup keeps the candidates whose pattern **matches the arguments the use
-    /// wrote** (`shared_ptr<_Ty>` does not match `int`; a bare `_Ty` matches anything), and the answer is `int`.
-    ///
-    /// # Why it is a spelling, and why it is not `parameters`
-    ///
-    /// A spelling, for the reason every other field here is: it is what the file says, and the matching is done
-    /// where the use's arguments are known. And **not** `parameters`, which the doc comment above already warns
-    /// about: that one is the *parameter names* (`["_Ty"]`) and is identical for the primary and the specialization —
-    /// it is what the types inside refer to, not what the class is a pattern of.
-    pub pattern: Option<String>,
-    /// **The parameter list a function was declared with**, as the file spells it — `(_Ty* _First, size_type _Count)`,
-    /// parentheses and all. `None` for everything that is not a function, and for a function whose declarator the
-    /// shapes could not reach.
-    ///
-    /// # Why a spelling rather than a structured list
-    ///
-    /// Because the two consumers want different things from it and the text serves both. A **completion's detail
-    /// line** shows it as written — that is the whole point, and a reader comparing `format(fmt, args)` with their
-    /// call is comparing spellings. A **signature help** needs the parameters *split* and each one's span inside the
-    /// label, and it already builds that by parsing the declaring file ([`crate::signature::signature_at`]), because
-    /// splitting on commas is wrong the moment a default argument mentions `std::pair<int, int>`.
-    ///
-    /// What it replaces is the `(…)` a completion used to show for every function in another file: the fact had a
-    /// return type and nothing else, so `std::format` and `f()` were described identically. Measured on the project
-    /// this was written against, the list is what makes `format` recognizable in a hundred-name popup.
-    ///
-    /// Defaults, `...`, and the names are all kept as written for the same reason [`DeclFact::type_of`] is: this is
-    /// what the file says, and a consumer that needs more reads the declaration.
-    pub parameter_list: Option<String>,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,
     /// Just the name, which is what a reference search matches. Separate from `range` for the reason
@@ -498,6 +332,129 @@ pub struct DeclFact {
     /// Read from the declaration's own node at index time: a class-like or enum declaration containing a class body, a
     /// function whose declaration contains a compound statement.
     pub definition: bool,
+    /// **Everything a declaration carries that most do not** — the ten fields this struct used to hold inline.
+    ///
+    /// # The measurement this shape exists for
+    ///
+    /// `size_of::<DeclFact>()` was **424 bytes**, and 486 783 declarations over 1 761 files therefore cost **196 MB —
+    /// 83 % of every summary in memory** — of which the text was 40 MB. A declaration's *rare* fields were most of the
+    /// width: `parameters`, `parameter_defaults`, `constraints`, `bases`, `parameter_list`, `requires_clause`,
+    /// `pattern`, `returns_in_the_class`, `in_namespace` and `reflection` are each a `Vec` or an `Option<String>` (24
+    /// bytes) and are empty for an ordinary variable, enumerator or field. One `Option<Box<…>>` is eight, and the
+    /// memory follows the facts that need it rather than the facts that do not.
+    ///
+    /// Read through the accessors below — `fact.parameters()` and not `fact.parameters()`, because the field is behind
+    /// the box.
+    pub detail: Option<Box<DeclDetail>>,
+}
+
+/// **The fields of a [`DeclFact`] that most declarations do not have** — boxed as a group, see [`DeclFact::detail`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclDetail {
+    /// The **qualified** name of the namespace this declaration is written in, when that is not its scope.
+    pub in_namespace: Option<String>,
+    /// The class of a function declared out of line — `Widget` in `int Widget::size() const`.
+    pub returns_in_the_class: Option<String>,
+    /// The **named** bases of a class-like definition, in the order the file wrote them.
+    pub bases: Vec<String>,
+    /// A reflection annotation — `UCLASS(Blueprintable)` — when the declaration carries one.
+    pub reflection: Option<ReflectionFact>,
+    /// The template parameter names of a template declaration, and of a member of a class template.
+    pub parameters: Vec<String>,
+    /// The constraints a `template <…>` head writes after its parameters.
+    pub constraints: Vec<String>,
+    /// The `requires`-clause written after a function's parameter list, or in a template head.
+    pub requires_clause: Option<String>,
+    /// The default arguments of [`DeclDetail::parameters`], position for position.
+    pub parameter_defaults: Vec<String>,
+    /// A class template's written pattern with its arguments — `map<_Kty, _Ty>`.
+    pub pattern: Option<String>,
+    /// The parameter list as the file spells it, parentheses included.
+    pub parameter_list: Option<String>,
+}
+
+impl DeclDetail {
+    /// **The box, or nothing when the detail is empty.** A fact that needs none of these pays eight bytes for the
+    /// option; one that needs any of them pays the box and the fields. Boxing every fact, empty or not, would put an
+    /// allocation back on the 486 783 declarations this shape exists to make cheap.
+    pub fn in_a_box(detail: DeclDetail) -> Option<Box<DeclDetail>> {
+        if detail.is_empty() {
+            None
+        } else {
+            Some(Box::new(detail))
+        }
+    }
+
+    /// Is every field of this detail at its default — no bases, no parameters, no annotation?
+    pub fn is_empty(&self) -> bool {
+        self.in_namespace.is_none()
+            && self.returns_in_the_class.is_none()
+            && self.bases.is_empty()
+            && self.reflection.is_none()
+            && self.parameters.is_empty()
+            && self.constraints.is_empty()
+            && self.requires_clause.is_none()
+            && self.parameter_defaults.is_empty()
+            && self.pattern.is_none()
+            && self.parameter_list.is_none()
+    }
+}
+
+impl DeclFact {
+    /// The boxed half, when this fact has one.
+    pub fn detail(&self) -> Option<&DeclDetail> {
+        self.detail.as_deref()
+    }
+
+    /// The boxed half, created if this fact has none — what a builder that fills one field needs.
+    pub fn detail_mut(&mut self) -> &mut DeclDetail {
+        self.detail.get_or_insert_with(Default::default)
+    }
+
+    pub fn in_namespace(&self) -> Option<&str> {
+        self.detail()
+            .and_then(|detail| detail.in_namespace.as_deref())
+    }
+
+    pub fn returns_in_the_class(&self) -> Option<&str> {
+        self.detail()
+            .and_then(|detail| detail.returns_in_the_class.as_deref())
+    }
+
+    pub fn bases(&self) -> &[String] {
+        self.detail().map_or(&[], |detail| &detail.bases)
+    }
+
+    pub fn reflection(&self) -> Option<&ReflectionFact> {
+        self.detail().and_then(|detail| detail.reflection.as_ref())
+    }
+
+    pub fn parameters(&self) -> &[String] {
+        self.detail().map_or(&[], |detail| &detail.parameters)
+    }
+
+    pub fn constraints(&self) -> &[String] {
+        self.detail().map_or(&[], |detail| &detail.constraints)
+    }
+
+    pub fn requires_clause(&self) -> Option<&str> {
+        self.detail()
+            .and_then(|detail| detail.requires_clause.as_deref())
+    }
+
+    pub fn parameter_defaults(&self) -> &[String] {
+        self.detail()
+            .map_or(&[], |detail| &detail.parameter_defaults)
+    }
+
+    pub fn pattern(&self) -> Option<&str> {
+        self.detail().and_then(|detail| detail.pattern.as_deref())
+    }
+
+    pub fn parameter_list(&self) -> Option<&str> {
+        self.detail()
+            .and_then(|detail| detail.parameter_list.as_deref())
+    }
 }
 
 /// Who may name a declaration — see [`DeclFact::access`].
@@ -1343,7 +1300,7 @@ impl DeclFact {
         std::mem::size_of::<DeclFact>()
             + on_the_heap(&self.name)
             + self.scope.as_ref().map_or(0, on_the_heap)
-            + self.in_namespace.as_ref().map_or(0, String::len)
+            + self.in_namespace().map_or(0, str::len)
     }
 }
 

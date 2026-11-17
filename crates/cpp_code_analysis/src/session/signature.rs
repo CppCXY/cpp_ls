@@ -784,7 +784,7 @@ fn constructors_in_the_index(
         if scope.rsplit("::").next().map(str::trim) != Some(class) {
             continue;
         }
-        let Some(parameters) = declaration.fact.parameter_list.as_deref() else {
+        let Some(parameters) = declaration.fact.parameter_list() else {
             continue;
         };
         let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);

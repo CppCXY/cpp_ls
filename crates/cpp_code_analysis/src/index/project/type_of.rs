@@ -1589,7 +1589,7 @@ pub(crate) fn declared_class(
     {
         let written = crate::sema::builtins::split_arguments(inside);
         let target =
-            crate::sema::types::substituted_spelling(target, &found.fact.parameters, &written);
+            crate::sema::types::substituted_spelling(target, found.fact.parameters(), &written);
         if let Some(named) = crate::sema::types::parse_type_spelling(&target).class_name() {
             return Some(named.to_string());
         }
@@ -1895,7 +1895,7 @@ pub(crate) fn operator_returns_of_with_arguments(
         .fact
         .returns
         .clone()
-        .or(found.fact.returns_in_the_class.clone())?;
+        .or(found.fact.returns_in_the_class().map(str::to_string))?;
 
     // **An operator inherited from a base answers in the base's spelling.** `template <class T> struct Base { T*
     // operator->(); }; template <class T> struct Ptr : Base<T> {};` — `Ptr<S>`'s arrow is `Base<S>::operator->`,
@@ -1947,7 +1947,10 @@ fn the_members_return(
     argument_types: &[crate::sema::types::Type],
 ) -> Option<String> {
     let _ = (index, scopes, root, path);
-    let returns = fact.returns.clone().or(fact.returns_in_the_class.clone());
+    let returns = fact
+        .returns
+        .clone()
+        .or(fact.returns_in_the_class().map(str::to_string));
     if returns.as_deref().is_none_or(is_a_placeholder)
         && let Some(deduced) = deduced_returns_of_the_member(
             declaring,
@@ -1970,10 +1973,10 @@ fn the_members_return(
 
 /// **How many parameters a fact's declaration takes**, from the names it recorded or the list it wrote.
 fn a_facts_parameter_count(fact: &crate::DeclFact) -> Option<usize> {
-    if !fact.parameters.is_empty() {
-        return Some(fact.parameters.len());
+    if !fact.parameters().is_empty() {
+        return Some(fact.parameters().len());
     }
-    let list = fact.parameter_list.as_deref()?;
+    let list = fact.parameter_list()?;
     let inside = list
         .trim()
         .trim_start_matches('(')
@@ -2112,13 +2115,10 @@ fn deduced_returns_of_the_member(
     // the parameter's name (`wrapper<Pred>` for a call of `make_one(1)`, measured). The class's arguments are
     // applied to the deduced spelling afterwards, because `TypeSubstitutions` pairs one list positionally and the
     // two lists are written with different names.
-    let deduced_from_the_call = deduce_the_parameters(
-        &fact.parameters,
-        fact.parameter_list.as_deref(),
-        argument_types,
-    );
+    let deduced_from_the_call =
+        deduce_the_parameters(fact.parameters(), fact.parameter_list(), argument_types);
     let substitutions =
-        crate::sema::types::TypeSubstitutions::new(&fact.parameters, &deduced_from_the_call);
+        crate::sema::types::TypeSubstitutions::new(fact.parameters(), &deduced_from_the_call);
     let deduced = crate::sema::declarations::deduced_returns_of_substituted(
         &declared_in.root,
         binding,
@@ -2132,7 +2132,8 @@ fn deduced_returns_of_the_member(
         .iter()
         .map(|argument| argument.to_string())
         .collect();
-    let deduced = crate::sema::types::substituted_spelling(&deduced, &fact.parameters, &as_written);
+    let deduced =
+        crate::sema::types::substituted_spelling(&deduced, fact.parameters(), &as_written);
     Some(crate::sema::types::substituted_spelling(
         &deduced,
         parameter_names,
@@ -2671,7 +2672,7 @@ impl NamedDeclaration {
                     Some(returns) => returns,
                     None => {
                         let substitutions = crate::sema::types::TypeSubstitutions::new(
-                            &fact.parameters,
+                            fact.parameters(),
                             written_arguments,
                         );
                         let declared_in = declaring(file.as_path())?;
@@ -2725,7 +2726,7 @@ impl NamedDeclaration {
                 // asic_string<char>::_Convert_size<size_t> - so the order does not decide the answer; it decides
                 // which name is left standing when the two lists overlap, and the function's is the nearer.
                 let started = bindings.applied_to(&returns);
-                let started = if fact.parameters.is_empty() || written_arguments.is_empty() {
+                let started = if fact.parameters().is_empty() || written_arguments.is_empty() {
                     started
                 } else {
                     // **Written with names nobody had recorded until now.** _Convert_size returns _Size_type`r
@@ -2735,7 +2736,7 @@ impl NamedDeclaration {
                     // <vector>/<xutility>: 11 uto refusals were exactly this call, every one of them a return
                     // type that had been read and left unpaired.
                     let substitutions = crate::sema::types::TypeSubstitutions::new(
-                        &fact.parameters,
+                        fact.parameters(),
                         written_arguments,
                     );
                     started.substituted(&substitutions)
@@ -2814,9 +2815,10 @@ impl NamedDeclaration {
                 ),
                 crate::sema::declarations::parameter_list_at(root, binding.name_range.start_offset),
             ),
-            NamedDeclaration::Indexed(fact, _, _) => {
-                (fact.parameters.clone(), fact.parameter_list.clone())
-            }
+            NamedDeclaration::Indexed(fact, _, _) => (
+                fact.parameters().to_vec(),
+                fact.parameter_list().map(str::to_string),
+            ),
         }
     }
 
@@ -2839,7 +2841,7 @@ impl NamedDeclaration {
                     binding,
                 )
             }
-            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_defaults.clone(),
+            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_defaults().to_vec(),
         }
     }
     ///
@@ -2860,7 +2862,7 @@ impl NamedDeclaration {
     pub(crate) fn parameter_list(&self) -> Option<String> {
         match self {
             NamedDeclaration::Here(_) => None,
-            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_list.clone(),
+            NamedDeclaration::Indexed(fact, _, _) => fact.parameter_list().map(str::to_string),
         }
     }
 }

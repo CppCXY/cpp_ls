@@ -1795,7 +1795,7 @@ fn a_macro_is_not_shown_with_a_signature() {
         item.detail,
         item.fact
             .as_ref()
-            .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
+            .map(|fact| (&fact.kind, &fact.returns, fact.parameter_list()))
     );
     assert_eq!(
         item.detail,
@@ -1803,7 +1803,7 @@ fn a_macro_is_not_shown_with_a_signature() {
         "a macro has no returns and no parameters: {:?}",
         item.fact
             .as_ref()
-            .map(|fact| (&fact.kind, &fact.returns, &fact.parameter_list))
+            .map(|fact| (&fact.kind, &fact.returns, fact.parameter_list()))
     );
 
     // **And its identity is the macro's own position.** The item a client resolves is a `(file, offset)` pair taken

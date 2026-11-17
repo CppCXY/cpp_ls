@@ -146,7 +146,7 @@ fn why_std_vector_stops_resolving() {
         for one in all.found.iter().take(8) {
             println!(
                 "  candidate: pattern {:?} definition {} exported {} file {}",
-                one.fact.pattern,
+                one.fact.pattern(),
                 one.fact.definition,
                 one.fact.exported,
                 one.file.file_name().unwrap_or_default().to_string_lossy()

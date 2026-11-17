@@ -1981,11 +1981,11 @@ fn fill_the_reflection(
         annotations.insert(name_start, annotation);
     }
     for fact in facts {
-        if fact.reflection.is_some() {
+        if fact.reflection().is_some() {
             continue;
         }
         if let Some((macro_name, arguments)) = annotations.get(&fact.name_range.start_offset) {
-            fact.reflection = Some(crate::summary::ReflectionFact {
+            fact.detail_mut().reflection = Some(crate::summary::ReflectionFact {
                 macro_name: (*macro_name).to_string(),
                 specifiers: the_specifiers(arguments),
             });
@@ -3906,30 +3906,34 @@ fn fact_for(
         // **The `requires`-clause written after the parameter list**, which is a fact about the declaration and not a
         // modifier: `void f(int) const requires (x > 0)`. The hover card showed neither it nor the `const` — reported
         // from `strings.cpp` as "the card is missing what the declaration says".
-        requires_clause: the_requires_clause_with(shapes, binding),
+        //
+        // It lives in the boxed half with the other rare fields — see [`crate::summary::DeclDetail`].
         // **What the function frees** is filled by the pass after the facts are built — see
         // [`fill_the_frees`], which needs the whole file to do it in one walk.
         frees: 0,
-        // **The annotation is filled after the facts exist** — see `fill_the_reflection`, which reads the file text once
-        // for the whole file rather than once per declaration.
-        reflection: None,
         name: name.into(),
         scope: scope.map(SmolStr::from),
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
-        in_namespace,
         type_of: type_of.map(SmolStr::from),
         returns,
-        returns_in_the_class,
         split_by_a_directive,
-        bases,
-        parameters,
-        constraints,
-        parameter_defaults,
-        pattern,
-        parameter_list,
+        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+            in_namespace,
+            returns_in_the_class,
+            bases,
+            // **The annotation is filled after the facts exist** — see `fill_the_reflection`, which reads the file
+            // text once for the whole file rather than once per declaration.
+            reflection: None,
+            parameters,
+            constraints,
+            requires_clause: the_requires_clause_with(shapes, binding),
+            parameter_defaults,
+            pattern,
+            parameter_list,
+        }),
         access,
         exported,
         range: binding.range,
@@ -4766,8 +4770,8 @@ impl<'a> DeclarationFacts<'a> {
                 // **The walker answered `None` for a definition's list**, because the shape it reads the declarator
                 // from has no name (a qualified definition's name is in the specifier sequence). The pass read the
                 // list from the declaration itself, so the fact a call site's signature is built from is complete.
-                if fact.parameter_list.is_none() {
-                    fact.parameter_list = parameters;
+                if fact.parameter_list().is_none() {
+                    fact.detail_mut().parameter_list = parameters;
                 }
                 by_offset
                     .entry(fact.name_range.start_offset)
@@ -5928,8 +5932,8 @@ mod tests {
                 .iter()
                 .find(|fact| fact.name == name)
                 .unwrap_or_else(|| panic!("{name} must be a fact"))
-                .bases
-                .clone()
+                .bases()
+                .to_vec()
         };
 
         assert_eq!(
@@ -6223,7 +6227,7 @@ public:
             .iter()
             .find(|fact| fact.name == "AMyActor")
             .expect("the class");
-        let reflection = class.reflection.clone().expect("UCLASS");
+        let reflection = class.reflection().cloned().expect("UCLASS");
         assert_eq!(reflection.macro_name, "UCLASS");
         assert_eq!(
             reflection.names().collect::<Vec<_>>(),
@@ -6234,7 +6238,7 @@ public:
             .iter()
             .find(|fact| fact.name == "bIsReady")
             .expect("the member");
-        let reflection = member.reflection.clone().expect("UPROPERTY");
+        let reflection = member.reflection().cloned().expect("UPROPERTY");
         assert_eq!(reflection.macro_name, "UPROPERTY");
         assert_eq!(
             reflection.specifiers,
@@ -6246,7 +6250,7 @@ public:
             .iter()
             .find(|fact| fact.name == "DoThing")
             .expect("the function");
-        let reflection = function.reflection.clone().expect("UFUNCTION");
+        let reflection = function.reflection().cloned().expect("UFUNCTION");
         assert_eq!(reflection.macro_name, "UFUNCTION");
         assert_eq!(
             reflection.specifiers,
@@ -6261,7 +6265,7 @@ public:
             .iter()
             .find(|fact| fact.name == "NotAnnotated")
             .expect("the plain member");
-        assert!(plain.reflection.is_none());
+        assert!(plain.reflection().is_none());
     }
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
     fn facts_of_a_broken_file(

@@ -103,7 +103,7 @@ pub fn an_item(
     // **A reflection annotation is part of the declaration**, not decoration around it: `UCLASS(Blueprintable)` is what
     // makes an Unreal class a class as far as the engine is concerned, and the fact records the macro and its arguments.
     // Rendered as `NAME(arg, arg)` from those parts — generated, like everything else in this block.
-    if let Some(reflection) = &fact.reflection {
+    if let Some(reflection) = &fact.reflection() {
         lines.push(reflection.said());
     }
     if let Some(head) = a_template_head(fact, syntax) {
@@ -121,8 +121,8 @@ pub fn an_item(
         // repeated here — only the kinds whose signature has no place for one get the line.
         if !matches!(fact.kind, DeclKind::Function)
             && let Some(clause) = fact
-                .requires_clause
-                .as_deref()
+                .requires_clause()
+                .filter(|clause| !clause.trim().is_empty())
                 .filter(|clause| !clause.trim().is_empty())
         {
             lines.push(clause.to_string());
@@ -180,11 +180,11 @@ fn a_template_head(fact: &DeclFact, syntax: Option<&CppDeclaration>) -> Option<S
     }
     // **The fact's own parameters, and only when the declaration is the template.** A member of a class template has
     // them too, which is why the scope decides — see this function's documentation.
-    if fact.scope.is_some() || fact.parameters.is_empty() {
+    if fact.scope.is_some() || fact.parameters().is_empty() {
         return None;
     }
     let parameters: Vec<TemplateParameter> = fact
-        .parameters
+        .parameters()
         .iter()
         .enumerate()
         .filter(|(_, name)| !name.is_empty())
@@ -192,7 +192,7 @@ fn a_template_head(fact: &DeclFact, syntax: Option<&CppDeclaration>) -> Option<S
             keyword: "class".to_string(),
             name: name.clone(),
             default: fact
-                .parameter_defaults
+                .parameter_defaults()
                 .get(at)
                 .filter(|default| !default.trim().is_empty())
                 .map(|default| a_default(default)),
@@ -292,7 +292,7 @@ fn a_function(fact: &DeclFact) -> String {
         out.push(' ');
     }
     out.push_str(&fact.name);
-    match fact.parameter_list.as_deref() {
+    match fact.parameter_list() {
         Some(list) => {
             let parameters: Vec<String> = parameters(list).iter().map(Parameter::said).collect();
             out.push('(');
@@ -328,8 +328,7 @@ fn a_trailing(fact: &DeclFact) -> String {
         out.push_str(" = default");
     }
     if let Some(clause) = fact
-        .requires_clause
-        .as_deref()
+        .requires_clause()
         .filter(|clause| !clause.trim().is_empty())
     {
         // **The clause is stored as the file wrote it, keyword included** — `requires (x > 0)`,
@@ -358,7 +357,7 @@ fn a_class(fact: &DeclFact, syntax: Option<&CppDeclaration>) -> String {
     }
     out.push_str(&fact.name);
     let bases: Vec<String> = fact
-        .bases
+        .bases()
         .iter()
         .filter(|base| !base.trim().is_empty())
         .map(|base| a_type(base))

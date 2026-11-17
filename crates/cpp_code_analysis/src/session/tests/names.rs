@@ -289,7 +289,8 @@ pub(crate) fn a_class_template_resolves_to_its_primary_definition() {
                 "a definition, not a forward declaration"
             );
             assert_eq!(
-                found.fact.pattern, None,
+                found.fact.pattern(),
+                None,
                 "the primary template, not `vector<bool>`"
             );
             assert_eq!(

@@ -479,7 +479,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let class = summary.declarations.iter().find(|fact| {
             fact.name == simple
                 && fact.kind == crate::DeclKind::Type
-                && fact.parameter_list.is_none()
+                && fact.parameter_list().is_none()
         })?;
         // **A member's `scope` is the class's qualified name**, which is the scope the class was written in plus its
         // own name — `Widget` at file scope, `ns::Widget` in a namespace.
@@ -499,9 +499,9 @@ impl<F: FileProvider + Clone> Session<F> {
             text: text.to_string(),
             class_at: class.name_range.start_offset,
             members,
-            parameters: class.parameters.clone(),
-            parameter_defaults: class.parameter_defaults.clone(),
-            bases: class.bases.clone(),
+            parameters: class.parameters().to_vec(),
+            parameter_defaults: class.parameter_defaults().to_vec(),
+            bases: class.bases().to_vec(),
         })
     }
 
@@ -566,7 +566,7 @@ impl<F: FileProvider + Clone> Session<F> {
             && let Some(alias) = environment.members.iter().find(|member| {
                 member.fact.kind == crate::DeclKind::Type
                     && member.fact.name == spelled
-                    && member.fact.parameter_list.is_none()
+                    && member.fact.parameter_list().is_none()
             })
             && let Some(target) = alias.fact.type_of.clone()
         {
@@ -658,8 +658,8 @@ impl<F: FileProvider + Clone> Session<F> {
         let written = alias.fact.type_of.as_deref()?;
         let target = crate::sema::types::substituted_spelling_with_defaults(
             written,
-            &alias.fact.parameters,
-            &alias.fact.parameter_defaults,
+            alias.fact.parameters(),
+            alias.fact.parameter_defaults(),
             arguments,
         );
         self.the_size_of_a_type_in(view, &target, depth + 1, None)
@@ -691,7 +691,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let Some(alias) = environment.members.iter().find(|member| {
             member.fact.kind == crate::DeclKind::Type
                 && member.fact.name == spelled.trim()
-                && member.fact.parameter_list.is_none()
+                && member.fact.parameter_list().is_none()
         }) else {
             return spelled;
         };
@@ -716,13 +716,13 @@ impl<F: FileProvider + Clone> Session<F> {
     ) -> Option<String> {
         let known = self.store.index().definition(head, path).value()?;
         let written = known.fact.type_of.as_deref()?;
-        if known.fact.parameters.is_empty() {
+        if known.fact.parameters().is_empty() {
             return None;
         }
         let target = crate::sema::types::substituted_spelling_with_defaults(
             written,
-            &known.fact.parameters,
-            &known.fact.parameter_defaults,
+            known.fact.parameters(),
+            known.fact.parameter_defaults(),
             arguments,
         );
         (target != head).then_some(target)
@@ -775,7 +775,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // written, and it is the honest place for a hover to open.
         let class_fact = declared.fact.clone();
         let class_name = class_fact.name.to_string();
-        for (name, type_of) in crate::project::ue::generated_members(&class_name, &class_fact.bases)
+        for (name, type_of) in
+            crate::project::ue::generated_members(&class_name, class_fact.bases())
         {
             let mut fact = class_fact.clone();
             fact.name = name.into();

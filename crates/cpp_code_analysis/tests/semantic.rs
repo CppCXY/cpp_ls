@@ -546,7 +546,7 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
         .expect("the local is declared");
 
     assert_eq!(
-        local.in_namespace.as_deref(),
+        local.in_namespace(),
         Some("app"),
         "the summary is read with the closure's macros in hand, so the namespace is known"
     );
@@ -580,7 +580,7 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
     match session.definition_of_a_written_type(
         &view,
         "Widget",
-        local.in_namespace.as_deref(),
+        local.in_namespace(),
         local.range.start_offset,
     ) {
         Known::Yes(found) => assert_eq!(found.fact.qualified_name(), "app::Widget"),
@@ -1798,7 +1798,7 @@ fn a_template_parameter_is_not_a_declaration_at_file_scope() {
         .find(|fact| fact.name == "A")
         .expect("the class's own fact");
     assert_eq!(
-        class.parameters,
+        class.parameters(),
         ["_Tp"],
         "the parameters live on the fact, which is what substitution reads"
     );
@@ -1841,7 +1841,7 @@ fn a_qualified_definition_carries_its_parameter_list() {
         .declarations
         .iter()
         .filter(|fact| fact.name == "f")
-        .map(|fact| (&*fact.name, fact.parameter_list.as_deref()))
+        .map(|fact| (&*fact.name, fact.parameter_list()))
         .collect();
     println!("facts for `f`: {found:?}");
     assert!(
@@ -1889,7 +1889,7 @@ fn a_member_whose_return_type_a_directive_separates_is_a_member() {
         .map(|fact| {
             (
                 &*fact.name,
-                fact.parameter_list.as_deref(),
+                fact.parameter_list(),
                 fact.scope.as_deref().unwrap_or("<file scope>"),
             )
         })
@@ -1928,7 +1928,7 @@ fn a_function_returning_a_reference_keeps_its_parameter_list() {
         .declarations
         .iter()
         .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
-        .map(|fact| (&*fact.name, fact.parameter_list.as_deref()))
+        .map(|fact| (&*fact.name, fact.parameter_list()))
         .collect();
     println!("functions: {found:?}");
     assert!(
@@ -2188,7 +2188,7 @@ struct A {
         "it is a member of its class"
     );
     assert_eq!(
-        decorated.parameter_list.as_deref(),
+        decorated.parameter_list(),
         Some("(int x)"),
         "**and its parameters**, which the declarator does not hold either: without the fallback the fact read as a \
          constructor that takes nothing, which a completion row and a signature help both believe"

@@ -43,7 +43,7 @@ fn facts_for(session: &Session<DiskFiles>, file: &std::path::Path, name: &str) -
                 fact.scope,
                 fact.type_of,
                 fact.returns,
-                fact.parameters,
+                fact.parameters(),
                 fact.local,
                 fact.range.start_offset
             )
@@ -188,7 +188,9 @@ fn two_wrong_answers_on_the_codestyle_project() {
             for one in all.found.iter().take(6) {
                 println!(
                     "  std::move candidate: params {:?} list {:?} returns {:?}",
-                    one.fact.parameters, one.fact.parameter_list, one.fact.returns
+                    one.fact.parameters(),
+                    one.fact.parameter_list(),
+                    one.fact.returns
                 );
             }
         }
@@ -378,7 +380,7 @@ fn what_the_analysis_says_about_lsp_handle() {
                 one.fact.scope,
                 one.fact.type_of,
                 one.fact.returns,
-                one.fact.parameters,
+                one.fact.parameters(),
                 one.file.file_name().unwrap_or_default().to_string_lossy()
             );
         }

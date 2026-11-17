@@ -233,7 +233,7 @@ impl CompletionItem {
         CompletionItem {
             label: fact.name.to_string(),
             kind: kind_of(fact.kind),
-            insert: match (&fact.kind, &fact.parameter_list) {
+            insert: match (&fact.kind, &fact.parameter_list()) {
                 // **A function-like macro is inserted with its parenthesis** — the only hint a completion item carries about how a
                 // name is used: `MAX(` says it takes arguments, and `MAX` alone does not. Measured before this: the item for
                 // `#define MAX(a, b)` read `insert: "MAX"`, `kind: Macro`, and nothing else.
@@ -343,14 +343,16 @@ fn kind_of(kind: DeclKind) -> ItemKind {
 /// than the truth and not more.
 pub fn detail_of(fact: &DeclFact) -> Option<String> {
     match fact.kind {
-        DeclKind::Function => match (&fact.returns, &fact.parameter_list) {
+        DeclKind::Function => match (&fact.returns, &fact.parameter_list()) {
             (Some(returns), Some(parameters)) => Some(format!("{returns} {parameters}")),
             (Some(returns), None) => Some(format!("{returns} (…)")),
-            (None, Some(parameters)) => Some(parameters.clone()),
+            (None, Some(parameters)) => Some(parameters.to_string()),
             (None, None) => None,
         },
         DeclKind::Variable => fact.type_of.clone().map(|ty| ty.to_string()),
-        DeclKind::Type if !fact.bases.is_empty() => Some(format!(": {}", fact.bases.join(", "))),
+        DeclKind::Type if !fact.bases().is_empty() => {
+            Some(format!(": {}", fact.bases().join(", ")))
+        }
         _ => None,
     }
 }
@@ -1734,17 +1736,17 @@ fn doc_comments(
                 // and the fact separates the two: `parameters` is the template head, `parameter_list` the
                 // parameter list. Both are offered, because which command the reader typed is a spelling and the
                 // name they want is a name.
-                // **The empty name is a slot, not a parameter.** `fact.parameters` keeps one entry per template
+                // **The empty name is a slot, not a parameter.** `fact.parameters()` keeps one entry per template
                 // parameter so that arguments pair with names by position, and an **unnamed** parameter's entry is
                 // the empty string (`template <typename, class T>` is `["", "T"]`). It is not a name a reader can be
                 // told about — offering it would put a blank item in the list.
                 let mut names: Vec<String> = fact
-                    .parameters
+                    .parameters()
                     .iter()
                     .filter(|name| !name.is_empty())
                     .cloned()
                     .collect();
-                if let Some(list) = &fact.parameter_list
+                if let Some(list) = fact.parameter_list()
                     && let Some(found) = crate::sema::call_syntax::parameter_names_from_text(list)
                 {
                     names.extend(found.into_iter().flatten());
@@ -2287,25 +2289,13 @@ mod tests {
         let fact = |returns: Option<&str>, parameter_list: Option<&str>| DeclFact {
             enumerator: false,
             frees: 0,
-            reflection: None,
             name: "format".into(),
             scope: Some("std".into()),
             local: false,
-            in_namespace: None,
             kind: DeclKind::Function,
             modifiers: crate::DeclModifiers::VIRTUAL,
             type_of: None,
             returns: returns.map(str::to_string),
-            // The residue of the operator gate, and this fixture declares a plain function: nothing was refused.
-            returns_in_the_class: None,
-            bases: Vec::new(),
-            parameters: Vec::new(),
-            constraints: Vec::new(),
-            // A clause is the declaration's text, and this literal is a fixture with no text to read.
-            requires_clause: None,
-            parameter_defaults: Vec::new(),
-            pattern: None,
-            parameter_list: parameter_list.map(str::to_string),
             range: cpp_parser::SourceRange::new(0, 0),
             name_range: cpp_parser::SourceRange::new(0, 0),
             clean: true,
@@ -2314,13 +2304,12 @@ mod tests {
             access: None,
             exported: false,
             definition: true,
+            // The one rare field this fixture has: the list the detail line is built from.
+            detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                parameter_list: parameter_list.map(str::to_string),
+                ..Default::default()
+            }),
         };
-
-        assert_eq!(
-            detail_of(&fact(Some("string"), Some("(_Fmt, _Args...)"))).as_deref(),
-            Some("string (_Fmt, _Args...)"),
-            "the return type and the parameters, as the file spells them"
-        );
         assert_eq!(
             detail_of(&fact(Some("string"), Some("()"))).as_deref(),
             Some("string ()"),

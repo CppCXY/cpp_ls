@@ -367,7 +367,7 @@ fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee>
         if !visible.contains(&normalized) {
             continue;
         }
-        let Some(parameters) = fact.parameter_list.as_deref() else {
+        let Some(parameters) = fact.parameter_list() else {
             continue;
         };
         let Some(callee) = the_callee_in(parameters) else {
@@ -577,7 +577,7 @@ fn judge_a_member_call(
             if fact.name != access.member {
                 continue;
             }
-            let Some(parameters) = fact.parameter_list.as_deref() else {
+            let Some(parameters) = fact.parameter_list() else {
                 continue;
             };
             if let Some(callee) = the_callee_in(parameters) {
@@ -593,7 +593,7 @@ fn judge_a_member_call(
             .members
             .iter()
             .filter(|member| member.fact.name == access.member)
-            .filter_map(|member| member.fact.parameter_list.as_deref())
+            .filter_map(|member| member.fact.parameter_list())
             .filter_map(the_callee_in)
             .collect();
     }

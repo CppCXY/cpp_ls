@@ -762,14 +762,14 @@ pub(crate) fn the_return_the_overloads_agree_on(
                 },
             };
             if !a_candidate_that_can_be_called_this_way(
-                candidate.fact.parameter_list.as_deref(),
+                candidate.fact.parameter_list(),
                 argument_types,
                 how_many_arguments,
             ) {
                 continue;
             }
             let substituted =
-                if written_arguments.is_empty() || candidate.fact.parameters.is_empty() {
+                if written_arguments.is_empty() || candidate.fact.parameters().is_empty() {
                     written.clone()
                 } else {
                     let arguments: Vec<String> = written_arguments
@@ -778,7 +778,7 @@ pub(crate) fn the_return_the_overloads_agree_on(
                         .collect();
                     crate::sema::types::substituted_spelling(
                         &written,
-                        &candidate.fact.parameters,
+                        candidate.fact.parameters(),
                         &arguments,
                     )
                 };
@@ -786,7 +786,7 @@ pub(crate) fn the_return_the_overloads_agree_on(
             // `variant_alternative_t<int, variant<_Types...>>` keeps `_Types` — and comparing it with a concrete
             // answer would make every set holding such an overload disagree for a reason that is not about the type.
             let still_unsubstituted =
-                candidate.fact.parameters.iter().any(|parameter| {
+                candidate.fact.parameters().iter().any(|parameter| {
                     !parameter.is_empty() && substituted.contains(parameter.as_str())
                 });
             if still_unsubstituted {
@@ -1298,7 +1298,7 @@ pub(crate) fn callees_of_a_call(
                     .map(|declaration| Callee {
                         file: declaration.file.clone(),
                         name_offset: declaration.fact.name_range.start_offset,
-                        parameters: declaration.fact.parameter_list.clone(),
+                        parameters: declaration.fact.parameter_list().map(str::to_string),
                     })
                     .collect(),
             ),
@@ -1478,11 +1478,10 @@ pub(crate) fn the_one_the_arguments_select(
         .map(|(at, &index)| {
             let (fact, _) = &candidates[index];
             let (declared, variadic) = fact
-                .parameter_list
-                .as_deref()
+                .parameter_list()
                 .map(crate::sema::overload::parameters_in)
                 .unwrap_or_default();
-            let names = fact.parameters.clone();
+            let names = fact.parameters().to_vec();
             let declared_for_ordering = declared.clone();
             // **The deduction starts from what the call wrote.** `std::make_unique<Resource>(1)` states `_Tp` as
             // `Resource`; without that seed the candidate's every parameter stayed unbound and it ranked `Unranked`.
@@ -1509,7 +1508,7 @@ pub(crate) fn the_one_the_arguments_select(
                 format!("declaration {at}"),
             );
             if substituted.1 {
-                candidate.with_declaration(declared_for_ordering, names)
+                candidate.with_declaration(declared_for_ordering, names.to_vec())
             } else {
                 candidate
             }
@@ -1527,13 +1526,15 @@ pub(crate) fn the_one_the_arguments_select(
                 "[inference]   candidate {at}: bits={} deleted={} params={:?}",
                 fact.modifiers.bits(),
                 fact.modifiers.contains(crate::DeclModifiers::DELETED),
-                fact.parameter_list
+                fact.parameter_list()
             );
         }
         for (at, (fact, _)) in candidates.iter().enumerate() {
             eprintln!(
                 "[inference]   candidate {at}: scope {:?} returns {:?} params {:?}",
-                fact.scope, fact.returns, fact.parameter_list
+                fact.scope,
+                fact.returns,
+                fact.parameter_list()
             );
         }
     }
@@ -1553,8 +1554,7 @@ pub(crate) fn the_one_the_arguments_select(
                 .iter()
                 .filter(|at| {
                     let (fact, _) = &candidates[**at];
-                    fact.parameter_list
-                        .as_deref()
+                    fact.parameter_list()
                         .and_then(|list| {
                             crate::sema::overload::parameters_in(list)
                                 .0
@@ -1651,7 +1651,7 @@ pub(crate) fn member_callees(
         .map(|member| Callee {
             file: member.file.clone(),
             name_offset: member.fact.name_range.start_offset,
-            parameters: member.fact.parameter_list.clone(),
+            parameters: member.fact.parameter_list().map(str::to_string),
         })
         .collect();
 

@@ -171,7 +171,7 @@ fn an_instantiated_member_list_records_the_arguments() {
         .find(|member| member.fact.name == "push_back")
         .expect("the member is on the class");
     assert_eq!(
-        push_back.fact.parameter_list.as_deref(),
+        push_back.fact.parameter_list(),
         Some("(int value)"),
         "the class's parameter is substituted with the use's argument"
     );

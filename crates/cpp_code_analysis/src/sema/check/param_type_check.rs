@@ -163,7 +163,7 @@ fn member_parameter_lists(
     list.members
         .iter()
         .filter(|member| member.fact.name == access.member)
-        .filter_map(|member| member.fact.parameter_list.as_deref())
+        .filter_map(|member| member.fact.parameter_list())
         .map(|written| crate::sema::overload::parameters_in(written).0)
         .collect()
 }
@@ -312,7 +312,7 @@ fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<
         .declarations
         .iter()
         .filter(|fact| fact.kind == crate::DeclKind::Function && fact.name == name)
-        .filter_map(|fact| fact.parameter_list.clone())
+        .filter_map(|fact| fact.parameter_list().map(str::to_string))
         .collect();
     if written.is_empty()
         && let crate::Known::Yes(definitions) = context.index().definitions(name, context.path)
@@ -321,7 +321,7 @@ fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<
             .found
             .iter()
             .filter(|definition| definition.fact.kind == crate::DeclKind::Function)
-            .filter_map(|definition| definition.fact.parameter_list.clone())
+            .filter_map(|definition| definition.fact.parameter_list().map(str::to_string))
             .collect();
     }
     written.dedup();

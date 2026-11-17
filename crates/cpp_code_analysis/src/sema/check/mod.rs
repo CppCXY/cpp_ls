@@ -1392,7 +1392,7 @@ pub fn a_class_can_be_built_from(
         if !is_a_constructor {
             continue;
         }
-        let Some(parameters) = fact.parameter_list.as_deref() else {
+        let Some(parameters) = fact.parameter_list() else {
             continue;
         };
         constructors += 1;

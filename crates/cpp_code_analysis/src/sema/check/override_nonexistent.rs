@@ -43,7 +43,7 @@ impl Check for OverrideNonexistent {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type)
-            .map(|fact| (fact.name.to_string(), fact.bases.clone()))
+            .map(|fact| (fact.name.to_string(), fact.bases().to_vec()))
             .collect();
 
         // **The overriding members of this file**, with the class they belong to.

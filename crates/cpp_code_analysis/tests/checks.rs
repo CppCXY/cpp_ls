@@ -2141,7 +2141,7 @@ int main()
                         "PROBE {:?} kind {:?} params {:?} type_of {:?}",
                         member.fact.name,
                         member.fact.kind,
-                        member.fact.parameter_list,
+                        member.fact.parameter_list(),
                         member.fact.type_of
                     );
                 }

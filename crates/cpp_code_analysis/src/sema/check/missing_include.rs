@@ -137,7 +137,7 @@ impl Check for MissingInclude {
                         // finding after the first sweep was exactly this (`is_convertible` "declared" in an unrelated
                         // header). A plain type in a template's parameter list — `template <class T> void f(Widget w)`
                         // — is not this shape and is still reported.
-                        || (!fact.parameters.is_empty() && is_used_with_template_arguments(&spelling, &name))
+                        || (!fact.parameters().is_empty() && is_used_with_template_arguments(&spelling, &name))
                         || !reported.insert(name.clone())
                     {
                         continue;
@@ -303,7 +303,7 @@ fn types_this_declaration_uses(fact: &crate::DeclFact) -> Vec<String> {
     if let Some(of) = &fact.type_of {
         spellings.push(of.to_string());
     }
-    if let Some(parameters) = &fact.parameter_list {
+    if let Some(parameters) = &fact.parameter_list() {
         spellings.extend(parameters.split(',').map(|one| one.trim().to_string()));
     }
     spellings

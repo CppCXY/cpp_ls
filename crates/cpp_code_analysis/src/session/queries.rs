@@ -236,7 +236,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let Known::Yes(mut definition) = found else {
             return found;
         };
-        if definition.fact.reflection.is_some() {
+        if definition.fact.reflection().is_some() {
             return Known::Yes(definition);
         }
         let Some(in_the_file) =
@@ -252,7 +252,7 @@ impl<F: FileProvider + Clone> Session<F> {
             fact.name == definition.fact.name && fact.name_range.start_offset == in_the_file.get()
         });
         if let Some(recorded) = recorded {
-            definition.fact.reflection = recorded.reflection.clone();
+            definition.fact.detail_mut().reflection = recorded.reflection().cloned();
         }
         Known::Yes(definition)
     }

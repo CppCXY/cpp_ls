@@ -120,11 +120,11 @@ fn constraints_of_a_declaration<'a>(
     let mut own: Option<&[String]> = None;
     let mut own_declarations = 0;
     for fact in &context.summary.declarations {
-        if fact.name != name || fact.parameter_list.is_none() {
+        if fact.name != name || fact.parameter_list().is_none() {
             continue;
         }
         own_declarations += 1;
-        own = Some(&fact.constraints);
+        own = Some(fact.constraints());
     }
     match own_declarations {
         0 => {}
@@ -137,11 +137,11 @@ fn constraints_of_a_declaration<'a>(
     let mut elsewhere: Option<&[String]> = None;
     let mut elsewhere_declarations = 0;
     for found in &declared {
-        if found.fact.parameter_list.is_none() {
+        if found.fact.parameter_list().is_none() {
             continue;
         }
         elsewhere_declarations += 1;
-        elsewhere = Some(&found.fact.constraints);
+        elsewhere = Some(found.fact.constraints());
     }
     match elsewhere_declarations {
         1 => elsewhere,
@@ -437,7 +437,7 @@ fn derives_from(
             continue;
         };
 
-        for written in &fact.bases {
+        for written in fact.bases() {
             // **A base clause is the base's *name***: the fact stores it as one (`shape.bases` is the `CppBaseSpecifier`'s
             // name node, written as the reader spelled it), so there is no access keyword to strip. What it may carry is
             // template arguments and a scope — `std::vector<int>` — and this question is about the class's own name, which

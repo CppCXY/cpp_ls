@@ -499,8 +499,8 @@ pub fn name_completions_at(
             // parameters of its own and no bases, and a `#define` is never local.
             declaration.type_of = None;
             declaration.returns = None;
-            declaration.bases.clear();
-            declaration.parameters.clear();
+            declaration.detail_mut().bases.clear();
+            declaration.detail_mut().parameters.clear();
             declaration.local = false;
             // **The clone's position is the macro's own.** This is the field that decided what the popup *said*
             // about the macro: the identity a client echoes back to `completionItem/resolve` is a `(file, offset)`
@@ -512,10 +512,10 @@ pub fn name_completions_at(
             declaration.name_range = range;
             declaration.range = range;
             declaration.scope = None;
-            declaration.in_namespace = None;
+            declaration.detail_mut().in_namespace = None;
             // **A function-like macro is offered with its parenthesis**, which is the only hint a completion item can carry
             // about how it is used: `MAX(` tells the reader the name takes arguments, and `MAX` alone does not.
-            declaration.parameter_list = function_like.then(|| "(".to_string());
+            declaration.detail_mut().parameter_list = function_like.then(|| "(".to_string());
             let ours = written_in == summary.path.as_path();
             names.push(OfferedName {
                 file: written_in.to_path_buf(),

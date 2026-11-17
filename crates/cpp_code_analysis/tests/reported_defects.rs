@@ -45,7 +45,7 @@ fn parameters_of<'a>(
         .declarations
         .iter()
         .find(|fact| fact.name == name)
-        .map(|fact| fact.parameters.as_slice())
+        .map(|fact| fact.parameters())
 }
 
 /// **§B1 — a template parameter list is names, not the keywords that introduce them.**
@@ -341,7 +341,7 @@ fn a_member_function_records_its_qualifiers_and_its_requires_clause() {
         .filter(|fact| fact.scope.as_deref() == Some("Bar"))
     {
         assert_eq!(
-            fact.requires_clause.as_deref(),
+            fact.requires_clause(),
             Some("requires requires { fn(*this); }"),
             "the clause as the declaration spells it"
         );
@@ -369,7 +369,7 @@ fn a_member_function_records_its_qualifiers_and_its_requires_clause() {
         .filter(|member| member.fact.name == "call")
     {
         assert_eq!(
-            member.fact.requires_clause.as_deref(),
+            member.fact.requires_clause(),
             Some("requires requires { fn(*this); }"),
             "the member list's facts carry the clause too"
         );

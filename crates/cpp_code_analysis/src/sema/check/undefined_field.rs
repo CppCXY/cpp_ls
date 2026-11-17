@@ -123,7 +123,7 @@ impl Check for UndefinedField {
             let is_a_template = context.summary.declarations.iter().any(|fact| {
                 fact.kind == crate::DeclKind::Type
                     && fact.name == class
-                    && !fact.parameters.is_empty()
+                    && !fact.parameters().is_empty()
             });
             if is_a_template {
                 continue;

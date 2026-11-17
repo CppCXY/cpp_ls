@@ -458,7 +458,7 @@ fn chosen_definition(
     let parameter_lists: Vec<Option<String>> = found
         .found
         .iter()
-        .map(|declaration| declaration.fact.parameter_list.clone())
+        .map(|declaration| declaration.fact.parameter_list().map(str::to_string))
         .collect();
     let template_parameters: Vec<Vec<String>> = found
         .found

@@ -37,7 +37,7 @@ impl Check for UeSpecifier {
         // same question, and the two could drift.
         let mut findings = Vec::new();
         for fact in &context.summary.declarations {
-            let Some(reflection) = &fact.reflection else {
+            let Some(reflection) = &fact.reflection() else {
                 continue;
             };
             let Some(known) = crate::project::ue::known_specifiers(&reflection.macro_name) else {

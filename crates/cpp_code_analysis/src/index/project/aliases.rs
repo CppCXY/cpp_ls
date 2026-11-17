@@ -358,7 +358,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
              ({member_arguments:?}), fact {:?}",
             found
                 .as_ref()
-                .map(|fact| (fact.type_of.clone(), fact.pattern.clone(), fact.kind))
+                .map(|fact| (fact.type_of.clone(), fact.pattern(), fact.kind))
         );
     }
     let Some(fact) = found else {
@@ -405,8 +405,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     };
     // The pattern's slots are what say which written argument each parameter takes.
     let (pattern_parameters, pattern_arguments) = fact
-        .pattern
-        .as_deref()
+        .pattern()
         .map(|pattern| the_pairing_its_pattern_implies(pattern, &inner_arguments))
         .filter(|(parameters, _)| !parameters.is_empty())
         .unwrap_or_else(|| (inner_parameters.clone(), inner_arguments.clone()));
@@ -429,8 +428,8 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     } else {
         crate::sema::types::substituted_spelling_with_defaults(
             &target,
-            &fact.parameters,
-            &fact.parameter_defaults,
+            fact.parameters(),
+            fact.parameter_defaults(),
             &member_arguments,
         )
     };
@@ -508,11 +507,7 @@ pub(crate) fn a_member_the_class_declares(
             .iter()
             .filter(|member| member.fact.name == name)
             .filter(|member| {
-                a_pattern_matches(
-                    member.fact.pattern.as_deref(),
-                    &parameters,
-                    Some(&arguments),
-                )
+                a_pattern_matches(member.fact.pattern(), &parameters, Some(&arguments))
             })
             .map(|member| member.fact.clone())
             .find(|fact| fact.type_of.is_some())
@@ -746,6 +741,8 @@ pub(crate) fn the_class_an_arrow_points_at(
         "operator->",
         Some(&arguments),
     )?;
+    // **Before `arrow` is partially moved below** — its parameters say whether an answer is one of them.
+    let arrows_parameters = arrow.parameters().to_vec();
     let returns = arrow.returns?;
     if crate::probes::inference() {
         eprintln!(
@@ -804,7 +801,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     if target.is_empty()
         || target == bare
         || names_nothing
-        || arrow.parameters.iter().any(|name| name == &target)
+        || arrows_parameters.iter().any(|name| name == &target)
     {
         // **An answer only counts when it names a class the index has.** The walk can arrive at a spelling that is a
         // *trait* rather than a class — `remove_extent_t` after `remove_extent_t<_Ty>` is substituted, an alias template
@@ -839,7 +836,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     if crate::probes::inference() {
         eprintln!(
             "[inference] operator-> substitution: parameters {parameters:?}, the member's own {arrow_parameters:?}, {returns:?} -> {substituted:?} -> {target:?}",
-            arrow_parameters = arrow.parameters
+            arrow_parameters = arrows_parameters
         );
     }
     (!target.is_empty() && target != bare).then_some(target)

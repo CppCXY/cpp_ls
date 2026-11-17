@@ -128,7 +128,7 @@ pub fn supertypes_of<F: FileProvider + Clone>(
     let mut found: Vec<TypeHierarchyItem> = Vec::new();
     // **The bases as the class wrote them**, then each resolved from the class's own file — where the names are
     // visible. A base that does not resolve whole is tried as its last segment: see the module documentation.
-    for base in &class.fact.bases {
+    for base in class.fact.bases() {
         let resolved = match session.index().definition(base, &class.file) {
             Known::Yes(found) => Some(found),
             _ => match session.index().definition(last_segment(base), &class.file) {
@@ -161,7 +161,7 @@ pub fn subtypes_of<F: FileProvider + Clone>(
             if fact.kind != DeclKind::Type {
                 continue;
             }
-            if !fact.bases.iter().any(|base| last_segment(base) == class) {
+            if !fact.bases().iter().any(|base| last_segment(base) == class) {
                 continue;
             }
             if let Some(item) = item_of_a_class(session, &path, fact) {

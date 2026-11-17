@@ -160,7 +160,7 @@ pub fn definition_across_files(
                         .all(|declaration| declaration.fact.kind == DeclKind::Type)
                     && let Some(general) = definitions
                         .iter()
-                        .max_by_key(|declaration| declaration.fact.parameters.len())
+                        .max_by_key(|declaration| declaration.fact.parameters().len())
                 {
                     return Known::Yes((*general).clone());
                 }

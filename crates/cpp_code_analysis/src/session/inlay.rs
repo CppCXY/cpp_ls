@@ -513,7 +513,7 @@ fn constructor_parameter_names(
         if scope.rsplit("::").next().map(str::trim) != Some(name) {
             continue;
         }
-        let Some(list) = fact.parameter_list.as_deref() else {
+        let Some(list) = fact.parameter_list() else {
             continue;
         };
         let Some(names) = parameter_names_from_text(list) else {

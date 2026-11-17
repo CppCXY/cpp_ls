@@ -181,7 +181,7 @@ fn what_is_answered_at_a_place() {
                         fact.scope,
                         fact.returns,
                         fact.type_of,
-                        fact.parameters
+                        fact.parameters()
                     );
                 }
             }

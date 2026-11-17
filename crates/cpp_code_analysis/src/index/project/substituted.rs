@@ -112,7 +112,7 @@ pub(crate) fn the_alias_behind(
     let target = found.fact.type_of.as_deref()?;
     let arguments = crate::sema::builtins::split_arguments(inside);
     let substituted =
-        crate::sema::types::substituted_spelling(target, &found.fact.parameters, &arguments);
+        crate::sema::types::substituted_spelling(target, found.fact.parameters(), &arguments);
 
     // `typename enable_if<_Test, _Ty>::type` — the last `::` separates the class from the member it names.
     let substituted = substituted
@@ -170,7 +170,7 @@ pub fn substituted_members(
     else {
         return Known::Yes(list);
     };
-    let names = declared.fact.parameters.clone();
+    let names = declared.fact.parameters().to_vec();
     if names.is_empty() {
         return Known::Yes(list);
     }
@@ -236,11 +236,15 @@ pub fn substituted_members(
         .iter_mut()
         .filter(|member| !declares_an_alias(member))
     {
-        for spelling in [&mut member.fact.parameter_list, &mut member.fact.returns]
-            .into_iter()
-            .flatten()
-        {
-            if !alias_names.is_empty() {
+        if !alias_names.is_empty() {
+            if let Some(spelling) = member.fact.detail_mut().parameter_list.as_mut() {
+                *spelling = crate::sema::types::substituted_spelling(
+                    spelling,
+                    &alias_names,
+                    &alias_targets,
+                );
+            }
+            if let Some(spelling) = member.fact.returns.as_mut() {
                 *spelling = crate::sema::types::substituted_spelling(
                     spelling,
                     &alias_names,
@@ -258,10 +262,12 @@ pub fn substituted_members(
         }
     }
     for member in &mut list.members {
-        for spelling in [&mut member.fact.parameter_list, &mut member.fact.returns]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(spelling) = member.fact.detail_mut().parameter_list.as_mut() {
+            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+                spelling, &names, &defaults, &arguments,
+            );
+        }
+        if let Some(spelling) = member.fact.returns.as_mut() {
             *spelling = crate::sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
             );

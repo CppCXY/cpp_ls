@@ -94,7 +94,7 @@ fn what_one_class_answers_for_its_members() {
                     member.fact.scope,
                     member.fact.type_of,
                     member.fact.returns,
-                    member.fact.parameters
+                    member.fact.parameters()
                 );
             }
         }

@@ -134,7 +134,7 @@ impl<F: FileProvider + Clone> Session<F> {
             summary.declarations.iter().any(|declared| {
                 declared.kind == DeclKind::Type
                     && declared.name == class
-                    && !declared.parameters.is_empty()
+                    && !declared.parameters().is_empty()
             })
         });
         Some(MissingDefinition {
@@ -202,7 +202,7 @@ fn signature_of<F: FileProvider + Clone>(
     file: &std::path::Path,
     fact: &crate::DeclFact,
 ) -> Option<(String, String)> {
-    let parameters = match fact.parameter_list.clone() {
+    let parameters = match fact.parameter_list().map(str::to_string) {
         Some(parameters) => parameters,
         None => {
             let view = session

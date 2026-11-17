@@ -138,7 +138,7 @@ fn a_class_member_list_and_its_postings_agree() {
             .map(|member| {
                 (
                     member.fact.name.to_string(),
-                    member.fact.parameter_list.clone(),
+                    member.fact.parameter_list().map(str::to_string),
                 )
             })
             .collect();
