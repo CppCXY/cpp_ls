@@ -283,7 +283,12 @@ impl<F: FileProvider + Clone> Session<F> {
             //
             // So the window in which the closure is not ready is a window for the walk, and only that window: the
             // walk is what the pump's walk budget must not remove, and a *ready* closure never pays for it.
-            None if !self.is_closure_ready(&path) => {
+            // **The walk is for the document the reader has open, not for every file a drain cooks.** A drain with
+            // a cold index cooks the focused closure — hundreds of headers — and an unready closure walked for each of
+            // them is the cook itself doing wholesale walks: measured as one `advance(8)` with 82 documents open taking
+            // longer than ten minutes. An open document is the case the arm exists for (a header the reader is
+            // typing in, whose summary the edit dropped); a background header composes, as it did before.
+            None if self.documents.is_open(&path) && !self.is_closure_ready(&path) => {
                 match self.unit_and_state_of(&path).map(|(unit, _)| unit) {
                     Some(unit) => (Some(unit), None),
                     None => (None, Some(composed()?)),

@@ -801,3 +801,23 @@ file in a 100 000-file synthetic tree at the same latency as in Emmy.
 Template instantiation, overload resolution and ODR checks stay translation-unit-wide. No C++ front end makes those
 incremental, and clangd does not either. They belong to the batch path (S4) and to lazy instantiation on query — a
 separate design, out of scope here.
+## Phase 2, first findings (pump rebuild)
+
+Three measurements from the first sitting of the pump rebuild, each narrowing the target:
+
+1. **The drain cooks one closure, not eighty-two.** `finish_a_slice`'s idle pass asks `want_the_closure_cooked` for the
+   **focused document only** ("twenty files open measured as 232 per-file readings inserted in a twenty-second idle
+   window"), so the pump's cook work with 82 tabs open is one closure.
+2. **The cook path was walking wholesale.** The ready-closure arm (`compose declines while the index is behind the
+   overlay`) walked whenever `is_closure_ready` was false — which during a cold drain is *every* header in the focused
+   closure. It is now gated on `documents.is_open`: the arm exists for the document the reader is typing in, and a
+   background header composes as it did before. This is landed (suite 866 passed) and removes hundreds of walks from
+   one drain, though it does not by itself move the 82-document number.
+3. **The remaining growth is churn, not retention.** One `advance(8)` with 82 documents open grows private bytes past
+   4.5 GB in 112 s while the probe's own *live* guard (1.5 GB) never trips — the same signature the 1 000-slice run
+   showed (`live` flat at 187 MB, `churn` 3.2 GB). So the next instrument is not a walk budget but **the allocator
+   trace**, attributing where the churn comes from inside one advance; `CPPLS_TRACE_ALLOCS` and
+   `Session::memory_report` are already the hooks.
+
+That reframes the goal: the number to fix is private bytes held after an advance, and the cause is repeated work inside
+one call, not the units the call keeps.
