@@ -478,6 +478,15 @@ So the difference is in **which member the view resolves the use to**, and that 
 `members_of("Foo")` from the view, and which of its two `call`s the name lookup returns first — a fact ordering question,
 not a cook question.
 
+**Nineteenth run: an explicit program read does not restore the second declaration.** Adding `session.read_the_unit(&file)`
+to the failing test — which is what an editor does when a reader opens a translation unit — changes nothing: the card
+still shows the `const` overload alone. So the second declaration the old cook produced did not come from the program
+reading either, and two of the three candidates are now eliminated: the member list is not truncated by
+`overloads_markdown`, and the unit's presence is not what the card misses. What is left is the **step before both**:
+`session.definition(view, offset)` and which declaration it resolves the use to. Its `found.fact` is what the card
+prints, and the next instrument prints that fact's name range and kind under both cooks — a two-line change in the
+hover's own trace, not another test migration.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
