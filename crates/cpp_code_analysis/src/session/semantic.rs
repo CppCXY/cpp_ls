@@ -263,7 +263,8 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     //
     // The one shape that cannot be cached by spelling is a member access, which is a question about a type — see
     // [`member_kinds`], which answers it and is asked once per access rather than once per spelling.
-    let mut held: HashMap<&str, Option<NameKind>> = HashMap::new();
+    // **Keyed by the spelling and the scope the use is in** — see the note where it is read.
+    let mut held: HashMap<(&str, usize), Option<NameKind>> = HashMap::new();
     // **The file's macro environment, built at most once** — see step 4b and
     // [`ProjectIndex::macro_names_in_force`]. It used to be a map from spelling to answer, which meant one walk of the
     // include graph per spelling; on `codeformat.h` that was 526 ms for 521 tokens.
@@ -368,16 +369,26 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
 
         let declared_here = defined.contains(text);
         if declared_here {
-            let resolved = *held.entry(text).or_insert_with(|| match held_at(view, at) {
-                Held::InThisFile(binding) => kind_of_binding(
-                    index,
-                    &binding,
-                    view,
-                    parameters.contains(&binding.name_range.start_offset),
-                    &shapes,
-                ),
-                Held::NotHere => None,
-            });
+            // **Keyed by the scope as well as the spelling.** The answer is "which binding does *this* use see", and
+            // that is a property of where the use is: one file has many `value`s — a concept's parameter, a
+            // function's, an enum's — and a cache keyed on the spelling alone answered the first one for all of
+            // them. Measured on `test_cpp/src/concepts.cpp:30`, `return value + value;` inside `twice(T value)`: the
+            // token was `enumMember`, because the *first* `value` in the file (a requires-expression's parameter,
+            // which this scope tree does not bind) had answered `NotHere` and every later one inherited it — and then
+            // fell through to the index, which answered some enumeration's member.
+            let scope = view.scopes.scope_at(at).map_or(usize::MAX, |id| id.index());
+            let resolved = *held
+                .entry((text, scope))
+                .or_insert_with(|| match held_at(view, at) {
+                    Held::InThisFile(binding) => kind_of_binding(
+                        index,
+                        &binding,
+                        view,
+                        parameters.contains(&binding.name_range.start_offset),
+                        &shapes,
+                    ),
+                    Held::NotHere => None,
+                });
 
             if let Some(kind) = resolved {
                 out.push(Name {

@@ -2509,3 +2509,44 @@ void use() {
         classified(source)
     );
 }
+
+/// **Each use of a spelling is resolved where it is, not where the first one was.**
+///
+/// One file spells `value` several times — a requires-expression's parameter, a function's, an enumeration's — and the
+/// per-name cache in the classifier answered the *first* use's kind for all of them. Measured on
+/// `test_cpp/src/concepts.cpp:30`, `return value + value;` inside `twice(T value)`: the token was **`enumMember`**,
+/// because the first `value` in the file is a requires-expression's parameter (a binding this scope tree does not
+/// create), so the cache held "not here" and every later `value` fell through to the index, which answered an
+/// enumeration's member.
+///
+/// The rule a reader can see: the name inside `twice` is that function's parameter.
+#[test]
+fn a_use_is_resolved_where_it_is_written() {
+    let source = "\
+enum Color { value };
+
+template <typename T>
+concept Sized = requires(T value) { value.size(); };
+
+template <typename T>
+constexpr T twice(T value) {
+    return value + value;
+}
+";
+    let names = classified(source);
+    // The two uses inside `twice` are the last two `value`s in the file.
+    let uses: Vec<NameKind> = names
+        .iter()
+        .filter(|(text, _, declaration)| text == "value" && !declaration)
+        .map(|(_, kind, _)| *kind)
+        .collect();
+    assert!(
+        uses.len() >= 2,
+        "the requires-expression's use and the two in `twice`: {names:#?}"
+    );
+    assert_eq!(
+        uses[uses.len() - 2..],
+        [NameKind::Parameter, NameKind::Parameter],
+        "a use inside `twice` is that function's parameter, not the enumeration's member: {names:#?}"
+    );
+}
