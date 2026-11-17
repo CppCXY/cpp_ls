@@ -1585,3 +1585,22 @@ set is per unit; `Url.cpp`'s 439-file walk went from "never finishes at 6 GB" to
 
 The walk budget and the drain-owned-units redesign are therefore not needed for this target. The reachable `EnvId` record
 key is still open.
+## The environment key: measured, and what is left
+
+`MacroEnvironment::fingerprint` is the identity the record key was to be built on, and the sharing probe measures why it
+is worth building:
+
+```text
+82 file(s): 82 distinct closure(s), 8 distinct environment(s)
+```
+
+Every translation unit has its own closure, so a closure-keyed record is shared by nobody. Ten files per environment
+value is what an environment key has to offer — and because the file's own content is in the key, the benefit is not
+records shared *between* files but a record that **survives a change that does not change the macros**: a header edited
+in its comments changes every closure fingerprint that includes it and leaves every environment fingerprint alone.
+
+Not landed, with the measurement it needs: moving the four `CacheKey` sites to the environment fingerprint puts a
+composition on the lookup path (a BFS of the file's closure), and the two numbers to hold it to are
+
+* the comment-only edit of an included header becoming a **record hit** instead of a re-cook, and
+* the cold-start time it costs (today: 1.85 s for the 82-source project).
