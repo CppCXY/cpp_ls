@@ -394,6 +394,29 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
                 file.unknown_guards
             );
         }
+        for probe_name in ["_GLIBCXX_HOSTED", "__cplusplus"] {
+            println!(
+                "  probe {probe_name}: seed has {}",
+                seed_names.contains(probe_name)
+            );
+            for file in composition.files.iter().filter(|file| {
+                let name = file.path.to_string_lossy().to_lowercase();
+                name.ends_with("bits/version.h")
+                    || name.ends_with("bits/c++config.h")
+                    || name.ends_with("c++config.h")
+            }) {
+                println!(
+                    "    {}: entry {} {:?} / exit {} {:?} / unknown {}",
+                    file.path.display(),
+                    file.at_entry.get(probe_name).is_some(),
+                    file.at_entry.get(probe_name).and_then(|found| found.body()),
+                    file.at_exit.get(probe_name).is_some(),
+                    file.at_exit.get(probe_name).and_then(|found| found.body()),
+                    file.unknown_guards
+                );
+                break;
+            }
+        }
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());
         }

@@ -86,6 +86,10 @@ pub struct Definition {
     /// `DefinedWithoutAValue`. Built here rather than on every question because the value is a property of the
     /// definition: macro_value reads it once and keeps it.
     evaluable: Option<Box<crate::macros::MacroDef>>,
+    /// **The one name the body *is***, when the body is exactly one identifier --- `#define A B`'s B. The
+    /// evaluator follows an alias through a body of tokens; an environment has the text and not the tokens, so it
+    /// follows the name instead, which is the same hop when the body is one name.
+    alias: Option<Arc<str>>,
     hash: u64,
 }
 
@@ -136,6 +140,7 @@ impl Definition {
             function_like: fact.function_like,
             body,
             evaluable,
+            alias: fact.alias.as_deref().map(Arc::from),
             hash,
         })
     }
@@ -148,6 +153,7 @@ impl Definition {
             function_like,
             body,
             evaluable: None,
+            alias: None,
             hash,
         }
     }
@@ -172,6 +178,11 @@ impl Definition {
     /// **The definition a condition evaluator can read a value from**, when the summary carried one.
     pub(crate) fn evaluable(&self) -> Option<&crate::macros::MacroDef> {
         self.evaluable.as_deref()
+    }
+
+    /// The name this definition's body is, when the body is one identifier --- see the field.
+    pub(crate) fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
     }
 }
 
@@ -378,12 +389,39 @@ impl Default for Env {
 /// is what `#undef` means), a name the environment defines answers `DefinedWithoutAValue` (its body is a shape plus
 /// one literal, not the token list the evaluator wants — `docs/module-cache.md` §8), and everything else is the
 /// seed's answer.
+/// How many alias hops a value may take before the answer is `defined, value unknown`.
+pub const MAX_ALIAS_HOPS: usize = 8;
+
+/// **What a condition sees**: an environment in front of the compilation's own definitions.
 pub struct Over<'a> {
     env: Env,
     seed: &'a dyn MacroValues,
 }
 
 impl<'a> Over<'a> {
+    /// **The value a definition has, following an alias when it is one.** `#define _GLIBCXX_HOSTED __STDC_HOSTED__`'s
+    /// value is `__STDC_HOSTED__`'s, and that one is a compiler predefine with a body --- the walk follows the same hop
+    /// through the body's tokens (macro_value re-expands and re-reads), and an environment follows the name. Bounded
+    /// so a cycle of aliases ends in `defined, value unknown` rather than in a loop.
+    fn through_aliases<'s>(&'s self, definition: &'s Definition) -> Lookup<'s> {
+        if let Some(found) = definition.evaluable() {
+            return Lookup::Defined(found);
+        }
+        let mut alias = definition.alias();
+        for _ in 0..MAX_ALIAS_HOPS {
+            let Some(name) = alias else { break };
+            match self.env.get(name) {
+                Some(next) => {
+                    if let Some(found) = next.evaluable() {
+                        return Lookup::Defined(found);
+                    }
+                    alias = next.alias();
+                }
+                None => return self.seed.lookup(name),
+            }
+        }
+        Lookup::DefinedWithoutAValue
+    }
     /// The table for one point of a fold: `env` in front of `seed`.
     pub fn new(env: Env, seed: &'a dyn MacroValues) -> Self {
         Over { env, seed }
@@ -393,9 +431,7 @@ impl<'a> Over<'a> {
 impl MacroValues for Over<'_> {
     fn lookup(&self, name: &str) -> Lookup<'_> {
         match self.env.find(name) {
-            Some(Some(definition)) => definition
-                .evaluable()
-                .map_or(Lookup::DefinedWithoutAValue, Lookup::Defined),
+            Some(Some(definition)) => self.through_aliases(definition),
             Some(None) => Lookup::Undefined,
             None => self.seed.lookup(name),
         }

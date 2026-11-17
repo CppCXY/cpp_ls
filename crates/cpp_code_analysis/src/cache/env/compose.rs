@@ -76,6 +76,31 @@ pub struct Composed {
 /// thousands of them allocates nothing worth measuring.
 pub const UNKNOWN_EXAMPLES: usize = 64;
 
+/// **The condition a directive is under, as text** — the attribution a probe needs: a name says *what* was lost,
+/// this says *why*. The region chain is printed outermost first, joined by  && , because a fact is in force only
+/// when every enclosing region is.
+fn guard_text(guards: &SummaryGuards, guard: crate::FactGuard) -> String {
+    let crate::FactGuard::Region(region) = guard else {
+        return "unconditional".to_string();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = Some(region);
+    while let Some(index) = current {
+        let Some(conditional) = guards.conditionals.get(index as usize) else {
+            break;
+        };
+        if let Some(branch) = conditional.branches.first() {
+            parts.push(format!(
+                "{:?} {}",
+                branch.kind,
+                branch.condition.as_deref().unwrap_or("")
+            ));
+        }
+        current = conditional.parent;
+    }
+    parts.join(" && ")
+}
+
 /// **What a directive is, for a probe's report** — its name, or the path it includes.
 fn step_label(step: &Step) -> String {
     match &step.action {
@@ -187,7 +212,14 @@ impl Fold<'_> {
                 Visibility::Unknown => {
                     self.unknown_guards += 1;
                     if self.unknown.len() < UNKNOWN_EXAMPLES {
-                        self.unknown.push((step.at, step_label(step)));
+                        self.unknown.push((
+                            step.at,
+                            format!(
+                                "{} under {}",
+                                step_label(step),
+                                guard_text(guards, step.guard)
+                            ),
+                        ));
                     }
                     continue;
                 }
