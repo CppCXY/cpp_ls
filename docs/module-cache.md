@@ -609,23 +609,21 @@ Two candidate fixes were built and **reverted**, each with a reason:
   an edit, because the re-cook composes from an index that has not caught up where the walk was self-contained. That
   test is the next round's question, and it is a *semantic* one, not memory.
 
-**Twenty-fifth run: the program-read budget, and what it does not fix.** A session now allows **one whole-program read per
-`advance` call** (`program_reads`/`in_advance`): outside `advance` the answer is the old one, inside it the budget is
-consumed, and `would_read_it_as_the_program` lets the wave gate ask without spending. On the 82-document scenario the
-**5.2 GB did not move** — the run died at the same ceiling after 113 s — and that is the finding rather than a failure:
+**Twenty-fifth run: a per-call program-read budget was built, measured, and reverted — it never spent a unit.** The idea
+was one whole-program read per `advance` call (a counter, a peek for the wave gate, a reset at the call's end). The
+5.2 GB did not move, and the reason is the finding: `will_read_it_as_the_program` was **dead** — `index_one` decides a
+step's reading by another route — so the budget was never consumed, and the run died at the same ceiling after 113 s.
+The code is reverted (`c9c22504`-era files restored) rather than kept as a guard that guards nothing.
 
-> 64 queued roots, each of which includes libstdc++, is **16 000 file reads whether the root is walked or read as text**.
-> A walk adds a timeline; the reads are the cost, and they are what the index keeps. A per-step budget cannot bound
-> that; only a **per-call file budget** can, and that changes what `advance(steps)` counts.
+What the run did establish, with the probe now able to set `CPPLS_PROBE_STEPS`:
 
-So the budget stays (63 fewer closures walked per pathological call, no change for `advance(1)`, suite green) and the
-acceptance number is now pinned to a contract question:
+> 64 queued roots, each of which includes libstdc++, is **16 000 file reads whether a root is walked or read as text**.
+> The walks are not the memory; the reads are, and the index keeps what they read.
 
-* `advance(steps)` = *steps roots*: one call with 82 tabs is 16 000 reads and cannot be under 500 MB. `advance(1)` is
-  **177 MB**, measured.
-* `advance(steps)` = *steps files*, with a root's unread includes returned to the queue: a call reads at most `steps`
-  files plus a bounded read-ahead, and 500 MB is reachable. This is the design note's preference and a change to the
-  contract, not a bug fix.
+So the 82-document acceptance is a **contract** question, not a leak: `advance(steps)` counts roots (today; `advance(1)`
+is a measured 177 MB) or it counts files (a call reads at most `steps` files and a root's unread includes go back to the
+queue; the design note's preference, and the only reading under which 500 MB is reachable). The next round is that
+change, not another measurement of the same two numbers.
 
 The class is named and small;
 
