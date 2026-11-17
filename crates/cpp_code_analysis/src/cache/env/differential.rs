@@ -186,12 +186,6 @@ fn composition<F: FileProvider + Clone>(
     })
 }
 
-/// **The compilation's own definitions**, as the condition evaluator wants them — the same table the cook passes as its
-/// seed, so a fold decides the conditions a walk decides.
-fn seed_of<F: FileProvider + Clone>(session: &Session<F>) -> crate::macros::MacroTable {
-    crate::macros::MacroTable::from_marked(session.index().macros())
-}
-
 /// The seed names of a session — the compiler predefines and the command line's `-D`s.
 fn seed_names_of<F: FileProvider + Clone>(session: &Session<F>) -> HashSet<String> {
     session
@@ -246,9 +240,8 @@ fn the_fold_and_the_walk_agree_on_a_fixture() {
     let walked = session
         .walked_bindings(Path::new("/p/a.cpp"))
         .expect("the unit walks");
-    let seed = seed_of(&session);
     let seed_names = seed_names_of(&session);
-    let composition = composition(&session, Path::new("/p/a.cpp"), &seed);
+    let composition = composition(&session, Path::new("/p/a.cpp"), session.index().macros());
     let mut tally = Tally::default();
     for (path, bindings) in &walked {
         let Some(file) = composition.file(path) else {
@@ -323,7 +316,6 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
     session.add_project_files(sources.clone());
     session.index_everything();
 
-    let seed = seed_of(&session);
     let seed_names = seed_names_of(&session);
     let roots: usize = std::env::var("CPPLS_PROBE_ROOTS")
         .ok()
@@ -335,7 +327,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             println!("{}: the walk declined", root_source.display());
             continue;
         };
-        let composition = composition(&session, root_source, &seed);
+        let composition = composition(&session, root_source, session.index().macros());
         let mut tally = Tally::default();
         for (path, bindings) in &walked {
             let Some(file) = composition.file(path) else {
@@ -366,6 +358,22 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
         );
         for example in tally.examples.iter().take(10) {
             println!("  {example}");
+        }
+        let mut undecided: Vec<&ComposedFile> = composition
+            .files
+            .iter()
+            .filter(|file| file.unknown_guards > 0)
+            .collect();
+        undecided.sort_by_key(|file| std::cmp::Reverse(file.unknown_guards));
+        for file in undecided.iter().take(5) {
+            println!(
+                "  undecided {}: {} directive(s)",
+                file.path.display(),
+                file.unknown_guards
+            );
+        }
+        for (path, offset, what) in composition.unknown.iter().take(20) {
+            println!("  undecided {}:{offset}: {what}", path.display());
         }
     }
 }

@@ -40,6 +40,8 @@ pub struct ComposedFile {
     pub at_exit: Env,
     /// How deep in `#include`s it was; 0 for the root.
     pub depth: usize,
+    /// Directives in this file whose region the fold could not decide.
+    pub unknown_guards: usize,
 }
 
 /// What composing a unit produced.
@@ -52,6 +54,8 @@ pub struct UnitComposition {
     pub depth_exceeded: usize,
     /// Includes whose target did not resolve, over every file in the unit.
     pub unresolved_includes: usize,
+    /// **The undecided directives**, as (file, offset, what), capped — the attribution a probe prints.
+    pub unknown: Vec<(PathBuf, usize, String)>,
 }
 
 impl UnitComposition {
@@ -76,6 +80,7 @@ pub fn compose_unit(
         unknown_guards: 0,
         depth_exceeded: 0,
         unresolved_includes: 0,
+        unknown: Vec::new(),
     };
     let Some((skeleton, guards)) = (recorder.look_up)(root) else {
         return UnitComposition::default();
@@ -87,17 +92,25 @@ pub fn compose_unit(
         at_entry: incoming.clone(),
         at_exit: incoming.clone(),
         depth: 0,
+        unknown_guards: 0,
     });
     let composed = fold(&skeleton, &guards, incoming, seed, &mut recorder, 0);
     recorder.unknown_guards += composed.unknown_guards;
     recorder.depth_exceeded += composed.depth_exceeded;
     recorder.unresolved_includes += composed.unresolved_includes;
     recorder.files[0].at_exit = composed.final_env;
+    recorder.files[0].unknown_guards = composed.unknown_guards;
+    for (offset, what) in composed.unknown {
+        if recorder.unknown.len() < super::compose::UNKNOWN_EXAMPLES {
+            recorder.unknown.push((root.to_path_buf(), offset, what));
+        }
+    }
     UnitComposition {
         files: recorder.files,
         unknown_guards: recorder.unknown_guards,
         depth_exceeded: recorder.depth_exceeded,
         unresolved_includes: recorder.unresolved_includes,
+        unknown: recorder.unknown,
     }
 }
 
@@ -109,6 +122,7 @@ struct Recording<'a> {
     unknown_guards: usize,
     depth_exceeded: usize,
     unresolved_includes: usize,
+    unknown: Vec<(PathBuf, usize, String)>,
 }
 
 impl IncludeHandler for Recording<'_> {
@@ -125,7 +139,14 @@ impl IncludeHandler for Recording<'_> {
                 at_entry: env.clone(),
                 at_exit: composed.final_env.clone(),
                 depth,
+                unknown_guards: composed.unknown_guards,
             });
+        }
+        for (offset, what) in &composed.unknown {
+            if self.unknown.len() < super::compose::UNKNOWN_EXAMPLES {
+                self.unknown
+                    .push((path.to_path_buf(), *offset, what.clone()));
+            }
         }
         Some(composed.final_env)
     }

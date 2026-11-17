@@ -81,6 +81,11 @@ pub struct Definition {
     /// The replacement list, exactly as written after the name and any parameters, or `None` for an object-like
     /// macro with no body (`#define FLAG`).
     body: Option<Arc<str>>,
+    /// **The definition a condition can read a value from**, when the summary carried one — #define A 1 makes
+    /// #if A decidable, and a body that is not a lone integer literal leaves this None and the answer
+    /// `DefinedWithoutAValue`. Built here rather than on every question because the value is a property of the
+    /// definition: macro_value reads it once and keeps it.
+    evaluable: Option<Box<crate::macros::MacroDef>>,
     hash: u64,
 }
 
@@ -102,7 +107,37 @@ impl Definition {
             Some(range) => Some(Arc::from(slice(text, range)?.trim())),
             None => None,
         };
-        Some(Self::new(fact.name.as_str(), fact.function_like, body))
+        let hash = hash_definition(fact.name.as_str(), fact.function_like, body.as_deref());
+        let evaluable = fact
+            .value
+            .as_deref()
+            .and_then(|value| value.trim().parse::<i128>().ok())
+            .map(|number| {
+                let definition = crate::macros::MacroDef {
+                    name: Box::from(fact.name.as_str()),
+                    // **Object-like only.** A function-like macro cannot be a value, and its parameter list is not
+                    // in the summary; the value cache below is what answers the conditions that matter.
+                    params: None,
+                    body: crate::macros::MacroBody {
+                        tokens: Vec::new(),
+                        stringize: Vec::new(),
+                        paste: Vec::new(),
+                    },
+                    range: fact.range,
+                    name_range: fact.range,
+                    written_in: None,
+                    value: std::sync::OnceLock::new(),
+                };
+                let _ = definition.value.set(Some(number));
+                Box::new(definition)
+            });
+        Some(Self {
+            name: Arc::from(fact.name.as_str()),
+            function_like: fact.function_like,
+            body,
+            evaluable,
+            hash,
+        })
     }
 
     /// A definition from parts — the constructor a decoder or a test uses when it has no [`MacroFact`].
@@ -112,6 +147,7 @@ impl Definition {
             name: Arc::from(name),
             function_like,
             body,
+            evaluable: None,
             hash,
         }
     }
@@ -131,6 +167,11 @@ impl Definition {
     /// The hash of this definition, which is what an environment's id is built from.
     pub fn hash(&self) -> u64 {
         self.hash
+    }
+
+    /// **The definition a condition evaluator can read a value from**, when the summary carried one.
+    pub(crate) fn evaluable(&self) -> Option<&crate::macros::MacroDef> {
+        self.evaluable.as_deref()
     }
 }
 
@@ -352,7 +393,9 @@ impl<'a> Over<'a> {
 impl MacroValues for Over<'_> {
     fn lookup(&self, name: &str) -> Lookup<'_> {
         match self.env.find(name) {
-            Some(Some(_)) => Lookup::DefinedWithoutAValue,
+            Some(Some(definition)) => definition
+                .evaluable()
+                .map_or(Lookup::DefinedWithoutAValue, Lookup::Defined),
             Some(None) => Lookup::Undefined,
             None => self.seed.lookup(name),
         }

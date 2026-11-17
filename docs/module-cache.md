@@ -261,7 +261,27 @@ feature-test headers do. So the dominant term is the known gap (§8: a `Definiti
 not a disagreement about a decidable rule. `missing files 31` and `only fold 8 773` are the second-order terms and
 need their own attribution (per-file unknowns, and the fold's own-name exclusion).
 
-The next step is therefore the value answer, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
+**Second run, after the value answer.** `Definition` now carries the one value a summary can prove — `#define A 1`
+gives a `MacroDef` whose `value` cache answers `#if A` without a body — so the libstdc++-configuration class of
+undecided regions fell out:
+
+```text
+                        before      after
+mismatches              209 626     111 366
+only walk               196 960      98 591
+unknown guards            2 093       1 914
+names compared          907 727     913 261
+```
+
+What is left is concentrated in four headers — `bits/version.h` (51 undecided), `cstdlib` (46), `_mingw.h` (28),
+`cppconfig.h` (10 + the `_GLIBCXX_HAVE_*` family) — and the conditions are `__has_builtin`, `__has_include` and
+friends, where the *table* has to answer and a bare environment cannot. The walk and the fold are confirmed to share
+the policy (`a_guard_holds` is `visibility == Active`, so both skip an undecided region); the remaining 98 591
+`only walk` names are therefore **not** explained by the 1 914 undecided directives alone — 1 914 skipped definitions
+cannot account for 98 591 names — and the next round has to attribute them per file before anything is concluded.
+`only fold 8 450` is the mirror image (names the fold has and the walk does not) and needs the same attribution.
+
+The next step is therefore the per-file attribution, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
 `MacroFact` (`value` is the single integer literal the summary already stores; `body_range` gives the rest) and answer
 it from `Over`. Then re-run this probe: `unknown guards` should fall, and the mismatches with it. Only when the only
 remaining mismatches are attributed and understood is S1 (deleting the walk from the cook) safe.

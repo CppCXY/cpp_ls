@@ -66,6 +66,23 @@ pub struct Composed {
     pub unresolved_includes: usize,
     /// Includes that would have nested past [`MAX_DEPTH`].
     pub depth_exceeded: usize,
+    /// **The directives whose region could not be decided**, as `(offset, what)` — the attribution a probe needs,
+    /// capped so a corpus with thousands of them does not turn a measurement into an allocation. The `what` is the
+    /// macro's name or the include's path: what the fold would have applied had the condition been decidable.
+    pub unknown: Vec<(usize, String)>,
+}
+
+/// How many undecided directives a fold keeps for a probe — enough to name the classes, few enough that a corpus with
+/// thousands of them allocates nothing worth measuring.
+pub const UNKNOWN_EXAMPLES: usize = 64;
+
+/// **What a directive is, for a probe's report** — its name, or the path it includes.
+fn step_label(step: &Step) -> String {
+    match &step.action {
+        Action::Define(definition) => definition.name().to_string(),
+        Action::Undef(name) => name.to_string(),
+        Action::Include(include) => include.path.display().to_string(),
+    }
 }
 
 /// **What a fold does when it reaches an `#include`** — the two shapes of recursion, behind one trait.
@@ -125,6 +142,7 @@ pub(crate) fn fold(
         history: vec![(0, incoming.clone())],
         after_each_include: Vec::new(),
         unknown_guards: 0,
+        unknown: Vec::new(),
         depth_exceeded: 0,
         seed,
         handler,
@@ -140,6 +158,7 @@ struct Fold<'a> {
     history: Vec<(usize, Env)>,
     after_each_include: Vec<(usize, Env)>,
     unknown_guards: usize,
+    unknown: Vec<(usize, String)>,
     depth_exceeded: usize,
     seed: &'a dyn MacroValues,
     handler: &'a mut dyn IncludeHandler,
@@ -167,6 +186,9 @@ impl Fold<'_> {
                 Visibility::Inactive => continue,
                 Visibility::Unknown => {
                     self.unknown_guards += 1;
+                    if self.unknown.len() < UNKNOWN_EXAMPLES {
+                        self.unknown.push((step.at, step_label(step)));
+                    }
                     continue;
                 }
             }
@@ -181,6 +203,7 @@ impl Fold<'_> {
             final_env: self.env,
             after_each_include: self.after_each_include,
             unknown_guards: self.unknown_guards,
+            unknown: self.unknown,
             unresolved_includes: skeleton.unresolved_includes(),
             depth_exceeded: self.depth_exceeded,
         }
