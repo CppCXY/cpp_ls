@@ -554,6 +554,27 @@ Also this run: **a definition whose body is one integer no longer lexes tokens**
 value cache, and the tokens were rebuilt for every feature macro in every composed closure). Verified by the suite's
 865 passes; its effect on the 82-source peak is what the pump fix will make measurable.
 
+**Twenty-third run: `advance(64)` with 82 documents open is 64 whole-program reads, and the metric says so.** The wave
+preparation is bounded by a **count** (`steps * 4` entries) but two `.max(wave.len())` clauses let a single step force
+its whole closure in whatever the budget said — so 64 popped roots each prepared ~250 files. Tightening that to
+`.max(1)` removed the over-preparation but **not** the cost: each step still reads its root's includes, so one
+`advance(64)` is ~16 000 file reads either way, and the probe ran past ten minutes (the earlier run was stopped at
+5 GB / 91 s).
+
+That is the metric, not a leak: 8 sources of this project index to **1 687 summaries and 47 MB of tables**, so 82
+roots' closures (≈16 000 distinct files) land near the 500 MB target **before** any transient — and one `advance(64)`
+asks for all of it at once. The acceptance number cannot be met with read-ahead bounding alone; it needs a decision
+about what `advance(steps)` counts:
+
+1. **steps = files** — each step reads one file, its includes come from the queue, and the wave is a *parallelism*
+   hint with a byte budget. Then one `advance(64)` is 64 files plus a bounded read-ahead, and the target is reachable.
+2. **steps = roots** (today) — each step is a whole-program read. Then 64 steps must be hundreds of MB by construction,
+   and the honest target is "one `advance(1)` stays under 500 MB".
+
+The probe now takes `CPPLS_PROBE_SLICES` and prints the pending breakdown (`queue 0, cooking 4` is how the livelock was
+identified), so either reading can be measured. The preference in the design note is (1): an editor pump at 60 Hz must
+advance one file at a time, and a root's closure is what the *wave* prefetches under budget, not what a step owes.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.

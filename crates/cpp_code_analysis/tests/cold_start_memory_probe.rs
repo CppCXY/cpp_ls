@@ -176,9 +176,15 @@ fn where_a_cold_start_puts_its_memory() {
     println!("\n# the cold index");
     let started = Instant::now();
     session.index_everything();
+    // **A bound the operator sets**: the loop exits on pending_work(), and a backlog holding a file no cook can
+    // serve never reaches zero. The bound makes the memory question answerable without waiting out the livelock.
+    let limit: usize = std::env::var("CPPLS_PROBE_SLICES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1000);
     let mut slices = 0usize;
     let mut read_ahead_peak = 0usize;
-    while session.pending_work() > 0 && slices < 1000 {
+    while session.pending_work() > 0 && slices < limit {
         session.advance(64);
         slices += 1;
         guard("a cold slice");
@@ -211,9 +217,15 @@ fn where_a_cold_start_puts_its_memory() {
         session.did_open(path, &text);
     }
     let started = Instant::now();
+    // **A bound the operator sets**: the loop exits on pending_work(), and a backlog holding a file no cook can
+    // serve never reaches zero. The bound makes the memory question answerable without waiting out the livelock.
+    let limit: usize = std::env::var("CPPLS_PROBE_SLICES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1000);
     let mut slices = 0usize;
     let mut read_ahead_peak = 0usize;
-    while session.pending_work() > 0 && slices < 1000 {
+    while session.pending_work() > 0 && slices < limit {
         session.advance(64);
         slices += 1;
         guard("an open-file slice");
@@ -240,6 +252,13 @@ fn where_a_cold_start_puts_its_memory() {
         session.unit_stats(),
         session.pending_work(),
         mb(read_ahead_peak)
+    );
+    println!(
+        "breakdown: queue {}, cooking {}, refinements {}, work {}",
+        session.pending(),
+        session.pending_cooking(),
+        session.refinements_wanted(),
+        session.pending_work()
     );
 
     println!("\n# one whole-program read at a time, the way the pump takes them");
