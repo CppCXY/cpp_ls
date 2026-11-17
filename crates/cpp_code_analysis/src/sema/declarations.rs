@@ -207,7 +207,27 @@ pub(crate) fn an_unnamed_class_body_named(
     // The **innermost** specifier sequence on the path is the declaration's own, the same reading
     // [`declared_type_of_with`] makes above.
     let mut unnamed = false;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if let Some(specifiers) = &shape.specifiers {
             unnamed = a_class_body_without_a_tag(specifiers);
         }
@@ -287,7 +307,27 @@ pub(crate) fn declared_type_of_with(
     // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
     // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
     let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -388,6 +428,9 @@ pub(crate) fn declared_modifiers_with(
     let mut specifiers = None;
     let mut declarator: Option<CppSyntaxNode> = None;
     let name_is_a_parameter = shapes.names_a_parameter(the_offset_to_descend_by(binding));
+    // **The specifier sequence of the declaration the name belongs to.** The innermost one wins, because a member
+    // writes its own — but the shape table answers the *enclosing* declaration's for a name that has none of its own,
+    // which a constructor always is; see the mask below for what that cost.
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
@@ -469,6 +512,38 @@ pub(crate) fn declared_modifiers_with(
         }
     }
 
+    // **The words a constructor cannot carry are the class's, not its own.**
+    //
+    // A constructor writes no specifier sequence — `Derived()` has none — so the walk above answered the *enclosing
+    // class's*, and `class Derived final : public Base` therefore recorded `FINAL` on every constructor and on the
+    // destructor. The mask is not a judgement call: [class.ctor] gives a constructor no virt-specifier-seq, no
+    // `static`, and no cv-qualification, so those bits can only have come from the class. Measured on
+    // `test_cpp/src/classes.cpp:50`: `Derived()` at 55:5 carried `FINAL` and `final-misplaced` reported the legal
+    // `class Derived final` through its own constructor — "`Derived` says `final` but no base of `Derived` declares it —
+    // `final` may only be applied to a virtual function".
+    //
+    // A **destructor** may legally say `virtual`, `override` and `final`, so only the one shape that needs `virtual` to
+    // be legal is dropped: `final` on a destructor that writes neither `virtual` nor `override` is the class's.
+    if binding.kind == crate::BindingKind::Constructor {
+        const A_CONSTRUCTOR_CANNOT_SAY: crate::DeclModifiers = crate::DeclModifiers::VIRTUAL
+            .union(crate::DeclModifiers::FINAL)
+            .union(crate::DeclModifiers::OVERRIDE)
+            .union(crate::DeclModifiers::STATIC)
+            .union(crate::DeclModifiers::CONST)
+            .union(crate::DeclModifiers::VOLATILE);
+        found = crate::DeclModifiers::from_bits(found.bits() & !A_CONSTRUCTOR_CANNOT_SAY.bits());
+    } else if crate::cache::summary::is_a_destructor_name(&binding.name.spelled()) {
+        // A destructor writes `final` **after its parameter list** — `~D() final` — so the word can only be its own
+        // when it is in the destructor's declarator. Anywhere else it is the class's, which is the leak this mask is
+        // for. The declarator is re-read rather than the bits inspected, because after the union there is no telling
+        // where a bit came from.
+        let its_own = declarator.as_ref().map(modifiers_in).unwrap_or_default();
+        found = crate::DeclModifiers::from_bits(
+            (found.bits() & !crate::DeclModifiers::FINAL.bits())
+                | (its_own.bits() & crate::DeclModifiers::FINAL.bits()),
+        );
+    }
+
     found
 }
 
@@ -522,7 +597,27 @@ pub(crate) fn the_requires_clause_with(
     binding: &Binding,
 ) -> Option<String> {
     let mut declarator: Option<CppSyntaxNode> = None;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if let Some(node) = &shape.declarator
             && reaches_the_name(node, binding.name_range)
         {
@@ -1306,7 +1401,27 @@ pub(crate) fn declared_alias_target_with(
     // copied out rather than borrowed: the visitor is handed a reference valid only for its own call, which is the
     // shape of the walk (see [`DeclarationShapes::on_the_path`]).
     let mut declaration = None;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if matches!(
             shape.kind,
             CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
@@ -2937,7 +3052,27 @@ pub(crate) fn declared_returns_of_with(
     let mut specifiers = None;
     let mut trailing = None;
     let mut declarator = None;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -3461,7 +3596,27 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
     // [`declared_type_of`] makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut owner = None;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         // **A class-like definition**: `class`/`struct`/`union` are one typed node, and an enum writes bases too (its
         // underlying type).
         if cpp_parser::CppClassDef::can_cast(shape.kind) || shape.kind == CppSyntaxKind::EnumDef {
@@ -3885,7 +4040,27 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// for its members and the class *further out* is not.
 pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
+    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if trace {
+            eprintln!(
+                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
+                binding.name.spelled(),
+                binding.name_range,
+                shape.at.start_offset,
+                shape.at.end_offset(),
+                shape
+                    .specifiers
+                    .as_ref()
+                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
+                shape.specifiers.as_ref().map(|node| node
+                    .text()
+                    .to_string()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()),
+            );
+        }
         if matches!(
             shape.kind,
             CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef

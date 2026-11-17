@@ -129,3 +129,73 @@ void f() {
         "a previous declaration's attribute does not excuse the next one"
     );
 }
+
+/// **A member's modifiers are the member's, not its class's.**
+///
+/// `class Derived final : public Base` writes `final` once, in the class's specifier sequence. The shape table holds
+/// that declaration as **two** shapes beginning at the same offset (the `Declaration` and the `ClassDef` its
+/// `DeclSpecifierSeq` contains), and a member — a constructor, whose own specifier sequence is empty — begins later in
+/// the same path. Taking the last *present* specifier sequence therefore answered the **class's** for every member, and
+/// `final-misplaced` reported the class through its own constructor: *"`Derived` says `final` but no base of `Derived`
+/// declares it — `final` may only be applied to a virtual function"*, on a legal `final` class.
+///
+/// The rule the two measurements settle: a shape that begins *after* the one that gave the specifiers is a different
+/// declaration, and has none of its own.
+#[test]
+fn a_members_specifiers_are_its_own_not_its_class_s() {
+    let source = "\
+struct Base {
+    virtual void run();
+};
+
+class Derived final : public Base {
+public:
+    Derived();
+    ~Derived() override;
+    void other() const;
+};
+";
+    let facts = facts_of(source);
+    let class = facts
+        .iter()
+        .find(|fact| fact.name == "Derived" && fact.kind == cpp_code_analysis::DeclKind::Type)
+        .expect("the class is a fact");
+    assert!(
+        class.modifiers.contains(DeclModifiers::FINAL),
+        "the class says `final` and keeps it"
+    );
+
+    for constructor in facts
+        .iter()
+        .filter(|fact| fact.name == "Derived" && fact.kind == cpp_code_analysis::DeclKind::Function)
+    {
+        assert!(
+            !constructor.modifiers.contains(DeclModifiers::FINAL),
+            "a constructor has no specifier sequence of its own: {:?}",
+            constructor.modifiers
+        );
+    }
+
+    let destructor = facts
+        .iter()
+        .find(|fact| fact.name == "~Derived")
+        .expect("the destructor is a fact");
+    assert!(
+        destructor.modifiers.contains(DeclModifiers::OVERRIDE),
+        "the destructor writes `override`, which is its own"
+    );
+    assert!(
+        !destructor.modifiers.contains(DeclModifiers::FINAL),
+        "and not the class's `final`"
+    );
+
+    let member = facts
+        .iter()
+        .find(|fact| fact.name == "other")
+        .expect("the member is a fact");
+    assert!(
+        member.modifiers.contains(DeclModifiers::CONST),
+        "a member's own `const` is still read: {:?}",
+        member.modifiers
+    );
+}
