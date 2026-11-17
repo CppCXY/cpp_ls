@@ -55,6 +55,13 @@ mod vocabulary;
 /// keeps a long call from filling the popup with code the reader is already looking at.
 const MAX_INLINE_CHARS: usize = 80;
 
+/// **How long a hover waits for the file's closure to be in the index** — see
+/// [`AnalysisState::wait_for_the_closure`], which is where the measurement is.
+///
+/// A ceiling rather than an expectation: on a warm index the check is one snapshot read, and on a cold start the pump
+/// reads a standard-heavy closure in about a second (`test_cpp`'s cold index settles in ~3 s for the whole project).
+/// Two seconds covers the first hover on a cold project without becoming a wait a reader can feel in the ordinary case.
+const HOVER_CLOSURE_BUDGET: std::time::Duration = std::time::Duration::from_millis(2000);
 pub async fn on_hover(
     context: ServerContextSnapshot,
     params: HoverParams,
@@ -69,6 +76,24 @@ pub async fn on_hover(
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare_for_a_read(&path).await;
         crate::handlers::read_the_modules(&context, &path, false).await;
+
+        // **And this file's own closure, which is what a name in a header needs.** `prepare` puts the file's *text*
+        // in reach and `read_the_modules` reads what it imports; neither reads the headers it `#include`s, and a name
+        // declared ten headers down is answered from the index. Measured over the protocol on
+        // `test_cpp/src/containers.cpp`: the first `textDocument/hover` on `std::to_string` answered **null** and the
+        // second, 700 ms later, answered the card — the pump had read the closure in between. A reader sees the first
+        // one. `catch_up` is the same step the semantic-token and inlay-hint handlers take, for the same reason, and it
+        // is bounded to the files this one names (9), so it cannot become the settle that used to make every hover
+        // wait for the whole project.
+        context.analysis().catch_up(&path).await;
+        // **`catch_up` is nine files and this name is fourteen headers down**, so the readiness that decides the
+        // answer is [`AnalysisState::wait_for_the_closure`] — the same condition the semantic-token handler checks,
+        // waited for instead of answered with `null`. The budget is a ceiling: on a warm index the first check
+        // answers, and the result is not consulted because the query below answers from whatever is there.
+        let _ = context
+            .analysis()
+            .wait_for_the_closure(&path, HOVER_CLOSURE_BUDGET, &cancel_token)
+            .await;
 
         // **And then the query, which no longer waits for the project's index to drain.**
         //

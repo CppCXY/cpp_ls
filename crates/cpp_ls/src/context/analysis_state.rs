@@ -525,6 +525,48 @@ impl AnalysisState {
             .is_ok()
     }
 
+    /// **Wait until this file's closure is in the index, or `at_most` passes** — the condition a hover needs and
+    /// nothing has been asking for.
+    ///
+    /// A name declared ten headers down (`std::to_string` in `bits/basic_string.h`) is answered from the **index**, and
+    /// until the pump has read that header the query answers *nothing* — which a reader sees as "no hover" rather than
+    /// "not yet", and the popup does not come back on its own. Measured over the protocol on
+    /// `test_cpp/src/containers.cpp`: the first `textDocument/hover` on `std::to_string` answered `null`, the second
+    /// one 700 ms later answered the card; `catch_up` does not close the gap because it reads the file's *direct*
+    /// includes (nine), and this name is fourteen headers down.
+    ///
+    /// `Session::is_closure_ready` is the question the semantic-token handler already asks before it answers — there the
+    /// answer is `null` and the client re-asks, which a hover cannot rely on. So this waits for the same state instead,
+    /// and the budget is a ceiling rather than an expectation: on a warm index the first check answers.
+    ///
+    /// `false` when the budget ran out, which callers answer from what they have rather than failing.
+    pub async fn wait_for_the_closure(
+        &self,
+        path: &std::path::Path,
+        at_most: Duration,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + at_most;
+        loop {
+            if cancel.is_cancelled() {
+                return false;
+            }
+            if self
+                .with_snapshot(|session| session.is_closure_ready(path))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let _ = self
+                .wait_for_work(left.min(Duration::from_millis(25)))
+                .await;
+        }
+    }
+
     /// Run `f` against the live session, or answer `None` when no workspace has been opened.
     ///
     /// **The read happens on a blocking-capable thread.** The lock is synchronous, and this is called from `async`
