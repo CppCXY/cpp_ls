@@ -304,7 +304,9 @@ chain that ends at a name neither the environment nor the seed holds must answer
 is `Marked::incomplete`. The 1032 → 251 file count between the two runs is that distinction showing up in the
 traversal, and it has to be resolved before anything is concluded from either number.
 
-The next step is therefore include resolution in the fold, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
+**Fourth run: the 778 are headers that do not exist, not a resolver gap.** With the resolver instrumented: 6 222 includes asked, 5 444 cached, **0 rescued** by suffix, 778 unresolved --- and the missed spellings are `machine/ansi.h` and `sys/_types.h`, which are in `bits/c++config.h`'s `#if __has_include(...)` blocks: BSD headers this mingw snapshot does not have. The walk cannot follow them either, so the 778 are not why the fold reaches 251 of the walk's 1 053 files.
+
+The remaining question is instrumentable: **for every include step the fold skips, which `Visibility` did it get?** An `Inactive` hides a whole subtree without adding to `unknown_guards`, and 527 unknown directives cannot hide 800 files. The next step is that tally, before S1. build the `MacroDef` a `Lookup::Defined` needs from a
 `MacroFact` (`value` is the single integer literal the summary already stores; `body_range` gives the rest) and answer
 it from `Over`. Then re-run this probe: `unknown guards` should fall, and the mismatches with it. Only when the only
 remaining mismatches are attributed and understood is S1 (deleting the walk from the cook) safe.

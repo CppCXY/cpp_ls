@@ -194,21 +194,47 @@ fn composition<F: FileProvider + Clone>(
                 .or_insert_with(|| path.clone());
         }
     }
-    compose_unit(root, &Env::empty(), seed, &mut |path| {
+    let asked = std::cell::Cell::new(0usize);
+    let cached = std::cell::Cell::new(0usize);
+    let rescued = std::cell::Cell::new(0usize);
+    let missed: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let composed = compose_unit(root, &Env::empty(), seed, &mut |path| {
         let summary = session.index().summary(path)?;
         let text = session.text(path)?;
         let skeleton = Skeleton::resolved_by(summary, &text, &mut |fact| {
-            fact.resolved.clone().or_else(|| {
-                let spelling = fact.spelling.to_lowercase().replace('\\', "/");
-                by_suffix.get(&spelling).cloned().or_else(|| {
-                    let mut segments = spelling.rsplit('/');
-                    let (file, directory) = (segments.next()?, segments.next()?);
-                    by_suffix.get(&format!("{directory}/{file}")).cloned()
-                })
-            })
+            asked.set(asked.get() + 1);
+            if let Some(path) = fact.resolved.clone() {
+                cached.set(cached.get() + 1);
+                return Some(path);
+            }
+            let spelling = fact.spelling.to_lowercase().replace('\\', "/");
+            let found = by_suffix.get(&spelling).cloned().or_else(|| {
+                let mut segments = spelling.rsplit('/');
+                match (segments.next(), segments.next()) {
+                    (Some(file), Some(directory)) => {
+                        by_suffix.get(&format!("{directory}/{file}")).cloned()
+                    }
+                    _ => None,
+                }
+            });
+            if found.is_some() {
+                rescued.set(rescued.get() + 1);
+            } else if missed.borrow().len() < 8 {
+                missed.borrow_mut().push(fact.spelling.clone());
+            }
+            found
         });
         Some((skeleton, summary.guards.clone()))
-    })
+    });
+    eprintln!(
+        "  resolver: {} include(s) asked, {} cached, {} rescued by suffix, {} still unresolved; missed e.g. {:?}",
+        asked.get(),
+        cached.get(),
+        rescued.get(),
+        composed.unresolved_includes,
+        missed.borrow()
+    );
+    composed
 }
 
 /// The seed names of a session — the compiler predefines and the command line's `-D`s.
