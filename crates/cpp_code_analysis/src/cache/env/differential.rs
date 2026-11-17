@@ -185,7 +185,6 @@ fn composition<F: FileProvider + Clone>(
     // the session's resolver, and it exists to test the diagnosis in docs/module-cache.md §6a: the fold reaches
     // 251 of the walk's 1 053 files because 778 includes did not resolve when the summaries were built.
     let mut by_suffix: HashMap<String, PathBuf> = HashMap::new();
-    let mut by_file: HashMap<String, PathBuf> = HashMap::new();
     for path in known {
         let normal = path.to_string_lossy().to_lowercase().replace('\\', "/");
         let mut segments = normal.rsplit('/');
