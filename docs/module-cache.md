@@ -646,6 +646,24 @@ time in this document) and the remaining S1 work is named precisely:
 Closing that gap is what makes the walk budget safe, and the budget is what makes `advance(64)` with 82 open documents
 fit in the memory target. They are one change, not two, and it is the last one S1 needs.
 
+**Twenty-seventh run: compose declines while the index is behind the overlay.** The stale-closure window now has its own
+arm in `cooking_materials`:
+
+```rust
+None if !self.is_closure_ready(&path) => walk the file's own timeline, or fall back to the composed environment
+```
+
+`is_closure_ready` is the question that matters — the file has a summary **and** every unconditionally-visible file in
+its closure has one — so an edited header (summary dropped, queued) makes the file compose from text that no longer
+exists. The walk is self-contained: it reads the overlay. Measured: `editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it`
+passes with the arm and fails without it, and the whole workspace suite now has **no failure other than the pre-existing
+one** (`a_member_declared_twice_shows_both_declarations_and_their_clauses`, red at `c9c22504`).
+
+This is S1's semantic half closing: a *ready* closure composes at 0.2–0.4 ms; the window where the index lags — a
+keystroke on a header, a file opened before the pump reached it — walks, which is exactly the narrow case the walk
+budget must preserve. The budget itself remains unimplemented: two attempts (a dead predicate, then the live site) each
+left the same test red, and the arm above is what that test needed.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.

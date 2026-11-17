@@ -1494,3 +1494,21 @@ Measured on EmmyLuaCodeStyle, `CodeFormat/src/LuaCheck.cpp` (373-file closure), 
 `cargo test -p cpp_code_analysis`: 865 passed. `cpp_ls`: one failure, the one the session's first commit already had
 (`a_member_declared_twice_shows_both_declarations_and_their_clauses`). Not yet met: the 82-open `advance(64)` memory
 target — `advance` does not return, and that pump is the next target rather than a cost of composition.
+## S1 final numbers
+
+| measurement | before | after |
+|---|---|---|
+| `LuaCheck.cpp` cook | 8.8 s (whole program) | **0.2–0.4 ms** |
+| walks per cook (ready closure) | 1 (whole closure) | **0** |
+| declarations filed | 50 | 50 |
+| 82 documents, `advance(1)` | — | **177 MB live / 179 MB peak** |
+| 82 documents, `advance(64)` | 2.87 GB (killed) | 5.2 GB — 64 whole-program reads by contract; see §6a |
+
+Gate 0: `fold ⊆ walk`, with `body differs 0`, `kind differs 0`, `missing files 0`, 188 unknown guards classified, and
+the only-walk residual measured to be the reference view leaking an unrelated subtree. The workspace suite fails only
+`a_member_declared_twice_shows_both_declarations_and_their_clauses`, which is red at the session's first commit
+(`c9c22504`).
+
+Not landed: the walk budget that would make `advance(64)` bound its closures (two attempts, both blocked by the
+stale-closure test that the ready-closure arm now covers), the `SiteKey` memoisation, and the record key moving to a
+reachable `EnvId`.

@@ -275,6 +275,20 @@ impl<F: FileProvider + Clone> Session<F> {
         // state a file starts with rather than the state at each line.
         let (unit, configuration) = match held {
             Some(unit) => (Some(unit), None),
+            // **The index must be current before a composition answers.** A header that was just edited has its
+            // summary dropped and is queued; its *text* is what the including file actually sees, and a composed
+            // environment would read the stale summary — or no summary — and answer a namespace that is no longer
+            // there. Measured: `editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it` answered
+            // `NotDeclaredHere("two::Widget")` after an edit, where the walk (self-contained) answered the reading.
+            //
+            // So the window in which the closure is not ready is a window for the walk, and only that window: the
+            // walk is what the pump's walk budget must not remove, and a *ready* closure never pays for it.
+            None if !self.is_closure_ready(&path) => {
+                match self.unit_and_state_of(&path).map(|(unit, _)| unit) {
+                    Some(unit) => (Some(unit), None),
+                    None => (None, Some(composed()?)),
+                }
+            }
             None => (None, Some(composed()?)),
         };
         drop(parsed);
