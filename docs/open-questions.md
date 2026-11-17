@@ -1620,3 +1620,23 @@ had the same condition but was computed at a different point in the session's li
 The change is reverted, with the shape, the measurement (82 closures / 8 environments) and this failure recorded. The next
 attempt should start by answering *which* write returned early — the `StoreStats`/`cooking` probes already print it — and
 decide whether the record key needs the closure fingerprint as a fallback when the environment cannot be composed.
+## Item 4, landed: the cooked record is keyed by the environment
+
+The four cooked-record sites (`put`/`read` with a rendering, `put`/`read` facts-only) now key on
+`the_record_environment`: the fingerprint of the macros in force. The refinement mark deliberately stays on the closure
+fingerprint, and that was the earlier failure — `mark_the_reading_as_refined` writes it under
+`SummaryKey::with_environment(the_closure_fingerprint)` and `the_stored_refinement_mark` reads it the same way; moving
+one side alone made it unfindable, measured as `stored_refinements_served: 0`.
+
+Measured after the swap (`EmmyLuaCodeStyle`):
+
+| | before | after |
+|---|---|---|
+| sharing across 82 translation units | 82 closures, 8 environments | unchanged (the number the key was built on) |
+| a comment edited into an included header | record **miss**, file re-cooked | record **hit** (`a_comment_edit_to_a_header_keeps_the_cook_record`) |
+| first cook of `LuaCheck.cpp`, cold | 0.4 ms | 4.7 ms (the composition on the lookup path) |
+| a served cook (record hit) | 0.3 ms | 0.3 ms |
+| cold start, 82 sources | 1.85 s | 1.49 s |
+
+The first cook pays for the composition (4.7 ms, still two orders under the 100 ms target); every later cook, and the
+whole cold start, do not. Suite: 868 passed (the comment-edit test is the 868th).

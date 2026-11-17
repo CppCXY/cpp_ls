@@ -1762,6 +1762,23 @@ impl<F: FileProvider> SummaryStore<F> {
         Some(fnv1a64(&bytes))
     }
 
+    /// **The environment half of a cooked record's key**: the macros in force for this file, hashed.
+    ///
+    /// The records keyed on [`SummaryStore::the_closure_fingerprint`] before this, which hashes the content of every
+    /// file in the closure. That is stable under nothing: a header edited in its comments changes every closure that
+    /// includes it and leaves every environment alone, so a record written before the edit answered nothing after it.
+    /// The environment fingerprint is what a cooked reading is actually a reading *of* — measured sharing on one
+    /// project: **82 translation units, 8 distinct environments**.
+    ///
+    /// **The refinement mark keeps the closure fingerprint**, and that is not an oversight: it is written by
+    /// `mark_the_reading_as_refined` under `SummaryKey::with_environment(the_closure_fingerprint)` and read back by
+    /// `the_stored_refinement_mark` the same way. Moving one of the two made the mark unfindable — measured as
+    /// `a_refinement_is_served_to_the_next_session` answering `stored_refinements_served: 0`.
+    fn the_record_environment(&self, path: &Path) -> Option<u64> {
+        self.the_indexed_environment(path)
+            .map(|environment| environment.fingerprint())
+    }
+
     /// **Record that the second pass found nothing to repair in a file** — the half of the cache a rebuilt summary
     /// cannot express, and the one that keeps the timelines unbuilt on a restart.
     ///
@@ -1868,7 +1885,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(source) = self.files.read(path) else {
             return;
         };
-        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+        let Some(fingerprint) = self.the_record_environment(path) else {
             return;
         };
         let key = CacheKey {
@@ -1902,7 +1919,7 @@ impl<F: FileProvider> SummaryStore<F> {
         path: &Path,
     ) -> Result<(CookedFile, crate::preprocess::cooked::RenderedCooked), &'static str> {
         let source = self.files.read(path).ok_or("no text")?;
-        let fingerprint = self.the_closure_fingerprint(path).ok_or("no closure")?;
+        let fingerprint = self.the_record_environment(path).ok_or("no closure")?;
         let key = CacheKey {
             content: content_hash(&source),
             config: self.context_hash(path),
@@ -1919,7 +1936,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(source) = self.files.read(path) else {
             return;
         };
-        let Some(fingerprint) = self.the_closure_fingerprint(path) else {
+        let Some(fingerprint) = self.the_record_environment(path) else {
             return;
         };
         let key = CacheKey {
@@ -1954,7 +1971,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// resolved against a filesystem that may have moved under it.
     pub fn the_stored_cooked_reading(&self, path: &Path) -> Option<CookedFile> {
         let source = self.files.read(path)?;
-        let fingerprint = self.the_closure_fingerprint(path)?;
+        let fingerprint = self.the_record_environment(path)?;
         let key = CacheKey {
             content: content_hash(&source),
             config: self.context_hash(path),

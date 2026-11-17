@@ -546,3 +546,52 @@ pub(crate) fn a_stored_cook_answers_the_next_session() {
         second.cooks_served_from_disk()
     );
 }
+
+/// **A comment edited into a header does not invalidate the records that include it.** The cooked record is keyed by
+/// the macros in force, not by the closure's content hash: a comment changes the text and no macro, so the reading the
+/// first session wrote is still the reading this environment produces — and the second session is served instead of
+/// re-cooking. Under the closure fingerprint this was a miss, because the header's hash is inside it.
+#[test]
+pub(crate) fn a_comment_edit_to_a_header_keeps_the_cook_record() {
+    let project = Project::new("a-comment-edit-keeps-the-record");
+    let source = "#include \"api.h\"\nLive live;\n";
+    let main = project.write("main.cpp", source);
+    project.write("api.h", "// the first comment\nstruct Live { int a; };\n");
+
+    let open = || {
+        Session::with_config(
+            &project.root,
+            SessionFiles::new(OpenDocuments::new(), DiskFiles),
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        )
+    };
+
+    // **The run that writes the record.**
+    {
+        let mut first = open();
+        first.add_project_files([main.clone()]);
+        first.did_open(&main, source);
+        first.index_everything();
+        assert!(
+            first.index().cooked_declarations(&main).is_some(),
+            "the first session cooked the file"
+        );
+    }
+
+    // **The header's comment changes, and nothing else.**
+    project.write(
+        "api.h",
+        "// a longer comment, and the same declaration\nstruct Live { int a; };\n",
+    );
+
+    let mut second = open();
+    second.add_project_files([main.clone()]);
+    second.did_open(&main, source);
+    second.index_everything();
+    assert!(
+        second.cooks_served_from_disk() > 0,
+        "a comment is not a change to the macros in force, so the record still answers: {} served",
+        second.cooks_served_from_disk()
+    );
+}
