@@ -1409,3 +1409,43 @@ Measured on `test_cpp` (twenty files open, no request, twenty seconds idle): **1
 the program read re-files as facts and the ones a request named, not repeats of an unchanged cook). The goal's budget — ≤700 MB, idle churn near zero — is met; what is left of
 the number is the cold start itself (372 files read once, ~600 MB of allocator retention) plus the focused document's
 program read.
+
+## Three hover and completion gaps on `containers.cpp`, measured
+
+Not fixed; each has the measurement that names where it is.
+
+**1. A declaration's type spelling drops its cv-qualifiers, and the hover prints that spelling.** `[](auto const&
+value)` hovers as `auto& value` — *"a variable of type `auto&`"* — and `bool operator()(std::string const& left, …)`
+prints `std::string& left`. Two layers agree because they read the same field: `DeclFact::type_of` and
+`Session::type_at` answer a *name for lookup* and strip the specifier sequence on purpose (`static const Widget`
+records `Widget`, so that a lookup by name finds the class). The const-ness a reader needs is in the declaration's own
+specifiers, which is where `Session::the_object_is_const` reads it for the member-overload filter; the *card* still
+prints the stripped spelling. The fix is a second field (a cv-qualified spelling) or a card that appends the
+qualifiers it can see in the file — and the first is the honest one, because a declaration in a header has no
+specifiers in hand.
+
+**2. A type does not narrow through `std::visit` and `if constexpr`.** Inside
+
+```cpp
+[](auto const& value) {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, int>) { std::to_string(value); }
+```
+
+`value` is `auto const&` everywhere; a reader knows it is `int const&` in the branch. Modelling it means three
+things this layer does not do: `std::visit`'s per-alternative visitation, `decay_t<decltype(x)>` as an alias for the
+parameter's type, and `if constexpr` narrowing the binding for the statements inside it. Each is a semantic feature
+rather than a defect in an existing one.
+
+**3. A `#define`'s replacement list has no qualified completion.** Measured with `inspect complete` on
+
+```cpp
+#define LOG(value) std::cout << value << '\n'
+```
+
+at the cursor just after `std::`: `scope ``, prefix ``, 22 item(s)` — the macro's parameter and every macro in scope.
+`CompletionContext::MacroBody` carries `written`, `range` and the parameters, and nothing about a qualifier, so the
+body is a flat list of preprocessor names. The fix has two halves: `define_at` reads the `qualifier::` written before
+the word at the cursor (it has the directive's text and the offsets), and the dispatch routes a *qualified* body
+through the same `names(NamePosition { scope, written, range })` a `std::` in a function body goes through, so both
+answer from one implementation.
