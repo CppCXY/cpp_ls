@@ -5594,6 +5594,37 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // **A using-declaration whose name is not the `Identifier :: …` shape** — `using Base<T>::f;`, and C++26's pack
+    // expansion of a using-declaration, `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;`.
+    //
+    // The branch above reads that first shape as **one name**; a name with a *template-id* in its qualifier does not
+    // match its window (`Identifier` followed directly by `::`), so it arrives here, where `parse_name` has read it as
+    // the type-id it is. Both shapes end at `;`, and the token after the name is the whole test.
+    //
+    // # What reading it as an alias cost
+    //
+    // The alias path below expects `= <type> ;`, so a using-declaration that reached it was reported as a broken
+    // declaration, and — the part that matters — **the class body it stood in lost everything after it**. Measured on
+    // libstdc++'s `<variant>`, whose `_Build_FUNs` specialization writes
+    // `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;`: the `struct` declaration swallowed the two closing braces of
+    // `namespace __variant` / `namespace __detail`, so every declaration after line 811 — `class variant` itself at
+    // 1425 and `holds_alternative` at 1137 — was filed inside `std::__detail::__variant`. The hover for
+    // `variant.index()` therefore said *"has no member `index`"* (the class's members are keyed by its scope), and
+    // `std::holds_alternative` had no card at all. The raw text balances (four braces deep at line 1130, one at 1135,
+    // one at the class), and the *cooked* reading had the same shape, which is what said the defect was the parse.
+    let a_pack_expansion = p.current_token() == CppTokenKind::Ellipsis
+        && p.peek_next_token() == CppTokenKind::Semicolon;
+    if p.current_token() == CppTokenKind::Semicolon || a_pack_expansion {
+        if a_pack_expansion {
+            p.bump(); // the `...`, which is the only thing a using-declaration may have between its name and `;`
+        }
+        if let Err(err) = expect_semicolon(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
     // An attribute on the alias's name: `using T [[deprecated]] = int;`. Between the name and the `=`, which is
     // the same position an attribute takes on any other declarator — see `finish_init_declarator` — and the one
     // this rule does not share with it, because an alias has no declarator node of its own.

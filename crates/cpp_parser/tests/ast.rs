@@ -1265,3 +1265,66 @@ struct Box {
         "the decorated constructor names itself"
     );
 }
+
+/// **A using-declaration ends at its own `;`**, however its name is spelled — `using Base<T>::f;`, and C++26's pack
+/// expansion `using Base<T>::f...;`.
+///
+/// The shape that measured the defect is libstdc++'s, in `<variant>`'s `_Build_FUNs` specialization:
+///
+/// ```cpp
+/// template<typename _Tp, typename... _Ti, size_t... _Ind>
+///   struct _Build_FUNs<_Tp, variant<_Ti...>, index_sequence<_Ind...>>
+///   : _Build_FUN<_Ind, _Tp, _Ti>...
+///   {
+///     using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;
+///   };
+/// ```
+///
+/// A name with a **template-id** in its qualifier does not match the branch that reads `Identifier :: …` as one name,
+/// so this one reached the *alias* path, which expects `= <type> ;`. The declaration was reported broken and the class
+/// body never closed: the `struct` swallowed the two braces that close `namespace __variant` and `namespace __detail`,
+/// so every declaration after line 811 — `class variant` and `holds_alternative` among them — was filed inside
+/// `std::__detail::__variant`. That is a *scope* answer, so `variant.index()` hovered as "has no member `index`" and
+/// `std::holds_alternative` had no card at all. The raw text balances (four braces deep at 1130, one at 1135, one at
+/// the class), which is what said the defect was the parse rather than the text.
+#[test]
+fn a_using_declaration_ends_at_its_own_semicolon() {
+    let pack = concat!(
+        "template <typename T> struct Base { void f(); };\n",
+        "template <typename... T> struct D : Base<T>... {\n",
+        "    using Base<T>::f...;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(pack),
+        vec!["Base", "D", "g"],
+        "a pack expansion in a using-declaration does not leave the class body open"
+    );
+
+    let template_id = concat!(
+        "template <typename T> struct Base { void f(); };\n",
+        "template <typename T> struct D : Base<T> {\n",
+        "    using Base<T>::f;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(template_id),
+        vec!["Base", "D", "g"],
+        "and neither does a template-id in the qualifier"
+    );
+
+    let plain = concat!(
+        "namespace ns { void f(); }\n",
+        "struct D {\n",
+        "    using ns::f;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(plain),
+        vec!["D", "g"],
+        "and the shape that already worked still does — `ns::f` is one name, so `f` is not a top-level declaration"
+    );
+}
