@@ -749,6 +749,20 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
 
             if crate::probes::allocations() {
                 let end = crate::live_bytes();
+                // **The ceiling, checked where the counter is already read** — see
+                // [`crate::probes::live_ceiling_mb`]. A probe that reproduces a multi-gigabyte spike must not take the
+                // machine down to report it: this ends the process with the number it reached, and every `[memory]`
+                // line it printed on the way stays in the log.
+                if let Some(ceiling) = crate::probes::live_ceiling_mb()
+                    && end > ceiling * 1024 * 1024
+                {
+                    eprintln!(
+                        "[memory] STOPPED: live {} MB is over the {ceiling} MB ceiling (CPPLS_LIVE_CEILING_MB) — \
+                         prepared {prepared_count}, pending {pending}",
+                        end / (1024 * 1024),
+                    );
+                    std::process::exit(3);
+                }
                 let sizes = context
                     .analysis()
                     .with_snapshot(|session| (session.cache_sizes(), session.memory_report()));
@@ -760,8 +774,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 eprintln!(
                     "[memory] live {} MB (peak {} MB, churn {} MB) | wave {:+} MB, drain {:+} MB, renders {:+} MB, \
                      commit {:+} MB, tail {:+} MB | prepared {prepared_count}, pending {pending}, cooked {cooked}, \
-                     re-read {re_read}, claimed {claimed_count}, summaries {}, cooked-readings {}, prefetched {} ({} \
-                     MB), session tables {} MB",
+                     re-read {re_read}, claimed {claimed_count}, summaries {}, prepared-not-committed {} ({}) MB, \
+                     cooked-files {}, session tables {} MB",
                     end / (1024 * 1024),
                     crate::peak_bytes() / (1024 * 1024),
                     crate::allocated_bytes() / (1024 * 1024),

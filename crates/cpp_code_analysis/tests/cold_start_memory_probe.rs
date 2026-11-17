@@ -113,13 +113,44 @@ fn project() -> PathBuf {
 }
 
 fn the_sources(root: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("src"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
+    // **The directories the project keeps its code in** — `src` by default, `CPPLS_PROBE_DIRS` for a project that
+    // names them differently (`EmmyLuaCodeStyle` has `CodeFormatCore`, `LuaParser`, …). Without this the probe
+    // measured an empty project for that one.
+    let directories: Vec<String> = std::env::var("CPPLS_PROBE_DIRS")
+        .map(|dirs| dirs.split(',').map(|dir| dir.trim().to_string()).collect())
+        .unwrap_or_else(|_| vec!["src".to_string()]);
+    let mut files: Vec<PathBuf> = directories
+        .iter()
+        .flat_map(|directory| {
+            std::fs::read_dir(root.join(directory))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
         .filter(|path| path.extension().is_some_and(|extension| extension == "cpp"))
         .collect();
+    // **Every directory's files, and the nested ones too**, because a project keeps its units under a `src` of their
+    // own: one level is what this used to read, and it counted 0 files for anything deeper.
+    if files.is_empty() {
+        for directory in &directories {
+            let mut pending = vec![root.join(directory)];
+            while let Some(next) = pending.pop() {
+                let Ok(entries) = std::fs::read_dir(&next) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else if path.extension().is_some_and(|extension| extension == "cpp") {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
     files.sort();
     files
 }

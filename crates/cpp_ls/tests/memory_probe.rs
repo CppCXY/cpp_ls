@@ -31,7 +31,15 @@ fn project() -> PathBuf {
 /// visited, and that is the state the report is about.
 fn source_files(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut pending = vec![root.join("src"), root.join("include")];
+    // **The directories an editor would visit** — `src`/`include` by default, which is the layout of a library.
+    // `CPPLS_MEMORY_DIRS` names them for a project that keeps its code somewhere else (`EmmyLuaCodeStyle` has
+    // `CodeFormatCore`, `LuaParser`, …), so a run against a real project can open the files a reader opens instead
+    // of nothing at all.
+    let directories: Vec<String> = std::env::var("CPPLS_MEMORY_DIRS")
+        .map(|dirs| dirs.split(',').map(|dir| dir.trim().to_string()).collect())
+        .unwrap_or_else(|_| vec!["src".to_string(), "include".to_string()]);
+    let mut pending: Vec<std::path::PathBuf> =
+        directories.iter().map(|dir| root.join(dir)).collect();
     while let Some(directory) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;

@@ -57,6 +57,24 @@ pub fn allocations() -> bool {
     cpp_code_analysis::alloc::counting()
 }
 
+/// **A ceiling the server stops itself at**, in megabytes — `CPPLS_LIVE_CEILING_MB`.
+///
+/// A probe that reproduces a multi-gigabyte spike must not take the machine down to report it. This was written after
+/// one did: `CPPLS_MEMORY_OPEN_ALL=1 CPPLS_MEMORY_EDITOR=1` on `EmmyLuaCodeStyle` drove a server to **4.8 GB** and the
+/// run had to be killed by hand, which is the one outcome worse than a slow measurement — no numbers at all.
+///
+/// Read once, like every switch here; the pump asks it per round against [`cpp_code_analysis::alloc::live`], which is
+/// the same counter the memory trace prints, so the ceiling is stated in the unit it is enforced in.
+pub fn live_ceiling_mb() -> Option<usize> {
+    static HELD: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *HELD.get_or_init(|| {
+        std::env::var("CPPLS_LIVE_CEILING_MB")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|megabytes| *megabytes > 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_on;
