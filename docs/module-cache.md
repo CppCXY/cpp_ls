@@ -844,3 +844,34 @@ Three facts from this sitting that the next one should start from:
 The next experiment is therefore not another run of the probe but a trace **inside** `TranslationUnit::walk` for
 `Util/src/Url.cpp` with 82 documents open, to see whether it is slow because the closure is large, because the closure is
 still growing and it retries, or because something in the walk is quadratic on this project.
+## The 82-document target is met — by a walk fix, not a budget
+
+Measured on `EmmyLuaCodeStyle`, 82 sources, `CPPLS_PROBE_SLICES=1`:
+
+| | before | after |
+|---|---|---|
+| `advance(64)`, 82 documents | 5.2 GB, killed at 115 s | **live 307 MB, peak 344 MB, 7.15 s** |
+| one `advance(1)` | 177 MB | unchanged (177 MB) |
+| `Url.cpp` walk (439-file closure) | never finished, 6 GB | **49 ms** |
+
+The cause was not the number of walks. `uriparser`'s `uri.h` writes `#include "Uri.h"` twice inside doxygen regions; on
+Windows the spelling resolves to the file itself, and `uri.h` has **no include guard**, so nothing in the walk stopped
+the descent. The walk census measured **197 470 entries of `uri.h`** (98 830 of `uridefsconfig.h`) over 117 distinct
+files, and one `TranslationUnit::walk` was the whole 6 GB.
+
+Two fixes, both in the walk:
+
+1. **A self-include is not followed** — recorded in `includes_skipped`. A preprocessor cannot meaningfully include the
+   file it is reading.
+2. **One visited set for the whole unit**, not one per top-level include, so the `#pragma once` and guard-name skips fire
+   at all. The unguarded re-read stays: `bits/version.h` is still entered once per includer, which its feature-test
+   macros need.
+
+A regression test pins the frame count (`a_header_that_includes_itself_is_read_once`: two files, not two hundred).
+
+What this settles: the walk budget and the drain-owned-units redesign that this goal was created for are **not needed
+for the memory target**. They remain a correct idea for a different problem (bounding work per call), and the evidence
+for that problem is no longer the 82-document case. Item 4 of the goal — the reachable `EnvId` record key — is untouched.
+
+Gates: analysis 867 passed (866 + the regression test), `clippy --workspace --all-targets` silent, `fmt` silent, and the
+release workspace suite with the pre-existing `a_member_declared_twice_...` failure only.

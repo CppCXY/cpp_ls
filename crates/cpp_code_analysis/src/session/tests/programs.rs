@@ -1304,3 +1304,25 @@ pub(crate) fn a_closure_with_an_unindexed_member_has_no_record_key() {
         "and the key is back once the index has caught up"
     );
 }
+
+/// **A header that includes itself does not walk forever.** `uriparser`'s `uri.h` writes `#include "Uri.h"` inside
+/// doxygen regions and on Windows that resolves to the file itself; an unguarded header has nothing inside the walk to
+/// stop the descent, so it went to the include-depth limit — 197 470 entries of one file, measured. The edge is
+/// recorded as skipped, and the assertion here is the frame count: two files, not two hundred.
+#[test]
+pub(crate) fn a_header_that_includes_itself_is_read_once() {
+    let files = MemoryFiles::new()
+        .with_file("/p/self.h", "#include \"self.h\"\n#define X 1\n")
+        .with_file("/p/a.cpp", "#include \"self.h\"\nint a;\n");
+    let fixture = Memory::new("a-self-include", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/a.cpp", "#include \"self.h\"\nint a;\n");
+    session.index_everything();
+    let unit = session
+        .read_the_unit(Path::new("/p/a.cpp"))
+        .expect("the program reads");
+    assert_eq!(
+        unit.files, 2,
+        "the header is filed once, not to the include-depth limit"
+    );
+}

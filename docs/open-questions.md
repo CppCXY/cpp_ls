@@ -1575,3 +1575,13 @@ with one file read in 104 ms. That is the call an editor makes, and it is the nu
 
 The rejected attempts are reverted; `cargo test -p cpp_code_analysis` is 866 passed, `clippy` and `fmt` are silent, and
 the release workspace suite fails only the pre-existing `a_member_declared_twice_...`.
+## The 82-document target, met (walk self-include fix)
+
+82 sources open, one `advance(64)`: **307 MB live / 344 MB peak, 7.15 s** (was 5.2 GB, killed at 115 s). The cause was one
+exploding walk, not 64 walks: `uriparser`'s `uri.h` includes itself (doxygen region, case-insensitive spelling) and has no
+guard, so the walk descended to the depth limit — 197 470 entries measured. A self-include is now skipped and the visited
+set is per unit; `Url.cpp`'s 439-file walk went from "never finishes at 6 GB" to 49 ms. Regression test:
+`a_header_that_includes_itself_is_read_once`.
+
+The walk budget and the drain-owned-units redesign are therefore not needed for this target. The reachable `EnvId` record
+key is still open.
