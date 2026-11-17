@@ -404,7 +404,7 @@ impl<'a> Over<'a> {
     /// through the body's tokens (macro_value re-expands and re-reads), and an environment follows the name. Bounded
     /// so a cycle of aliases ends in `defined, value unknown` rather than in a loop.
     /// **The seed's answer, with the completeness rule applied**: a name an incomplete table has never seen is not
-    /// Undefined --- it may be defined in a file the walk has not reached, and answering   there reads a branch
+    /// Undefined --- it may be defined in a file the walk has not reached, and answering `0` there reads a branch
     /// the compiler does not take.
     fn the_seed_answer(&self, name: &str) -> Lookup<'_> {
         match self.seed.lookup(name) {
