@@ -217,6 +217,7 @@ named_switch! {
     macro_name => "CPPLS_TRACE_MACRO", "The one macro name to trace, at every lookup the expander makes.";
     guard_name => "CPPLS_TRACE_GUARD", "The one name to trace through every condition evaluation.";
     lookup_name => "CPPLS_TRACE_LOOKUP", "The one name to trace through the walk's macro environment.";
+    step_name => "CPPLS_TRACE_STEP", "The one directive name to trace through a fold's visibility decision.";
 }
 
 #[cfg(test)]

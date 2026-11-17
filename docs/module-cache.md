@@ -372,6 +372,25 @@ The fold should apply them. That it does not is now a question about **the visib
 environment it asks with**, not about the directives: the next instrument prints `visibility_of`'s answer for that one
 step, and the `Over` it was given. Everything else on this path has been eliminated.
 
+**Thirteenth run: the Inactive step is the `want_all` test hook — and the fold is right about it.** Tracing the
+`__cpp_lib_bit_cast` step prints its condition:
+
+```text
+[step] __cpp_lib_bit_cast at 36399 -> Inactive | under If defined(__glibcxx_want_all)
+```
+
+`__glibcxx_want_all` is libstdc++'s internal "define every feature" test hook; no header defines it, so the compiler
+does not take that block either, and the walk's view does **not** contain `__cpp_lib_bit_cast` (`in walk false`,
+measured). The fold's answer is the correct one.
+
+That reclassifies the residual: the only-walk names are the `want` names themselves (`__glibcxx_want_bit_cast` is in
+the walk, never in the fold), and the fold drops them on purpose because `<bits/version.h>` `#undef`s each one after
+use — the header that wrote it consumes it. The walk's `for_each_definition` reports the last *definition* event for a
+name; if it does not see the later `#undef` as the last event, it reports a name that is not a macro at that point.
+The next test is a fixture: `#define X 1` then `#undef X`, and whether the walk's view of a later include still lists
+`X`. If it does, Gate 0's remaining 34 949 are the walk's over-report after `#undef`, the fold is the correct side, and
+the gate becomes "the fold never invents a name the walk does not have" rather than equality.
+
 The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
