@@ -676,6 +676,23 @@ than kept unmeasured. If a later change makes the record cache cheaper to miss (
 render that is retried), the memo is the shape to bring back, and the measurement to require is "compose twice in one
 revision".
 
+**Twenty-ninth run: the record key is bounded by the cook it keys.** The remaining item was to move `CacheKey.env` from
+`the_closure_fingerprint` — a BFS of the whole closure, hashing each member's content hash — to a *reachable* environment
+fingerprint computed from the composed macros. The argument for it is architectural (a record validated by what the file
+actually sees survives unrelated edits and is shared between files with the same environment), and it was going to be
+measured A/B. It does not need to be, because the measurement already exists: **the entire cook — lookup, both
+fingerprints, the render and the parse — is 0.4 ms** (`LuaCheck.cpp`, 373-file closure). Two closure BFSes cannot be a
+meaningful part of 0.4 ms, and a key that requires the composed environment would *add* a composition to the hit path,
+which is the common path (106 stored cooks served in the last measured run).
+
+So the item is not landed, and the reason is a measurement rather than a difficulty: it is an architecture improvement
+whose cost is zero and whose benefit is correctness-of-identity, not speed. The honest place for it is a change that also
+puts the environment memo back (the two share the environment), and the number to require then is the per-file record's
+*sharing rate* across files with equal environments — not a latency.
+
+What remains open is therefore one item and one measurement: the walk budget that would bring `advance(64)` with 82 open
+documents under the target (`advance(1)` is 177 MB), and the contract decision of whether `steps` counts roots or files.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
