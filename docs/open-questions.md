@@ -1454,3 +1454,30 @@ The same card says *"a type of type `basic_string<char>`"*, which is the alias s
 `type_of`; it should read "an alias of". Two small presentation defects around one real gap: the layout walk has no
 answer for a **union member** (the size of a union is the largest alternative, not the sum, and the walk reads each
 member's own size), and the refusal message is a list of guesses rather than the node it could not size.
+## The "135 contexts" were never a multiplier — a correction
+
+`289c5826` claimed that 135 distinct context hashes over one closure meant "the same closure stored on disk 135
+times", and that the fix was to collapse them. That was inferred from a count, and the count does not show it.
+Measured on `EmmyLuaCodeStyle` (1 761 files of closure):
+
+```text
+1 723 distinct content hashes — 38 stored twice, two copies at the worst
+1 761 distinct (content, context) pairs for 1 761 files
+135 distinct contexts == 135 distinct directories
+1 distinct macro environment over the whole closure
+```
+
+A context is `(configuration, the file's own directory)` — the directory is part of it because a quoted `#include`
+searches the includer's directory first — and it varies **across files**, one per directory. Each file has exactly
+one entry. The 38 duplicates are different files with identical text in different directories, which is what a key
+carrying the directory is *for*.
+
+So there is nothing to collapse: dropping the directory from the key would save 38 entries out of 1 761 (2 %) and
+would put the quoted-include resolution back on trust. `SummaryStore::resolution_still_holds` already re-resolves
+every include **from the current file's directory** on every hit, so the entry is verified rather than trusted; the
+directory in the key is what lets two genuinely different compilations coexist, not what loses hits.
+
+The memory a session holds is therefore **not** multiplied by contexts. What grows is the in-memory set of summaries
+itself: every file the session has read stays in `ProjectIndex::summaries` with no budget, and that is where the
+117 MB on this project lives. That is the next change, and it is a bound on the *working set*, not a convergence of
+keys.
