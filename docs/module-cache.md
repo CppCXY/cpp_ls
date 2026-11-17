@@ -693,6 +693,27 @@ puts the environment memo back (the two share the environment), and the number t
 What remains open is therefore one item and one measurement: the walk budget that would bring `advance(64)` with 82 open
 documents under the target (`advance(1)` is 177 MB), and the contract decision of whether `steps` counts roots or files.
 
+**Thirtieth run: why the walk budget broke a test — a record-key collision, not a walk.** The budget was re-applied and
+the failing test traced. Both cooks print `[cook] "/p/api.h" ready true`, so the composed arm runs and no walk is
+involved; the budget changes only *when* the edited header is indexed, and that is enough to flip the answer. The
+mechanism is `the_closure_fingerprint`'s treatment of an absent summary:
+
+```rust
+parts.push(fnv1a64(key.as_bytes()) ^ NOT_IN_THE_INDEX);
+```
+
+Any file whose summary is currently absent — the header just edited, the header not yet read — contributes one constant,
+so **two different texts of the same header produce the same fingerprint**, and a record written under the old text is
+served for the new one. The budget merely moved the window in which the header's summary was absent at key time.
+
+That is a far better reason to land the reachable `EnvId` key than the latency argument rejected last round: the current
+key is **not injective where it matters** — a closure member the index cannot describe is exactly the file whose text
+just changed. The composed environment has no such hole: it is a hash of the macros actually in force.
+
+So the two remaining items are one change again, in the direction the design note always pointed: compose the
+environment, key the record by it (which needs the environment memo, because the key and the render share it), and the
+budget then has a sound key to stand on. The budget itself is reverted again and stays out until that lands.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
