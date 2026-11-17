@@ -1604,3 +1604,19 @@ composition on the lookup path (a BFS of the file's closure), and the two number
 
 * the comment-only edit of an included header becoming a **record hit** instead of a re-cook, and
 * the cold-start time it costs (today: 1.85 s for the 82-source project).
+### The swap, attempted: one test says which write goes missing
+
+The five `CacheKey` sites (put/read with a rendering, put/read facts-only, and `has_a_stored_cooked_reading`) were
+moved to the environment fingerprint in one change. The suite answered with a single failure —
+`session::tests::cache::a_refinement_is_served_to_the_next_session`: `stored_refinements_served: 0` where it wants at
+least one, on a fixture of two files (`api.h`, `main.cpp`).
+
+That is not a coincidence and it is the next thing to read: a refinement is stored under a `SummaryKey` whose environment
+is the **closure** fingerprint (a different table, untouched by the swap), so the failure means the first session's
+*record* write went missing — most plausibly `put_the_cooked_reading` returning early because `the_record_environment`
+composed nothing for a file whose closure still had a member without a summary at that moment. The closure fingerprint
+had the same condition but was computed at a different point in the session's life.
+
+The change is reverted, with the shape, the measurement (82 closures / 8 environments) and this failure recorded. The next
+attempt should start by answering *which* write returned early — the `StoreStats`/`cooking` probes already print it — and
+decide whether the record key needs the closure fingerprint as a fallback when the environment cannot be composed.
