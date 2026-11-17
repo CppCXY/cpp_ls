@@ -461,6 +461,23 @@ program reading versus a file reading, or the name table rather than the cooked 
 `cpp_ls::handlers::hover` itself — print which list the card's "declared twice" section is built from — because the
 cook's half of S1 is now exonerated by measurement.
 
+**Eighteenth run: the card's own trace names the path, and it is not `overloads_markdown`.** `CPPLS_TRACE_HOVER=1` (a
+trace the hover already had) prints, on the failing fixture with the no-walk experiment on:
+
+```text
+[card] heard call local false type_of None => indexed no
+```
+
+The card is built by `declaration_markdown` from **the view's member fact**, and its "re-ask the index" branch answered
+*nothing* (`indexed no`). The multi-declaration list that the test asserts (`overloads_markdown`) is therefore not the
+path this card took: the member was resolved to one of the two declarations before any list was built. With a walk the
+same cursor produced two; without one it produces the `const` overload.
+
+So the difference is in **which member the view resolves the use to**, and that resolution runs before either
+`overloads_markdown` or `declaration_markdown` decides what to print. The next instrument is the member lookup itself:
+`members_of("Foo")` from the view, and which of its two `call`s the name lookup returns first — a fact ordering question,
+not a cook question.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
