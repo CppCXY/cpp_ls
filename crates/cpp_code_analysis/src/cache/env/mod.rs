@@ -503,7 +503,7 @@ fn build_macro_def(
             crate::token::Token::new(data.kind, piece, data.range)
         })
         .collect();
-    let mut definition = crate::macros::MacroDef {
+    let definition = crate::macros::MacroDef {
         name: Box::from(fact.name.as_str()),
         params,
         body: crate::macros::MacroBody {
