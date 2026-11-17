@@ -616,6 +616,20 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
         classes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         println!("  unknown classes: {classes:?}");
         let over = crate::cache::env::Over::new(Env::empty(), session.index().macros());
+        let bit_in_fold = composition.files.iter().find(|file| {
+            let name = file.path.to_string_lossy().to_lowercase();
+            name.ends_with("/bit") && !name.ends_with("/orbit")
+        });
+        let bit_in_walk = walked.iter().find(|(path, _)| {
+            let name = path.to_string_lossy().to_lowercase();
+            name.ends_with("/bit")
+        });
+        println!(
+            "  <bit>: in fold {:?} (unknown {}), in walk {}",
+            bit_in_fold.map(|file| file.path.display().to_string()),
+            bit_in_fold.map_or(0, |file| file.unknown_guards),
+            bit_in_walk.is_some()
+        );
         let marked = session.index().macros();
         for name in [
             "__cpp_lib_bit_cast",

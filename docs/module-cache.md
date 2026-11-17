@@ -340,6 +340,25 @@ walk's views contain `__glibcxx_want_bit_cast`, the fold never defines it anywhe
 skipping an unconditional `#define` in a header it composed. The next instrument is the smallest one left: is `<bit>`
 among the composed files, and if it is, what are its `unknown_guards` and the steps named `__glibcxx_want_*`.
 
+**Eleventh run: the feature-test pattern, read off the headers.** `bit:58` writes five `#define __glibcxx_want_*`
+and includes `<bits/version.h>`; version.h's block is
+
+```cpp
+#if !defined(__cpp_lib_bit_cast) && defined(__glibcxx_want_bit_cast)
+#define __cpp_lib_bit_cast 202102L
+#endif
+#undef __glibcxx_want_bit_cast          // always, outside the #if
+```
+
+so the `want` macro is *consumed and undefined* by the header that wrote it, and `__cpp_lib_bit_cast` is what the
+consumer keeps. The probe confirms `<bit>` is composed with **0 unknown guards**, and `<bits/version.h>` is the
+deliberately **unguarded** file `walk_one_file`'s note describes — the one a compiler re-enters for every header.
+
+Both names are absent from every composed file's `at_exit`, which the `#undef` explains for the `want` name and not
+for `__cpp_lib_bit_cast`. So the next instrument is `<bit>`'s own skeleton: the steps whose names are
+`__glibcxx_want_*` and `__cpp_lib_bit_cast`, with the visibility each got. That distinguishes a guard decided false
+(the top of `bit` is inside `#if __cplusplus > ...`-shaped text) from a step that never made it into the skeleton.
+
 The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
