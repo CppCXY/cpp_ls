@@ -1,18 +1,23 @@
-[default]
-extend-ignore-re = [
-  # git commit hashes in CHANGELOG.md
-  "\\[[0-9a-f]{7}\\]",
-  # Line ignore with trailing # spellchecker:disable-line
-  "(?Rm)^.*(#|--|//)\\s*spellchecker:disable-line$",
-  # ignore typ in identifiers
-  "(?i)\\b(?:\\w*typ|typ_\\w*)\\b",
+[files]
+extend-exclude = [
+  "CHANGELOG.md",
+  "*.flake",
+  "*.yaml",
+  "*test.rs",          # 已覆盖 test.rs，无需单独列出
+  "open-questions.md",
+  # "target/",         # 按需添加目录排除
 ]
 
-# **Words this project writes on purpose.** The spell check reads English prose, and three kinds of token here are not
-# that: hyphenated compounds whose first half it wants to respell (`mis-nesting`, `mis-paired` → `miss`), compiler and
-# tool spellings quoted verbatim (`-Iinclude`, `/Fo`, `PARM` inside `_GLIBCXX_NOEXCEPT_PARM`, `_S_nd`, `SEH`), and
-# fixtures whose whole point is a misspelling (`IndentWidht`, `exlude`, `standrad` are what a test asserts the error
-# message quotes back) or a wrong result the tests report (`aanotherVec`).
+[default]
+extend-ignore-re = [
+  # Git commit hash in CHANGELOG.md
+  "\\[[0-9a-f]{7}\\]",
+  # 行尾禁用注释（保留你实际使用的注释风格即可）
+  "(?Rm)^.*(#|--|//)\\s*spellchecker:disable-line$",
+  # 如果 typ 正则过于宽泛，建议移除或改为精确的 extend-words 条目
+  # "(?i)\\b(?:\\w*typ|typ_\\w*)\\b",
+]
+
 [default.extend-words]
 mis = "mis"
 PARM = "PARM"
@@ -36,12 +41,6 @@ summar = "summar"
 allocater = "allocater"
 classs = "classs"
 nam = "nam"
-[files]
-extend-exclude = [
-  "CHANGELOG.md",
-  "*.flake",
-  "*.yaml",
-  "test.rs",
-  "*test.rs",
-  "open-questions.md"
-]
+abd = "abd"
+Thi = "Thi"
+ake = "ake"
