@@ -435,7 +435,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return true;
         }
         self.program_reads
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |left| left.checked_sub(1),
