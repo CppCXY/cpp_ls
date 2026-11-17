@@ -315,7 +315,7 @@ fn the_members_type<F: FileProvider + Clone>(
         .fact
         .returns
         .clone()
-        .or_else(|| member.fact.type_of.clone())
+        .or_else(|| member.fact.type_of.clone().map(|ty| ty.to_string()))
 }
 #[cfg(test)]
 mod tests {

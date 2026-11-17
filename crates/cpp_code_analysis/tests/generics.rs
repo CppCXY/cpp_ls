@@ -51,7 +51,7 @@ fn members_after(source: &str, marker: &str) -> Vec<String> {
             .members
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect(),
         _ => Vec::new(),
     }

@@ -106,9 +106,9 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
     // warning: leaving it out does not compile, and a server that has nothing to deprecate sets neither.
     #[allow(deprecated)]
     DocumentSymbol {
-        name: fact.name.clone(),
+        name: fact.name.to_string(),
         // What the label does not say: the scope a member was written in (`ns::Widget`).
-        detail: fact.scope.clone(),
+        detail: fact.scope.clone().map(|scope| scope.to_string()),
         kind: symbol_kind(fact.kind),
         tags: None,
         deprecated: None,

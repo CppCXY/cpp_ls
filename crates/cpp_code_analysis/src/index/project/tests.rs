@@ -224,7 +224,7 @@ fn a_workspace_search_finds_symbols_across_the_project() {
     let names = |found: &[super::ProjectSymbol]| -> Vec<String> {
         found
             .iter()
-            .map(|symbol| symbol.fact.name.clone())
+            .map(|symbol| symbol.fact.name.to_string())
             .collect()
     };
 
@@ -2472,7 +2472,7 @@ fn a_member_added_to_a_base_appears_without_reindexing_the_derived_class() {
         Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`A` is declared in an included header: {other:?}"),
     };
@@ -3121,7 +3121,7 @@ fn offered(found: &Known<super::NameCompletions>) -> Vec<String> {
         Known::Yes(completions) => completions
             .names
             .iter()
-            .map(|name| name.fact.name.clone())
+            .map(|name| name.fact.name.to_string())
             .collect(),
         other => panic!("expected names: {other:?}"),
     }

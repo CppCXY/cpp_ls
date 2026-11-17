@@ -76,8 +76,8 @@ type Row = (PathBuf, String, Option<String>, usize, IncludeVisibility);
 fn row(file: &Path, fact: &DeclFact, visibility: IncludeVisibility) -> Row {
     (
         file.to_path_buf(),
-        fact.name.clone(),
-        fact.scope.clone(),
+        fact.name.to_string(),
+        fact.scope.clone().map(|scope| scope.to_string()),
         fact.range.start_offset,
         visibility,
     )
@@ -183,8 +183,8 @@ fn symbols_by_scanning(
         .map(|(_, _, _, file, fact)| {
             (
                 file,
-                fact.name.clone(),
-                fact.scope.clone(),
+                fact.name.to_string(),
+                fact.scope.clone().map(|scope| scope.to_string()),
                 fact.range.start_offset,
             )
         })
@@ -253,8 +253,8 @@ fn check(index: &ProjectIndex, files: usize, step: &str) {
                 .map(|symbol| {
                     (
                         symbol.file,
-                        symbol.fact.name,
-                        symbol.fact.scope,
+                        symbol.fact.name.to_string(),
+                        symbol.fact.scope.clone().map(|scope| scope.to_string()),
                         symbol.fact.range.start_offset,
                     )
                 })

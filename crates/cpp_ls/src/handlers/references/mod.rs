@@ -578,7 +578,7 @@ pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
         session.symbol_references_of(fact, file, cpp_code_analysis::ReferenceBudget::default())
     else {
         return Known::Unknown(cpp_code_analysis::UnknownReason::NotDeclaredHere(
-            Box::from(fact.name.clone()),
+            Box::from(fact.name.to_string()),
         ));
     };
 

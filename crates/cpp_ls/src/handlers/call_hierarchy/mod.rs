@@ -164,7 +164,7 @@ fn item_of<F: FileProvider + Clone>(
         _ => None,
     };
     Some(CallHierarchyItem {
-        name: fact.name.clone(),
+        name: fact.name.to_string(),
         kind: if fact.scope.is_some() {
             SymbolKind::METHOD
         } else {

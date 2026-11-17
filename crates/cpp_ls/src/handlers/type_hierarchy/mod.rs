@@ -184,17 +184,17 @@ fn item_of_a_class<F: FileProvider + Clone>(
     let end = position_in_file(held, fact.name_range.end_offset())?;
     let name_range = Range { start, end };
     Some(TypeHierarchyItem {
-        name: fact.name.clone(),
+        name: fact.name.to_string(),
         kind: SymbolKind::CLASS,
         tags: None,
         // **The scope as the detail**, which is what tells two same-named classes apart in the picker.
-        detail: fact.scope.clone(),
+        detail: fact.scope.clone().map(|scope| scope.to_string()),
         uri,
         range: name_range,
         selection_range: name_range,
         data: Some(serde_json::json!({
             "file": file.to_string_lossy(),
-            "name": fact.name,
+            "name": fact.name.to_string(),
         })),
     })
 }

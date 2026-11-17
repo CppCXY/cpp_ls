@@ -390,7 +390,7 @@ int f() {
                 .members
                 .members
                 .iter()
-                .map(|member| member.fact.name.clone())
+                .map(|member| member.fact.name.to_string())
                 .collect();
             assert!(
                 names.contains(&"size".to_string()) && names.contains(&"scaled".to_string()),
@@ -1844,7 +1844,7 @@ int f() {
             "members of Money: {:?}",
             list.members
                 .iter()
-                .map(|member| (member.fact.name.clone(), member.fact.returns.clone()))
+                .map(|member| (member.fact.name.to_string(), member.fact.returns.clone()))
                 .collect::<Vec<_>>()
         ),
         other => println!("members of Money: {other:?}"),
@@ -1901,7 +1901,7 @@ int g(void) { return plain.d; }
             );
             list.members
                 .iter()
-                .map(|member| member.fact.name.clone())
+                .map(|member| member.fact.name.to_string())
                 .collect::<Vec<_>>()
         }
         other => panic!("`{class}` has a member list: {other:?}"),
@@ -1973,7 +1973,7 @@ int f(void) { exarg_T eap; return eap.addr_count; }
         cpp_code_analysis::Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`{class}` has a member list: {other:?}"),
     };
@@ -2025,7 +2025,7 @@ struct line {
         cpp_code_analysis::Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`line` has a member list: {other:?}"),
     };
@@ -2063,7 +2063,7 @@ fn an_unnamed_struct_type_is_keyed_by_the_variable_it_declares() {
         cpp_code_analysis::Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`bits` has a member list: {other:?}"),
     };
@@ -2239,7 +2239,7 @@ int f() {
         cpp_code_analysis::Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`{class}` has a member list: {other:?}"),
     };
@@ -2298,7 +2298,7 @@ int f() {
         cpp_code_analysis::Known::Yes(list) => list
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("`Box<int>` has a member list: {other:?}"),
     };
@@ -4027,7 +4027,7 @@ void f() {
         "the class's own members are listed: {:?}",
         bare.members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -4143,7 +4143,7 @@ struct Hashed {
     let names: Vec<String> = members
         .members
         .iter()
-        .map(|member| member.fact.name.clone())
+        .map(|member| member.fact.name.to_string())
         .collect();
     assert!(
         names.iter().any(|name| name == "operator()"),

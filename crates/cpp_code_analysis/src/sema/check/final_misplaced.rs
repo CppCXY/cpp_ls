@@ -41,7 +41,7 @@ impl Check for FinalMisplaced {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type)
-            .map(|fact| (fact.name.clone(), fact.bases.clone()))
+            .map(|fact| (fact.name.to_string(), fact.bases.clone()))
             .collect();
 
         let finals: Vec<(String, Option<String>, cpp_parser::SourceRange)> = context
@@ -58,7 +58,13 @@ impl Check for FinalMisplaced {
                     // [`super::override_nonexistent`] — so `~B() final` is not judged by name.
                     && !fact.is_a_destructor()
             })
-            .map(|fact| (fact.name.clone(), fact.scope.clone(), fact.name_range))
+            .map(|fact| {
+                (
+                    fact.name.to_string(),
+                    fact.scope.clone().map(|scope| scope.to_string()),
+                    fact.name_range,
+                )
+            })
             .collect();
 
         for (name, scope, name_range) in &finals {

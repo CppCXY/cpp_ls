@@ -104,7 +104,7 @@ fn offered_at(offset: usize) -> Option<Vec<String>> {
             found
                 .names
                 .iter()
-                .map(|offered| offered.fact.name.clone())
+                .map(|offered| offered.fact.name.to_string())
                 .collect(),
         ),
         _ => None,
@@ -323,7 +323,7 @@ void Widget::grow(int by) {
             .members
             .members
             .iter()
-            .map(|member| member.fact.name.clone())
+            .map(|member| member.fact.name.to_string())
             .collect(),
         other => panic!("the member query must answer here: {other:?}"),
     };
@@ -511,19 +511,19 @@ int f() {
         Known::Yes(found) => found
             .names
             .iter()
-            .map(|offered| offered.fact.name.clone())
+            .map(|offered| offered.fact.name.to_string())
             .collect::<Vec<_>>(),
         other => panic!("a blank cursor in a body is answerable: {other:?}"),
     };
 
     for reserved in ["__mine_anywhere", "_Upper_anywhere", "_global_underscored"] {
         assert!(
-            !known.contains(&reserved.to_string()),
+            !known.iter().any(|name| name == reserved),
             "`{reserved}` is reserved to the implementation: {known:?}"
         );
     }
     assert!(
-        known.contains(&"_local_underscored".to_string()),
+        known.iter().any(|name| name == "_local_underscored"),
         "a local `_name` is the user's own — only the *global* name space reserves it: {known:?}"
     );
 
@@ -703,7 +703,7 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -1660,20 +1660,20 @@ fn a_constructors_parameters_are_in_scope() {
             Known::Yes(found) => found
                 .names
                 .iter()
-                .map(|offered| offered.fact.name.clone())
+                .map(|offered| offered.fact.name.to_string())
                 .collect::<Vec<_>>(),
             other => panic!("{what} should be answerable, got {other:?}"),
         };
         assert!(
-            names.contains(&"f".to_string()),
+            names.iter().any(|name| name == "f"),
             "the constructor's own parameter, in {what}: {names:?}"
         );
         assert!(
-            names.contains(&"m".to_string()),
+            names.iter().any(|name| name == "m"),
             "and the second one, in {what}: {names:?}"
         );
         assert!(
-            names.contains(&"first".to_string()),
+            names.iter().any(|name| name == "first"),
             "and the field it initialises, in {what}: {names:?}"
         );
     }
@@ -1775,7 +1775,7 @@ fn a_macro_is_not_shown_with_a_signature() {
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -1873,7 +1873,7 @@ fn the_typed_prefix_is_the_word_being_replaced() {
                 "members_of(Source) → {:?}",
                 list.members
                     .iter()
-                    .map(|m| m.fact.name.clone())
+                    .map(|m| m.fact.name.to_string())
                     .collect::<Vec<_>>()
             ),
             other => println!("members_of(Source) → {other:?}"),
@@ -1934,7 +1934,7 @@ fn a_statement_position_prefix_is_read_too() {
                 "members_of(Source) → {:?}",
                 list.members
                     .iter()
-                    .map(|m| m.fact.name.clone())
+                    .map(|m| m.fact.name.to_string())
                     .collect::<Vec<_>>()
             ),
             other => println!("members_of(Source) → {other:?}"),
@@ -1998,7 +1998,7 @@ int main()
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2077,7 +2077,7 @@ struct Widget { int size; };
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2114,7 +2114,7 @@ struct Widget { int size; };
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2167,7 +2167,7 @@ fn a_macro_body_offers_its_own_parameters() {
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2247,7 +2247,7 @@ int neither;
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2272,7 +2272,7 @@ int neither;
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2342,7 +2342,7 @@ int f() {
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),
@@ -2428,7 +2428,7 @@ fn a_member_is_completed_in_a_separated_definition() {
             "members_of(Source) → {:?}",
             list.members
                 .iter()
-                .map(|m| m.fact.name.clone())
+                .map(|m| m.fact.name.to_string())
                 .collect::<Vec<_>>()
         ),
         other => println!("members_of(Source) → {other:?}"),

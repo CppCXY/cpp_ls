@@ -84,7 +84,7 @@ impl Check for MacroRedefined {
             context.add_in_the_file(
                 DiagnosticCode::MacroRedefined,
                 fact.range,
-                fact.name.clone(),
+                fact.name.to_string(),
                 format!(
                     "`{}` is redefined here with a different body; the definition that was in force is at offset {}",
                     fact.name, first.range.start_offset

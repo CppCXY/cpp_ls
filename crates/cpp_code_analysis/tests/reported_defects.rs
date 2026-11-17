@@ -11,6 +11,7 @@
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
+use smol_str::SmolStr;
 
 fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
@@ -1022,7 +1023,7 @@ fn an_out_of_line_definition_declares_its_member_and_not_its_class() {
         .summary(std::path::Path::new("/p/pair.cpp"))
         .expect("the file is indexed");
 
-    let functions: Vec<(String, Option<String>)> = summary
+    let functions: Vec<(SmolStr, Option<SmolStr>)> = summary
         .declarations
         .iter()
         .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Function)
@@ -1038,9 +1039,9 @@ fn an_out_of_line_definition_declares_its_member_and_not_its_class() {
     assert_eq!(
         functions,
         vec![
-            ("Pair".to_string(), Some("Pair".to_string())),
-            ("Mine".to_string(), Some("Pair".to_string())),
-            ("Mine".to_string(), Some("Pair".to_string())),
+            (SmolStr::new("Pair"), Some(SmolStr::new("Pair"))),
+            (SmolStr::new("Mine"), Some(SmolStr::new("Pair"))),
+            (SmolStr::new("Mine"), Some(SmolStr::new("Pair"))),
         ],
         "the constructor declared in the class, and the member's declaration and definition"
     );

@@ -1920,7 +1920,7 @@ mod tests {
             summary
                 .declarations
                 .iter()
-                .map(|fact| fact.name.clone())
+                .map(|fact| fact.name.to_string())
                 .collect::<Vec<_>>()
         };
 

@@ -978,7 +978,7 @@ fn member_markdown(
         out.push_str("```\n\n");
         let scope = shown
             .iter()
-            .find_map(|candidate| candidate.fact.scope.clone())
+            .find_map(|candidate| candidate.fact.scope.clone().map(|scope| scope.to_string()))
             .unwrap_or_else(|| written.clone());
         let sentence = if call_selected.is_some() {
             format!(
@@ -1688,7 +1688,7 @@ fn declaration_markdown(
             ),
         )
     {
-        corrected.type_of = Some(deduced.type_of.to_string());
+        corrected.type_of = Some(deduced.type_of.into());
     }
     if let Some(returns) = corrected.returns.clone()
         && let Some(better) = the_type_the_macros_leave(session, &found.file, &corrected, &returns)
@@ -1796,7 +1796,7 @@ fn declaration_markdown(
         && !written.starts_with("const")
         && !written.starts_with("volatile")
     {
-        fact.type_of = Some(format!("{qualifiers}{written}"));
+        fact.type_of = Some(format!("{qualifiers}{written}").into());
     }
     let mut declaration = cpp_code_analysis::sema::render::an_item(
         fact,

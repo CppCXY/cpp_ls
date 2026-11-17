@@ -305,7 +305,9 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
         let scope = context.scopes().qualified_name_of(binding.scope);
         // **This file's summary first** — the facts the reading already produced, and the callee is usually here.
         if let Some(fact) = context.summary.declarations.iter().find(|fact| {
-            fact.name == name && fact.scope == scope && fact.kind == crate::DeclKind::Function
+            fact.name == name
+                && fact.scope.as_deref() == scope.as_deref()
+                && fact.kind == crate::DeclKind::Function
         }) {
             return Some(fact.frees);
         }

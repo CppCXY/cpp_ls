@@ -216,8 +216,8 @@ pub fn substituted_members(
         if target == member.fact.name {
             continue;
         }
-        alias_names.push(member.fact.name.clone());
-        alias_targets.push(target);
+        alias_names.push(member.fact.name.to_string());
+        alias_targets.push(target.to_string());
     }
 
     // **An alias's own target is not an alias to expand.** `std::shared_ptr`'s `element_type` is written
@@ -226,20 +226,19 @@ pub fn substituted_members(
     // `typename __shared_ptr<Resource>::typename __shared_ptr<Resource>::element_type`, measured. The member's own
     // `type_of` *is* the target, so the expansion is a step for the other members only.
     let declares_an_alias = |member: &ProjectMember| {
-        member.fact.kind == crate::DeclKind::Type && alias_names.contains(&member.fact.name)
+        member.fact.kind == crate::DeclKind::Type
+            && alias_names
+                .iter()
+                .any(|name| name == member.fact.name.as_str())
     };
     for member in list
         .members
         .iter_mut()
         .filter(|member| !declares_an_alias(member))
     {
-        for spelling in [
-            &mut member.fact.parameter_list,
-            &mut member.fact.returns,
-            &mut member.fact.type_of,
-        ]
-        .into_iter()
-        .flatten()
+        for spelling in [&mut member.fact.parameter_list, &mut member.fact.returns]
+            .into_iter()
+            .flatten()
         {
             if !alias_names.is_empty() {
                 *spelling = crate::sema::types::substituted_spelling(
@@ -249,19 +248,29 @@ pub fn substituted_members(
                 );
             }
         }
+        // **`type_of` is a `SmolStr`**, so it takes the same rewrite and converts its own result back.
+        if !alias_names.is_empty()
+            && let Some(spelling) = member.fact.type_of.as_mut()
+        {
+            *spelling =
+                crate::sema::types::substituted_spelling(spelling, &alias_names, &alias_targets)
+                    .into();
+        }
     }
     for member in &mut list.members {
-        for spelling in [
-            &mut member.fact.parameter_list,
-            &mut member.fact.returns,
-            &mut member.fact.type_of,
-        ]
-        .into_iter()
-        .flatten()
+        for spelling in [&mut member.fact.parameter_list, &mut member.fact.returns]
+            .into_iter()
+            .flatten()
         {
             *spelling = crate::sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
             );
+        }
+        if let Some(spelling) = member.fact.type_of.as_mut() {
+            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+                spelling, &names, &defaults, &arguments,
+            )
+            .into();
         }
     }
     Known::Yes(list)

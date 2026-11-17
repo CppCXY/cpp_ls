@@ -604,10 +604,10 @@ pub struct SymbolToFind {
 impl SymbolToFind {
     /// The symbol a resolved declaration names.
     pub fn of(fact: &crate::summary::DeclFact, declared_in: PathBuf) -> Self {
-        let name = fact.name.clone();
+        let name = fact.name.to_string();
         let last_segment = match name.rsplit_once("::") {
             Some((_, last)) => last.to_string(),
-            None => name.clone(),
+            None => name.to_string(),
         };
 
         SymbolToFind {

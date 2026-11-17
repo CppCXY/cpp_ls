@@ -190,7 +190,7 @@ fn ask(
             .declarations
             .iter()
             .filter(|fact| !fact.local && !fact.name.is_empty())
-            .map(|fact| fact.name.clone())
+            .map(|fact| fact.name.to_string())
             .collect();
         names.sort();
         names.dedup();

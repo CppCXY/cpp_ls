@@ -50,7 +50,7 @@ impl Check for FinalHierarchy {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type)
-            .map(|fact| (fact.name.clone(), fact.bases.clone(), fact.name_range))
+            .map(|fact| (fact.name.to_string(), fact.bases.clone(), fact.name_range))
             .collect();
 
         for (class, bases, name_range) in &classes {
@@ -91,7 +91,13 @@ impl Check for FinalHierarchy {
                     && fact.modifiers.contains(crate::DeclModifiers::OVERRIDE)
                     && !fact.is_a_destructor()
             })
-            .filter_map(|fact| Some((fact.scope.clone()?, fact.name.clone(), fact.name_range)))
+            .filter_map(|fact| {
+                Some((
+                    fact.scope.clone()?.to_string(),
+                    fact.name.to_string(),
+                    fact.name_range,
+                ))
+            })
             .collect();
 
         for (class, name, name_range) in &overriders {

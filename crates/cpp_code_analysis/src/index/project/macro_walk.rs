@@ -3106,7 +3106,7 @@ impl ProjectIndex {
                 Some((_, answer)) => *answer,
                 None => {
                     let answer = self.scope_names_a_class(&scope, visible_from);
-                    decided.push((scope.clone(), answer));
+                    decided.push((scope.to_string(), answer));
                     answer
                 }
             };
@@ -4309,7 +4309,7 @@ impl Collecting<'_> {
         // header mentions a few hundred names and each one paid the walk. Collecting every name in one walk answers
         // all of them from one pass, and the question "is this spelling a macro here" is the same question.
         if let Collecting::Names(out) = self {
-            out.insert(fact.name.clone());
+            out.insert(fact.name.to_string());
             return;
         }
 

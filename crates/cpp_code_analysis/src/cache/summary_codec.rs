@@ -22,6 +22,7 @@
 //! summary that uses every field rather than by inspecting bytes — a byte-level test would pin the encoding without
 //! saying anything about whether it is *correct*.
 
+use smol_str::SmolStr;
 use std::path::PathBuf;
 
 use cpp_parser::SymbolKind;
@@ -1179,6 +1180,7 @@ mod tests {
         MacroFact, MacroScopeReading, SummaryGuards,
     };
     use cpp_parser::{MacroBody, SourceRange};
+    use smol_str::SmolStr;
 
     fn range(start: usize, length: usize) -> SourceRange {
         SourceRange::new(start, length)
@@ -1209,7 +1211,7 @@ mod tests {
                             "meta=(DisplayName=\"W\", ToolTip=\"a, b\")".to_string(),
                         ],
                     }),
-                    name: "Widget".to_string(),
+                    name: "Widget".into(),
                     scope: None,
                     kind: DeclKind::Type,
                     modifiers: crate::DeclModifiers::default(),
@@ -1256,8 +1258,8 @@ mod tests {
                     enumerator: false,
                     frees: 0,
                     reflection: None,
-                    name: "make".to_string(),
-                    scope: Some("ns::Widget".to_string()),
+                    name: "make".into(),
+                    scope: Some("ns::Widget".into()),
                     kind: DeclKind::Function,
                     modifiers: crate::DeclModifiers::default(),
                     // A function declares no `type_of` — the name has no type — and its `returns` is what a *call*
@@ -1295,7 +1297,7 @@ mod tests {
                     enumerator: false,
                     frees: 0,
                     reflection: None,
-                    name: String::new(),
+                    name: SmolStr::default(),
                     scope: None,
                     kind: DeclKind::Other,
                     modifiers: crate::DeclModifiers::default(),
@@ -1648,10 +1650,12 @@ fn put_macro(out: &mut Vec<u8>, fact: &MacroFact) {
 /// Read one declaration fact — the reader half of [`put_declaration`].
 fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
     Ok(DeclFact {
-        name: reader.string()?,
-        scope: reader.optional_string()?,
+        // **The one field that is a SmolStr** — an identifier, and a short one costs no allocation. The bytes on disk
+        // are unchanged (a length-prefixed string either way), so an existing cache still decodes.
+        name: SmolStr::from(reader.string()?),
+        scope: reader.optional_string()?.map(SmolStr::from),
         kind: decl_kind_from(reader.u8()?)?,
-        type_of: reader.optional_string()?,
+        type_of: reader.optional_string()?.map(SmolStr::from),
         returns: reader.optional_string()?,
         returns_in_the_class: reader.optional_string()?,
         bases: {
@@ -1987,8 +1991,8 @@ fn a_cooked_reading_round_trips() {
         declarations: vec![
             DeclFact {
                 enumerator: false,
-                name: "Widget".to_string(),
-                scope: Some("std".to_string()),
+                name: "Widget".into(),
+                scope: Some("std".into()),
                 kind: DeclKind::Type,
                 type_of: None,
                 returns: None,
@@ -2020,10 +2024,10 @@ fn a_cooked_reading_round_trips() {
             },
             DeclFact {
                 enumerator: false,
-                name: "f".to_string(),
+                name: "f".into(),
                 scope: None,
                 kind: DeclKind::Function,
-                type_of: Some("int".to_string()),
+                type_of: Some("int".into()),
                 returns: Some("void".to_string()),
                 returns_in_the_class: None,
                 bases: Vec::new(),

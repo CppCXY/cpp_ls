@@ -106,11 +106,11 @@ pub fn symbols<F: cpp_code_analysis::FileProvider + Clone>(
         };
 
         symbols.push(WorkspaceSymbol {
-            name: symbol.fact.name.clone(),
+            name: symbol.fact.name.to_string(),
             kind: symbol_kind(symbol.fact.kind),
             tags: None,
             // What a client shows as the qualifier: the scope the declaration was written in.
-            container_name: symbol.fact.scope.clone(),
+            container_name: symbol.fact.scope.clone().map(|scope| scope.to_string()),
             location: OneOf::Left(Location {
                 uri,
                 range: lsp_types::Range::new(start, end),

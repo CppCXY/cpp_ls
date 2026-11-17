@@ -129,7 +129,7 @@ pub fn definitions_of<F: FileProvider + Clone>(
         .found
         .iter()
         .filter(|definition| definition.fact.kind == cpp_code_analysis::DeclKind::Function)
-        .map(|definition| (definition.fact.name.clone(), owner.clone()))
+        .map(|definition| (definition.fact.name.to_string(), owner.clone()))
         .collect();
     wanted.sort();
     wanted.dedup();
@@ -229,7 +229,7 @@ pub fn implementations_of<F: FileProvider + Clone>(
                 segment == name || owners.iter().any(|owner| owner == segment)
             });
             if derives_from_the_name {
-                derived.push(fact.name.clone());
+                derived.push(fact.name.to_string());
                 push_location(session, path, fact.name_range, &mut found);
             }
         }

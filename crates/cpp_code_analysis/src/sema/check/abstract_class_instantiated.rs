@@ -57,7 +57,7 @@ impl Check for AbstractClassInstantiated {
             .filter(|fact| fact.kind == crate::DeclKind::Variable)
             .filter_map(|fact| {
                 let class = a_class_name(fact.type_of.as_deref()?)?;
-                Some((class, fact.name.clone(), fact.name_range))
+                Some((class, fact.name.to_string(), fact.name_range))
             })
             .collect();
 

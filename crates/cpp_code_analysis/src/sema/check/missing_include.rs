@@ -84,7 +84,7 @@ impl Check for MissingInclude {
             .summary
             .declarations
             .iter()
-            .map(|fact| fact.name.clone())
+            .map(|fact| fact.name.to_string())
             .collect();
 
         // **And every name this file's own scopes *bind*** — which is a wider set than `summary.declarations`, and
@@ -301,7 +301,7 @@ fn is_ours(context: &CheckContext<'_>, file: &Path) -> bool {
 fn types_this_declaration_uses(fact: &crate::DeclFact) -> Vec<String> {
     let mut spellings: Vec<String> = Vec::new();
     if let Some(of) = &fact.type_of {
-        spellings.push(of.clone());
+        spellings.push(of.to_string());
     }
     if let Some(parameters) = &fact.parameter_list {
         spellings.extend(parameters.split(',').map(|one| one.trim().to_string()));

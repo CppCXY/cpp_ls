@@ -93,7 +93,7 @@ fn a_class_member_list_and_its_postings_agree() {
                 list.members.len(),
                 list.members
                     .iter()
-                    .map(|member| member.fact.name.clone())
+                    .map(|member| member.fact.name.to_string())
                     .collect::<Vec<_>>(),
             ),
             other => {
@@ -135,7 +135,12 @@ fn a_class_member_list_and_its_postings_agree() {
                 )
             })
             .take(4)
-            .map(|member| (member.fact.name.clone(), member.fact.parameter_list.clone()))
+            .map(|member| {
+                (
+                    member.fact.name.to_string(),
+                    member.fact.parameter_list.clone(),
+                )
+            })
             .collect();
             println!("  signatures: {samples:?}");
             assert!(
@@ -175,11 +180,8 @@ fn a_class_member_list_and_its_postings_agree() {
                 std::collections::BTreeMap::new();
             for (file, summary) in session.index().all_summaries() {
                 for fact in summary.declarations.iter().filter(|fact| fact.name == name) {
-                    let key = fact
-                        .scope
-                        .clone()
-                        .unwrap_or_else(|| "<file scope>".to_string());
-                    let entry = scopes.entry(key).or_insert((0, String::new()));
+                    let key = fact.scope.clone().unwrap_or_else(|| "<file scope>".into());
+                    let entry = scopes.entry(key.to_string()).or_insert((0, String::new()));
                     entry.0 += 1;
                     if entry.1.is_empty() {
                         entry.1 = file.display().to_string();

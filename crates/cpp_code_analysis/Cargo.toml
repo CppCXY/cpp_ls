@@ -44,6 +44,11 @@ rust-i18n.workspace = true
 redb.workspace = true
 zstd.workspace = true
 rustc-hash = "2"
+# **A summary's text is an identifier, not a document.** `SmolStr` keeps up to 22 bytes inline, so a declaration's name
+# costs no allocation at all — and a `FileSummary` is made of them: 486 783 declarations over 1 761 files on
+# `EmmyLuaCodeStyle`, 517 bytes each. See `tests/summary_cost_probe.rs`. The `serde` feature is on because a name
+# ends up in an LSP payload (`typeHierarchyItem.data`), and converting at each site is what the type should not need.
+smol_str = { version = "0.2", features = ["serde"] }
 
 [features]
 # **The performance probe's observation points.** Off by default and **not compiled** when off: the marks in the

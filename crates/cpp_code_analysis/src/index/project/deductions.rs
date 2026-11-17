@@ -550,7 +550,7 @@ fn the_member_a_lambdas_return_names(
         let member = listed.members.iter().find(|member| {
             member.fact.name == access.member && member.fact.kind == crate::DeclKind::Variable
         })?;
-        let written = member.fact.type_of.clone()?;
+        let written = member.fact.type_of.clone()?.to_string();
         match &agreed {
             None => agreed = Some(written),
             Some(previous) if *previous == written => {}
@@ -1272,7 +1272,7 @@ pub(crate) fn structured_binding_type(
             .find(|member| {
                 member.fact.name == wanted && member.fact.kind == crate::DeclKind::Variable
             })
-            .and_then(|member| member.fact.type_of.clone())
+            .and_then(|member| member.fact.type_of.clone().map(|target| target.to_string()))
     });
 
     Some(match element {

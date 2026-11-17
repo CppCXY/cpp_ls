@@ -30,7 +30,7 @@ impl Check for UseOverride {
             .declarations
             .iter()
             .filter(|fact| fact.kind == crate::DeclKind::Type && !fact.bases.is_empty())
-            .map(|fact| (fact.name.clone(), fact.bases.clone()))
+            .map(|fact| (fact.name.to_string(), fact.bases.clone()))
             .collect();
 
         // **One `members_of` per base, not one per member.** The first version asked for a base's members inside the member
@@ -55,7 +55,7 @@ impl Check for UseOverride {
                     fact.kind == crate::DeclKind::Function
                         && fact.scope.as_deref() == Some(class.as_str())
                 })
-                .map(|fact| (fact.name.clone(), fact.modifiers, fact.name_range))
+                .map(|fact| (fact.name.to_string(), fact.modifiers, fact.name_range))
                 .collect();
 
             for (name, modifiers, name_range) in members {
@@ -77,7 +77,7 @@ impl Check for UseOverride {
                             crate::Known::Yes(list) => list
                                 .members
                                 .iter()
-                                .map(|member| member.fact.name.clone())
+                                .map(|member| member.fact.name.to_string())
                                 .collect(),
                             _ => Vec::new(),
                         };

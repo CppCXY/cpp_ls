@@ -109,7 +109,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **A member, not a free function**: the definition of a free function *is* the function, and this edit exists
         // for the declaration/definition split a class makes.
         let class = fact.scope.clone()?;
-        let name = fact.name.clone();
+        let name = fact.name.to_string();
 
         // **Already defined somewhere** — the question is the whole point of the edit, and a second definition is
         // worse than no edit.
@@ -139,8 +139,8 @@ impl<F: FileProvider + Clone> Session<F> {
         });
         Some(MissingDefinition {
             qualified_name: format!("{class}::{name}"),
-            class,
-            name,
+            class: class.to_string(),
+            name: name.to_string(),
             returns: fact.returns.clone(),
             parameters,
             qualifiers,
@@ -181,7 +181,7 @@ impl<F: FileProvider + Clone> Session<F> {
             found.push(MissingDefinition {
                 qualified_name: format!("{class}::{}", member.fact.name),
                 class: class.to_string(),
-                name: member.fact.name.clone(),
+                name: member.fact.name.to_string(),
                 returns: member.fact.returns.clone(),
                 parameters,
                 qualifiers,

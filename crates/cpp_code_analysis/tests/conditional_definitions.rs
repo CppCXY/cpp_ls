@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
+use smol_str::SmolStr;
 
 /// The macro is defined in **both** branches, and the two bodies are told apart by the member they write.
 const HEADER: &str = r#"#pragma once
@@ -53,7 +54,7 @@ fn session_with(files: MemoryFiles) -> Session<MemoryFiles> {
 }
 
 /// What the index holds for a name, as `(scope, kind)`.
-fn facts_named(session: &Session<MemoryFiles>, name: &str) -> Vec<(Option<String>, String)> {
+fn facts_named(session: &Session<MemoryFiles>, name: &str) -> Vec<(Option<SmolStr>, String)> {
     session
         .index()
         .every_fact_named(name)

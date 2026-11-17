@@ -2398,7 +2398,7 @@ impl<F: FileProvider> SummaryStore<F> {
 
                 if used {
                     is_bodied.insert(&fact.name);
-                    bodied.push(fact.name.clone());
+                    bodied.push(fact.name.to_string());
                 }
             }
         }
@@ -2908,7 +2908,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 {
                     continue;
                 }
-                if !chosen.insert(fact.name.clone()) {
+                if !chosen.insert(fact.name.to_string()) {
                     continue;
                 }
                 let Some(range) = fact.body_range else {

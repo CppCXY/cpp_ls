@@ -453,7 +453,7 @@ pub(crate) fn a_header_is_read_in_the_same_translation_unit_every_time() {
             .cooked_declarations(Path::new("/p/h.h"))
             .expect("the header has a reading")
             .iter()
-            .map(|fact| fact.name.clone())
+            .map(|fact| fact.name.to_string())
             .collect();
         assert!(
             names.iter().any(|name| name == "value_b"),

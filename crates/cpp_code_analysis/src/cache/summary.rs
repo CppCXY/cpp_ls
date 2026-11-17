@@ -24,6 +24,7 @@
 //! resolved identity. Resolving is a query over this data plus the include graph, and it needs the *environment* the
 //! file was entered with — which is exactly what the summary's key records.
 
+use smol_str::SmolStr;
 use std::path::Path;
 
 use crate::Marked;
@@ -119,7 +120,12 @@ pub struct DeclFact {
     /// enum)". One name, two answers, and a theme that colours an enumerator with its enumeration.
     pub enumerator: bool,
     /// The name as written, without qualification: `Widget` in `ns::Widget`.
-    pub name: String,
+    ///
+    /// **A `SmolStr`, because this is an identifier and not a document.** Up to 22 bytes live inside the value, so an
+    /// identifier that short — nearly all of them — costs no allocation and no pointer chase. A summary is made of
+    /// these: measured on `EmmyLuaCodeStyle`, 486 783 declarations over 1 761 files at 517 bytes each, and the field was
+    /// a `String`, i.e. a 24-byte header plus one heap block per name.
+    pub name: SmolStr,
     /// The **qualified** name of the scope the declaration was written in, without the name itself: `ns::C` for a
     /// member of that class.
     ///
@@ -134,7 +140,7 @@ pub struct DeclFact {
     /// nothing while looking like an answer.
     ///
     /// [`ScopeId`]: crate::ScopeId
-    pub scope: Option<String>,
+    pub scope: Option<SmolStr>,
     /// Was this declaration written inside a **function body, a block or a lambda**?
     ///
     /// The other half of [`DeclFact::scope`], and the reason it is a field rather than something a consumer can
@@ -221,7 +227,7 @@ pub struct DeclFact {
     /// * **Declaration specifiers are stripped.** `static const Widget` records `Widget`, because a specifier is
     ///   not part of the type's name and a lookup by name is what this is for. `unsigned long` survives, because
     ///   there the words *are* the type.
-    pub type_of: Option<String>,
+    pub type_of: Option<SmolStr>,
     /// The type a **function** returns, as the file spells it.
     ///
     /// The other half of [`DeclFact::type_of`], and separate from it for the reason that field's documentation
@@ -698,7 +704,11 @@ pub fn outline_of(facts: &[DeclFact]) -> Vec<OutlineSymbol> {
             children: Vec::new(),
         };
 
-        let path = match fact.scope.as_ref().and_then(|scope| placed.get(scope)) {
+        let path = match fact
+            .scope
+            .as_ref()
+            .and_then(|scope| placed.get(scope.as_str()))
+        {
             Some(parent) => {
                 let parent = parent.clone();
                 let mut path = parent.clone();
@@ -738,8 +748,8 @@ impl DeclFact {
     pub fn qualified_name(&self) -> String {
         match &self.scope {
             Some(scope) if !self.name.is_empty() => format!("{scope}::{}", self.name),
-            Some(scope) => scope.clone(),
-            None => self.name.clone(),
+            Some(scope) => scope.to_string(),
+            None => self.name.to_string(),
         }
     }
 
@@ -1324,11 +1334,25 @@ pub const MAX_DEFINITION_BYTES: usize = 32 * 1024 * 1024;
 
 impl DeclFact {
     /// The bytes one declaration fact holds: the struct and the strings it owns.
+    ///
+    /// **A `SmolStr` is only counted when it is on the heap.** The struct is `size_of::<DeclFact>` whether a field is
+    /// inline or not, so a name of 22 bytes or fewer costs nothing here — which is the reason the field is a `SmolStr`
+    /// at all. Counting `len()` for those was how the first measurement of this change reported "no difference": the
+    /// estimate charged an allocation that no longer happens.
     pub fn heap_bytes(&self) -> usize {
         std::mem::size_of::<DeclFact>()
-            + self.name.len()
-            + self.scope.as_ref().map_or(0, String::len)
+            + on_the_heap(&self.name)
+            + self.scope.as_ref().map_or(0, on_the_heap)
             + self.in_namespace.as_ref().map_or(0, String::len)
+    }
+}
+
+/// What a `SmolStr` costs **outside the struct** — nothing while it is inline, its length when it is not.
+fn on_the_heap(text: &SmolStr) -> usize {
+    if text.is_heap_allocated() {
+        text.len()
+    } else {
+        0
     }
 }
 

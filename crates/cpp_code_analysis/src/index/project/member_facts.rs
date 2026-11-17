@@ -877,6 +877,7 @@ pub(crate) fn alias_target_of(
             (declaration.fact.kind == crate::DeclKind::Type)
                 .then(|| declaration.fact.type_of.clone())
                 .flatten()
+                .map(|target| target.to_string())
                 .map(|target| {
                     (
                         crate::sema::types::substituted_spelling(
@@ -884,7 +885,11 @@ pub(crate) fn alias_target_of(
                             &declaration.fact.parameters,
                             &written_arguments,
                         ),
-                        declaration.fact.scope.clone(),
+                        declaration
+                            .fact
+                            .scope
+                            .clone()
+                            .map(|scope| scope.to_string()),
                     )
                 })
         }),

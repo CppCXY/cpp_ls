@@ -493,7 +493,7 @@ pub fn name_completions_at(
                 continue;
             };
             let mut declaration = template.clone();
-            declaration.name = name.to_string();
+            declaration.name = name.into();
             declaration.kind = crate::DeclKind::MacroLike;
             // Nothing of the template's *declaration* survives: a macro has no type, no return type, no
             // parameters of its own and no bases, and a `#define` is never local.
@@ -1451,5 +1451,5 @@ pub(crate) fn sort_and_hide(names: &mut Vec<OfferedName>) {
     });
 
     let mut seen: HashSet<String> = HashSet::new();
-    names.retain(|name| seen.insert(name.fact.name.clone()));
+    names.retain(|name| seen.insert(name.fact.name.to_string()));
 }

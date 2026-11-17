@@ -231,14 +231,14 @@ impl CompletionItem {
             (!fact.name.is_empty()).then(|| (file.to_path_buf(), fact.name_range.start_offset));
 
         CompletionItem {
-            label: fact.name.clone(),
+            label: fact.name.to_string(),
             kind: kind_of(fact.kind),
             insert: match (&fact.kind, &fact.parameter_list) {
                 // **A function-like macro is inserted with its parenthesis** — the only hint a completion item carries about how a
                 // name is used: `MAX(` says it takes arguments, and `MAX` alone does not. Measured before this: the item for
                 // `#define MAX(a, b)` read `insert: "MAX"`, `kind: Macro`, and nothing else.
                 (crate::DeclKind::MacroLike, Some(_)) => format!("{}(", fact.name),
-                _ => fact.name.clone(),
+                _ => fact.name.to_string(),
             },
             snippet: false,
             detail: detail_of(fact),
@@ -349,7 +349,7 @@ pub fn detail_of(fact: &DeclFact) -> Option<String> {
             (None, Some(parameters)) => Some(parameters.clone()),
             (None, None) => None,
         },
-        DeclKind::Variable => fact.type_of.clone(),
+        DeclKind::Variable => fact.type_of.clone().map(|ty| ty.to_string()),
         DeclKind::Type if !fact.bases.is_empty() => Some(format!(": {}", fact.bases.join(", "))),
         _ => None,
     }
@@ -1611,7 +1611,9 @@ fn names(
                 continue;
             };
             for fact in &summary.declarations {
-                if fact.kind != DeclKind::Type || labels.contains(&fact.name) {
+                if fact.kind != DeclKind::Type
+                    || labels.iter().any(|label| label == fact.name.as_str())
+                {
                     continue;
                 }
                 let matched = matching::quality(&fact.name, &listed_prefix);
@@ -2286,8 +2288,8 @@ mod tests {
             enumerator: false,
             frees: 0,
             reflection: None,
-            name: "format".to_string(),
-            scope: Some("std".to_string()),
+            name: "format".into(),
+            scope: Some("std".into()),
             local: false,
             in_namespace: None,
             kind: DeclKind::Function,

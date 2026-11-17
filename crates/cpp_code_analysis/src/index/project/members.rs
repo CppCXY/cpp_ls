@@ -334,7 +334,7 @@ pub(crate) fn a_namespace_aliass_target(
     if found.fact.kind != crate::DeclKind::Namespace {
         return None;
     }
-    let written = found.fact.type_of.clone()?;
+    let written = found.fact.type_of.clone()?.to_string();
     if written.contains("::") || written.is_empty() {
         return Some(written);
     }
@@ -611,7 +611,7 @@ pub(crate) fn the_pointee_of_a_handle(
         &bindings,
         finished,
         file,
-        vec![fact.name.clone()],
+        vec![fact.name.to_string()],
     );
     // **A name that no class declares is not a pointee.** `std::shared_ptr`'s `element_type` is written
     // `typename __shared_ptr<_Tp>::element_type`, and a walk that cannot finish it answers the spelling it started with —
@@ -1570,7 +1570,7 @@ pub(crate) fn members_of_inner(
             }
         }
 
-        found.retain(|member| !hidden.contains(&member.fact.name));
+        found.retain(|member| !hidden.contains(member.fact.name.as_str()));
         found.sort_by(|one, other| one.fact.name.cmp(&other.fact.name));
         mark_ambiguity(&mut found);
         hidden.extend(recorded_names(&found));
@@ -2201,7 +2201,7 @@ pub(crate) fn a_class_nested_in_another(
 pub(crate) fn recorded_names(members: &[ProjectMember]) -> impl Iterator<Item = String> + '_ {
     members
         .iter()
-        .map(|member| member.fact.name.clone())
+        .map(|member| member.fact.name.to_string())
         .filter(|name| !name.is_empty())
 }
 
@@ -2223,7 +2223,7 @@ pub(crate) fn mark_ambiguity(members: &mut [ProjectMember]) {
 
     for member in members.iter().filter(|member| !member.fact.name.is_empty()) {
         declaring
-            .entry(member.fact.name.clone())
+            .entry(member.fact.name.to_string())
             .or_default()
             .insert(member.declared_in.clone());
     }
@@ -2231,7 +2231,7 @@ pub(crate) fn mark_ambiguity(members: &mut [ProjectMember]) {
     for member in members.iter_mut() {
         member.ambiguous = !member.fact.name.is_empty()
             && declaring
-                .get(&member.fact.name)
+                .get(member.fact.name.as_str())
                 .is_some_and(|classes| classes.len() > 1);
     }
 }

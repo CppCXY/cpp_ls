@@ -378,7 +378,7 @@ fn the_c_corpus_parses_and_its_members_resolve() {
                 session
                     .macro_definition(&view, offset)
                     .value()
-                    .map(|found| found.fact.name.clone())
+                    .map(|found| found.fact.name.to_string())
             });
             let goto = view
                 .reading_offset_of(file_offset)

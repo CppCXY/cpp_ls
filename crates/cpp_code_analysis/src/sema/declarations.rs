@@ -28,6 +28,7 @@
 //! directives, keeping a stack of the regions currently open. The result is the same answer for a fraction of
 //! the work, and it is the reason this module rather than `summary` owns the walk.
 
+use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
 
 use crate::preprocess::FilePreprocessing;
@@ -3912,14 +3913,14 @@ fn fact_for(
         // **The annotation is filled after the facts exist** — see `fill_the_reflection`, which reads the file text once
         // for the whole file rather than once per declaration.
         reflection: None,
-        name,
-        scope,
+        name: name.into(),
+        scope: scope.map(SmolStr::from),
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
         in_namespace,
-        type_of,
+        type_of: type_of.map(SmolStr::from),
         returns,
         returns_in_the_class,
         split_by_a_directive,
@@ -4744,7 +4745,7 @@ impl<'a> DeclarationFacts<'a> {
             if let Some(&at) = by_offset.get(&binding.name_range.start_offset) {
                 let existing = &mut facts[at];
                 if existing.scope.is_none() {
-                    existing.scope = Some(scope);
+                    existing.scope = Some(scope.into());
                 }
                 // **And the range is the declaration's, not the declarator's.** The walker's binding covers the name
                 // and its parameter list — `&LuaLexer::GetErrors()` — while "is this a definition" is asked of the
@@ -6299,7 +6300,7 @@ public:
             .iter()
             .map(|fact| match &fact.scope {
                 Some(scope) => format!("{scope}::{}", fact.name),
-                None => fact.name.clone(),
+                None => fact.name.to_string(),
             })
             .collect();
         names.sort();
@@ -6522,7 +6523,7 @@ void f(int value);
         facts
             .iter()
             .filter(|fact| !fact.clean)
-            .map(|fact| fact.name.clone())
+            .map(|fact| fact.name.to_string())
             .collect()
     }
 

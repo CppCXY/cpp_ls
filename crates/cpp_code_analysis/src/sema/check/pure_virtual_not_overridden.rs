@@ -81,8 +81,8 @@ impl Check for PureVirtualNotOverridden {
                         && other.depth < member.depth
                         && !other.fact.modifiers.contains(crate::DeclModifiers::PURE)
                 });
-                if !overridden && !missing.contains(&member.fact.name) {
-                    missing.push(member.fact.name.clone());
+                if !overridden && !missing.iter().any(|name| name == member.fact.name.as_str()) {
+                    missing.push(member.fact.name.to_string());
                 }
             }
             if missing.is_empty() {

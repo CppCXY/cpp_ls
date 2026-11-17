@@ -106,7 +106,7 @@ int Report::joined(int separator) const {
             .declarations
             .iter()
             .filter(|fact| fact.name.as_str() == "joined")
-            .map(|fact| fact.scope.clone())
+            .map(|fact| fact.scope.clone().map(|scope| scope.to_string()))
             .collect();
         assert!(
             scopes

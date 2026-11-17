@@ -1425,7 +1425,7 @@ pub(crate) fn type_of_expression_inner(
                 // **The chain is what has already been *resolved*, not what is about to be asked.** Pushing the member
                 // here made the walk refuse its first question — `asked.contains("type")` — and the answer came back as
                 // the member's own name (measured: `Some("type")` where the file means `double`).
-                let chain = vec![fact.name.clone()];
+                let chain = vec![fact.name.to_string()];
                 // **The bindings of the class the member was found in**, not of the class the *use* names: the walk is
                 // about to read `enable_if<…, double>::type`, whose declaration says `_Ty`, and `_Ty` is `double` here
                 // because that class was applied to `double`. Passing the object's bindings (`Widget`'s, which pair
@@ -1475,7 +1475,7 @@ pub(crate) fn type_of_expression_inner(
                 &bindings,
                 finished,
                 file,
-                vec![fact.name.clone()],
+                vec![fact.name.to_string()],
             ));
         }
 
@@ -1491,7 +1491,7 @@ pub(crate) fn type_of_expression_inner(
                 &bindings,
                 bindings.applied_to(&returns),
                 file,
-                vec![fact.name.clone()],
+                vec![fact.name.to_string()],
             ));
         }
 
@@ -1534,7 +1534,7 @@ pub(crate) fn agreeing_type(
         // is what makes `std::vector` and its partial specialisations one answer rather than thirteen.
         let type_of = match found.fact.kind {
             crate::DeclKind::Type => found.fact.qualified_name(),
-            _ => found.fact.type_of.clone()?,
+            _ => found.fact.type_of.clone()?.to_string(),
         };
 
         match &agreeing {
@@ -2100,7 +2100,7 @@ fn deduced_returns_of_the_member(
                 }
             }
             let mut borrowed = borrowed?;
-            borrowed.name = crate::symbol::Name::identifier(&fact.name);
+            borrowed.name = crate::symbol::Name::identifier(fact.name.as_str());
             borrowed.kind = crate::BindingKind::Function;
             borrowed.range = fact.range;
             borrowed.name_range = fact.name_range;
@@ -2665,7 +2665,7 @@ impl NamedDeclaration {
                 // file can be read again. So the body is typed a second time, **with the substitutions**, and that
                 // is what lets `if constexpr` pick its branch: `_It + 0` becomes `int* + 0` and the two branches of
                 // `_Get_unwrapped` finally agree.
-                let name = fact.name.clone();
+                let name = fact.name.to_string();
                 let offset = fact.name_range.start_offset;
                 let returns = match what_a_call_has_in(fact) {
                     Some(returns) => returns,
@@ -2783,7 +2783,7 @@ impl NamedDeclaration {
                     bindings,
                     started,
                     file.clone(),
-                    vec![fact.name.clone()],
+                    vec![fact.name.to_string()],
                 );
 
                 Some(finished)

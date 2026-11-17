@@ -38,7 +38,11 @@ impl Check for MacroParentheses {
                 context
                     .written
                     .get(range.start_offset..range.end_offset())?;
-                Some((fact.name.clone(), range.start_offset, range.end_offset()))
+                Some((
+                    fact.name.to_string(),
+                    range.start_offset,
+                    range.end_offset(),
+                ))
             })
             .collect();
         for (name, start, end) in bodies {

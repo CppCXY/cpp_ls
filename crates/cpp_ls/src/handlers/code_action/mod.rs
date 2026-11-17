@@ -437,8 +437,8 @@ fn the_class_at_the_cursor<F: FileProvider + Clone>(
         .iter()
         .find(|fact| fact.name_range.start_offset == in_the_file)?;
     let class = match fact.kind {
-        cpp_code_analysis::DeclKind::Type => fact.name.clone(),
-        cpp_code_analysis::DeclKind::Function => fact.scope.clone()?,
+        cpp_code_analysis::DeclKind::Type => fact.name.to_string(),
+        cpp_code_analysis::DeclKind::Function => fact.scope.clone()?.to_string(),
         _ => return None,
     };
     let is_a_template = summary.declarations.iter().any(|declared| {

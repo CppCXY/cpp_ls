@@ -4,6 +4,7 @@
 //! resolved class, so each name here is pattern-matched against the class it may mean.
 
 use super::*;
+use smol_str::SmolStr;
 
 pub(crate) fn direct_member(
     shapes: &crate::sema::declarations::ShapeTable,
@@ -294,11 +295,11 @@ pub(crate) fn fact_from_binding_with(
         // was invisible to a member list — and a completion after `.`, a hover and every member query with it.
         //
         // The name alone is a fact about the declaration and changes no inference.
-        name: binding.name.text(),
+        name: binding.name.text().into(),
         // `None` for an empty spelling, which is what a caller listing the names of a **body** passes: a local has
         // no qualified scope at all, and `Some("")` would be a scope that matches nothing while looking like one.
         // Every other caller passes the class or namespace the binding is in.
-        scope: (!class.is_empty()).then(|| class.to_string()),
+        scope: (!class.is_empty()).then(|| SmolStr::from(class)),
         // Known, and always: this path is handed the class a member belongs to, so there is no scope the file's text
         // could have left open. See [`DeclFact::scope_unknown`].
         // Answered rather than defaulted, and the answer is always `false`: this path exists for **members**, and a
@@ -324,17 +325,19 @@ pub(crate) fn fact_from_binding_with(
         // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
         // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
         reflection: None,
-        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding).or_else(|| {
-            // **A member whose type is an unnamed class body**, named the way the index names it — see
-            // [crate::sema::declarations::an_unnamed_class_body_named]. The two paths that build a fact must
-            // agree, and this one is what a member query against the open file uses.
-            crate::sema::declarations::an_unnamed_class_body_named(
-                Some(class),
-                &binding.name.text(),
-                shapes,
-                binding,
-            )
-        }),
+        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding)
+            .or_else(|| {
+                // **A member whose type is an unnamed class body**, named the way the index names it — see
+                // [crate::sema::declarations::an_unnamed_class_body_named]. The two paths that build a fact must
+                // agree, and this one is what a member query against the open file uses.
+                crate::sema::declarations::an_unnamed_class_body_named(
+                    Some(class),
+                    &binding.name.text(),
+                    shapes,
+                    binding,
+                )
+            })
+            .map(SmolStr::from),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
         // **The deduction, when the file wrote no return type.** `declared_returns_of_in` answers only what is written, and

@@ -107,10 +107,10 @@ impl Check for ContractPlacement {
             .filter(|fact| fact.kind == crate::DeclKind::Function)
             .map(|fact| {
                 (
-                    fact.name.clone(),
+                    fact.name.to_string(),
                     fact.modifiers,
                     fact.name_range,
-                    fact.scope.clone(),
+                    fact.scope.clone().map(|scope| scope.to_string()),
                 )
             })
             .collect();

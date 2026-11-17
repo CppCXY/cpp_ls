@@ -395,7 +395,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             }
             let Some(type_of) = fact.type_of.as_deref() else {
-                unknown.push(fact.name.clone());
+                unknown.push(fact.name.to_string());
                 continue;
             };
             // **A bitfield has no width in a fact**, and a layout computed without it puts the next member at the
@@ -405,15 +405,15 @@ impl<F: FileProvider + Clone> Session<F> {
             if as_written.as_ref().is_some_and(|written| {
                 written
                     .members
-                    .get(&fact.name)
+                    .get(fact.name.as_str())
                     .is_some_and(|at| Self::a_bitfield(&written.text, *at))
             }) {
-                unknown.push(fact.name.clone());
+                unknown.push(fact.name.to_string());
                 continue;
             }
             match self.the_size_of_a_type_in(view, type_of, depth, Some(&instantiation)) {
-                Some((size, alignment)) => sized.push((fact.name.clone(), size, alignment)),
-                None => unknown.push(fact.name.clone()),
+                Some((size, alignment)) => sized.push((fact.name.to_string(), size, alignment)),
+                None => unknown.push(fact.name.to_string()),
             }
         }
         // **A base class takes bytes too, and this layer places none of them.** An *empty* base costs nothing — the
@@ -493,7 +493,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .filter(|fact| {
                 fact.kind == crate::DeclKind::Variable && fact.scope.as_deref() == Some(&qualified)
             })
-            .map(|fact| (fact.name.clone(), fact.name_range.end_offset()))
+            .map(|fact| (fact.name.to_string(), fact.name_range.end_offset()))
             .collect();
         Some(TheClassAsWritten {
             text: text.to_string(),
@@ -774,19 +774,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // The synthetic members point at the class's own declaration: that is where the macro that generates them is
         // written, and it is the honest place for a hover to open.
         let class_fact = declared.fact.clone();
-        let class_name = class_fact.name.clone();
+        let class_name = class_fact.name.to_string();
         for (name, type_of) in crate::project::ue::generated_members(&class_name, &class_fact.bases)
         {
             let mut fact = class_fact.clone();
-            fact.name = name.to_string();
+            fact.name = name.into();
             fact.kind = crate::DeclKind::Type;
-            fact.type_of = Some(type_of);
+            fact.type_of = Some(type_of.into());
             // A generated member is not a member of a **namespace**: it belongs to the class it was generated for.
-            fact.scope = Some(class_name.clone());
+            fact.scope = Some(class_name.as_str().into());
             list.members.push(crate::index::ProjectMember {
                 file: declared.file.clone(),
                 fact,
-                declared_in: class_name.clone(),
+                declared_in: class_name.to_string(),
                 depth: 0,
                 ambiguous: false,
             });

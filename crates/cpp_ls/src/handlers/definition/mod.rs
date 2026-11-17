@@ -359,8 +359,12 @@ fn definitions_where_there_are_bodies<F: cpp_code_analysis::FileProvider + Clone
         .map(|(declaration, _)| {
             (
                 declaration.file.clone(),
-                declaration.fact.scope.clone(),
-                declaration.fact.name.clone(),
+                declaration
+                    .fact
+                    .scope
+                    .clone()
+                    .map(|scope| scope.to_string()),
+                declaration.fact.name.to_string(),
             )
         })
         .collect();
@@ -375,8 +379,12 @@ fn definitions_where_there_are_bodies<F: cpp_code_analysis::FileProvider + Clone
         .filter(|(declaration, definition)| {
             let group = (
                 declaration.file.clone(),
-                declaration.fact.scope.clone(),
-                declaration.fact.name.clone(),
+                declaration
+                    .fact
+                    .scope
+                    .clone()
+                    .map(|scope| scope.to_string()),
+                declaration.fact.name.to_string(),
             );
             !groups_with_a_body.contains(&group) || *definition
         })

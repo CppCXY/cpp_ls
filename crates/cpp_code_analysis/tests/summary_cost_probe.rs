@@ -125,6 +125,28 @@ fn what_a_summary_costs_and_why() {
         total / total_declarations.max(1),
     );
 
+    // **What the number is made of.** `heap_bytes` charges the struct once per fact and then the strings; splitting
+    // them says whether the cost is the fact or what it owns — the question a refactor of either has to answer.
+    let struct_bytes = std::mem::size_of::<cpp_code_analysis::DeclFact>();
+    let mut inline_names = 0usize;
+    let mut heap_names = 0usize;
+    for summary in session.index().summaries() {
+        for fact in &summary.declarations {
+            if fact.name.is_heap_allocated() {
+                heap_names += 1;
+            } else {
+                inline_names += 1;
+            }
+        }
+    }
+    println!(
+        "\n# the fact itself\nsize_of::<DeclFact>() = {struct_bytes} bytes ({}, {:.0}% of the total), the structs alone \
+         = {} MB\nnames: {inline_names} inline (no allocation), {heap_names} on the heap",
+        struct_bytes * total_declarations / (1024 * 1024),
+        (struct_bytes * total_declarations) as f64 * 100.0 / total as f64,
+        struct_bytes * total_declarations / (1024 * 1024),
+    );
+
     files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let top: usize = std::env::var("CPPLS_PROBE_TOP")
         .ok()

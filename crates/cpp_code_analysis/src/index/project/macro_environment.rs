@@ -3,6 +3,8 @@
 //!
 //! Moved here from `project/mod.rs` without a change.
 
+use smol_str::SmolStr;
+
 use super::*;
 
 /// Every fact about one macro name that a file can reach — the answer to "what is this name here", before the
@@ -285,7 +287,7 @@ impl IndexedKind {
     pub(crate) fn of(found: &DeclFact) -> IndexedKind {
         IndexedKind {
             kind: found.kind,
-            scope: found.scope.clone().map(Box::from),
+            scope: found.scope.clone().map(|scope| Box::from(scope.as_str())),
             // **The fact's own flag**, not a derivation from what it happens to record: a variable with no written
             // type and a scope used to count as an enumerator, which is wrong at both ends — an anonymous enum's
             // member has *no* scope and so was not one, and an untyped scoped variable was one wrongly. See
@@ -465,12 +467,8 @@ impl ProjectDefinition {
                 // caller that wants `frees` asks the fact, which is the same rule `in_namespace` below follows.
                 frees: 0,
                 reflection: None,
-                name: binding
-                    .name
-                    .identifier_text()
-                    .unwrap_or_default()
-                    .to_string(),
-                scope,
+                name: binding.name.identifier_text().unwrap_or_default().into(),
+                scope: scope.map(SmolStr::from),
                 local,
                 // `None` for the same reason `type_of` below is: this answer is a **place to jump to**, built
                 // from a binding, and the namespaces around a body are a fact about the file's text that lives in

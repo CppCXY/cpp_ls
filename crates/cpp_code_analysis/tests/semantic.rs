@@ -1657,7 +1657,7 @@ fn a_qualified_definition_is_a_fact() {
     let names: Vec<(String, String)> = summary
         .declarations
         .iter()
-        .map(|fact| (fact.name.clone(), fact.qualified_name()))
+        .map(|fact| (fact.name.to_string(), fact.qualified_name()))
         .collect();
     println!("facts: {names:?}");
     assert!(
