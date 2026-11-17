@@ -666,6 +666,72 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// **The walk's own answer, for a differential test** — a cold walk, not a served rendering.
+    ///
+    /// `read_the_unit` and `gather_a_unit_read` both answer from a rendering an earlier call cooked when they can, and
+    /// a served rendering carries no timeline; `cache::env::differential` needs the timeline, so this walks. The pair
+    /// it uses is the one `read_the_program` uses — `closure_with_text_from` and `TranslationUnit::walk` — with the
+    /// contribution sharing **off**, because a shared contribution is replayed at a position recorded in a different
+    /// program and a preprocessor's positions are not portable between programs.
+    #[cfg(test)]
+    pub(crate) fn walked_bindings(
+        &mut self,
+        root: &Path,
+    ) -> Option<Vec<(std::path::PathBuf, Vec<(String, Option<bool>, String)>)>> {
+        let summary = self.store.index().summary(root)?;
+        let root_path = summary.path.clone();
+        let root_key = queue_key(&root_path);
+        let (closure, by_key) = self.closure_with_text_from(&root_path, Some(summary));
+        let mut definitions = self.held_definitions();
+        let index = self.store.index();
+        let unit = crate::TranslationUnit::walk(
+            summary,
+            |wanted| {
+                let (held, text) = closure.get(*by_key.get(&queue_key(wanted))?)?;
+                let summary = if queue_key(held) == root_key {
+                    summary
+                } else {
+                    index.summary(held)?
+                };
+                Some((summary, text.as_str()))
+            },
+            index.macros(),
+            &mut definitions,
+            false,
+            self.store.contributions(),
+        );
+        let mut found = Vec::new();
+        for file in unit.files() {
+            let Some(view) = unit.environment_of(file) else {
+                continue;
+            };
+            // **Both channels**, because a view's answer to "is this a macro" is the union: `for_each_definition`
+            // is the definitions it contributes, and `for_each_body_in_force` is the bodies only the in-force channel
+            // has (an `_STD_BEGIN`-shaped `#define` inside a conditional region). A consumer reading the environment
+            // reads both, so Gate 0 compares both.
+            let mut bindings: Vec<(String, Option<bool>, String)> = Vec::new();
+            cpp_parser::MacroFacts::for_each_definition(&view, &mut |facts| {
+                bindings.push((
+                    facts.name.to_string(),
+                    Some(facts.function_like),
+                    facts
+                        .body_text
+                        .map(|text| text.to_string())
+                        .unwrap_or_default(),
+                ));
+            });
+            let definitions = bindings.len();
+            cpp_parser::MacroFacts::for_each_body_in_force(&view, &mut |facts| {
+                let name = facts.name.to_string();
+                if bindings[..definitions].iter().any(|known| known.0 == name) {
+                    return;
+                }
+                bindings.push((name, facts.function_like, facts.body.to_string()));
+            });
+            found.push((file.to_path_buf(), bindings));
+        }
+        Some(found)
+    }
     /// The macro definition cache, with the lock taken — same poison rule, see [`Session::held_units`].
     ///
     /// It is behind a lock for the same reason the units table is: this cache was what made a unit walk need

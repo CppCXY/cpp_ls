@@ -40,6 +40,8 @@ use crate::preprocess::condition::{Lookup, MacroValues};
 use cpp_parser::SourceRange;
 
 mod compose;
+#[cfg(test)]
+mod differential;
 mod skeleton;
 #[cfg(test)]
 mod tests;

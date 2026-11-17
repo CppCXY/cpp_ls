@@ -245,7 +245,28 @@ Two things the implementation found that the design note had not:
 * **`body_range` starts at the byte after the name**, so a replacement list slices with a leading space; trimmed,
   because two spellings of one definition must be one environment.
 
-**Gate 0 is not yet proven.** The harness needs the *walk's* answer per file, and the two obvious routes do not give it:
+**Gate 0, first real run (EmmyLuaCodeStyle, one root, 2026-11-18).** The fixture gate is green: 3 files, every name
+compared, 0 unknown guards, 0 mismatches, on every test run. The probe is not:
+
+```text
+CodeFormat.cpp: 1025 files walked, 907 727 names compared, 209 626 mismatches, 2 093 unknown guards
+                only walk 196 960 | only fold 8 773 | body 3 862 | kind 0 | missing files 31
+```
+
+The examples are all of one shape — `__cpp_lib_*`, `__glibcxx_want_*`, `_GLIBCXX_*_H` — feature-test macros defined
+inside `#if` regions whose condition needs a **value** (`__cplusplus > 201703L`, `_GLIBCXX_USE_CXX11_ABI`,
+`__has_include(...)`). The fold answers those `Unknown`, applies nothing, and loses the whole branch's names: 2 093
+undecided regions are enough to account for ~197 000 names if each gates ~90 definitions, which is what libstdc++'s
+feature-test headers do. So the dominant term is the known gap (§8: a `Definition` answers `DefinedWithoutAValue`),
+not a disagreement about a decidable rule. `missing files 31` and `only fold 8 773` are the second-order terms and
+need their own attribution (per-file unknowns, and the fold's own-name exclusion).
+
+The next step is therefore the value answer, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
+`MacroFact` (`value` is the single integer literal the summary already stores; `body_range` gives the rest) and answer
+it from `Over`. Then re-run this probe: `unknown guards` should fall, and the mismatches with it. Only when the only
+remaining mismatches are attributed and understood is S1 (deleting the walk from the cook) safe.
+
+**Earlier note, kept for the record:** Gate 0 was not yet proven. The harness needs the *walk's* answer per file, and the two obvious routes do not give it:
 `Session::read_the_unit` may be served from a stored rendering (no timeline, `TranslationUnit::units` empty), and
 `gather_a_unit_read` answers from the cache for the same reason. The next step is a test-only accessor that forces a
 cold walk — `closure_with_text_from` + `TranslationUnit::walk`, the pair `read_the_program` itself uses — and compares
