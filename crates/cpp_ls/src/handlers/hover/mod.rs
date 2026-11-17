@@ -1794,12 +1794,21 @@ fn declaration_markdown(
     //
     // Added to the *fact* rather than to the printed line, so the code block and the sentence beside it — "a variable of
     // type `auto&`" is the same fact read once more — cannot disagree.
+    //
+    // **And only when there is a type to qualify.** An anonymous class body's spelling is the empty string — the type
+    // layer's way of saying "no name to write" (see `types::the_specifiers_of_a_declaration`) — and prefixing a
+    // qualifier to it made `const ` out of nothing, which the type writer then read as `const void`: measured on
+    // `static const struct { unsigned char left; unsigned char right; } priority[]`, whose card said
+    // "static const const void priority" while the fact's own `type_of` was empty.
     if matches!(fact.kind, DeclKind::Variable)
         && let Some(qualifiers) = Some(cpp_code_analysis::sema::render::the_qualifiers_of_node(
             node.as_ref(),
         ))
         .filter(|qualifiers| !qualifiers.is_empty())
-        && let Some(written) = fact.type_of.clone()
+        && let Some(written) = fact
+            .type_of
+            .clone()
+            .filter(|written| !written.trim().is_empty())
         && !written.starts_with("const")
         && !written.starts_with("volatile")
     {
