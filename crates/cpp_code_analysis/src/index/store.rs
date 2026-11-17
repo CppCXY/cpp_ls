@@ -1720,8 +1720,7 @@ impl<F: FileProvider> SummaryStore<F> {
         const THE_WIDEST_CLOSURE: usize = 8192;
         /// A domain separator, so that "unresolved `x.h`" cannot collide with a path that happens to hash the same.
         const UNRESOLVED_INCLUDE: u64 = 0x8f3a_2c11_5e6b_9d07;
-        /// The same, for a file inside the closure that the index does not hold.
-        const NOT_IN_THE_INDEX: u64 = 0x1d57_9b40_c3e8_2a6f;
+        // The constant that stood here is gone: an absent summary answers `None`, not a value that collides.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
         let mut parts: Vec<u64> = Vec::new();
@@ -1738,8 +1737,11 @@ impl<F: FileProvider> SummaryStore<F> {
             // `C:\…`. Looked up raw, every closure past the first file was "not indexed" and every fingerprint came
             // back empty.
             let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
-                parts.push(fnv1a64(key.as_bytes()) ^ NOT_IN_THE_INDEX);
-                continue;
+                // **A member the index cannot describe has no fingerprint at all.** It used to contribute a
+                // constant, which made two different texts of the same unindexed header produce the *same* key —
+                // and that header is exactly the file whose text just changed. A miss is correct; a collision is
+                // a record served for text it was not written from.
+                return None;
             };
             let mut bytes = Vec::with_capacity(16 + key.len());
             bytes.extend_from_slice(key.as_bytes());

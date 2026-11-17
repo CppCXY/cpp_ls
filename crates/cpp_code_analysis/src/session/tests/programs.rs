@@ -1263,3 +1263,44 @@ pub(crate) fn a_buffer_is_the_text_the_analysis_reads() {
         Some("struct Widget { int fresh; };\n")
     );
 }
+
+/// **A closure the index cannot fully describe has no record key.** A member with no summary used to contribute one
+/// constant to `the_closure_fingerprint`, so two different texts of the same unindexed header produced the **same** key
+/// — and that header is exactly the file whose text just changed, which made a record written under the old text a hit
+/// for the new one. The key is `None` now, which is a miss rather than a collision.
+#[test]
+pub(crate) fn a_closure_with_an_unindexed_member_has_no_record_key() {
+    let files = MemoryFiles::new()
+        .with_file("/p/ns.h", "#define NS one\n")
+        .with_file("/p/api.h", "#include \"ns.h\"\nNS\n");
+    let fixture = Memory::new("a-closure-with-an-unindexed-member", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/api.h", "#include \"ns.h\"\nNS\n");
+    session.index_everything();
+    assert!(
+        session
+            .store
+            .the_closure_fingerprint(Path::new("/p/api.h"))
+            .is_some(),
+        "every member of the closure has a summary"
+    );
+
+    // The header is edited: its summary is dropped and queued, and `api.h`'s text has not changed at all.
+    session.did_change("/p/ns.h", "#define NS two\n");
+    assert!(
+        session
+            .store
+            .the_closure_fingerprint(Path::new("/p/api.h"))
+            .is_none(),
+        "a member with no summary means the closure has no key, not a key that collides with any other text"
+    );
+
+    session.index_everything();
+    assert!(
+        session
+            .store
+            .the_closure_fingerprint(Path::new("/p/api.h"))
+            .is_some(),
+        "and the key is back once the index has caught up"
+    );
+}

@@ -714,6 +714,22 @@ So the two remaining items are one change again, in the direction the design not
 environment, key the record by it (which needs the environment memo, because the key and the render share it), and the
 budget then has a sound key to stand on. The budget itself is reverted again and stays out until that lands.
 
+**Thirty-first run: the record key stops colliding on an absent summary.** `the_closure_fingerprint` now answers `None`
+when any member of the closure has no summary, instead of folding in the `NOT_IN_THE_INDEX` constant. The constant made
+the key blind exactly where it had to be sharp — a header edited but not yet indexed is the file whose text changed, and
+every version of it hashed the same. `None` is a miss: the cook composes, the record is not written or served, and the
+next ready closure stores a key that names what it was built from.
+
+A regression test pins the three states (`a_closure_with_an_unindexed_member_has_no_record_key`): key present when the
+closure is indexed, **absent** the moment the header's summary is dropped, present again after the index catches up.
+Measured after the change: `LuaCheck.cpp` cooks in 0.4 / 0.3 / 0.2 ms with 50 declarations, the analysis suite is 865
+passed, and `cpp_ls` still has only the pre-existing failure.
+
+This is the correctness half of the `EnvId` item, landed without the architecture change: the key is no longer wrong, it
+is only coarser than a hash of the macros in force. The reachable-environment key remains an improvement — it would let a
+record survive an unrelated edit and be shared between files with the same environment — and the number to require for it
+is the sharing rate, not a latency.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
