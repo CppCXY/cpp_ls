@@ -73,6 +73,8 @@ pub mod cache_lru;
 // the thing it compares against a compiler is a RenderedUnit --- the cached reading of a program.
 pub mod align;
 pub mod alloc;
+/// **The environment as a value** — see `docs/module-cache.md`.
+pub mod env;
 pub mod memory;
 /// **Where a read's allocations go**, when the perf-probe feature is on --- a stage's own marks, next to the
 /// counter that reads them.

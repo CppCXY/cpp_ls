@@ -4911,6 +4911,30 @@ impl SummaryGuards {
         })
     }
 
+    /// **Does the file's own include guard let its body be read at all?**
+    ///
+    /// The facts inside the guard are stored as `Unconditional` (`deguard_the_files_own_guard`), because a fact
+    /// inside `#ifndef X / #define X` is as visible as one written outside every `#if` — *once the file is read*. A
+    /// fold that composes the file's directives has to know whether it is read at all: the second `#include` of a
+    /// guarded header contributes nothing, and applying its `#define X` a second time would produce a different
+    /// environment for the same text (measured: the guard fixture's two inclusions hashed differently before this).
+    ///
+    /// `Some(true)` when there is no guard or its opener holds, `Some(false)` when the opener does not, `None` when
+    /// the opener cannot be decided from the table.
+    pub fn own_guard_holds<M: crate::MacroValues>(&self, macros: &M) -> Option<bool> {
+        let Some(own) = self.own_guard else {
+            return Some(true);
+        };
+        let conditional = self.conditionals.get(own as usize)?;
+        let decoded = conditional.decoded.get_or_init(|| {
+            conditional
+                .branches
+                .iter()
+                .map(GuardBranch::as_branch)
+                .collect()
+        });
+        decoded.first()?.holds(macros)
+    }
     /// The span of a region's condition, when the index names one.
     pub fn span_of(&self, region: u32) -> Option<cpp_parser::SourceRange> {
         self.regions.get(region as usize).copied()

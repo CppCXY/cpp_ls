@@ -89,7 +89,7 @@ pub use cpp_toolchain::{include, preprocess, probes, project};
 // measures, and `inspect` reaches `TypeHintKind` through the root.
 #[cfg(feature = "perf-probe")]
 pub use cache::perf;
-pub use cache::{align, alloc, memory, summary, summary_codec, unit_codec};
+pub use cache::{align, alloc, env, memory, summary, summary_codec, unit_codec};
 pub use index::{effect, surface};
 pub use session::{completion, cuda, definition, doc, folding, format, inlay, semantic, signature};
 
