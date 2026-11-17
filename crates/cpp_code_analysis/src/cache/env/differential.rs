@@ -504,6 +504,26 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             composition.files.len(),
             composition.unresolved_includes
         );
+        // **The set difference, which is the question left**: the walk reached files the fold never composed, and
+        // neither a guard nor a look-up failed on the fold's side — so the edges themselves differ. Printing the
+        // first ten names the shape without asking the reader to guess it.
+        let composed_paths: std::collections::HashSet<&PathBuf> =
+            composition.files.iter().map(|file| &file.path).collect();
+        let mut went_elsewhere: Vec<&PathBuf> = walked
+            .iter()
+            .map(|(path, _)| path)
+            .filter(|path| !composed_paths.contains(*path))
+            .collect();
+        went_elsewhere.sort();
+        println!(
+            "  walk-only files: {}; e.g. {:?}",
+            went_elsewhere.len(),
+            went_elsewhere
+                .iter()
+                .take(10)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        );
         for wanted in ["_mingw.h", "wchar.h", "time.h", "bits/chrono.h", "cstdlib"] {
             let mut found = false;
             let mut skeletons = 0;
