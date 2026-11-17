@@ -403,6 +403,16 @@ impl<'a> Over<'a> {
     /// value is `__STDC_HOSTED__`'s, and that one is a compiler predefine with a body --- the walk follows the same hop
     /// through the body's tokens (macro_value re-expands and re-reads), and an environment follows the name. Bounded
     /// so a cycle of aliases ends in `defined, value unknown` rather than in a loop.
+    /// **The seed's answer, with the completeness rule applied**: a name an incomplete table has never seen is not
+    /// Undefined --- it may be defined in a file the walk has not reached, and answering   there reads a branch
+    /// the compiler does not take.
+    fn from_the_seed(&self, name: &str) -> Lookup<'_> {
+        match self.seed.lookup(name) {
+            Lookup::Undefined if !self.seed.is_complete() => Lookup::Unanswered,
+            answer => answer,
+        }
+    }
+
     fn through_aliases<'s>(&'s self, definition: &'s Definition) -> Lookup<'s> {
         if let Some(found) = definition.evaluable() {
             return Lookup::Defined(found);
@@ -417,7 +427,7 @@ impl<'a> Over<'a> {
                     }
                     alias = next.alias();
                 }
-                None => return self.seed.lookup(name),
+                None => return self.from_the_seed(name),
             }
         }
         Lookup::DefinedWithoutAValue
@@ -433,7 +443,7 @@ impl MacroValues for Over<'_> {
         match self.env.find(name) {
             Some(Some(definition)) => self.through_aliases(definition),
             Some(None) => Lookup::Undefined,
-            None => self.seed.lookup(name),
+            None => self.from_the_seed(name),
         }
     }
 

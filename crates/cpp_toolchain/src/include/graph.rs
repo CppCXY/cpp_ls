@@ -1061,6 +1061,12 @@ impl PartialEq for Marked {
 impl Eq for Marked {}
 
 impl crate::condition::MacroValues for Marked {
+    /// **A walk is complete only when it read every file it needed.** See `MacroValues::is_complete`: this is the
+    /// one table in the program whose completeness is a runtime fact rather than a property of how it was built.
+    fn is_complete(&self) -> bool {
+        !self.is_incomplete()
+    }
+
     /// The definition behind a name, for evaluating a condition.
     ///
     /// Only names that came from the command line have one here: `-DFOO=2` is a definition this layer read, so

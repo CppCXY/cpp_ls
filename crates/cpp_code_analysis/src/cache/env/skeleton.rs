@@ -15,6 +15,15 @@
 //! answer is the bytes, which are in `body_range`. Slicing them costs one copy per definition the fold applies, and
 //! the environment keeps them for as long as it is asked.
 //!
+//! # Which include path a step uses
+//!
+//! [`Skeleton::of`] takes the one the summary cached (`IncludeFact::resolved`). [`Skeleton::resolved_by`] takes a
+//! **resolver** instead, and that is the shape a real project needs: the cached path is what the index found when the
+//! summary was built, and on a project with no compile database it is empty for most includes — measured on
+//! `EmmyLuaCodeStyle`, **778 of the 1 053-file closure's includes**, so a fold that trusts it reaches 251 files where
+//! the walk reaches 1 053. A caller that can search again (see `Session`'s resolver, which is what the walk itself
+//! uses) passes the search here, and a resolver that only handles the unresolved ones costs one branch per include.
+//!
 //! # What is not a step
 //!
 //! * An include whose target did not resolve. The resolver already decided there is no such file (§"a summary that
@@ -63,12 +72,25 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
-    /// **Read a summary and a text into the steps a fold takes.**
+    /// **Read a summary and a text into the steps a fold takes**, using the resolution the summary cached.
     ///
     /// The two kinds of step are gathered separately (that is how the summary stores them) and then merged by
     /// offset. The sort is stable and the offsets are distinct for distinct directives, so two skeletons of one file
     /// are equal — which is what lets a probe compare two compositions without comparing `Step`s.
     pub fn of(summary: &FileSummary, text: &str) -> Self {
+        Self::resolved_by(summary, text, &mut |fact| fact.resolved.clone())
+    }
+
+    /// **The same, with a resolver instead of the summary's cached answer** — see the module note.
+    ///
+    /// The resolver is asked for **every** include, not only the unresolved ones, because a cached path is a
+    /// candidate the index verified when the summary was built: if the search now says something else, the search is
+    /// right. Returning `None` drops the include as unresolved.
+    pub fn resolved_by(
+        summary: &FileSummary,
+        text: &str,
+        resolve: &mut dyn FnMut(&crate::IncludeFact) -> Option<PathBuf>,
+    ) -> Self {
         let mut steps: Vec<Step> =
             Vec::with_capacity(summary.macros.len() + summary.includes.len());
         let mut unreadable = 0usize;
@@ -90,7 +112,7 @@ impl Skeleton {
         }
         let mut unresolved_includes = 0usize;
         for fact in &summary.includes {
-            let Some(path) = fact.resolved.clone() else {
+            let Some(path) = resolve(fact) else {
                 unresolved_includes += 1;
                 continue;
             };

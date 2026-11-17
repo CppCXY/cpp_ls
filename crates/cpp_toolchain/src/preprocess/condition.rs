@@ -263,6 +263,18 @@ pub trait MacroValues {
         let _ = (name, operand);
         None
     }
+
+    /// **Does this table know every name a compilation defines?** — the difference between [`Lookup::Undefined`] and
+    /// [`Lookup::Unanswered`] for a name the table has never seen.
+    ///
+    /// A table built from the compiler's own predefines plus the command line is complete: a name it does not hold is
+    /// not defined, and `#if NAME` is `0`. A table built by a walk that has read only part of a program is not, and
+    /// the honest answer there is [`Lookup::Unanswered`] — the name may be defined in a file the walk has not reached.
+    /// [`crate::Marked::is_incomplete`] is the flag; this is how a consumer that holds only `&dyn MacroValues` asks it,
+    /// which is what `cache::env::Over` needs before it turns an absent name into `0`.
+    fn is_complete(&self) -> bool {
+        true
+    }
 }
 
 /// A table that defines nothing, so every identifier is `0`.

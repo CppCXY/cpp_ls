@@ -178,11 +178,37 @@ fn composition<F: FileProvider + Clone>(
     session: &Session<F>,
     root: &Path,
     seed: &dyn crate::MacroValues,
+    known: &[PathBuf],
 ) -> UnitComposition {
+    // **A resolver for the includes the summary could not resolve**, from the paths the walk reached: a spelling
+    // with no cached path is matched against the last two segments of a known file. This is a probe's stand-in for
+    // the session's resolver, and it exists to test the diagnosis in docs/module-cache.md §6a: the fold reaches
+    // 251 of the walk's 1 053 files because 778 includes did not resolve when the summaries were built.
+    let mut by_suffix: HashMap<String, PathBuf> = HashMap::new();
+    let mut by_file: HashMap<String, PathBuf> = HashMap::new();
+    for path in known {
+        let normal = path.to_string_lossy().to_lowercase().replace('\\', "/");
+        let mut segments = normal.rsplit('/');
+        if let (Some(file), Some(directory)) = (segments.next(), segments.next()) {
+            by_suffix
+                .entry(format!("{directory}/{file}"))
+                .or_insert_with(|| path.clone());
+        }
+    }
     compose_unit(root, &Env::empty(), seed, &mut |path| {
         let summary = session.index().summary(path)?;
         let text = session.text(path)?;
-        Some((Skeleton::of(summary, &text), summary.guards.clone()))
+        let skeleton = Skeleton::resolved_by(summary, &text, &mut |fact| {
+            fact.resolved.clone().or_else(|| {
+                let spelling = fact.spelling.to_lowercase().replace('\\', "/");
+                by_suffix.get(&spelling).cloned().or_else(|| {
+                    let mut segments = spelling.rsplit('/');
+                    let (file, directory) = (segments.next()?, segments.next()?);
+                    by_suffix.get(&format!("{directory}/{file}")).cloned()
+                })
+            })
+        });
+        Some((skeleton, summary.guards.clone()))
     })
 }
 
@@ -241,7 +267,12 @@ fn the_fold_and_the_walk_agree_on_a_fixture() {
         .walked_bindings(Path::new("/p/a.cpp"))
         .expect("the unit walks");
     let seed_names = seed_names_of(&session);
-    let composition = composition(&session, Path::new("/p/a.cpp"), session.index().macros());
+    let composition = composition(
+        &session,
+        Path::new("/p/a.cpp"),
+        session.index().macros(),
+        &[],
+    );
     let mut tally = Tally::default();
     for (path, bindings) in &walked {
         let Some(file) = composition.file(path) else {
@@ -327,7 +358,8 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             println!("{}: the walk declined", root_source.display());
             continue;
         };
-        let composition = composition(&session, root_source, session.index().macros());
+        let known: Vec<PathBuf> = walked.iter().map(|(path, _)| path.clone()).collect();
+        let composition = composition(&session, root_source, session.index().macros(), &known);
         let mut tally = Tally::default();
         let mut per_file: Vec<(PathBuf, Tally)> = Vec::new();
         for (path, bindings) in &walked {
