@@ -130,6 +130,22 @@ impl<F: FileProvider + Clone> Session<F> {
             .then_some(reached)
     }
 
+    /// **The name a declaration gives itself at `offset`**, when the cursor is exactly on it.
+    ///
+    /// The one name a reader can point at that no *name resolution* can read: an **operator**. `operator()` is spelled
+    /// with a keyword and punctuation, so the token at the cursor is the `OperatorKeyword` and
+    /// [`crate::sema::resolve::definitions_at`] answers `UnparsableName` — measured on
+    /// `test_cpp/src/containers.cpp:63`, where hovering `operator` showed the keyword's meaning ("this function defines
+    /// what an operator means for a type") for a reader pointing at a whole function. The scope tree has the name —
+    /// a binding's `name_range` starts at the keyword, and its spelling is composed (`operator()`, `operator+`,
+    /// `operator bool`) — so the declaration is one lookup away, and the index files its fact under exactly that
+    /// spelling.
+    pub fn the_name_declared_at(&self, view: &FileView, offset: usize) -> Option<String> {
+        view.scopes
+            .binding_declared_at(offset)
+            .map(|binding| binding.name.text())
+    }
+
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.
     ///
     /// The *one* projection of [`Session::definitions`]: `Yes` only when the answer is a single declaration, so a
@@ -153,6 +169,35 @@ impl<F: FileProvider + Clone> Session<F> {
             self.want_refinement(&found.file);
         }
         found
+    }
+
+    /// **Is the object this name denotes `const`?** — the one question a member access's overload set depends on, and
+    /// the one a *type's spelling* cannot answer.
+    ///
+    /// [`crate::DeclFact::type_of`] is a name for lookup and drops the declaration's specifiers on purpose (`static
+    /// const Widget` records `Widget`, so that a lookup by name finds the class), and [`Session::type_at`]'s answer
+    /// follows it: measured on `test_cpp/src/containers.cpp:57`, inside
+    /// `bool operator()(std::string const& left, std::string const& right)`, `type_at` answers **`std::string&`** for
+    /// `left`. A card that filtered the overloads by the type would therefore keep both.
+    ///
+    /// The declaration's own specifier sequence is the reading, and it is available for a name this file declares —
+    /// which is the case that matters here (a parameter, a local, a file-scope object). `None` when the name resolves
+    /// to nothing here or to a declaration this file does not write: a constness nobody can see must not become
+    /// `false`, which is what a caller filtering a list would read it as.
+    pub fn the_object_is_const(&self, view: &FileView, offset: usize) -> Option<bool> {
+        let Known::Yes(binding) =
+            crate::sema::resolve::definition_at(&view.scopes, &view.root, offset)
+        else {
+            return None;
+        };
+        let shapes = crate::sema::declarations::DeclarationShapes::of(&view.root);
+        let specifiers = shapes.specifiers_at(binding.name_range.start_offset)?;
+        let written = specifiers.text().to_string();
+        Some(
+            written
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+                .any(|word| matches!(word, "const" | "constexpr" | "consteval")),
+        )
     }
 
     /// **Is this file's reading the refined one?** — `false` for a summary that is still the shape-only reading of the

@@ -17,7 +17,7 @@
 //! both layers at the same offset so a report can be attributed instead of guessed at: `hover_text` is exactly what the
 //! handler builds, and `classified_names` is exactly what the semantic-token handler maps onto its legend.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
@@ -127,7 +127,7 @@ fn the_three_reported_places() {
         ("Value{std::string{\"three\"}}", 0, "the second `Value`"),
     ];
 
-    for (needle, shift, why) in places {
+    for (needle, shift, _why) in places {
         let Some(at) = text.find(needle).map(|at| at + shift) else {
             println!("{needle:?} is not in the file");
             continue;
@@ -155,6 +155,21 @@ fn the_three_reported_places() {
             })
             .unwrap_or_else(|| "NONE".to_string());
         println!("{at:>5} {word:<14} semantic: {classified:<44}\n      hover: {hover}");
+    }
+
+    // **What the scope tree says the cursor is on**, for the two `operator` tokens the report named — the keyword card
+    // and the function card differ by nothing a reader can see, so the layer that decides is printed.
+    for needle in ["bool operator()", "std::size_t operator()"] {
+        if let Some(at) = text
+            .find(needle)
+            .and_then(|at| text[at..].find("operator").map(|inside| at + inside))
+        {
+            println!(
+                "{needle:?} at {at}: declared name {:?}, word {:?}",
+                session.the_name_declared_at(&view, at),
+                &text[at..(at + 10).min(text.len())]
+            );
+        }
     }
 
     // **The window around `Value{1}.describe()`**, so the row above can be read against what the file says there: a

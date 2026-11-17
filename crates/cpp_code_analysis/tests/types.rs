@@ -4113,3 +4113,92 @@ fn a_partial_specializations_members_are_not_the_primary_templates() {
         "and both are the primary's own body: {begins:?}"
     );
 }
+
+/// **An operator whose return type is a qualified name is still a member.**
+///
+/// `std::size_t operator()(std::string const& value) const` is an operator declaration whose *return type* holds a
+/// `::` in the specifier sequence. `declaration_is_qualified` asks "is there a `::` in a name under the specifier
+/// sequence, outside every declarator" — and answered yes, because an operator's declarator holds no *identifier*
+/// (`get_name_text` looks for one), so it looked like the bare parameter list of an out-of-line definition. The walk
+/// then asked whether `std::size_t` named a scope this file had built, got `false`, and bound nothing: the class had
+/// no member, and `containers.cpp` had 43 declarations without its operator — which is why hovering the `operator`
+/// **keyword** on line 63 showed the keyword's meaning. The pair that named the cause: `bool operator<(…)` was fine
+/// and `std::size_t operator<(…)` was not.
+#[test]
+fn an_operators_qualified_return_type_does_not_lose_the_member() {
+    let source = "\
+struct Hashed {
+    std::size_t operator()(std::string const& value) const;
+    bool operator<(const Hashed& other) const;
+};
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is held");
+    let members = session.members_of(&view, "Hashed");
+    let cpp_code_analysis::Known::Yes(members) = members else {
+        panic!("a class this file declares answers a member list: {members:?}");
+    };
+    let names: Vec<String> = members
+        .members
+        .iter()
+        .map(|member| member.fact.name.clone())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "operator()"),
+        "the operator with the qualified return type is a member: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "operator<"),
+        "and so is the one with a plain return type: {names:?}"
+    );
+}
+
+/// **The three readings a member hover and a keyword hover are built from**, asked directly.
+///
+/// `the_name_declared_at` is the one name no *name resolution* can read — an operator, spelled with a keyword — and
+/// `the_object_is_const` is the constness of a declared object, which its *type spelling* cannot answer: `type_at`
+/// says `std::string&` for a parameter declared `std::string const&`, because the spelling is a name for lookup.
+#[test]
+fn a_declarations_own_readings() {
+    let source = "\
+struct Hashed {
+    std::size_t operator()(std::string const& value) const;
+};
+
+void f(std::string const& text, std::string& plain) {
+    text.size();
+    plain.size();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session
+        .view_of_the_file(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is held");
+
+    let operator = source.find("operator()").expect("the operator is written") + 2;
+    assert_eq!(
+        session.the_name_declared_at(&view, operator).as_deref(),
+        Some("operator()"),
+        "an operator's name is composed from the keyword, not read as an identifier"
+    );
+
+    let text = source.find("text.size").expect("the const one is used");
+    assert_eq!(
+        session.the_object_is_const(&view, text),
+        Some(true),
+        "`text` is declared `std::string const&`"
+    );
+    let plain = source.find("plain.size").expect("the other one is used");
+    assert_eq!(
+        session.the_object_is_const(&view, plain),
+        Some(false),
+        "`plain` is declared `std::string&`, so every overload is callable"
+    );
+    assert_eq!(
+        session.the_object_is_const(&view, source.find("nothing").unwrap_or(0)),
+        None,
+        "an offset that is not a name answers nothing rather than `false`"
+    );
+}

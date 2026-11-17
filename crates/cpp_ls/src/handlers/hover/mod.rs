@@ -349,6 +349,39 @@ pub fn hover(
         };
 
         if covers_the_cursor && let Some(text) = vocabulary::keyword_hover(&token) {
+            // **A keyword that *begins a declaration's name* is that declaration.** `operator` is the case: it is a
+            // keyword token, so the name resolution refuses it (`UnparsableName`) and the card was the keyword's
+            // meaning — *"this function defines what an operator means for a type"* — for a reader pointing at
+            // `std::size_t operator()(std::string const& value) const`, a whole function. Measured on
+            // `test_cpp/src/containers.cpp:63`.
+            //
+            // The declaration's own spelling is what the scope tree has (`operator()`, `operator+`, `operator bool`),
+            // and the index files the fact under exactly it, so this is one lookup rather than a second reading of the
+            // declaration. Asked before the vocabulary and only for `operator`: every other keyword that reaches here
+            // (`constexpr`, `noexcept`, `friend`) declares nothing.
+            if cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::OperatorKeyword
+                && let Some(name) = session.the_name_declared_at(view, in_the_file.get())
+                && name.starts_with("operator")
+                && let Known::Yes(found) = session.index().definitions(&name, &view.path)
+                // **The declaration under the cursor**, not the first class that declares this operator:
+                // `operator()` written in two classes is one spelling with two facts, and the list is by name.
+                && let Some(one) = found
+                    .found
+                    .iter()
+                    .find(|one| one.fact.name_range.start_offset == in_the_file.get())
+                    .or_else(|| found.found.first())
+            {
+                let definition = cpp_code_analysis::ProjectDefinition {
+                    file: one.file.clone(),
+                    fact: one.fact.clone(),
+                };
+                return Some(markdown(declaration_markdown(
+                    session,
+                    view,
+                    &definition,
+                    None,
+                )));
+            }
             return Some(markdown(text));
         }
 
@@ -822,13 +855,56 @@ fn member_markdown(
     }
 
     // **Several can take the call, or the cursor is not on one** — print what the call can reach, or all of them.
-    let shown: Vec<&cpp_code_analysis::ProjectMember> = match &call_selected {
+    //
+    // **A `const` object cannot call a member that is not `const`.** The sentence below has always *said* that rule
+    // and the card listed both overloads anyway: `std::lexicographical_compare(left.begin(), …)` in
+    // `containers.cpp:57` showed `iterator begin()` and `const_iterator begin() const`, with the advice that "a `const`
+    // object can only call the `const` one" — advice the reader has to apply to a list the analysis could have
+    // filtered. `left` is `std::string const&`, so `begin()` is not callable and there is one answer, which is what a
+    // reader wants to see.
+    //
+    // The object's type is what decides it, and a type this layer cannot read leaves the list alone: a constness
+    // nobody can see must not become a list with something removed.
+    // **The declaration's specifiers, not the object's type.** `type_at` answers `std::string&` for a parameter
+    // declared `std::string const&` (the type's spelling drops specifiers on purpose — it is a name for lookup), so a
+    // filter reading it would never fire. See [`cpp_code_analysis::Session::the_object_is_const`].
+    let object_is_const = session
+        .the_object_is_const(view, usize::from(access.object.text_range().start()))
+        .unwrap_or(false);
+    let mut shown: Vec<&cpp_code_analysis::ProjectMember> = match &call_selected {
         Some(selected) => selected
             .iter()
             .filter_map(|at| candidates.get(*at).copied())
             .collect(),
         None => candidates.clone(),
     };
+    if object_is_const {
+        let const_ones: Vec<&cpp_code_analysis::ProjectMember> = shown
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate
+                    .fact
+                    .modifiers
+                    .contains(cpp_code_analysis::DeclModifiers::CONST)
+            })
+            .collect();
+        // **Only when one is left**: a class that declares no `const` overload at all (`std::list::remove`) is a
+        // member no `const` object can call, and that is a *finding* about the code rather than a reason to empty the
+        // card — the list stays, and the reader sees why nothing matches.
+        if !const_ones.is_empty() {
+            shown = const_ones;
+        }
+    }
+    if shown.len() == 1
+        && let Some(member) = shown.first()
+    {
+        let definition = cpp_code_analysis::ProjectDefinition {
+            file: member.file.clone(),
+            fact: member.fact.clone(),
+        };
+        return declaration_markdown(session, view, &definition, None);
+    }
     if shown.len() > 1 {
         let mut out = String::from("```cpp\n");
         for candidate in &shown {

@@ -75,14 +75,13 @@ fn what_a_member_list_of_a_class_template_costs() {
     {
         let cooked = session.cook(&named);
         println!(
-            "cooked {named}: {} declaration(s), {}{}",
+            "cooked {named}: {} declaration(s), {}",
             cooked.as_ref().map_or(0, |reading| reading.declarations),
             if cooked.is_some() {
                 "has a reading"
             } else {
                 "NO reading"
-            },
-            ""
+            }
         );
     }
 

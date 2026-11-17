@@ -2717,7 +2717,31 @@ fn declaration_is_qualified(node: &CppSyntaxNode) -> bool {
 
     // A declarator that names something is the declaration's name; what is left is a declaration whose name was
     // written where a type goes.
-    !declarators(node).iter().any(named_in_a_declarator)
+    //
+    // **An `operator` keyword in a declarator is a name too.** The AST's reader answers `None` for an operator
+    // (`get_name_text` looks for an identifier), so "no identifier outside a parameter list" is true of it and of a
+    // bare parameter list alike — and the difference is the keyword. Measured on a class in
+    // `test_cpp/src/containers.cpp:63`: `std::size_t operator()(std::string const& value) const { … }` was read as a
+    // **`::`-qualified declaration** — the `::` of the *return type* is in the specifier sequence and outside every
+    // declarator — so the walk asked whether `std::size_t` named a scope this file had built, got `false`, and bound
+    // nothing. `Hashed` had no member and `containers.cpp` had 43 declarations without its operator; the hover on
+    // `operator` then fell through to the keyword's meaning. The pair that named the cause: `bool operator<(…)` was
+    // fine and `std::size_t operator<(…)` was not — the return type, not the operator.
+    !declarators(node)
+        .iter()
+        .any(|declarator| named_in_a_declarator(declarator) || spells_an_operator(declarator))
+}
+
+/// Does this declarator spell an operator's name — `operator<`, `operator()`, `operator bool`?
+///
+/// The keyword anywhere in the declarator, which is where a declared name lives. `int y = x.operator+();` puts one in
+/// an *initializer*, which is not this declaration's name — the caller excludes the initializer by asking the
+/// declarators, not the declaration.
+fn spells_an_operator(declarator: &CppSyntaxNode) -> bool {
+    declarator
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword)
 }
 
 /// Does anything written **outside a declarator** in this subtree spell a `::`-qualified name?
