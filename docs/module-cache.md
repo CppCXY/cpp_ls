@@ -821,3 +821,26 @@ Three measurements from the first sitting of the pump rebuild, each narrowing th
 
 That reframes the goal: the number to fix is private bytes held after an advance, and the cause is repeated work inside
 one call, not the units the call keeps.
+## Phase 2, second sitting: the hang is one per-step timeline walk
+
+The unit trace narrows the 82-document blow-up to a single operation. With `advance(1)` the call finishes in 104 ms
+(`walked: 1`, live 177 MB), and with `advance(2)` it never returns: step 1 reads `Utf8.cpp` in 101 ms with `timeline
+true` — a **held** unit, so no walk — and step 2 prints `load Url.cpp took 1 us` and then nothing for minutes.
+
+So the cost is `unit_and_state_of`'s walk for the **second** open document, i.e. the per-step timeline acquisition for a
+document that has no unit in hand. That is the operation the walk budget must bound, and it is also why the budget's
+failure in `editing_a_header_stales_...` is a separate problem: refusing the walk there changed **which files the drain
+cooked**, not merely how a step was read.
+
+Three facts from this sitting that the next one should start from:
+
+* the drain cooks the **focused document's closure only** (`want_the_closure_cooked` on the focused path), so 82 open
+  documents are not 82 cooks;
+* `prepare_closure` is bounded by its `budget` (the frontier stops adding at `seen.len() >= budget`), so the wave is not
+  the blow-up;
+* the first walk per call is cheap when the unit is already held; the second walk — a real `TranslationUnit::walk` while
+  the index is still filling — does not return within two minutes.
+
+The next experiment is therefore not another run of the probe but a trace **inside** `TranslationUnit::walk` for
+`Util/src/Url.cpp` with 82 documents open, to see whether it is slow because the closure is large, because the closure is
+still growing and it retries, or because something in the walk is quadratic on this project.
