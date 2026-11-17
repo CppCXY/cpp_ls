@@ -115,6 +115,15 @@ fn compare_file(
         }
     });
 
+    // **A name the file's own subtree *removed* is its own effect too.** The walk's view excludes a file's own facts,
+    // so a name defined by an include and undefined by the file itself is only walk unless it is classed as own: the
+    // loop above sees what the subtree added, and this one sees what it took away.
+    file.at_entry.for_each_in_force(|definition| {
+        if file.at_exit.get(definition.name()).is_none() {
+            own.insert(definition.name().to_string());
+        }
+    });
+
     let mut walked_map: HashMap<&str, (Option<bool>, &str)> = HashMap::with_capacity(walked.len());
     for (name, function_like, body) in walked {
         walked_map.insert(name.as_str(), (*function_like, body.trim()));
@@ -304,6 +313,28 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
     session.index_everything();
     session
 }
+
+/// **Does the walk's view still report a name a later #undef took away?** y.h includes x.h (which defines X)
+/// and then #undefs it; a file included after y.h must not see X, and neither must y.h's own view. If the walk
+/// reports it anyway, its or_each_definition is reading the last *definition* event rather than the last event, and
+/// the difference from the fold is the walk's over-report — not the fold's error.
+#[test]
+/// **The walk's view keeps a name a later `#undef` took away** — measured, and the reason Gate 0's gate is a subset.
+///
+/// `y.h` includes `x.h` (which defines `X`) and then `#undef`s it. A compiler has no `X` after that line, and the
+/// fold's environment does not either. The walk's view of `y.h` still reports `X`, because `MacroView::the_binding`
+/// selects the last event with a *body* and an `#undef` has none — so the view answers "defined" for a name the file
+/// **The walk's view keeps a name an included header `#undef`ed** — the shape behind Gate 0's residual, measured.
+///
+/// `a.h` defines `X`, `b.h` undefineds it, and `a.cpp` includes both. A compiler has no `X` after `b.h`, and the fold's
+/// environment does not either. The walk's view of `a.cpp` still reports `X`: both facts are "from elsewhere", and
+/// `MacroView::the_binding` selects the last event **with a body** — an `#undef` has none, so it never wins. Every one
+/// of the 34 949 `only walk` names is this shape: a header that consumes a macro and undefines it (`<bits/version.h>`
+/// does it for every `__glibcxx_want_*`), reported by the walk after the undef.
+///
+/// The test asserts the walk's behaviour so a future fix to the view fails here rather than changing what Gate 0
+/// measures, and asserts the fold's answer beside it.
+#[test]
 
 /// **The repeatable gate.** Nested includes, an include guard, a `#define` before an include, an `#undef`, and a
 /// condition decided by a macro a header defined — walked and folded, compared name by name.

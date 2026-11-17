@@ -391,6 +391,17 @@ The next test is a fixture: `#define X 1` then `#undef X`, and whether the walk'
 `X`. If it does, Gate 0's remaining 34 949 are the walk's over-report after `#undef`, the fold is the correct side, and
 the gate becomes "the fold never invents a name the walk does not have" rather than equality.
 
+**Fourteenth run: the `#undef` hypothesis is rejected.** Two fixtures went the other way. A file that defines a name and
+then `#undef`s it is *not* reported by the walk for a later file, and a name defined by one included header and
+undefined by another is not reported either — the walk's `for_each_definition` takes the last *unconditional* event,
+and an `#undef` is one, so the undef wins. That removes the theory that the 34 949 are the walk's over-report after an
+undef, and it leaves the one measurement that contradicts it: the probe still says `__glibcxx_want_bit_cast` is `in
+walk true`, and no channel the view reports through should contain a body-less define that a later header undefined.
+
+The next instrument is therefore the narrowest one yet: for that name, **which walked file's bindings contain it and
+which channel reported it** (`for_each_definition` or `for_each_body_in_force`). Printing the two channels apart is the
+only way to tell a view that lists a stale name from a comparison that reads the wrong list.
+
 The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
