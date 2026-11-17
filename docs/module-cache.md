@@ -281,7 +281,30 @@ the policy (`a_guard_holds` is `visibility == Active`, so both skip an undecided
 cannot account for 98 591 names — and the next round has to attribute them per file before anything is concluded.
 `only fold 8 450` is the mirror image (names the fold has and the walk does not) and needs the same attribution.
 
-The next step is therefore the per-file attribution, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
+**Third run: the disagreement is include resolution, not guard evaluation.** The probe now reports what the traversal
+reached:
+
+```text
+composition: 251 file(s), 778 unresolved includes      the walk: 1053 file(s)
+```
+
+The fold follows `IncludeFact.resolved` — the path the resolver found when the summary was built — and on a project
+with no compile database **778 of the closure's includes did not resolve at index time**. The walk does not use that
+field: `closure_with_text_from` builds its own closure with the session's resolver over every file the index knows, so
+it reaches 1053 files. That is the residual: 800 files the fold never sees, and the 61 028 `only walk` names they
+carry — which is also why the per-file list shows the *same* set of names missing from every file rather than a
+different set per file.
+
+So the next change to `cache::env` is structural: **composition takes a resolver**, the way the walk does, instead of
+trusting a summary's cached resolution. `IncludeFact.resolved` stays useful as the *cached candidate* — it is what
+`resolution_still_holds` re-verifies on a summary hit — but the environment must not make it the only path.
+
+The alias answer also needs one guard rail before it is trusted: `_GLIBCXX_HOSTED` is an alias to a **predefine**, and a
+chain that ends at a name neither the environment nor the seed holds must answer `Unanswered`, not `0`, when the seed
+is `Marked::incomplete`. The 1032 → 251 file count between the two runs is that distinction showing up in the
+traversal, and it has to be resolved before anything is concluded from either number.
+
+The next step is therefore include resolution in the fold, before S1: build the `MacroDef` a `Lookup::Defined` needs from a
 `MacroFact` (`value` is the single integer literal the summary already stores; `body_range` gives the rest) and answer
 it from `Over`. Then re-run this probe: `unknown guards` should fall, and the mismatches with it. Only when the only
 remaining mismatches are attributed and understood is S1 (deleting the walk from the cook) safe.

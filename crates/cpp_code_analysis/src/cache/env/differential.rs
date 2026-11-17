@@ -417,6 +417,24 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
                 );
             }
         }
+        println!(
+            "  composition: {} file(s), unresolved includes {}",
+            composition.files.len(),
+            composition.unresolved_includes
+        );
+        for wanted in ["_mingw.h", "wchar.h", "time.h", "bits/chrono.h", "cstdlib"] {
+            let mut found = false;
+            let mut skeletons = 0;
+            for file in &composition.files {
+                let name = file.path.to_string_lossy().to_lowercase();
+                if name.ends_with(wanted) {
+                    found = true;
+                    skeletons += 1;
+                }
+            }
+            println!("  contains {wanted}: {found} ({skeletons})");
+            let _ = skeletons;
+        }
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());
         }
