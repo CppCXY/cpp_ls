@@ -487,6 +487,23 @@ reading either, and two of the three candidates are now eliminated: the member l
 prints, and the next instrument prints that fact's name range and kind under both cooks — a two-line change in the
 hover's own trace, not another test migration.
 
+**Twentieth run: the hover failure predates this session.** The test that blocked S1 is **red at `c9c22504`**, the
+session's first commit — checked out in a detached head and run there, before any of this session's work existed:
+
+```text
+cpp_ls (release, at c9c22504):  one failing test —
+a_member_declared_twice_shows_both_declarations_and_their_clauses
+```
+
+Every other `cpp_ls` binary was green (187 + 65 + 7 + 4 + 3 + 1 passed). So the card's single-declaration answer is a
+**pre-existing** defect, not a cost of composition, and S1 is exonerated: the whole session's rounds of diagnosis
+(three candidates eliminated: the overload list, the program reading, the cook's facts) were chasing a red test that
+was red from the start.
+
+That makes the gate for S1 precise: the analysis suite green, and `cpp_ls` with **no failure other than the one this
+baseline records**. It also means the earlier "one failure in the workspace suite" was the same pre-existing test, and
+that the S1 experiment never introduced a regression at all.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
