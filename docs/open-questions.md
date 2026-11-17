@@ -1435,3 +1435,22 @@ this layer does not do, and each is a semantic feature rather than a defect in a
 
 The report that named it: the hover on `value` says `const auto&` beside an `if constexpr` that has already decided
 otherwise.
+## `std::string`'s layout is refused, and the reason it gives is the interesting part
+
+Hovering `std::string` (`using string = basic_string<char>;`, `stringfwd.h:79:33`) answers with a **Layout** line that
+says it will not be computed:
+
+```text
+Layout — not computed: `_M_string_length`, `_M_local_buf`, `_M_allocated_capacity` cannot be sized here (a bitfield, a
+dependent type such as `_Rebind_alloc_t<_Alloc, _Ty>`, or one the index does not hold).
+```
+
+Those three are `basic_string`'s own members and none of them is any of the listed reasons: `_M_string_length` is a
+`size_type`, `_M_local_buf` is `char[_S_local_capacity + 1]`, and `_M_allocated_capacity` is a `size_type` inside a
+**union** with `_M_local_buf`. So the refusal is real but its stated cause is not, which is worse than no line at all —
+a reader is told the standard library's most-used class is "dependent" when it is concrete.
+
+The same card says *"a type of type `basic_string<char>`"*, which is the alias sentence built from the fact's
+`type_of`; it should read "an alias of". Two small presentation defects around one real gap: the layout walk has no
+answer for a **union member** (the size of a union is the largest alternative, not the sum, and the walk reads each
+member's own size), and the refusal message is a list of guesses rather than the node it could not size.
