@@ -425,7 +425,38 @@ impl<F: FileProvider + Clone> Session<F> {
         if !self.documents.is_open(path) {
             return false;
         }
-        self.holds_an_environment_for(path) || self.a_timeline_can_be_walked_for(path)
+        if !(self.holds_an_environment_for(path) || self.a_timeline_can_be_walked_for(path)) {
+            return false;
+        }
+        // **One program read per `advance` call.** Outside `advance` there is no budget and the answer is the
+        // conditions alone; inside it, the budget is what keeps 82 open tabs from becoming 82 closures in one slice —
+        // measured: 82 documents, `advance(64)`, 16 000 files and 5.2 GB, where one step is 177 MB.
+        if !self.in_advance.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        self.program_reads
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+    }
+
+    /// The same question **without spending the budget** — what a caller asks when it is about to choose a path and
+    /// the spending belongs to the call that actually reads the file.
+    pub(crate) fn would_read_it_as_the_program(&self, path: &Path) -> bool {
+        if !self.documents.is_open(path) {
+            return false;
+        }
+        if !(self.holds_an_environment_for(path) || self.a_timeline_can_be_walked_for(path)) {
+            return false;
+        }
+        !self.in_advance.load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .program_reads
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
     }
 
     /// **Can a timeline for this file be walked right now, without one being in hand?**

@@ -425,6 +425,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// not reach in this call (a file it discovers outranks it) is simply dropped and read again when its turn comes.
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
+        // **The program-read budget of one call**, and why it is one: a step that pops a document the reader has open
+        // reads it *as the program* — a whole closure and a timeline. An editor with 82 tabs turned one `advance(64)`
+        // into 64 closures, 16 000 files and 5.2 GB, where one step is 177 MB. Every other root of the same call is
+        // read as text and refined by the second pass, which is the pipeline the rest of the project already uses.
+        self.program_reads
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        self.in_advance
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // **The read-ahead is trimmed before it is added to**, so the budget is a ceiling on what this call holds and
         // not something the call can overshoot. Measured on `EmmyLuaCodeStyle`: a session that had indexed the
@@ -482,7 +490,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // decides for itself, so asking here would be the same question twice and the second answer is the one
             // that matters.
             let wave_would_parse_it_as_text = left > 1
-                && !self.will_read_it_as_the_program(&path)
+                && !self.would_read_it_as_the_program(&path)
                 && !self.prefetched.contains_key(&key);
             if wave_would_parse_it_as_text {
                 let mut wave = vec![path.clone()];
@@ -625,6 +633,10 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
+        self.in_advance
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.program_reads
+            .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         done
     }
 

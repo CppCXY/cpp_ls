@@ -1061,6 +1061,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// expensive thing this session does, and a background tab is not a reason to do it — the same trade
     /// `the_program_to_read` already states for files nobody has open.
     focused_document: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// **How many whole-program reads this call may still make.** A step that pops a document the reader has open
+    /// reads it *as the program* — a whole closure, ~250 files. An editor with 82 tabs turned one `advance(64)` into
+    /// 64 closures, 16 000 files and 5 GB, so a call is given one and every other root is read as text.
+    program_reads: std::sync::atomic::AtomicUsize,
+    /// Whether the call being served is an [`Session::advance`], which is where the program-read budget applies.
+    in_advance: std::sync::atomic::AtomicBool,
     /// **How many cooks the disk answered** --- a cook that rendered, parsed and indexed nothing, because the file's
     /// record was already on the disk with its rendering. The number the per-file cache is judged by.
     stored_cooks: std::sync::atomic::AtomicUsize,

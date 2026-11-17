@@ -609,6 +609,24 @@ Two candidate fixes were built and **reverted**, each with a reason:
   an edit, because the re-cook composes from an index that has not caught up where the walk was self-contained. That
   test is the next round's question, and it is a *semantic* one, not memory.
 
+**Twenty-fifth run: the program-read budget, and what it does not fix.** A session now allows **one whole-program read per
+`advance` call** (`program_reads`/`in_advance`): outside `advance` the answer is the old one, inside it the budget is
+consumed, and `would_read_it_as_the_program` lets the wave gate ask without spending. On the 82-document scenario the
+**5.2 GB did not move** — the run died at the same ceiling after 113 s — and that is the finding rather than a failure:
+
+> 64 queued roots, each of which includes libstdc++, is **16 000 file reads whether the root is walked or read as text**.
+> A walk adds a timeline; the reads are the cost, and they are what the index keeps. A per-step budget cannot bound
+> that; only a **per-call file budget** can, and that changes what `advance(steps)` counts.
+
+So the budget stays (63 fewer closures walked per pathological call, no change for `advance(1)`, suite green) and the
+acceptance number is now pinned to a contract question:
+
+* `advance(steps)` = *steps roots*: one call with 82 tabs is 16 000 reads and cannot be under 500 MB. `advance(1)` is
+  **177 MB**, measured.
+* `advance(steps)` = *steps files*, with a root's unread includes returned to the queue: a call reads at most `steps`
+  files plus a bounded read-ahead, and 500 MB is reachable. This is the design note's preference and a change to the
+  contract, not a bug fix.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.

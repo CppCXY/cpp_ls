@@ -207,6 +207,8 @@ impl<F: FileProvider + Clone> Session<F> {
             cooked_or_wanted: std::sync::Mutex::new(std::collections::HashSet::new()),
             renderings_asked: std::sync::Mutex::new(std::collections::HashSet::new()),
             focused_document: std::sync::Mutex::new(None),
+            program_reads: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            in_advance: std::sync::atomic::AtomicBool::new(false),
             stored_cooks: std::sync::atomic::AtomicUsize::new(0),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
