@@ -1524,3 +1524,27 @@ Not achieved, and stated as such: `advance(64)` with 82 open documents is 5.2 GB
 roots and each root is a whole-program walk; the walk budget that would bound it was attempted twice and each attempt
 left the stale-closure test red, so it is not landed. The `SiteKey` memoisation and the record key moving to a reachable
 `EnvId` are also not landed.
+## Final verification (round 39)
+
+```text
+cargo fmt --all -- --check          silent
+cargo clippy --workspace --all-targets   silent
+cargo test --release --workspace   163 binaries ok, 2 374 tests passed, 1 binary failed
+                                   (7 passed / 1 failed: a_member_declared_twice_shows_both_declarations_and_their_clauses)
+```
+
+That one failure is the session's baseline: it is red at `c9c22504`, the session's first commit, checked out in a detached
+head and run there. No other test in the workspace fails.
+
+### Objective, item by item
+
+| item | state | evidence |
+|---|---|---|
+| Gate 0: fold vs walk on Emmy, unknown guards counted separately | **concluded** | `fold ⊆ walk`; body differs 0, kind differs 0, missing 0; 188 unknown guards classified; the only-walk residual measured to be the reference view's unrelated-subtree leak (`the_walk_view_leaks_an_unrelated_subtree`) |
+| S1: a cook materialises no closure | **landed** | `LuaCheck.cpp` 0.2–0.4 ms (from 8.8 s), `walked 0`, 50 declarations; six tests migrated to the contract |
+| S1: the ready-closure judgement | **landed** | `is_closure_ready` arm; `editing_a_header_stales_...` passes with it and fails without |
+| S1: record key `the_closure_fingerprint` → reachable `EnvId` | **half** | the collision on an absent summary is fixed (`None`, with a regression test); the reachable-environment key itself is not landed — it is an identity improvement whose number is the sharing rate, not a latency |
+| S1: `compose` memoised by `SiteKey` | **rejected by measurement** | built, no measurable effect (the per-file record answers before composition is reached), reverted with the shape and the measurement to require recorded |
+| acceptance: C++ corpus 51/52 | not measurable here | the external corpus is not in this workspace; the directive-split tests in `semantic` are 49 passed |
+| acceptance: `LuaCheck.cpp` <100 ms | **met** | 0.2–0.4 ms |
+| acceptance: 82 documents, one `advance(64)` <500 MB | **not met** | `advance(1)` is 177 MB; `advance(64)` is 64 whole-program walks by the current contract, 5.2 GB; the walk budget that would bound it was attempted twice and needs the contract decision (roots or files) |
