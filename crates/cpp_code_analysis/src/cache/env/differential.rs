@@ -364,6 +364,37 @@ fn the_fold_and_the_walk_agree_on_a_fixture() {
     );
 }
 
+/// **A macro from an earlier include is visible to a later one, and that is C++.** .cpp includes .h and then
+/// .h; a compiler's state at the second #include holds the first one's definitions, so .h sees FROM_A`n/// even though it does not include .h itself. This is a test of the *semantics* the fold implements, not a leak:
+/// an attempt to call it one is how a comparison against the walk's view would be misread.
+#[test]
+fn a_macro_from_an_earlier_include_is_visible_to_a_later_one() {
+    let mut session = session_with(&[
+        ("/p/a.h", "#define FROM_A 1\n"),
+        ("/p/b.h", "int b;\n"),
+        (
+            "/p/a.cpp",
+            r#"#include "a.h"
+#include "b.h"
+"#,
+        ),
+    ]);
+    let walked = session
+        .walked_bindings(Path::new("/p/a.cpp"))
+        .expect("the unit walks");
+    let b = walked
+        .iter()
+        .find(|(path, _)| path.ends_with("b.h"))
+        .map(|(_, bindings)| bindings)
+        .expect("b.h is in the unit");
+    let seen = b.iter().any(|(name, _, _)| name == "FROM_A");
+    assert!(
+        seen,
+        "b.h must see a macro defined before it in the same translation unit: {:?}",
+        b.iter().map(|(name, _, _)| name).collect::<Vec<_>>()
+    );
+}
+
 /// **The probe.** `EmmyLuaCodeStyle` (or `CPPLS_REAL_PROJECT`), the project's own directories, one unit per root.
 #[test]
 #[ignore = "a probe: walks a real project and compares instead of asserting"]
