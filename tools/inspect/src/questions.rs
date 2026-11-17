@@ -76,18 +76,18 @@ fn what_it_says(fact: &DeclFact) -> String {
     if let Some(returns) = &fact.returns {
         said.push_str(&format!(" returns `{returns}`"));
     }
-    if let Some(parameters) = &fact.parameter_list {
+    if let Some(parameters) = fact.parameter_list() {
         said.push_str(&format!(" parameters `{parameters}`"));
     }
-    if !fact.parameters.is_empty() {
-        said.push_str(&format!(" over [{}]", fact.parameters.join(", ")));
+    if !fact.parameters().is_empty() {
+        said.push_str(&format!(" over [{}]", fact.parameters().join(", ")));
     }
-    if let Some(requires) = &fact.requires_clause {
+    if let Some(requires) = fact.requires_clause() {
         said.push_str(&format!(" requires `{requires}`"));
     }
     // **The annotation the declaration was written under** — `UCLASS(Blueprintable)`. Reported here because the card is
     // rendered from the fact, so a fact that lost it and a card that does not show it look the same from outside.
-    if let Some(reflection) = &fact.reflection {
+    if let Some(reflection) = fact.reflection() {
         said.push_str(&format!(" under `{}`", reflection.said()));
     }
     if fact.modifiers.bits() != 0 {
@@ -105,11 +105,11 @@ fn declaration_value(session: &Session<DiskFiles>, definition: &ProjectDefinitio
         "scope": definition.fact.scope,
         "type_of": definition.fact.type_of,
         "returns": definition.fact.returns,
-        "parameter_list": definition.fact.parameter_list,
-        "parameters": definition.fact.parameters,
-        "requires_clause": definition.fact.requires_clause,
-        "bases": definition.fact.bases,
-        "reflection": definition.fact.reflection.as_ref().map(|reflection| reflection.said()),
+        "parameter_list": definition.fact.parameter_list(),
+        "parameters": definition.fact.parameters(),
+        "requires_clause": definition.fact.requires_clause(),
+        "bases": definition.fact.bases(),
+        "reflection": definition.fact.reflection().map(|reflection| reflection.said()),
         "modifiers": definition.fact.modifiers.bits(),
     })
 }
@@ -274,8 +274,8 @@ pub fn the_members(opened: &Opened, class: &str, limit: usize) -> Result<Answer,
                     "file": member.file.display().to_string(),
                     "type_of": member.fact.type_of,
                     "returns": member.fact.returns,
-                    "parameter_list": member.fact.parameter_list,
-                    "requires_clause": member.fact.requires_clause,
+                    "parameter_list": member.fact.parameter_list(),
+                    "requires_clause": member.fact.requires_clause(),
                     "modifiers": member.fact.modifiers.bits(),
                 })).collect::<Vec<_>>(),
             })
@@ -454,9 +454,9 @@ pub fn the_facts(opened: &Opened, filters: &FactFilters<'_>) -> Result<Answer, S
             "scope": fact.scope,
             "type_of": fact.type_of,
             "returns": fact.returns,
-            "parameter_list": fact.parameter_list,
-            "parameters": fact.parameters,
-            "requires_clause": fact.requires_clause,
+            "parameter_list": fact.parameter_list(),
+            "parameters": fact.parameters(),
+            "requires_clause": fact.requires_clause(),
             "modifiers": fact.modifiers.bits(),
             "line": line_col(&opened.text, fact.name_range.start_offset).0,
             "column": line_col(&opened.text, fact.name_range.start_offset).1,

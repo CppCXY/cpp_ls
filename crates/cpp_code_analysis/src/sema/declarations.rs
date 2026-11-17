@@ -4911,7 +4911,16 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         // called `string` in namespace `std` (`std::vector<int> &f();` one called `vector<int>`). Measured with
         // `inspect facts`; that bogus fact is what a hover on the return type's `string` showed, and what the semantic tokens
         // called a method.
-        let names_itself = declarator.get_name().is_some();
+        //
+        // **An operator's name is not an identifier, and the fallback took the return type for it.** `std::size_t
+        // operator()(…)` has a declarator whose `get_name()` is `None` — the keyword and its punctuation are the name —
+        // so `names_itself` was false, the specifier sequence answered with the **return type's** last qualified name,
+        // and every operator definition whose return type was qualified produced a second, phantom declaration: a
+        // function `size_t` in namespace `std`, rendered as a function, given a code lens, and counted against
+        // `std::size_t`. Measured with `inspect facts` on `struct Hashed { std::size_t operator()(…) const; };`: four
+        // facts, one of them that phantom. A declarator that spells an operator names itself.
+        let names_itself = declarator.get_name().is_some()
+            || crate::sema::scopes::spells_an_operator(declarator.syntax());
         let from_the_declarator = declarator
             .child::<CppNameExpr>()
             .filter(CppNameExpr::is_qualified);

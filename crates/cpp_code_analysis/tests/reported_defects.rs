@@ -1046,3 +1046,78 @@ fn an_out_of_line_definition_declares_its_member_and_not_its_class() {
         "the constructor declared in the class, and the member's declaration and definition"
     );
 }
+
+/// **An operator definition is named by its operator, not by its return type.**
+///
+/// `std::size_t operator()(std::string const& value) const { … }` has a declarator whose `get_name()` is `None` — the
+/// keyword and its punctuation *are* the name — so `qualified_declarations` treated it as a declaration with no name
+/// and fell back to the **specifier sequence**, which answered the return type's last qualified name. Every operator
+/// definition whose return type was qualified therefore produced a second, phantom declaration: a *function* named
+/// `size_t` in namespace `std`.
+///
+/// What a reader saw: a `codeLens` reading "726 references" over the return type — the lens excludes operators and
+/// destructors, and the phantom is neither — counting every `std::size_t` in the project, and a hover card calling
+/// `std::size_t` a function. Measured with `inspect facts` on the fixture below: four facts, one of them the phantom.
+#[test]
+fn an_operator_is_named_by_its_operator_not_its_return_type() {
+    let source = "\
+struct Hashed {
+    std::size_t operator()(std::string const& value) const { return 0; }
+};
+";
+    // **The plain reading, not the cooked one.** The phantom fact is made by the fact builder's second pass over
+    // the tree — see `qualified_declarations` — and the cooked reading reaches it through a rendering whose offsets
+    // differ; the shape under test is the file's own.
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let summary = session
+        .parsed_summary(std::path::Path::new("/p/a.cpp"))
+        .expect("the file is a summary");
+
+    let functions: Vec<&cpp_code_analysis::DeclFact> = summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Function)
+        .collect();
+    assert_eq!(
+        functions.len(),
+        1,
+        "one function is declared, and the return type is not a second one: {:?}",
+        functions
+            .iter()
+            .map(|fact| (fact.name.as_str(), fact.scope.as_deref()))
+            .collect::<Vec<_>>()
+    );
+    let operator = functions[0];
+    assert_eq!(
+        operator.name.as_str(),
+        "operator()",
+        "the declarator spells the name"
+    );
+    assert_eq!(operator.scope.as_deref(), Some("Hashed"));
+    assert_eq!(
+        operator.returns.as_deref(),
+        Some("std::size_t"),
+        "and the return type is the return type"
+    );
+    assert!(
+        !summary
+            .declarations
+            .iter()
+            .any(|fact| fact.name == "size_t"),
+        "no fact is named after the return type: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}

@@ -2737,7 +2737,7 @@ fn declaration_is_qualified(node: &CppSyntaxNode) -> bool {
 /// The keyword anywhere in the declarator, which is where a declared name lives. `int y = x.operator+();` puts one in
 /// an *initializer*, which is not this declaration's name — the caller excludes the initializer by asking the
 /// declarators, not the declaration.
-fn spells_an_operator(declarator: &CppSyntaxNode) -> bool {
+pub(crate) fn spells_an_operator(declarator: &CppSyntaxNode) -> bool {
     declarator
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
