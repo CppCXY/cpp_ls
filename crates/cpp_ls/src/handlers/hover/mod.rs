@@ -325,6 +325,17 @@ pub fn hover(
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
+    // **An attribute is a word with a meaning of its own, and it is not a name in the program.** `[[maybe_unused]]`
+    // declares nothing, so every question below answers "no" and the popup was the declaration's documentation or
+    // nothing at all: measured with `inspect hover` on `test_cpp/src/attributes.cpp:37`,
+    // `[[maybe_unused]] int local = 3;` at the attribute's name — `hover at 37:10: none`.
+    //
+    // Asked first because the token is an identifier like any other: the program query below would look it up as a
+    // name, and the *declaration* the attribute is attached to is not the subject either.
+    if let Some(found) = timed!("attribute", the_attribute_at(view, offset)) {
+        return Some(markdown(found));
+    }
+
     if let Some(found) = timed!(
         "program",
         hover_of_the_program(session, view, offset, in_the_file)
@@ -506,6 +517,34 @@ fn hover_of_the_rendering(
     }
     let offset = cpp_code_analysis::file::coordinates::ReadingOffset::new(offset);
     hover_of_the_program(session, &rendered, offset, in_the_file)
+}
+
+/// **The card for an attribute name at the cursor**, when that is what the cursor is on — see [`hover`].
+///
+/// The walk is the one every other question here uses: up from the token, stopping at the first node that is a
+/// *declaration*. An attribute list is written inside the declaration it belongs to, so reaching a declaration first
+/// means the token is one of the declaration's own names and not an attribute's.
+fn the_attribute_at(
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+) -> Option<String> {
+    let token = cpp_parser::token_at(&view.root, offset.get())?;
+    if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier {
+        return None;
+    }
+    let mut node = token.parent();
+    while let Some(current) = node {
+        match cpp_parser::CppSyntaxKind::from(current.kind()) {
+            cpp_parser::CppSyntaxKind::AttributeList => {
+                return vocabulary::attribute_hover(token.text());
+            }
+            cpp_parser::CppSyntaxKind::Declaration
+            | cpp_parser::CppSyntaxKind::CompoundStat
+            | cpp_parser::CppSyntaxKind::TranslationUnit => return None,
+            _ => node = current.parent(),
+        }
+    }
+    None
 }
 
 fn hover_of_the_program(

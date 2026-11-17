@@ -183,3 +183,17 @@ cuda:
   vector_ulonglong: "**`ulonglong1` … `ulonglong4`** — 一到四个无符号 64 位整数，分量 `.x` … `.w`。"
   vector_float: "**`float1` … `float4`** — 一到四个 32 位浮点，分量 `.x` … `.w`。\n\n`float4` 是访存受限核函数的主力：每个线程每次访问 16 个对齐字节，正是硬件最喜欢的形状。"
   vector_double: "**`double1` … `double4`** — 一到四个 64 位浮点，分量 `.x` … `.w`。\n\n除专用单元外，设备做 `double` 的速度只是 `float` 的一小部分；需要精确算术的核函数仍然需要它。"
+
+# **标准 attribute** —— `[[maybe_unused]]` 之类。和 `keyword` 分开，因为 attribute 不是词法关键字：
+# 它是 `[[…]]` 里的一个标识符，所以按 token kind 查不到，拼写就是 key。
+attribute:
+  assume: "**`[[assume(expr)]]`** —— 告诉优化器：此处 `expr` 为真；C++23。\n\n```cpp\nint half(int x) {\n    [[assume(x % 2 == 0)]];\n    return x / 2;\n}\n```\n\n这是承诺不是检查：`expr` 为假则程序 ill-formed、无需诊断——实际效果是编译器删掉了它认为不可能的分支。能写它就别写 `if (!cond) unreachable;`：优化器看不穿那个 `if`。"
+  carries_dependency: "**`[[carries_dependency]]`** —— 该值携带依赖链，供 `memory_order_consume` 使用；C++11。\n\n```cpp\nint* p = load(memory_order_consume);\n[[carries_dependency]] int* copy = p;\n```\n\n标在函数的参数/返回值或变量上，表示依赖链经过它传递。今天所有实现都把 `consume` 提升成 `acquire`，所以它更像是文档而不是代码生成。"
+  deprecated: "**`[[deprecated(\"why\")]]`** —— 使用这个名字已被弃用，编译器会提示；C++14。\n\n```cpp\n[[deprecated(\"use size_bytes()\")]] std::size_t size() const;\n```\n\n消息可省略，但构建时用户看到的就是这句话——所以写替代方案，不要写「别用」。"
+  fallthrough: "**`[[fallthrough]]`** —— 这个 `switch` 分支是故意贯穿的；C++17。\n\n```cpp\nswitch (kind) {\ncase 1:\n    prepare();\n    [[fallthrough]];\ncase 2:\n    finish();\n}\n```\n\n没有它，开着隐式贯穿告警的编译器会报一处；有了它，意图写在代码里、告警也消失。它必须自己是一条语句，紧挨着下一个 label。"
+  likely: "**`[[likely]]`** —— 这个分支更可能被走到；C++20。\n\n```cpp\nif (error) [[unlikely]] { report(); }\nfor (auto& item : items) [[likely]] { use(item); }\n```\n\n标在语句上（label、`if`/`else` 的分支、循环体），影响优化器选的代码布局。它是**提示**：猜错只损失性能，不改变语义。"
+  maybe_unused: "**`[[maybe_unused]]`** —— 这个名字可能不被使用，别告警；C++17。\n\n```cpp\n[[maybe_unused]] int debug_only = 3;\nvoid handler([[maybe_unused]] int signal) { /* 某些构建里才用到 */ }\n```\n\n类、函数、变量、参数、枚举量、结构化绑定、命名空间都可以标。它消掉的是**未使用**告警，所以「只有某个 `#if` 分支才读的参数」正是它该用的地方。"
+  nodiscard: "**`[[nodiscard]]`** —— 丢掉这个调用的返回值是错误，编译器会提示；C++17。\n\n```cpp\n[[nodiscard]] bool empty() const;\n[[nodiscard(\"the lock is released here\")]] Lock acquire();\n```\n\n标在函数上则每次调用都检查；标在类型上则该类型的所有返回函数都被检查——`[[nodiscard]] enum class Status` 就是让每个返回 `Status` 的调用都被盯住，这正是它的用法。"
+  no_unique_address: "**`[[no_unique_address]]`** —— 空成员不必有自己的地址；C++20。\n\n```cpp\ntemplate <typename Alloc>\nstruct vector {\n    [[no_unique_address]] Alloc alloc;\n    int* data;\n};\n```\n\n无状态 allocator 因此不占空间，包装类和它的数据一样大。非空成员不受影响，代价是这个成员的地址不再和邻居不同——这正是交换。"
+  noreturn: "**`[[noreturn]]`** —— 这个函数不返回；C++11。\n\n```cpp\n[[noreturn]] void fatal(const char* message);\nif (!input) fatal(\"no input\");\n```\n\n这是承诺：走到函数末尾就是未定义行为。换来的是调用之后的代码不可达——所以 `fatal(...)` 能站在需要值的位置，编译器也不会在那里报「缺少 return」。"
+  unlikely: "**`[[unlikely]]`** —— 这个分支更**不**可能被走到；C++20。\n\n```cpp\nif (size == 0) [[unlikely]] { return; }\n```\n\n位置和 `[[likely]]` 一样，猜的方向相反。两者都只是代码布局的提示，不改变程序行为。"

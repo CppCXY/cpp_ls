@@ -44,6 +44,22 @@ pub fn command_hover(name: &str) -> Option<String> {
     known(&format!("command.{}", name.to_ascii_lowercase()))
 }
 
+/// **What a standard attribute means** — `[[maybe_unused]]`, `[[nodiscard]]`, `[[fallthrough]]`, …
+///
+/// An attribute is not a name in the program: it declares nothing, so neither `Session::definition` nor the scope walk
+/// has an answer for it, and a hover on one produced the declaration's documentation — or nothing. Measured with
+/// `inspect hover` on `test_cpp/src/attributes.cpp:37`, `[[maybe_unused]] int local = 3;`: `hover at 37:10: none`.
+///
+/// The text lives beside the keywords' in `locales/en.yml` for the same reason they do: this is a vocabulary, and a
+/// vocabulary is a table a translator can edit.
+///
+/// `None` for a spelling the table does not describe, and for a **scoped** attribute (`[[gnu::always_inline]]`), whose
+/// meaning belongs to a vendor's manual rather than to the standard — the caller passes the token's own text, so a
+/// scope's name answers nothing.
+pub fn attribute_hover(name: &str) -> Option<String> {
+    known(&format!("attribute.{name}"))
+}
+
 /// **What a CUDA word means** — `None` unless the project is a CUDA project.
 ///
 /// These are not keywords to this lexer (see `cpp_code_analysis::cuda`): `__global__` is a legal variable name in
@@ -185,5 +201,23 @@ mod tests {
         assert!(cuda_hover(&other, true).is_none());
         let mistyped = token_of("void f() { int ThreadIdx = 1; }\n", "ThreadIdx", true);
         assert!(cuda_hover(&mistyped, true).is_none(), "case matters");
+    }
+
+    /// **A standard attribute has a card**, and a scoped one does not: `[[gnu::always_inline]]`'s meaning is a
+    /// vendor's, and the table is the standard's.
+    #[test]
+    fn a_standard_attribute_is_answered() {
+        let card = attribute_hover("maybe_unused").expect("`[[maybe_unused]]` has an answer");
+        assert!(card.contains("maybe_unused"), "{card}");
+        assert!(card.contains("C++17"), "the standard it comes from: {card}");
+
+        assert!(
+            attribute_hover("always_inline").is_none(),
+            "a vendor's attribute is not the standard's vocabulary"
+        );
+        assert!(
+            attribute_hover("gnu").is_none(),
+            "the scope's own name is not an attribute"
+        );
     }
 }
