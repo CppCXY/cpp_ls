@@ -630,6 +630,41 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             bit_in_fold.map_or(0, |file| file.unknown_guards),
             bit_in_walk.is_some()
         );
+        if let Some(file) = bit_in_fold
+            && let Some(summary) = session.index().summary(&file.path)
+        {
+            let wants: Vec<(String, String)> = summary
+                .macros
+                .iter()
+                .filter(|fact| fact.name.contains("__glibcxx_want"))
+                .take(4)
+                .map(|fact| (fact.name.clone(), format!("{:?}", fact.guard)))
+                .collect();
+            let text = session.text(&file.path).unwrap_or_default();
+            let skeleton = Skeleton::of(summary, &text);
+            let region: Vec<String> = summary
+                .guards
+                .conditionals
+                .get(2)
+                .map(|conditional| {
+                    conditional
+                        .branches
+                        .iter()
+                        .map(|branch| format!("{:?} {:?}", branch.kind, branch.condition))
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!("  <bit> region 2: {region:?}");
+            println!(
+                "  <bit> facts {}, want {} {:?}, steps {}, unreadable {}, unresolved {}",
+                summary.macros.len(),
+                wants.len(),
+                wants,
+                skeleton.steps().len(),
+                skeleton.unreadable(),
+                skeleton.unresolved_includes()
+            );
+        }
         let marked = session.index().macros();
         for name in [
             "__cpp_lib_bit_cast",
@@ -639,16 +674,21 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             let in_walk = walked
                 .iter()
                 .any(|(_, bindings)| bindings.iter().any(|(known, _, _)| known == name));
-            let in_fold = composition
+            let in_exit = composition
                 .files
                 .iter()
                 .any(|file| file.at_exit.get(name).is_some());
+            let in_entry = composition
+                .files
+                .iter()
+                .any(|file| file.at_entry.get(name).is_some());
             println!(
-                "  {name}: defined {}, unknown {}, in walk {}, in fold {}",
+                "  {name}: defined {}, unknown {}, in walk {}, in some exit {}, in some entry {}",
                 marked.is_defined(name),
                 marked.is_unknown(name),
                 in_walk,
-                in_fold
+                in_exit,
+                in_entry
             );
         }
         println!(

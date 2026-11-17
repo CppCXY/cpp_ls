@@ -359,6 +359,19 @@ for `__cpp_lib_bit_cast`. So the next instrument is `<bit>`'s own skeleton: the 
 `__glibcxx_want_*` and `__cpp_lib_bit_cast`, with the visibility each got. That distinguishes a guard decided false
 (the top of `bit` is inside `#if __cplusplus > ...`-shaped text) from a step that never made it into the skeleton.
 
+**Twelfth run: `bit`'s defines are guarded by a decidable condition.** The probe now prints the skeleton of `<bit>`:
+
+```text
+<bit> facts 6, want 4 [("__glibcxx_want_bit_cast", "Region(2)"), ...], steps 11, unreadable 0, unresolved 0
+<bit> region 2: ["If Some("__cplusplus >= 201402L")"]
+```
+
+So the defines *are* in the skeleton, they are not unreadable, they are not inside a skipped include, and their region
+is `#if __cplusplus >= 201402L` — which the seed answers with 202002, verified directly against `Over` two rounds ago.
+The fold should apply them. That it does not is now a question about **the visibility the fold computes and the
+environment it asks with**, not about the directives: the next instrument prints `visibility_of`'s answer for that one
+step, and the `Over` it was given. Everything else on this path has been eliminated.
+
 The class is named and small; __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
 
 **Earlier note.** **Sixth run: the closure is complete.** The set difference says it outright: `walk-only files: 3` --- `bits/ranges_algobase.h`, `bits/std_mutex.h`, `numbers`. The walk's 1 053 is a count of **frames**, not files (`unit.files()` yields one entry per frame, and a header included several times has several), and the fold's 251 distinct files are the walk's distinct files minus three. So the traversal was never the problem; the previous rounds' `251 vs 1 053` was a comparison of two different units.
