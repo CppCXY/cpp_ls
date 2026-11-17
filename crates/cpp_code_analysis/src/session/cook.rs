@@ -246,15 +246,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     .map(|held| std::sync::Arc::clone(&held.unit)),
             }
         };
-        let can_be_a_root = {
-            let included = !self.store.index().includers_of(&path).is_empty();
-            let has_a_command = self
-                .config
-                .database
-                .as_ref()
-                .is_some_and(|database| database.command_for(&path).is_some());
-            !included || has_a_command || self.documents.is_open(&path)
-        };
         // The definition cache is the run's, not this file's: a definition's text does not depend on which file asked
         // for it, and without it every cook re-lexes and re-parses the whole closure's bodies (`configuration_from_
         // environment_and`'s own note measures 12.2 s of a 40 s census on exactly that).
@@ -273,25 +264,16 @@ impl<F: FileProvider + Clone> Session<F> {
                     )
                 })
         };
-        // **Walk the unit that reads this file** — the designated root when the index names one, and the file itself
-        // only when it is a root of its own. Walking the *header* was the bug: a unit rooted at it has no includer, so
-        // _HAS_CXX20 is false and MSVC's <ranges> renders as its #else branch (12 bytes) where the unit that
         // includes it renders 217 875. Nothing is walked when the designated root's timeline is already in hand
         // (held), which is the case the fast path above exists for.
-        let walked = if held.is_none() {
-            match designated_root.as_deref() {
-                Some(root) => self.unit_and_state_of(root).map(|(unit, _)| unit),
-                None if can_be_a_root => self.unit_and_state_of(&path).map(|(unit, _)| unit),
-                None => None,
-            }
-        } else {
-            None
-        };
+        // **S1: a cook composes, and never walks.** The environment a file needs is a function of its text and the
+        // macros in force where it is included, so the composed arm is the answer at file scale; walking the whole
+        // closure was measured at 2.8-8.8 s and +174-355 MB for each open file (`docs/module-cache.md`).
         // **A timeline answers positionally and stays preferred**; the composed configuration is the fallback for a
         // file no walk covers. Converting both to a `Configuration` was tried and is *not* equivalent: the two
         // `semantic.rs` tests about a directive-split return type failed with it, because a materialised table is the
         // state a file starts with rather than the state at each line.
-        let (unit, configuration) = match held.or(walked) {
+        let (unit, configuration) = match held {
             Some(unit) => (Some(unit), None),
             None => (None, Some(composed()?)),
         };

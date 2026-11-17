@@ -420,51 +420,57 @@ pub(crate) fn a_conditional_macros_value_is_folded_when_every_definition_agrees(
     );
 }
 
-/// **A header is read in one translation unit's context, and it is the same one every time.**
+/// **A header cooked with no unit is read in its own environment, not in an includer's.**
 ///
-/// Nothing in the language says which translation unit a header is "in": the analysis reads it with the macros of
-/// one of the units that contains it in force. It used to take *any* such unit out of a hash map, so the answer
-/// depended on the map's layout — measured on neovim's `grid.h`, which is clean on its own and reads
-/// `__declspec(dllexport) ScreenGrid …` when `main.c`'s unit answers for it, because `main.c:3` defines `EXTERN`
-/// for its own translation unit. The census (517 files indexed) reported 2 errors there; the same file asked alone
-/// reported 0.
-///
-/// The rule is now the **lowest root path** among the units held, which is a function of the files rather than of
-/// their iteration order. `b.cpp` and `c.cpp` define the same name differently; the header's reading has to be
-/// `b.cpp`'s whichever order the two were read in.
+/// This replaces a test of the old rule ("the lowest root path decides the context"), which belonged to cooking a
+/// header by *walking* the unit that includes it. A cook composes now (`docs/module-cache.md`), and the composed
+/// environment of a header is its own closure — which does not contain a `#define` written by the *includer* before the
+/// `#include`. So `KIND` stays an identifier and neither `value_b` nor `value_c` appears: the reading is the header's
+/// own, and a program that wants `b.cpp`'s reading asks for `b.cpp` to be read as a program.
 #[test]
-pub(crate) fn a_header_is_read_in_the_same_translation_unit_every_time() {
-    for order in [["/p/b.cpp", "/p/c.cpp"], ["/p/c.cpp", "/p/b.cpp"]] {
-        let files = MemoryFiles::new()
-            .with_file("/p/h.h", "KIND\n")
-            .with_file("/p/b.cpp", "#define KIND int value_b;\n#include \"h.h\"\n")
-            .with_file("/p/c.cpp", "#define KIND int value_c;\n#include \"h.h\"\n");
-        let memory = Memory::new("header-context", &files);
-        let mut session = memory.session();
-        let roots: Vec<PathBuf> = order.iter().map(PathBuf::from).collect();
-        session.add_project_files(roots.clone());
-        session.index_everything();
-        for root in &roots {
-            session.cook(root).expect("the root is cooked");
-        }
-        session.cook("/p/h.h").expect("the header is cooked");
+pub(crate) fn a_header_cooked_without_a_unit_is_read_in_its_own_environment() {
+    let files = MemoryFiles::new()
+        .with_file("/p/h.h", "KIND\n")
+        .with_file("/p/b.cpp", "#define KIND int value_b;\n#include \"h.h\"\n")
+        .with_file("/p/c.cpp", "#define KIND int value_c;\n#include \"h.h\"\n");
+    let memory = Memory::new("header-own-environment", &files);
+    let mut session = memory.session();
+    session.add_project_files([PathBuf::from("/p/b.cpp"), PathBuf::from("/p/c.cpp")]);
+    session.index_everything();
+    session.cook("/p/b.cpp").expect("the root is cooked");
+    session.cook("/p/c.cpp").expect("the root is cooked");
+    session.cook("/p/h.h").expect("the header is cooked");
 
-        let names: Vec<String> = session
-            .index()
-            .cooked_declarations(Path::new("/p/h.h"))
-            .expect("the header has a reading")
+    let names: Vec<String> = session
+        .index()
+        .cooked_declarations(Path::new("/p/h.h"))
+        .expect("the header has a reading")
+        .iter()
+        .map(|fact| fact.name.to_string())
+        .collect();
+    assert!(
+        !names
             .iter()
-            .map(|fact| fact.name.to_string())
-            .collect();
-        assert!(
-            names.iter().any(|name| name == "value_b"),
-            "the lowest root path decides the context, whichever order the roots were read in ({order:?}): {names:?}"
-        );
-        assert!(
-            !names.iter().any(|name| name == "value_c"),
-            "and the other translation unit's context is not used ({order:?}): {names:?}"
-        );
-    }
+            .any(|name| name == "value_b" || name == "value_c"),
+        "an includer's `#define` is not part of the header's own environment: {names:?}"
+    );
+
+    // **A program read is where an includer's environment comes from.** Reading `b.cpp` as a program rebuilds `h.h`'s
+    // reading with `b.cpp`'s `#define` in force, and that is the reading the program's own queries use.
+    session
+        .read_the_unit(Path::new("/p/b.cpp"))
+        .expect("b.cpp reads as a program");
+    let names: Vec<String> = session
+        .index()
+        .cooked_declarations(Path::new("/p/h.h"))
+        .expect("the header has a reading")
+        .iter()
+        .map(|fact| fact.name.to_string())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "value_b"),
+        "the program read gives the header the environment it is included in: {names:?}"
+    );
 }
 
 /// **A name a macro writes is in the index only once the header that writes it has been cooked.**

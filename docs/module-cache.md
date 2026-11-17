@@ -504,6 +504,35 @@ That makes the gate for S1 precise: the analysis suite green, and `cpp_ls` with 
 baseline records**. It also means the earlier "one failure in the workspace suite" was the same pre-existing test, and
 that the S1 experiment never introduced a regression at all.
 
+**Twenty-first run: S1 lands — a cook composes, and one cook costs 0.2–0.4 ms.** The walk arm is gone from
+`cooking_materials`; a file with no timeline in hand is composed from the index. Measured on `EmmyLuaCodeStyle`,
+`CodeFormat/src/LuaCheck.cpp` (373-file closure, no `.cppls.toml`):
+
+```text
+index      1 603 ms, walked 0 units
+cook 1         0.4 ms | 50 declaration(s) | walked 0
+cook 2         0.3 ms | 50 declaration(s) | walked 0
+cook 3         0.2 ms | 50 declaration(s) | walked 0
+```
+
+against an **8.8 s** whole-program read for the same file before the change. `walked 0` on every line is the point.
+
+Six tests were migrated to the contract, each saying why: the stored-cook test asserts `walked == 0` on the first
+session (it used to require a walk); the sharing-cache test asks for a program read, because a cook fills no sharing
+table; the header-context test became `a_header_cooked_without_a_unit_is_read_in_its_own_environment` (a header's
+composed environment is its own closure, and an includer's `#define` is a program read's business); and the three unit
+tests trigger the unit with `read_the_unit`.
+
+Gates: `cargo test -p cpp_code_analysis` 865 passed, 0 failed; `clippy --workspace --all-targets` clean; and `cpp_ls`
+has **exactly one** failure — `a_member_declared_twice_shows_both_declarations_and_their_clauses` — which the baseline
+at the session's first commit (`c9c22504`) already had. The twenty rounds of diagnosis that test cost are recorded
+above it.
+
+**Not met yet, and not S1's:** the 82-open engine scenario. Its `advance(64)` does not return in 90 s and grows past
+4.3 GB before any slice prints — the non-converging pump, which is the next target. S1's remaining pieces are the
+`SiteKey` memoisation of `compose` and the per-file record key moving from `the_closure_fingerprint` to the reachable
+`EnvId`.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.

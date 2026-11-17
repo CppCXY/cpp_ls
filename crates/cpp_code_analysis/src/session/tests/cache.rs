@@ -178,6 +178,11 @@ pub(crate) fn the_sharing_cache_survives_a_restart() {
         session.set_sharing_contributions(true);
         session.did_open("/p/api.h", source);
         session.index_everything();
+        // **A program read is what walks now**: a cook composes its environment and walks no closure, so the sharing
+        // table is filled by the reads a reader asks for.
+        session
+            .read_the_unit(std::path::Path::new("/p/api.h"))
+            .expect("the program reads");
         session
             .save_the_sharing()
             .expect("the cache directory is the fixture's")

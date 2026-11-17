@@ -503,14 +503,21 @@ pub(crate) fn a_stored_cook_answers_the_next_session() {
         )
     };
 
-    // **Nothing on disk, so this session pays for the cook** and writes the record with its rendering.
+    // **Nothing on disk, so this session pays for the cook** and writes the record with its rendering. It pays with a
+    // *composition*, not a timeline: the environment a file needs is a function of its text and the macros in force
+    // where it is included, so cooking one file no longer walks its closure (`docs/module-cache.md`).
     let mut first = open();
     first.add_project_files([main.clone()]);
     first.did_open(&main, source);
     first.index_everything();
     assert!(
-        first.unit_stats().walked > 0,
-        "the first session had nothing to read from: {:?}",
+        first.index().cooked_declarations(&main).is_some(),
+        "the first session cooked the file"
+    );
+    assert_eq!(
+        first.unit_stats().walked,
+        0,
+        "and it composed the environment instead of walking one: {:?}",
         first.unit_stats()
     );
 

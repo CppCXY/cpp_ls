@@ -702,9 +702,8 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
         .with_file("/p/main.cpp", main);
     let fixture = Memory::new("a-body-edit-is-not-a-walk", &files);
 
-    // **The first session walks, because there is nothing to reuse** — and writes the entry for the next one.
-    // `index_everything` is the whole of the work: it reads the queue *and* drains the cooking backlog, which
-    // is where a unit is reached.
+    // **The first session cooks, and nothing walks** — a cook composes its environment from the index
+    // (`docs/module-cache.md`), so the per-file record is affordable and no timeline is built for it.
     let mut first = fixture.session();
     first.add_project_files([PathBuf::from("/p/main.cpp")]);
     first.did_open("/p/main.cpp", main);
@@ -714,11 +713,12 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
             .index()
             .cooked_declarations(Path::new("/p/main.cpp"))
             .is_some(),
-        "the fixture cooked the file, which is what walks its unit"
+        "the fixture cooked the file"
     );
-    assert!(
-        first.unit_stats().walked > 0,
-        "…and nothing was on disk to serve it: {:?}",
+    assert_eq!(
+        first.unit_stats().walked,
+        0,
+        "and no timeline was walked for it: {:?}",
         first.unit_stats()
     );
     // **Nothing is written to disk for this any more.** `tu/` held built `TranslationUnit`s, and a stored
@@ -758,9 +758,9 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
     // session gets *that* text from the record the edit's cook wrote.
     let typed = format!("{main}\nint more() {{ return A; }}\n");
     let edited = over_a_fresh_session("a body edit", &typed);
-    assert!(
-        edited.walked >= 1,
-        "a text nobody has cooked needs its unit walked: {edited:?}"
+    assert_eq!(
+        edited.walked, 0,
+        "a text nobody has cooked composes too, so a keystroke costs no walk: {edited:?}"
     );
     let again = over_a_fresh_session("the same body edit again", &typed);
     assert_eq!(
@@ -771,9 +771,9 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
     // **An `#include` above the body is a different matter**: it moves the preamble, which is the key.
     let with_an_include = "#include \"a.h\"\n#include \"b.h\"\nint main() { return A; }\n";
     let moved = over_a_fresh_session("an include above the body", with_an_include);
-    assert!(
-        moved.walked > 0,
-        "an edit above the bound is an edit to what the walk reads: {moved:?}"
+    assert_eq!(
+        moved.walked, 0,
+        "an include edit composes too, so it costs no walk: {moved:?}"
     );
 }
 
@@ -839,9 +839,13 @@ pub(crate) fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_sec
     let mut warm = fixture.session();
     warm.did_open("/p/api.h", api);
     warm.index_everything();
+    // **A program read is what builds a unit now**: a cook composes its environment and walks no closure, so the
+    // unit this test is about is asked for explicitly.
+    warm.read_the_unit(Path::new("/p/api.h"))
+        .expect("the program reads");
     assert!(
         holds_a_unit_for(&warm, "/p/api.h"),
-        "the fixture walked a unit for the file"
+        "the program read holds a unit for the file"
     );
     // **And this is the assertion to tighten.** `one::Widget` is what the environment is *for* — it is now in
     // the index (`scope: Some("one")`, the macro's `namespace` placed) where before this round it was
@@ -1031,9 +1035,12 @@ pub(crate) fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive()
 
     session.did_open("/p/api.h", api);
     session.index_everything();
+    session
+        .read_the_unit(Path::new("/p/api.h"))
+        .expect("the program reads");
     assert!(
         holds_a_unit_for(&session, "/p/api.h"),
-        "the fixture cooked the file, which walked a unit"
+        "the program read holds a unit for the file"
     );
     // **A header no longer has a unit of its own, and that is the composed reading working.** `ns.h` is included by
     // `api.h`, so it cannot be the root of its own program; it used to be walked as one so that the *unit table*

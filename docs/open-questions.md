@@ -1481,3 +1481,16 @@ The memory a session holds is therefore **not** multiplied by contexts. What gro
 itself: every file the session has read stays in `ProjectIndex::summaries` with no budget, and that is where the
 117 MB on this project lives. That is the next change, and it is a bound on the *working set*, not a convergence of
 keys.
+## S1: a cook no longer walks its closure
+
+Measured on EmmyLuaCodeStyle, `CodeFormat/src/LuaCheck.cpp` (373-file closure), no `.cppls.toml`:
+
+| | before | after |
+|---|---|---|
+| one cook | 8.8 s (whole-program read) | **0.2–0.4 ms** (composed) |
+| walks per cook | 1 (the whole closure) | **0** |
+| declarations | 50 | 50 (unchanged) |
+
+`cargo test -p cpp_code_analysis`: 865 passed. `cpp_ls`: one failure, the one the session's first commit already had
+(`a_member_declared_twice_shows_both_declarations_and_their_clauses`). Not yet met: the 82-open `advance(64)` memory
+target — `advance` does not return, and that pump is the next target rather than a cost of composition.
