@@ -664,6 +664,18 @@ keystroke on a header, a file opened before the pump reached it — walks, which
 budget must preserve. The budget itself remains unimplemented: two attempts (a dead predicate, then the live site) each
 left the same test red, and the arm above is what that test needed.
 
+**Twenty-eighth run: the `SiteKey` memo was built and reverted — the record answers first.** A per-(path, revision) memo of
+`the_indexed_environment` (an `Arc<MacroEnvironment>` in the session, `SessionRevision::is_the_same_as` as the key) compiles
+and the suite is green, but it has **no measurable effect**: `cooking_materials` is reached only after the per-file disk
+record has missed, and a cook that missed once writes the record, so the second cook of the same file never composes at
+all. The memo would pay only for a *repeated decline* within one revision, and the pump's declines are the four files
+`advance` never drains — which `index_everything`'s progress rule ends rather than retries.
+
+So the item is not a slow optimisation but an **unnecessary one under the current design**, and it is reverted rather
+than kept unmeasured. If a later change makes the record cache cheaper to miss (an in-memory-only session, a declined
+render that is retried), the memo is the shape to bring back, and the measurement to require is "compose twice in one
+revision".
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
