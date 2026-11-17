@@ -533,6 +533,27 @@ above it.
 `SiteKey` memoisation of `compose` and the per-file record key moving from `the_closure_fingerprint` to the reachable
 `EnvId`.
 
+**Twenty-second run: the pump does not converge, and it is now reproducible in four seconds.** With one directory of the
+project open (`CodeFormatLib`, 8 sources), the probe's slice loop runs 1000 times in **4.5 s** and ends with
+
+```text
+settled after 1000 slice(s); live 187 MB, peak 201 MB, units { walked: 3 }, pending 4
+```
+
+Live and the tables are **flat** (187 MB, 47 MB of tables) — so this is not memory at all: `pending_work()` stays at
+**4** and the loop exits only on its 1000-slice bound. The 82-source run that reached 4.3 GB in 90 s is the same
+livelock with expensive slices: each `advance(64)` composes up to 64 closures, and none of the slices was printed
+because the first one had not returned.
+
+The four are one of `queue.pending()`, `cooking.len()`, `refinements_wanted()`. The probe already prints the tables and
+those show `cooked 3 / units 3`, so the queue is the first suspect: a file whose summary is refused (`has_unresolved_includes`
+answers a third of this project) may be re-queued after every attempt, which would keep `queue.pending()` at a constant
+non-zero while doing no work. The next instrument prints the three terms separately.
+
+Also this run: **a definition whose body is one integer no longer lexes tokens** (`build_macro_def` answers from the
+value cache, and the tokens were rebuilt for every feature macro in every composed closure). Verified by the suite's
+865 passes; its effect on the 82-source peak is what the pump fix will make measurable.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.

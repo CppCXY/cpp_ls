@@ -493,16 +493,27 @@ fn build_macro_def(
         None
     };
     let body_text = body.unwrap_or("");
-    let (lexed, _) = cpp_parser::lex(body_text, &cpp_parser::LexerConfig::default());
-    let tokens: Vec<crate::token::Token> = lexed
-        .iter()
-        .map(|data| {
-            let piece = body_text
-                .get(data.range.start_offset..data.range.end_offset())
-                .unwrap_or("");
-            crate::token::Token::new(data.kind, piece, data.range)
-        })
-        .collect();
+    // **A body that is one integer needs no tokens.** `macro_value` answers from the value cache before it looks at
+    // the body, so lexing `202002L` into three tokens for every feature macro is memory spent to be skipped — and a
+    // session composes hundreds of closures, each with a few hundred such definitions.
+    let value = fact
+        .value
+        .as_deref()
+        .and_then(|value| value.trim().parse::<i128>().ok());
+    let tokens: Vec<crate::token::Token> = if value.is_some() {
+        Vec::new()
+    } else {
+        let (lexed, _) = cpp_parser::lex(body_text, &cpp_parser::LexerConfig::default());
+        lexed
+            .iter()
+            .map(|data| {
+                let piece = body_text
+                    .get(data.range.start_offset..data.range.end_offset())
+                    .unwrap_or("");
+                crate::token::Token::new(data.kind, piece, data.range)
+            })
+            .collect()
+    };
     let definition = crate::macros::MacroDef {
         name: Box::from(fact.name.as_str()),
         params,
@@ -516,11 +527,7 @@ fn build_macro_def(
         written_in: None,
         value: std::sync::OnceLock::new(),
     };
-    if let Some(number) = fact
-        .value
-        .as_deref()
-        .and_then(|value| value.trim().parse::<i128>().ok())
-    {
+    if let Some(number) = value {
         let _ = definition.value.set(Some(number));
     }
     Some(definition)
