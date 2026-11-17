@@ -198,4 +198,30 @@ fn what_a_summary_costs_and_why() {
         contexts.len(),
         keys.len(),
     );
+
+    // **Is the context multiplying entries, or is it one key per file?** A key is `(content, context)`; the contexts
+    // vary because a file's own **directory** is part of the hash (a quoted `#include` searches it first), so what
+    // matters is whether one *content* is stored under several contexts — that would be the multiplier.
+    let mut contents: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut pairs: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    let mut directories: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for summary in session.index().summaries() {
+        *contents.entry(summary.key.content_hash).or_default() += 1;
+        pairs.insert((summary.key.content_hash, summary.key.context_hash));
+        if let Some(parent) = summary.path.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    let shared_contents = contents.values().filter(|count| **count > 1).count();
+    println!(
+        "\n# and what a context is made of\n{} distinct content hash(es) — {} of them stored more than once \
+         ({:?} copies at the worst) — {} distinct (content, context) pair(s), {} distinct director(ies)\n\
+         so a context varies **across files** (one per directory) and does not multiply any file's entries",
+        contents.len(),
+        shared_contents,
+        contents.values().copied().max().unwrap_or(0),
+        pairs.len(),
+        directories.len(),
+    );
 }
