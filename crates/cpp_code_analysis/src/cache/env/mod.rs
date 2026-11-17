@@ -406,7 +406,7 @@ impl<'a> Over<'a> {
     /// **The seed's answer, with the completeness rule applied**: a name an incomplete table has never seen is not
     /// Undefined --- it may be defined in a file the walk has not reached, and answering   there reads a branch
     /// the compiler does not take.
-    fn from_the_seed(&self, name: &str) -> Lookup<'_> {
+    fn the_seed_answer(&self, name: &str) -> Lookup<'_> {
         match self.seed.lookup(name) {
             Lookup::Undefined if !self.seed.is_complete() => Lookup::Unanswered,
             answer => answer,
@@ -427,7 +427,7 @@ impl<'a> Over<'a> {
                     }
                     alias = next.alias();
                 }
-                None => return self.from_the_seed(name),
+                None => return self.the_seed_answer(name),
             }
         }
         Lookup::DefinedWithoutAValue
@@ -443,7 +443,7 @@ impl MacroValues for Over<'_> {
         match self.env.find(name) {
             Some(Some(definition)) => self.through_aliases(definition),
             Some(None) => Lookup::Undefined,
-            None => self.from_the_seed(name),
+            None => self.the_seed_answer(name),
         }
     }
 
