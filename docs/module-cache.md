@@ -453,6 +453,14 @@ This is exactly the class of regression Gate 0 does not catch: it compares **env
 answer. S1 needs that survey before it can land — the cheapest form being to run the server suite with the walk arm
 deleted and read every failure, which is what this run did (one failure out of the whole workspace).
 
+**Seventeenth run: the regression is not in the cook.** The same fixture, cooked with the walk and without it, files
+**identical facts** — `cook: declarations 5`, two `call` facts in scope `Foo` (`crates/cpp_code_analysis/tests/cook_fixture_probe.rs`,
+kept as an ignored probe). The hover card, however, lists one declaration and cites only line 3 (`a.cpp:3:29`, the
+`const` overload). So the loss is **downstream of the cook**, in whatever the hover reads when no timeline is held: a
+program reading versus a file reading, or the name table rather than the cooked declarations. The next instrument is in
+`cpp_ls::handlers::hover` itself — print which list the card's "declared twice" section is built from — because the
+cook's half of S1 is now exonerated by measurement.
+
 The class is named and small;
 
  __has_include needs an include search in the table, and the other two are compiler predefines this machine's seed does not carry.
