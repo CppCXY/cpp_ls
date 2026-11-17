@@ -66,6 +66,26 @@ fn what_a_member_list_of_a_class_template_costs() {
         session.pending_work()
     );
 
+    // **A file named here is cooked before the members are asked for** — the half the server's pump does and this probe
+    // did not, so a member list built from the *raw* reading can be told from one built from the compiler's: a header
+    // whose braces only balance per `#if` branch (`<variant>`) files its class under the enclosing namespace of whichever
+    // branch the raw text leaves open.
+    if let Ok(named) = std::env::var("CPPLS_MEMBERS_COOK")
+        && !named.is_empty()
+    {
+        let cooked = session.cook(&named);
+        println!(
+            "cooked {named}: {} declaration(s), {}{}",
+            cooked.as_ref().map_or(0, |reading| reading.declarations),
+            if cooked.is_some() {
+                "has a reading"
+            } else {
+                "NO reading"
+            },
+            ""
+        );
+    }
+
     let Some(view) = session.view_of_the_file(&entry) else {
         panic!("the entry file has a view");
     };
