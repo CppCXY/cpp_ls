@@ -198,9 +198,28 @@ fn composition<F: FileProvider + Clone>(
     let cached = std::cell::Cell::new(0usize);
     let rescued = std::cell::Cell::new(0usize);
     let missed: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let missing_summary = std::cell::Cell::new(0usize);
+    let missing_text = std::cell::Cell::new(0usize);
+    let missing_examples: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
     let composed = compose_unit(root, &Env::empty(), seed, &mut |path| {
-        let summary = session.index().summary(path)?;
-        let text = session.text(path)?;
+        let Some(summary) = session.index().summary(path) else {
+            missing_summary.set(missing_summary.get() + 1);
+            if missing_examples.borrow().len() < 6 {
+                missing_examples
+                    .borrow_mut()
+                    .push(format!("no summary: {}", path.display()));
+            }
+            return None;
+        };
+        let Some(text) = session.text(path) else {
+            missing_text.set(missing_text.get() + 1);
+            if missing_examples.borrow().len() < 6 {
+                missing_examples
+                    .borrow_mut()
+                    .push(format!("no text: {}", path.display()));
+            }
+            return None;
+        };
         let skeleton = Skeleton::resolved_by(summary, &text, &mut |fact| {
             asked.set(asked.get() + 1);
             if let Some(path) = fact.resolved.clone() {
@@ -226,6 +245,12 @@ fn composition<F: FileProvider + Clone>(
         });
         Some((skeleton, summary.guards.clone()))
     });
+    eprintln!(
+        "  lookup: {} missing summary, {} missing text; e.g. {:?}",
+        missing_summary.get(),
+        missing_text.get(),
+        missing_examples.borrow()
+    );
     eprintln!(
         "  resolver: {} include(s) asked, {} cached, {} rescued by suffix, {} still unresolved; missed e.g. {:?}",
         asked.get(),
