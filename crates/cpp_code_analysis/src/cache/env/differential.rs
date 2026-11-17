@@ -492,6 +492,14 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             println!("  contains {wanted}: {found} ({skeletons})");
             let _ = skeletons;
         }
+        for (path, offset, what, visibility, condition) in
+            composition.skipped_includes.iter().take(12)
+        {
+            println!(
+                "  skipped include [{visibility}] {}:{offset} {what} under {condition}",
+                path.display()
+            );
+        }
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());
         }

@@ -70,6 +70,10 @@ pub struct Composed {
     /// capped so a corpus with thousands of them does not turn a measurement into an allocation. The `what` is the
     /// macro's name or the include's path: what the fold would have applied had the condition been decidable.
     pub unknown: Vec<(usize, String)>,
+    /// **Every include the fold skipped**, as `(offset, spelling or path, visibility, condition text)` — an `Inactive`
+    /// include hides a whole subtree and adds nothing to [`Composed::unknown_guards`], which is exactly the shape a
+    /// traversal can lose most of a closure to without saying so. Capped like [`Composed::unknown`].
+    pub skipped_includes: Vec<(usize, String, &'static str, String)>,
 }
 
 /// How many undecided directives a fold keeps for a probe — enough to name the classes, few enough that a corpus with
@@ -168,6 +172,7 @@ pub(crate) fn fold(
         after_each_include: Vec::new(),
         unknown_guards: 0,
         unknown: Vec::new(),
+        skipped_includes: Vec::new(),
         depth_exceeded: 0,
         seed,
         handler,
@@ -184,6 +189,7 @@ struct Fold<'a> {
     after_each_include: Vec<(usize, Env)>,
     unknown_guards: usize,
     unknown: Vec<(usize, String)>,
+    skipped_includes: Vec<(usize, String, &'static str, String)>,
     depth_exceeded: usize,
     seed: &'a dyn MacroValues,
     handler: &'a mut dyn IncludeHandler,
@@ -208,8 +214,12 @@ impl Fold<'_> {
             });
             match visibility {
                 Visibility::Active => {}
-                Visibility::Inactive => continue,
+                Visibility::Inactive => {
+                    self.note_a_skipped_include(step, guards, "Inactive");
+                    continue;
+                }
                 Visibility::Unknown => {
+                    self.note_a_skipped_include(step, guards, "Unknown");
                     self.unknown_guards += 1;
                     if self.unknown.len() < UNKNOWN_EXAMPLES {
                         self.unknown.push((
@@ -236,9 +246,32 @@ impl Fold<'_> {
             after_each_include: self.after_each_include,
             unknown_guards: self.unknown_guards,
             unknown: self.unknown,
+            skipped_includes: self.skipped_includes,
             unresolved_includes: skeleton.unresolved_includes(),
             depth_exceeded: self.depth_exceeded,
         }
+    }
+
+    /// **Remember an include this fold did not take**, so a probe can say which one and why. Only includes are
+    /// recorded: a skipped #define is one name, and the multiplier that matters is the subtree behind an
+    /// #include.
+    fn note_a_skipped_include(
+        &mut self,
+        step: &Step,
+        guards: &SummaryGuards,
+        visibility: &'static str,
+    ) {
+        if !matches!(step.action, Action::Include(_))
+            || self.skipped_includes.len() >= UNKNOWN_EXAMPLES
+        {
+            return;
+        }
+        self.skipped_includes.push((
+            step.at,
+            step_label(step),
+            visibility,
+            guard_text(guards, step.guard),
+        ));
     }
 
     fn apply(&mut self, step: &Step) {

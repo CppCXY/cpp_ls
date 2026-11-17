@@ -56,6 +56,8 @@ pub struct UnitComposition {
     pub unresolved_includes: usize,
     /// **The undecided directives**, as (file, offset, what), capped — the attribution a probe prints.
     pub unknown: Vec<(PathBuf, usize, String)>,
+    /// **The includes the fold skipped**, as (file, offset, spelling, visibility, condition), capped.
+    pub skipped_includes: Vec<(PathBuf, usize, String, &'static str, String)>,
 }
 
 impl UnitComposition {
@@ -81,6 +83,7 @@ pub fn compose_unit(
         depth_exceeded: 0,
         unresolved_includes: 0,
         unknown: Vec::new(),
+        skipped_includes: Vec::new(),
     };
     let Some((skeleton, guards)) = (recorder.look_up)(root) else {
         return UnitComposition::default();
@@ -105,12 +108,24 @@ pub fn compose_unit(
             recorder.unknown.push((root.to_path_buf(), offset, what));
         }
     }
+    for (offset, what, visibility, condition) in composed.skipped_includes {
+        if recorder.skipped_includes.len() < super::compose::UNKNOWN_EXAMPLES {
+            recorder.skipped_includes.push((
+                root.to_path_buf(),
+                offset,
+                what,
+                visibility,
+                condition,
+            ));
+        }
+    }
     UnitComposition {
         files: recorder.files,
         unknown_guards: recorder.unknown_guards,
         depth_exceeded: recorder.depth_exceeded,
         unresolved_includes: recorder.unresolved_includes,
         unknown: recorder.unknown,
+        skipped_includes: recorder.skipped_includes,
     }
 }
 
@@ -123,6 +138,7 @@ struct Recording<'a> {
     depth_exceeded: usize,
     unresolved_includes: usize,
     unknown: Vec<(PathBuf, usize, String)>,
+    skipped_includes: Vec<(PathBuf, usize, String, &'static str, String)>,
 }
 
 impl IncludeHandler for Recording<'_> {
