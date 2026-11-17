@@ -545,6 +545,35 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
                 path.display()
             );
         }
+        let mut classes: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_path, _offset, what) in &composition.unknown {
+            let condition = what.split(" under ").nth(1).unwrap_or(what);
+            // **The outermost region is the one that decides the chain**: `visibility_of` answers `Unknown` if any
+            // enclosing region is undecided, and `guard_text` lists them outermost first, so the class is the last
+            // segment, not the first.
+            let first = condition
+                .split(" && ")
+                .last()
+                .unwrap_or(condition)
+                .trim_start_matches("If ")
+                .split_whitespace()
+                .next()
+                .unwrap_or("?")
+                .to_string();
+            *classes.entry(first).or_insert(0) += 1;
+        }
+        let mut classes: Vec<(String, usize)> = classes.into_iter().collect();
+        classes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        println!("  unknown classes: {classes:?}");
+        let over = crate::cache::env::Over::new(Env::empty(), session.index().macros());
+        println!(
+            "  __cplusplus: defined {}, body {}, incomplete {}, over {:?}",
+            session.index().macros().is_defined("__cplusplus"),
+            session.index().macros().get("__cplusplus").is_some(),
+            session.index().macros().is_incomplete(),
+            crate::MacroValues::lookup(&over, "__cplusplus")
+        );
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());
         }
