@@ -544,6 +544,65 @@ pub struct MacroEnvironment {
     bodies_in_force: std::collections::HashMap<std::sync::Arc<str>, InForceEntry>,
 }
 
+impl MacroEnvironment {
+    /// **A hash of what this environment puts in force** — the identity a record key needs.
+    ///
+    /// Two files whose fingerprints are equal have the same macros defined the same way from the same offsets,
+    /// which is what lets one cooked record answer for both. It is deliberately *not* the content hash of the
+    /// closure: a header that changed without changing what it defines leaves the environment equal, and the record is
+    /// still the reading this environment produces.
+    ///
+    /// The names are hashed **sorted**, because two environments that differ only in the order their includes were
+    /// walked are the same environment; the bindings of one name keep the walk's order, which is meaningful: at the
+    /// same offset, a later `#define` is the one in force.
+    pub fn fingerprint(&self) -> u64 {
+        fn mix(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            *hash ^= 0xff;
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut names: Vec<&std::sync::Arc<str>> = self.by_name.keys().collect();
+        names.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+        for name in &names {
+            mix(&mut hash, name.as_bytes());
+            if let Some(bindings) = self.by_name.get(name.as_ref()) {
+                for binding in bindings {
+                    mix(&mut hash, &(binding.at as u64).to_le_bytes());
+                    mix(&mut hash, &[u8::from(binding.definition.is_some())]);
+                    mix(&mut hash, binding.body.as_deref().unwrap_or("").as_bytes());
+                    mix(
+                        &mut hash,
+                        binding.parameters.as_deref().unwrap_or("").as_bytes(),
+                    );
+                }
+            }
+        }
+        let mut in_force: Vec<&std::sync::Arc<str>> = self.bodies_in_force.keys().collect();
+        in_force.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+        for name in &in_force {
+            mix(&mut hash, name.as_bytes());
+            if let Some((function_like, parameters, body)) = self.bodies_in_force.get(name.as_ref())
+            {
+                mix(
+                    &mut hash,
+                    &[match function_like {
+                        None => 2,
+                        Some(true) => 1,
+                        Some(false) => 0,
+                    }],
+                );
+                mix(&mut hash, parameters.as_deref().unwrap_or("").as_bytes());
+                mix(&mut hash, body.as_bytes());
+            }
+        }
+        hash
+    }
+}
+
 /// One entry in a name's history: where it came into force, and everything the caller knew about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Binding {
