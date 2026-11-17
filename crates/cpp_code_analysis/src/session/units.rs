@@ -236,9 +236,18 @@ impl<F: FileProvider + Clone> Session<F> {
                 };
 
                 let read_started = std::time::Instant::now();
+                if crate::probes::units() {
+                    eprintln!("[unit] gathering the closure of {path:?}");
+                }
                 let (closure, closure_by_key) = { self.closure_with_text_from(path, Some(root)) };
                 let read_took = read_started.elapsed();
                 let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
+                if crate::probes::units() {
+                    eprintln!(
+                        "[unit] closure of {path:?}: {} file(s), {closure_bytes} bytes in {read_took:?}",
+                        closure.len()
+                    );
+                }
                 let walk_started = std::time::Instant::now();
 
                 // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a

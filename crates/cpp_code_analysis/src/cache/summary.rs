@@ -1776,6 +1776,18 @@ fn walk_the_translation_unit<'a>(
         generation: 0,
     };
 
+    // **One visited set for the whole unit, not one per top-level include.** It is what makes the re-entry guards
+    // fire at all: `walk_one_file` skips a second read only when `already_read` is true, and a fresh set per include
+    // made it false at every top-level include's first entry into a file — so a guarded header included by five
+    // others was read five times, and every header it includes five times more. Measured on `Util/src/Url.cpp` with
+    // the walk census: **380 538 entries over 117 distinct files** (ratio 3 252) and a walk that did not finish in
+    // minutes at 6 GB; with one set it is 117 entries.
+    //
+    // The unguarded header keeps being re-read, which is the deliberate half: `bits/version.h` is included by every
+    // libstdc++ header for the feature-test macros that header asks for, it has no guard, and skipping it dropped
+    // `__cpp_lib_print`. The two skips in `walk_one_file` are `#pragma once` and the `#ifndef X / #define X` idiom,
+    // and both are *unit-wide* facts, not per-include ones.
+    let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
     for include in &summary.includes {
         // The includes are facts in source order, so the first one at or past the limit ends the walk.
         if only_before.is_some_and(|limit| include.range.start_offset >= limit) {
@@ -1787,8 +1799,6 @@ fn walk_the_translation_unit<'a>(
         };
         let from_offset = all_from.unwrap_or(include.range.start_offset + include.range.length);
 
-        let mut seen: std::collections::HashSet<&std::path::Path> =
-            std::collections::HashSet::new();
         walk_one_file(
             root,
             from_offset,
@@ -4313,6 +4323,20 @@ fn walk_one_file<'a>(
             )
         };
         if !include_is_in_force {
+            walked.includes_skipped += 1;
+            continue;
+        }
+
+        // **A file that includes itself is not followed.** uriparser's `uri.h` writes `#include "Uri.h"` twice,
+        // inside regions a doxygen build takes, and on Windows the spelling resolves to the file itself — so the
+        // walk descended into the header it was already reading, and an unguarded file has nothing to stop it: the
+        // census measured **197 470 entries of `uri.h`** and a walk that never finished at 6 GB. A preprocessor
+        // cannot meaningfully include the file it is reading, so the edge is recorded as skipped.
+        if include
+            .resolved
+            .as_deref()
+            .is_some_and(|nested| nested == file.path)
+        {
             walked.includes_skipped += 1;
             continue;
         }

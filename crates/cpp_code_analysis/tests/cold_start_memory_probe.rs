@@ -216,7 +216,23 @@ fn where_a_cold_start_puts_its_memory() {
     );
 
     println!("\n# the pump, with the reader's files open");
-    for path in &sources {
+    // **Which documents to open**, because the interesting case is one or two files: a hang that two documents
+    // reproduce is a finer experiment than one that needs eighty-two.
+    let opening: Vec<PathBuf> = match std::env::var("CPPLS_PROBE_OPEN") {
+        Ok(names) => {
+            let names: Vec<&str> = names.split(',').map(str::trim).collect();
+            sources
+                .iter()
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|file| names.contains(&file.to_string_lossy().as_ref()))
+                })
+                .cloned()
+                .collect()
+        }
+        Err(_) => sources.clone(),
+    };
+    for path in &opening {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         session.did_open(path, &text);
     }
