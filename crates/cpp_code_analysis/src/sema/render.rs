@@ -108,6 +108,25 @@ pub fn an_item(
     }
     if let Some(head) = a_template_head(fact, syntax) {
         lines.push(head);
+        // **A constrained variable template writes its clause under the head**, and the card used to drop it:
+        //
+        // ```cpp
+        // template <typename T>
+        //     requires std::copyable<T>
+        // constexpr bool copyable_v = true;
+        // ```
+        //
+        // reported from `concepts.cpp:67` as "copyable_v 缺少 requires 相关的渲染". A *function's* clause is part of its
+        // signature (`a_function` prints it after the parameter list, where the language writes it), so it is not
+        // repeated here — only the kinds whose signature has no place for one get the line.
+        if !matches!(fact.kind, DeclKind::Function)
+            && let Some(clause) = fact
+                .requires_clause
+                .as_deref()
+                .filter(|clause| !clause.trim().is_empty())
+        {
+            lines.push(clause.to_string());
+        }
     }
     lines.push(a_line(fact, syntax, value));
     lines

@@ -597,27 +597,7 @@ pub(crate) fn the_requires_clause_with(
     binding: &Binding,
 ) -> Option<String> {
     let mut declarator: Option<CppSyntaxNode> = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(node) = &shape.declarator
             && reaches_the_name(node, binding.name_range)
         {
@@ -627,8 +607,29 @@ pub(crate) fn the_requires_clause_with(
     use cpp_parser::{CppAstNode, CppInitDeclarator};
     let parent = declarator.as_ref()?.parent()?;
     // **The clause is a sibling of the declarator**, in the init-declarator that holds both: `void f() const requires (x) {}`.
-    let init = CppInitDeclarator::cast(parent)?;
-    let clause = init.get_requires_clause()?;
+    if let Some(init) = CppInitDeclarator::cast(parent.clone())
+        && let Some(clause) = init.get_requires_clause()
+    {
+        let text = clause.get_clause_text();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+
+    // **A constrained *variable* template writes its clause in the `template` head instead.**
+    //
+    // `template <typename T> requires std::copyable<T> constexpr bool copyable_v = true;` parses as a `Declaration`
+    // holding a `TemplateDecl` (`template <typename T> requires std::copyable<T>`) with the init-declarator beside it —
+    // so the clause is a child of the `TemplateDecl` and the init-declarator has none. The card printed the head with
+    // no constraint at all: reported from `test_cpp/src/concepts.cpp:67` as "copyable_v 缺少 requires 相关的渲染".
+    let declaration = parent.parent()?;
+    let head = declaration
+        .children()
+        .find_map(cpp_parser::CppTemplateDecl::cast)?;
+    let clause = head
+        .syntax()
+        .children()
+        .find_map(cpp_parser::CppRequiresClause::cast)?;
     let text = clause.get_clause_text();
     (!text.is_empty()).then_some(text)
 }
