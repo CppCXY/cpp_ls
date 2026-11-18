@@ -2317,9 +2317,9 @@ Two changes closed the report:
    SerializeArray(items)   →  `lsp::WorkspaceDiagnosticReport::items`, lsp.h:587:52
    ```
 
-**One adjacent gap stays open**, recorded as an ignored test in `tests/alias_qualified_members.rs`: a qualified name
-inside a definition written *with* a qualifier (`void Holder::probe() { ns::simple::make(); }`) still answers
-`NotDeclaredHere` when the alias and the class are in different files. A first probe suggests the cause is not the
-alias walk but the index's own `definition`, which answered `NotDeclaredHere` for **every** qualified spelling in that
-fixture — `ns::simple`, `ns::basic`, `ns::basic::make` — while the session query for the same spellings resolved the
-member. That disagreement between `ProjectIndex::definition` and the session path is the thing to read next.
+**The adjacent shape this section once called open was the fixture, not the code.** The `.cpp` that used
+`ns::simple::make()` did not `#include` the header that declares the alias, so the alias was invisible from it and
+`NotDeclaredHere` was the right answer — the probe that printed every qualified spelling showed the alias found from
+the include and not without it. The fixture now includes the header and the test is a normal one: a qualified name
+inside a definition written with a qualifier resolves through a cross-file alias, and the rule that answers
+*unqualified* names from the definition's class leaves it alone.

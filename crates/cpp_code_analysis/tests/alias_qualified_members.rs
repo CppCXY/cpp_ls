@@ -159,6 +159,8 @@ int main() {
     );
 }
 const PROBE_SHAPE: &str = "\
+#include \"alias.h\"
+
 struct Holder {
     void probe();
 };
@@ -173,7 +175,6 @@ void Holder::probe() {
 /// `nlohmann/json.hpp`, `nlohmann::json::object` inside `WorkspaceDiagnosticReport::Serialize` was read as a member of
 /// that class and answered `NotDeclaredHere`.
 #[test]
-#[ignore = "open: a qualified name inside a definition written with a qualifier does not resolve through a cross-file alias"]
 fn a_qualified_name_inside_a_member_definition_is_not_the_classes_member() {
     let session = session_of(&[
         ("/p/basic.h", BASIC),
