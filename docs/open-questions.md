@@ -2288,3 +2288,38 @@ which the parser reads as an expression and then as a *function definition* — 
 body. That is the rule to change: inside a body, a declaration that ends with `}` and consumed a block is not a
 declaration, and reading it as a macro call with a block is what stops the swallow. The grammar already has that
 reader (`parse_macro_call`, extended in `3192964f` to accept no argument group); the missing piece is the decision.
+### The class body survives, and `json::object` answers
+
+Two changes closed the report:
+
+1. **The parser** (`3192964f`, and the rule finished since): a declaration read inside a function body that ends with
+   `}` and begins with an identifier and a `(` is not a declaration — a function definition cannot stand there, and
+   the block belongs to the macro. The reader is `parse_macro_call` (its argument group is optional since the earlier
+   commit). Measured on `nlohmann/json.hpp` at L1 with a plain `ParserConfig`:
+
+   ```text
+   before:  74 children of `basic_json`'s ClassBody, 8 errors, last declaration 333 362 bytes
+   after:  368 children, 1 error
+   ```
+
+   and the index now holds `nlohmann::basic_json::object` (kind `Function`, returns `basic_json`).
+
+2. **The query layer** (`fa3f0efd`): the rule that answers an *unqualified* name from the definition's own class was
+   also applied to qualified names — `nlohmann::json::object` inside `WorkspaceDiagnosticReport::Serialize` is not a
+   member of that class, and the narrowing turned the correct plural answer into `NotDeclaredHere`. It now applies
+   only when the written name has no `::`, and a qualified spelling the scope walk cannot place is asked of the index
+   directly (which resolves it through `using json = basic_json<>;`).
+
+   Both places in `LSP.cpp` then answered:
+
+   ```text
+   nlohmann::json::object  →  `nlohmann::basic_json::object`, json.hpp:1960:23
+   SerializeArray(items)   →  `lsp::WorkspaceDiagnosticReport::items`, lsp.h:587:52
+   ```
+
+**One adjacent gap stays open**, recorded as an ignored test in `tests/alias_qualified_members.rs`: a qualified name
+inside a definition written *with* a qualifier (`void Holder::probe() { ns::simple::make(); }`) still answers
+`NotDeclaredHere` when the alias and the class are in different files. A first probe suggests the cause is not the
+alias walk but the index's own `definition`, which answered `NotDeclaredHere` for **every** qualified spelling in that
+fixture — `ns::simple`, `ns::basic`, `ns::basic::make` — while the session query for the same spellings resolved the
+member. That disagreement between `ProjectIndex::definition` and the session path is the thing to read next.
