@@ -89,7 +89,9 @@ fn the_two_reported_hovers() {
         started.elapsed(),
         session.pending_work()
     );
-    let view = session.view_of_the_file(&path).expect("the file has a view");
+    let view = session
+        .view_of_the_file(&path)
+        .expect("the file has a view");
     let rendering = view.source.to_string();
 
     // **The tokens, found in the rendering**: the last `object` of the `nlohmann::json::object()` call, and the

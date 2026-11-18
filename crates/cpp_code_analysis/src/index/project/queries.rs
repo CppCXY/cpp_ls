@@ -442,10 +442,38 @@ pub fn definitions_across_files(
                     });
                 }
             }
-            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
+            // **The class the definition is written for answers an unqualified member use.** Inside
+            // `void C::g() { … }`, `items` names `C`'s member — the same rule `this->items` follows — and asking the
+            // index by bare spelling instead answers every class's `items`: measured on a fixture with two classes,
+            // `size` inside `Widget::area` came back `Ambiguous("size")`, and a name only `Gadget` declares came back
+            // as `Gadget`'s member from a body that cannot name it.
+            if !naming_a_member
+                && let Some(class) = the_class_a_definition_is_written_for(root, offset)
+                && index.scope_names_a_class(&class, path)
+                && let Known::Yes(list) = members_of(index, scopes, root, path, &class)
             {
+                let named: Vec<ProjectDefinition> = list
+                    .members
+                    .into_iter()
+                    .filter(|member| member.fact.name.as_str() == &*name)
+                    .map(|member| ProjectDefinition {
+                        file: member.file,
+                        fact: member.fact,
+                    })
+                    .collect();
+                if !named.is_empty() {
+                    return Known::Yes(ProjectDefinitions {
+                        found: named,
+                        conditional: 0,
+                    });
+                }
+            }
+            return if naming_a_member {
                 index.definitions(&name, path)
             } else {
+                // **An ordinary name does not reach into a class.** The definition's own class has been asked above;
+                // if it does not declare the spelling, what remains is the names actually in scope — answering with
+                // some other class's member is a wrong answer where silence is an honest one.
                 index.definitions_in_scope(&name, path)
             };
         }
@@ -710,6 +738,45 @@ pub(crate) fn template_parameters_in(declaration: &str) -> Vec<String> {
 /// spelling rather than a walk of the grammar's own shapes — the declarator of a definition holds only its
 /// parameter list, and the name it declares sits in the specifier sequence, which is the seam
 /// `sema::scopes::declarator_as` documents. A miss answers `false` and the scope rule applies; it cannot invent a
+/// **The class a member function definition is written for** — `Widget` in `int Widget::area() { … }`, and
+/// `lsp::WorkspaceDiagnosticReport` in `nlohmann::json lsp::WorkspaceDiagnosticReport::Serialize() { … }`.
+///
+/// `None` for a free function, for a definition written without a qualifier, and for an offset outside every body.
+/// This is the scope an unqualified member name is looked up in — the same rule that makes `this->items` and
+/// `items` mean the same thing inside a member function.
+pub(crate) fn the_class_a_definition_is_written_for(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+) -> Option<String> {
+    let mut node = cpp_parser::token_at(root, offset).and_then(|token| token.parent());
+
+    while let Some(current) = node {
+        let is_a_definition = cpp_parser::CppSyntaxKind::from(current.kind())
+            == cpp_parser::CppSyntaxKind::Declaration
+            && current.children().any(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::CompoundStat
+            });
+        if is_a_definition {
+            let text = current.text().to_string();
+            let before_the_parameters = text.split('(').next().unwrap_or_default();
+            let name = before_the_parameters
+                .split_whitespace()
+                .next_back()
+                .unwrap_or_default();
+            if let Some((qualifier, _)) = name.rsplit_once("::")
+                && !qualifier.is_empty()
+            {
+                return Some(qualifier.to_string());
+            }
+        }
+
+        node = current.parent();
+    }
+
+    None
+}
+
 /// member, because the query it enables is the one that was made before the rule existed.
 pub(crate) fn inside_a_definition_written_with_a_qualifier(
     root: &cpp_parser::CppSyntaxNode,
