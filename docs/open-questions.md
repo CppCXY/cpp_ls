@@ -2171,3 +2171,23 @@ so the misparse never became a declaration fact.
 2. **The grammar reading itself.** `BOOL_OPTION(a) BOOL_OPTION(b)` is still one declaration in the tree. A fix there
    would remove the misparse for every consumer (hover, completion, checks) rather than for the colour pass, and it
    is the same rule that decides `__glibcxx_function_requires(…)` — a change to weigh against the whole corpus.
+## The second report: `nlohmann::json::object` — the alias chain is fine, the class body is not
+
+Hermetic fixtures for the alias chain pass unchanged (`tests/alias_qualified_members.rs`: `using simple = basic<int>;`
+then `ns::simple::make()`, and the `basic<>` default-argument spelling `nlohmann` uses for `json`). So the qualified
+lookup was not the failure.
+
+The real project shows the class body is **read only in part**. Measured on `3rd/nlohmann_json/include/nlohmann/json.hpp`:
+
+```text
+summary: 738 declarations, 53 with scope `nlohmann::basic_json`
+members: basic_json_t lexer parser … meta object_t array_t string_t … create json_value assert_invariant
+```
+
+`parse`, `dump`, `size`, `object` are **not among them**, and the list stops at `assert_invariant` — the member written
+just before `set_parents()`, whose body is `#if JSON_DIAGNOSTICS / JSON_TRY { … } JSON_CATCH(...) {}`. That is where the
+class body is lost: recovery swallows the rest, so every later member is a declaration the index never holds, and
+`basic_json::parse` answers `NotDeclaredHere` just as `basic_json::object` does.
+
+The next fixture is therefore a class whose method contains that `JSON_TRY { … } JSON_CATCH(...) {}` shape followed by
+another member, asserting the later member is still declared — and then the parse fix, whatever it turns out to be.

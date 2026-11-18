@@ -94,6 +94,62 @@ fn the_two_reported_hovers() {
         .expect("the file has a view");
     let rendering = view.source.to_string();
 
+    // **How much of nlohmann's class body the index captured** — the member facts are the ones a qualified
+    // lookup for `json::object` needs, and the answer was `NotDeclaredHere`.
+    {
+        let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
+        if let Some(summary) = session.index().summary(&json) {
+            let mut scopes: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for declaration in &summary.declarations {
+                let scope = declaration.scope.as_ref().map_or("(none)".to_string(), |s| s.to_string());
+                *scopes.entry(scope).or_default() += 1;
+            }
+            let top: Vec<(String, usize)> = scopes
+                .iter()
+                .filter(|(scope, _)| scope.contains("basic_json"))
+                .map(|(scope, count)| (scope.clone(), *count))
+                .take(12)
+                .collect();
+            let names: Vec<String> = summary
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration.scope.as_ref().is_some_and(|scope| scope.as_str() == "nlohmann::basic_json")
+                })
+                .map(|declaration| declaration.name.to_string())
+                .collect();
+            println!(
+                "[summary] json.hpp: {} declaration(s), basic_json scopes {top:?}",
+                summary.declarations.len()
+            );
+            println!("[summary] members: {}", names.join(" "));
+        } else {
+            println!("[summary] json.hpp: no summary");
+        }
+    }
+    // **What the index holds for the chain**, which is what a qualified lookup has to work with.
+    for name in [
+        "object",
+        "basic_json::size",
+        "basic_json::parse",
+        "nlohmann::json",
+        "nlohmann::basic_json",
+        "nlohmann::basic_json::object",
+        "nlohmann::json::object",
+    ] {
+        match session.index().definition(name, &path) {
+            cpp_code_analysis::Known::Yes(found) => println!(
+                "[index] {name}: kind {:?}, file {:?}, type {:?}, scope {:?}",
+                found.fact.kind, found.file, found.fact.returns, found.fact.scope
+            ),
+            cpp_code_analysis::Known::Unknown(reason) => {
+                println!("[index] {name}: unknown {reason:?}")
+            }
+            cpp_code_analysis::Known::No => println!("[index] {name}: no"),
+        }
+    }
+
     // **The tokens, found in the rendering**: the last `object` of the `nlohmann::json::object()` call, and the
     // `items` of `SerializeArray(items)`.
     for (label, needle) in [
