@@ -620,11 +620,23 @@ impl<F: FileProvider + Clone> Session<F> {
         if self.is_idle() {
             let claimed = self.claim_cooking(COOK_SLICE);
             if !claimed.is_empty() {
+                // **Each stage's count, because a file can be claimed and then dropped by any of them** — the hole
+                // `docs/open-questions.md` names "claimed and dropped": `materials_for` when a file's unit is
+                // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
+                // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
+                let asked = claimed.len();
+                if crate::probes::cooking() {
+                    eprintln!("advance: claiming {claimed:?}");
+                }
                 let materials = self.materials_for(claimed);
+                let gathered = materials.len();
                 let rendered = self.render_them(materials);
+                let built = rendered.len();
                 let committed = self.commit_them(rendered).len();
                 if crate::probes::cooking() {
-                    eprintln!("advance: cooked {committed} file(s)");
+                    eprintln!(
+                        "advance: claimed {asked}, gathered {gathered}, built {built}, committed {committed}"
+                    );
                 }
             }
         }

@@ -207,12 +207,28 @@ impl Readings {
     const ON_ITS_OWN: u32 = 1;
 
     /// The reading a caller gets when it has no program to ask for: the last program's, else the file's own.
+    ///
+    /// **A reading with declarations wins over one without**, and the order is otherwise unchanged. Two readings of
+    /// one file are two answers, and an empty one is the weaker: a file cooked on its own **before** its includes were
+    /// in the index renders to nothing (`nlohmann/json.hpp` has 761 declarations from its program and an `on_its_own`
+    /// entry with none), and a caller that took the empty one answered `NotDeclaredHere` for every member of the class
+    /// — which is exactly the shape the report described, after the file had in fact been read.
     fn any(&self) -> Option<&CookedFile> {
-        self.last
+        let from_the_last_program = self
+            .last
             .and_then(|program| self.id_for(program))
-            .and_then(|id| self.reading(id))
-            .or(self.on_its_own.as_ref())
-            .or_else(|| self.in_a_program.first().map(|(_, reading)| reading))
+            .and_then(|id| self.reading(id));
+        let candidates = [
+            from_the_last_program,
+            self.on_its_own.as_ref(),
+            self.in_a_program.first().map(|(_, reading)| reading),
+        ];
+        candidates
+            .iter()
+            .flatten()
+            .copied()
+            .find(|reading| !reading.declarations.is_empty())
+            .or_else(|| candidates.iter().flatten().copied().next())
     }
 
     fn every(&self) -> impl Iterator<Item = (u32, &CookedFile)> {
@@ -312,8 +328,15 @@ pub struct ProjectIndex {
     ///
     /// **Per program**, because the same bytes read in two translation units are two answers — see [`Readings`].
     cooked: HashMap<String, Readings>,
-    /// **The cooked files in the order they arrived** — what [`ProjectIndex::insert_cooked`] evicts from.
-    cooked_order: std::collections::VecDeque<String>,
+    /// **The cooked files in the order they were last used** — what [`ProjectIndex::insert_cooked`] evicts from.
+    ///
+    /// A queue rather than a counter, and behind a lock so that a **read** can move its file to the back: the policy
+    /// is least-recently-*used*, not first-in-first-out, because the file a query just asked about is the one that
+    /// must survive the wave that follows it. Measured on `EmmyLuaCodeStyle`: `nlohmann/json.hpp` was rendered and
+    /// indexed with **761** declarations, then evicted by the standard-library headers cooked after it, and the hover
+    /// that needed it answered `NotDeclaredHere` — the eviction made the answer depend on the order of a walk nobody
+    /// asked for.
+    cooked_order: std::sync::Mutex<std::collections::VecDeque<String>>,
     /// A visibility walk's answer, by the file it was asked about.
     ///
     /// **The whole-walk memo, beside the per-condition one**, and it exists for the reason the numbers say: the walk

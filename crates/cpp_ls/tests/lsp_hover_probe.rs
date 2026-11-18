@@ -226,6 +226,19 @@ fn the_two_reported_hovers() {
             println!("[summary] json.hpp: no summary");
         }
     }
+    // **The two index questions the hover needs**, asked directly.
+    {
+        let in_scope = session
+            .index()
+            .declarations_in("nlohmann::basic_json", &path)
+            .len();
+        let by_name = session
+            .index()
+            .definition("nlohmann::basic_json::object", &path);
+        println!(
+            "[index] declarations_in(basic_json) = {in_scope}, definition(basic_json::object) = {by_name:?}"
+        );
+    }
     // **Is the class's header cooked at all**, and does its cooked reading hold the member?
     {
         let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");

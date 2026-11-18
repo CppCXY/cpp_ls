@@ -749,15 +749,24 @@ impl ProjectIndex {
             "the id an insert decided on is the id it filled"
         );
 
-        // **Bounded**: cooking runs for the closure of every open file — a thousand headers on a project that
-        // includes the standard library — and each reading is a declaration list as large as the file`s own
-        // summary. The map is *sparse by design* ("a file with no entry here is one nobody cooked", so a miss falls
-        // back to the file`s own reading), which is what makes evicting the oldest sound.
-        self.cooked_order.push_back(path);
-        while self.cooked.len() > MAX_COOKED_FILES {
-            let Some(oldest) = self.cooked_order.pop_front() else {
-                break;
-            };
+        // **Bounded, least-recently-*used* first.** Cooking runs for the closure of every open file — a thousand
+        // headers on a project that includes the standard library — and each reading is a declaration list as large
+        // as the file's own summary. The map is *sparse by design* ("a file with no entry here is one nobody
+        // cooked"), and the order is touched by reads (`cooked_reading` moves its file to the back), so the entry a
+        // query just used is the last one evicted. FIFO by insertion was the earlier policy, and it dropped
+        // `nlohmann/json.hpp` — 761 declarations, filed and then evicted by the standard headers cooked after it —
+        // between the query that needed it and the query that would have used it.
+        let mut victims = Vec::new();
+        if let Ok(mut order) = self.cooked_order.lock() {
+            order.push_back(path);
+            while self.cooked.len() - victims.len() > MAX_COOKED_FILES {
+                let Some(oldest) = order.pop_front() else {
+                    break;
+                };
+                victims.push(oldest);
+            }
+        }
+        for oldest in victims {
             self.forget_the_readings_of(&oldest);
         }
     }

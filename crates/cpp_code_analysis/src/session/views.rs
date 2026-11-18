@@ -220,6 +220,25 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **Ask for a file's cooked reading**, whether or not a rendering of it is cached.
+    ///
+    /// `Session::view` asks only when the **rendering** is missing, which is the right question for a view and the
+    /// wrong one for a query about a *name*: the rendering may be in the cache while the declarations it produced
+    /// were evicted from the index's bounded map, and the name is answered from the declarations. Measured on
+    /// `nlohmann/json.hpp` — rendered and indexed with **761** declarations, evicted by the wave that followed, and
+    /// every later ask saw a cached rendering and stopped, so the file was never re-read.
+    ///
+    /// Nothing is forced here: the ask is the same `macro_work` queue `Session::view` uses, and the pump serves it
+    /// (`advance` moves it into the cook queue and cooks it).
+    pub fn ask_for_the_cooked_reading(&self, path: &Path) {
+        if let Ok(mut work) = self.macro_work.lock() {
+            let queued = work.want(path);
+            if crate::probes::cooking() {
+                eprintln!("[ask] queued {queued}: {}", path.display());
+            }
+        }
+    }
+
     /// **The offset in the file's rendering a position in the file names** — the reverse of
     /// `RenderedCooked::written_at`, and the half a position query needs when the file's own text cannot answer.
     ///

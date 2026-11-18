@@ -184,13 +184,20 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The files whose rendering the question needs**, asked in the only place a query can ask: `view` is
             // the asking side of the rendering contract — on a miss it records the file and answers `None`, and the
             // pump renders it. Nothing here guesses: the files are the index's own facts about the qualifier.
-            for file in self
-                .files_a_qualified_name_needs(qualifier, &view.path)
-                .into_iter()
-                .take(8)
-            {
-                if self.store.index().cooked_declarations(&file).is_none() {
-                    let _ = self.view(&file);
+            let needed = self.files_a_qualified_name_needs(qualifier, &view.path);
+            if crate::probes::cooking() {
+                eprintln!("[ask] {qualifier}: needed {needed:?}");
+            }
+            for file in needed.into_iter().take(8) {
+                let cooked = self.store.index().cooked_declarations(&file).is_some();
+                if crate::probes::cooking() {
+                    eprintln!("[ask] {} cooked {cooked}", file.display());
+                }
+                if !cooked {
+                    // **The cooked reading is what is missing**, not the rendering: `view` asks only when no
+                    // rendering is cached, and the rendering outlives the declarations it produced (they are what the
+                    // bounded map evicted).
+                    self.ask_for_the_cooked_reading(&file);
                 }
             }
         }
