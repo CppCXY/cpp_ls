@@ -397,6 +397,10 @@ where
         // *declares constructors*, and a constructor declares parameters. Reported from `EmmyLuaCodeStyle`:
         // `LuaParser(file, std::move(luaLexer.GetTokens()))` showed no hints at all — the constructor branch is what
         // answers there, and the function branch below is unchanged for every other call.
+        // **The declaration's own parameters, then a callable object's `operator()`.** The order matters: a *free
+        // function* call resolves in the first branch, and only a callee that names no function at all — a variable
+        // of a class type — reaches the second. The other order would read a function's **return** type and hint its
+        // `operator()`'s parameters for a call the function itself declares.
         let names =
             constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
                 let Known::Yes(callee) = callee_of_a_call(
@@ -410,7 +414,7 @@ where
                 ) else {
                     // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
                     // wrong parameter is a wrong answer printed into the code.
-                    return None;
+                    return callable_object_parameter_names(index, view, &call, arguments.len());
                 };
                 let resolved = started.elapsed();
 
@@ -441,7 +445,9 @@ where
                         names.as_ref().map(Vec::len).unwrap_or(0)
                     );
                 }
-                names
+                names.or_else(|| {
+                    callable_object_parameter_names(index, view, &call, arguments.len())
+                })
             });
         let Some(names) = names else {
             continue;
@@ -472,6 +478,65 @@ where
     }
 
     hints
+}
+
+/// **What a call through an *object* hands its arguments** — the parameter names of the class's `operator()`.
+///
+/// `std::views::filter(numbers, pred)` calls a function-like object: `filter` is a `std::ranges::views::_Filter`
+/// variable, so [`callee_of_a_call`] finds a *variable* and there is no function declaration to read a parameter
+/// list from — the call had no hints at all. Reported from an editor with the `views` adaptors, where every call is
+/// this shape.
+///
+/// The type of the callee is the class, and the class declares `operator()`; its parameters are the answer, read from
+/// the **fact** (`DeclFact::parameter_list`) so a header need not be rendered first. Only an **exact** arity match is
+/// accepted: `_Filter` declares `operator()(_Range&&, _Pred&&)` and nothing else, so the one-argument closure form
+/// `views::filter(pred)` — which really goes through the adaptor-closure base's pack — must keep its silence rather
+/// than label the predicate `__r`.
+fn callable_object_parameter_names(
+    index: &ProjectIndex,
+    view: &FileView,
+    call: &CppSyntaxNode,
+    passed: usize,
+) -> Option<Vec<Option<String>>> {
+    let callee = call.children().next()?;
+    let Known::Yes((type_of, _)) = crate::index::project::type_of_expression(
+        index,
+        &mut |_: &Path| None,
+        &view.scopes,
+        &view.root,
+        &view.path,
+        &callee,
+        0,
+    ) else {
+        return None;
+    };
+    // A *free function* has a type too — its return type — and naming it here would read a called object that is
+    // not one. The callable shape is a class, which is what `class_name` says.
+    let class = type_of.class_name()?;
+    let Known::Yes(list) =
+        crate::index::project::members_of(index, &view.scopes, &view.root, &view.path, class)
+    else {
+        return None;
+    };
+    let mut best: Option<Vec<Option<String>>> = None;
+    for member in &list.members {
+        if member.fact.name != "operator()" {
+            continue;
+        }
+        let Some(text) = member.fact.parameter_list() else {
+            continue;
+        };
+        let Some(names) = parameter_names_from_text(text) else {
+            continue;
+        };
+        if names.len() != passed {
+            continue;
+        }
+        if best.is_none() {
+            best = Some(names);
+        }
+    }
+    best
 }
 
 /// The parameter names of the declaration a call names, or `None` when they cannot be read.

@@ -246,6 +246,56 @@ Widget make() { return Widget(3, 4); }
     );
 }
 
+/// **A call through an object is the parameter list of its `operator()`** — `views::filter(r, pred)`.
+///
+/// Reported from an editor: `std::views::filter(numbers, pred)` showed no hints at all. `filter` is a *variable* of
+/// `std::ranges::views::_Filter`, so the callee names no function and the parameters were never asked for — the call
+/// went down the "no declaration" path and stayed silent. The class declares `operator()`, and its parameters are
+/// the answer.
+///
+/// The arity has to match exactly: `_Filter` declares `operator()(_Range&&, _Pred&&)` and the *one*-argument closure
+/// form `views::filter(pred)` goes through the adaptor-closure base's pack, so hinting that call with `__r` would
+/// print a name for an argument it is not.
+#[test]
+fn a_call_through_an_object_reports_the_operators_parameters() {
+    let source = "\
+struct Adder {
+    int operator()(int left, int right) const;
+};
+int f() {
+    Adder add;
+    return add(1, 2);
+}
+";
+    let call = source.find("add(1").expect("the fixture") + "add(".len();
+    assert_eq!(
+        hints_of(source),
+        vec![
+            (call, "left".to_string()),
+            (call + "1, ".len(), "right".to_string())
+        ],
+        "the operator's own parameter names"
+    );
+}
+
+/// **The closure form stays silent.** One argument, and the only `operator()` written takes two.
+#[test]
+fn a_call_through_an_object_with_the_wrong_arity_is_not_hinted() {
+    let source = "\
+struct Adder {
+    int operator()(int left, int right) const;
+};
+int f() {
+    Adder add;
+    return add(1);
+}
+";
+    assert!(
+        hints_of(source).is_empty(),
+        "nothing declares a one-argument call of this object"
+    );
+}
+
 /// **A class with no constructor written has no parameters to name**, and a field's name is not one.
 #[test]
 fn a_class_with_no_constructor_is_not_hinted() {

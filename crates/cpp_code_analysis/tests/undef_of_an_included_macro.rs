@@ -43,7 +43,10 @@ fn a_macro_an_included_header_undefines_is_not_expanded_at_the_use() {
                 "defined.h",
                 "#pragma once\n#define min(a, b) (((a) < (b)) ? (a) : (b))\n",
             ),
-            ("pch.h", "#pragma once\n#include \"defined.h\"\n#undef min\n"),
+            (
+                "pch.h",
+                "#pragma once\n#include \"defined.h\"\n#undef min\n",
+            ),
             (
                 "main.cpp",
                 "#include \"pch.h\"\n\nstruct Frame { int value; };\n\nint f() {\n    Frame a{};\n    Frame b{};\n\x20   return std::min(a.value, b.value);\n}\n",

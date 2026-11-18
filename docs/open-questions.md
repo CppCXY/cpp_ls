@@ -1998,10 +1998,23 @@ members, and the hover now names `reset`'s four declarations instead of "has no 
 (a synthetic forward-declaration + definition resolved through the use site's own scope tree, and the retry covered the
 rest); the measured proof is the project query above.
 
-### Left open: what a callable object's `operator()` should provide
+### A call through an object now reports its `operator()` (fixed), and the closure form stays silent
 
-The same round reported `std::views::filter(lambda)` — a `_Filter` object called with one argument — as missing a
-parameter-name inlay hint. Measured: `_Filter` declares **one** `operator()` in its own body,
-`(_Range&& __r, _Pred&& __p)`; the one-argument form `filter(pred)` is the adaptor-closure protocol in a **base class
-template** (`__range_adaptor_closure`), whose parameter is a pack (`_Args&&...`), so there is no *named* parameter to
-draw for that argument. A hint there needs a decision about packs, and none is made yet.
+The same round reported `std::views::filter(...)` — a `_Filter` object being called — as missing a parameter-name inlay
+hint. Measured on `test_cpp`:
+
+```text
+std::views::filter(numbers, pred)     2 parameter(s)  →  nothing
+_Filter's members                     operator()(_Range&& __r, _Pred&& __p)
+```
+
+The callee is a **variable**, not a function, so `callee_of_a_call` had no parameter list to read and the call was
+silent. `parameter_hints` now asks, after the declaration's own parameters, for the class's `operator()`: the callee's
+*type* gives the class (`type_of_expression`), `members_of` gives its members, and the overload whose parameter count
+**equals** the call's is the one to name. After: `__r:` and `__p:` on that call.
+
+**The one-argument closure form still gets nothing, and that is the measured answer rather than an omission**:
+`views::filter(pred)` goes through the adaptor-closure base template (`__range_adaptor_closure`), whose parameter is a
+pack (`_Args&&...`); `_Filter` itself declares only the two-argument `operator()`. Naming the predicate `__r` would be a
+wrong answer printed into the code, so the exact-arity rule refuses it — and
+`a_call_through_an_object_with_the_wrong_arity_is_not_hinted` pins that refusal.

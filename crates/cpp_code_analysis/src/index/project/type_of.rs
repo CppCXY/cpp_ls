@@ -2489,7 +2489,8 @@ impl NamedDeclaration {
     ///
     /// `None` for a function — `make` is not a `Widget` and has no members — which is the distinction
     /// [`DeclFact::type_of`] documents.
-    pub(crate) fn type_of(        &self,
+    pub(crate) fn type_of(
+        &self,
         root: &cpp_parser::CppSyntaxNode,
         scopes: &crate::ScopeTree,
     ) -> Option<Type> {
