@@ -7177,3 +7177,101 @@ int main() {
         "both parameters, spelled as the header writes them: {text}"
     );
 }
+
+/// **A member of a class template is answered for the instantiation the reader wrote.**
+///
+/// Reported from an editor on `test_cpp/src/templates.cpp`: hovering `Builder<std::string>::build()` answered
+/// `template <typename T> T build(…)` — the *definition's* fact, with the class's parameter still in the return
+/// type — and said nothing about `std::string`. The argument is written in the **qualifier**, which is why the
+/// class-template rule in the card (it reads a `Type` fact's own spelling) never saw it.
+///
+/// The answer is the member list's own substitution: `members_of("Builder<std::string>")` holds `build` with
+/// `returns: std::string`, and the card uses that fact.
+#[test]
+fn a_hover_on_a_member_of_an_instantiation_names_the_instantiation() {
+    let project = Project::new("hover-instantiation-member");
+    project.write(
+        "main.cpp",
+        "\
+template <typename T>
+struct Builder {
+    T value{};
+
+    static T build();
+};
+
+template <typename T>
+T Builder<T>::build() {
+    return T{};
+}
+
+int main() {
+    return static_cast<int>(Builder<int>::build());
+}
+",
+    );
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let source = "\
+template <typename T>
+struct Builder {
+    T value{};
+
+    static T build();
+};
+
+template <typename T>
+T Builder<T>::build() {
+    return T{};
+}
+
+int main() {
+    return static_cast<int>(Builder<int>::build());
+}
+";
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "hover": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    // The cursor is on `build` in the **use**, whose line is the last one.
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    // 0-based, and the use is the file's last line (the 15th).
+                    "position": { "line": 13, "character": 42 },
+                },
+            })
+        },
+        |answer| !answer["result"].is_null(),
+    );
+    let markdown = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a hover was expected, got {answer}"));
+    assert!(
+        markdown.contains("int build()"),
+        "the instantiation's own signature, not the parameter name: {markdown}"
+    );
+    assert!(
+        !markdown.contains("T build()"),
+        "and nothing of the declaration's parameter is left in it: {markdown}"
+    );
+}

@@ -367,7 +367,13 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
             continue;
         }
 
-        let declared_here = defined.contains(text);
+        // **A name that continues with `::` is a nested-name-specifier, and no local declaration can be one.**
+        // `std::views::split(',', ' ')` inside a file that declares `void views() {}` resolved `views` to *that
+        // function* — a reader saw the namespace coloured as `entity.name.function` (reported from an editor on
+        // `strings.cpp`, where the function and the namespace are two lines apart). The index and the qualified
+        // chain are what answer for a scope name; the file's scopes are not asked.
+        let opens_a_qualified_name = qualified_heads.contains(&at);
+        let declared_here = !opens_a_qualified_name && defined.contains(text);
         if declared_here {
             // **Keyed by the scope as well as the spelling.** The answer is "which binding does *this* use see", and
             // that is a property of where the use is: one file has many `value`s — a concept's parameter, a
@@ -453,15 +459,13 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         // `LuaCodeFormat` was drawn as a function, restored to a type only when the index happened to hold the class
         // first. In `X::Y`, `X` names a class or a namespace and never a function ([basic.lookup.qual]), so the
         // question for that token is `X` alone.
-        let opens_a_qualified_name = qualified_heads.contains(&at);
-        let written = if opens_a_qualified_name {
-            text.to_string()
-        } else {
-            qualified
-                .get(&at)
-                .cloned()
-                .unwrap_or_else(|| text.to_string())
-        };
+        // **The chain ending at this token**, which for a nested-name-specifier is the qualifier itself: `views` in
+        // `std::views::split` is asked as `std::views` — a namespace — and not as the bare `views`, which the file's
+        // own function answers. See [`qualified_names`].
+        let written = qualified
+            .get(&at)
+            .cloned()
+            .unwrap_or_else(|| text.to_string());
         let answer = asked.entry(written.clone()).or_insert_with(|| {
             index
                 .kind_of(&written, &view.path)

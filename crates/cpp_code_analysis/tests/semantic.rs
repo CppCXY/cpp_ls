@@ -2621,3 +2621,50 @@ int f() { return is_pair_like<int>; }
         "and a variable template is still drawn apart from a variable"
     );
 }
+
+/// **A nested-name-specifier is never a local function.** `std::views::split(',', ' ')` inside a file that declares
+/// `void views()` is the reported shape: `views` resolved through the file's own scopes to that function, and the
+/// editor drew the *namespace* as `entity.name.function`.
+///
+/// Two things had to change, and both are pinned here: the file's scopes are not asked about a name that continues
+/// with `::`, and the index is asked for the **chain ending at that name** (`std::views`) rather than the bare one.
+#[test]
+fn a_nested_name_specifier_is_not_a_local_function() {
+    let source = "\
+namespace std {
+namespace views {
+int split(int value);
+}
+}
+
+void views();
+
+int use() {
+    std::views::split(1);
+    views();
+    return 0;
+}
+";
+    let found: Vec<(String, NameKind)> = classified(source)
+        .into_iter()
+        .map(|(text, kind, _)| (text, kind))
+        .collect();
+    let views: Vec<NameKind> = found
+        .iter()
+        .filter(|(text, _)| text == "views")
+        .map(|(_, kind)| *kind)
+        .collect();
+    // In source order: `namespace views` (declared), `void views()` (declared), the **namespace** in
+    // `std::views::split`, and the **function** at the call `views()`. Before the fix the third was a function too —
+    // the one declared three lines above it.
+    assert_eq!(
+        views,
+        vec![
+            NameKind::Namespace,
+            NameKind::Function,
+            NameKind::Namespace,
+            NameKind::Function
+        ],
+        "the namespace stands at `std::views`, the function at the call: {found:?}"
+    );
+}

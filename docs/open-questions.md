@@ -1731,3 +1731,42 @@ parameter the callee's body never calls (the deduction has no argument to take a
 `Session::a_generic_lambdas_parameter_type`; `inlay::lambda_parameter_hints` only places the answer, so the pass that
 reads the other file stays the session's — the same seam `Session::type_hints` already had for a call's parameter
 names.
+
+## The ranges pipeline is not typed — measured, and what modelling it would need
+
+Reported with the two fixes above, from `test_cpp/src/strings.cpp:87`:
+
+```cpp
+for (auto part : std::string_view{text} | std::views::split(',', ' ')) {
+    parts.emplace_back(part.begin(), part.end());
+}
+```
+
+`auto part` gets no inlay hint and the hover says *"the type of `auto` is not known here"*. That answer is **correct
+for the wrong reason**: nothing in `sema::types::Type` can name what a range adaptor produces.
+
+```text
+Type's variants   Builtin, Named, TemplateParameter, Pointer, Reference, Array, Function, Pack, Qualified
+                  — no range, no view, no adaptor closure
+`|` in the type    no arm at all: `a | b` is resolved like any other call, and `views::split(',', ' ')` is a
+layer              *partially applied* adaptor whose type this layer cannot spell, so the right-hand side of the
+                  pipe is untyped before the left-hand side is even reached
+```
+
+And the element type is not the obvious one: in C++20 a `split_view`'s reference is a `subrange` over the underlying
+view's iterators, which is exactly why the fixture passes `part.begin(), part.end()` to `emplace_back` — `part` is not
+a `std::string_view`. A hint that said `std::string_view` would be a guess in the reader's line, so none is drawn.
+
+What a correct implementation needs, in order:
+
+1. **a `Type` for a range** — one element type and how it is reached (a value, a reference, a subrange), which is
+   the only thing any consumer here asks of it;
+2. **an adaptor closure** — `views::split(',')` is a call whose result is a function object, so the pipeline is
+   `operator|(range, closure)` and the closure's own `operator|` is what applies it;
+3. **an element rule per adaptor**, and there are five the standard writes most often
+   (`filter`, `transform`, `reverse`, `drop`, `take` — the list the namespace-alias note in `sema/model.rs` already
+   names) before `split`, whose element is the subrange above;
+4. a *refusal* for every adaptor not in that table, which is the same rule the rest of this layer follows.
+
+That is a feature with its own measurements (which of the five a project of this size actually uses, and how deep a
+pipeline gets), not a fix to bend into this round.

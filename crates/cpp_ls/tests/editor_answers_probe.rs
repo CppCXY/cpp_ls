@@ -264,6 +264,40 @@ fn what_the_editor_is_told_about_a_file() {
         );
     }
 
+    // **One hover, when a report names a spelling to ask about** — the card is assembled by the handler, so nothing
+    // below the LSP can show it.
+    if let Ok(needle) = std::env::var("CPPLS_ANSWERS_HOVER") {
+        // **A needle ending in `$` is the *last* occurrence** — a report's card is often about a use, and the
+        // declaration of the same spelling comes first in the file.
+        let (needle, last) = match needle.strip_suffix('$') {
+            Some(without) => (without.to_string(), true),
+            None => (needle, false),
+        };
+        let found = if last {
+            text.rfind(&needle)
+        } else {
+            text.find(&needle)
+        };
+        if let Some(at) = found {
+            let (line, character) = line_col(&text, at);
+            let hover = server.request(
+                35,
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }),
+            );
+            println!("\n# hover on `{needle}` at {}:{}", line + 1, character + 1);
+            println!(
+                "{}",
+                hover["result"]["contents"]["value"]
+                    .as_str()
+                    .unwrap_or("<no popup>")
+            );
+        }
+    }
+
     let hints = server.request(
         40,
         "textDocument/inlayHint",

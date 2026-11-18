@@ -1712,6 +1712,34 @@ fn declaration_markdown(
         corrected.detail_mut().reflection = the_files.reflection().cloned();
     }
     let fact = &mut corrected;
+    // **A member of a class template is answered for the instantiation the reader wrote.** `Builder<std::string>::
+    // build()` hovers on `build`, and the fact is the *definition* the file declares — `T build(…)` — while what runs
+    // is `std::string build()`. The argument is written in the **qualifier**, which is why the class-template rule
+    // below (it reads a `Type` fact's own spelling) never saw it: measured on `test_cpp`'s `templates.cpp:170`, where
+    // the card read "a function returning `T`" with no instantiation anywhere.
+    //
+    // `members_of` is the query that substitutes: the same one the member list and the call typing use, so the card
+    // and a `.` completion cannot disagree about what `Builder<std::string>::build` is.
+    let instantiated = written
+        .and_then(|written| {
+            written
+                .rsplit_once("::")
+                .map(|(class, member)| (class.trim(), member.trim()))
+        })
+        .filter(|(class, member)| {
+            class.contains('<') && *member == fact.name.as_str() && fact.kind == DeclKind::Function
+        });
+    if let Some((class, _)) = instantiated
+        && let Known::Yes(list) = session.members_of(view, class)
+        && let Some(the_member) = list.members.iter().find(|member| {
+            member.depth == 0
+                && member.fact.name == fact.name
+                && member.fact.kind == DeclKind::Function
+        })
+        && the_member.fact.returns.is_some()
+    {
+        *fact = the_member.fact.clone();
+    }
     if crate::probes::debug_card() {
         eprintln!(
             "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
@@ -1735,6 +1763,9 @@ fn declaration_markdown(
         Some(written) if matches!(fact.kind, DeclKind::Type) && !fact.parameters().is_empty() => {
             written
         }
+        // **And a member of an instantiation**, whose signature line above is the substituted one: the sentence
+        // beside it has to name the same thing, or the card says `std::string build()` and then talks about `T`.
+        Some(written) if instantiated.is_some() => written,
         _ => "",
     };
 
