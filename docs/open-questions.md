@@ -1962,3 +1962,46 @@ lexer.
 Measured state: 1 error before this round's fix (line 239, the `min` expansion) plus this one; after it, this one.
 Not fixed here — it needs the in-force body path instrumented the way `visible_binding` was, and a fixture whose
 `#define` sits behind a guard in an included header.
+
+## `shared_ptr<int>` had no `reset` — an ambiguous class name answered "no members" (fixed)
+
+Round 42, reported with a screenshot on `test_cpp`'s `smart_pointers.cpp`:
+
+```cpp
+auto left = std::make_shared<int>(1);
+left.reset();                       // hover: `shared_ptr<int>` has no member `reset`
+```
+
+and the two spellings disagreed:
+
+```text
+members_of("shared_ptr<int>")          9 member(s)   (none of them `reset`)
+members_of("std::shared_ptr<int>")    50 member(s)   (`reset` at depth 1, from `__shared_ptr`)
+```
+
+`left`'s type is deduced from `std::make_shared<int>`'s return type, which libstdc++ writes as `shared_ptr<_Tp>` —
+**unqualified**, because the declaration sits in `namespace std`. That spelling is what the hover asks `members_of`
+about, and libstdc++ declares the class twice (`bits/shared_ptr.h` forward-declares it, `shared_ptr.h` defines it), so
+a lookup by the bare name answers `Ambiguous`.
+
+`direct_members` answered `Known::Yes(empty)` for an ambiguous name — deliberately, because a forward declaration and a
+definition are one entity and "nothing is written directly in it" is true. It was invisible for as long as such a class
+contributed *nothing*: `members_of_with` retries the qualified spelling when the answer is **empty**. What broke it is a
+class with a **base**: the base walk found `__shared_ptr`'s and `__shared_ptr_access`'s members, the list was therefore
+not empty, no retry ran, and the class's own members — `reset`, `get`, `use_count`, … — were missing from a list that
+claimed to be complete.
+
+The fix is the rule `agreeing_type` already applies to a declaration's type: when every visible declaration of the
+**bare** name agrees on its **qualified** name, that is the class, and its members are asked for by that name. A name
+whose declarations live in two different classes still answers empty. Verified with `inspect` on the project: 9 → 50
+members, and the hover now names `reset`'s four declarations instead of "has no member". No unit fixture reproduced it
+(a synthetic forward-declaration + definition resolved through the use site's own scope tree, and the retry covered the
+rest); the measured proof is the project query above.
+
+### Left open: what a callable object's `operator()` should provide
+
+The same round reported `std::views::filter(lambda)` — a `_Filter` object called with one argument — as missing a
+parameter-name inlay hint. Measured: `_Filter` declares **one** `operator()` in its own body,
+`(_Range&& __r, _Pred&& __p)`; the one-argument form `filter(pred)` is the adaptor-closure protocol in a **base class
+template** (`__range_adaptor_closure`), whose parameter is a pack (`_Args&&...`), so there is no *named* parameter to
+draw for that argument. A hint there needs a decision about packs, and none is made yet.

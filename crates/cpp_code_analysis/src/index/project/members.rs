@@ -2169,7 +2169,41 @@ pub(crate) fn direct_members(
     // level out, which is what the base walk above is for.
     match index.definition(class, path) {
         Known::Yes(found) if found.fact.qualified_name() == *class => Known::Yes(Vec::new()),
-        Known::Unknown(UnknownReason::Ambiguous(_)) => Known::Yes(Vec::new()),
+        // **One class written twice is not two classes.** A class template that is forward-declared and then
+        // defined is two declarations and one entity — `std::shared_ptr` is declared in `bits/shared_ptr.h` and
+        // defined in `shared_ptr.h` — and the letter of "ambiguous" answered *"that class has nothing written in
+        // it"*. That answer was invisible until the base walk found something: a member list that was **empty** was
+        // retried with the qualified spelling by [`members_of_with`], but a list with a few *inherited* members in
+        // it was not, so a bare `shared_ptr<int>` answered 9 members and no `reset` while `std::shared_ptr<int>`
+        // answered 50 — reported by an editor as "`shared_ptr<int>` has no member `reset`".
+        //
+        // The rule is the one `agreeing_type` already applies to a declaration's type: when every visible
+        // declaration of the name agrees on the **qualified** name, that name is the class, and its members are
+        // asked for by that name. A name whose declarations live in two different classes stays ambiguous.
+        Known::Unknown(UnknownReason::Ambiguous(_)) => {
+            if let Known::Yes(found) = index.definitions(class, path) {
+                let names: std::collections::BTreeSet<String> = found
+                    .found
+                    .iter()
+                    .filter(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                    .map(|declaration| declaration.fact.qualified_name())
+                    .collect();
+                if let [qualified] = names.iter().collect::<Vec<_>>().as_slice() {
+                    let found = index.declarations_in(qualified, path);
+                    if !found.is_empty() {
+                        return Known::Yes(
+                            found
+                                .into_iter()
+                                .map(|declaration| {
+                                    (declaration.file.clone(), declaration.fact.clone())
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            Known::Yes(Vec::new())
+        }
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::Yes(_) | Known::No => {
             Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class.as_str())))
