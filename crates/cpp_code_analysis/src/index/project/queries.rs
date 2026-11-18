@@ -123,7 +123,43 @@ pub fn definition_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
-    match definitions_across_files(index, declaring, scopes, root, path, offset) {
+    // **An unqualified name inside its class's own method is that class's member**, and the plural query cannot say
+    // so: it lists every declaration of the spelling (a references list narrows that itself, see
+    // `handlers::references::narrowed_to_the_cursors_class`). `void C::g() { … }` cannot name another class's member
+    // without qualifying it, so the class the definition is written for decides the singular question — and when it
+    // declares nothing of that spelling, the answer is that the class does not declare it rather than another
+    // class's member of the same name.
+    let found = definitions_across_files(index, declaring, scopes, root, path, offset);
+    let found = if crate::sema::resolve::member_access_at(root, offset).is_none()
+        && let Some(class) = the_class_a_definition_is_written_for(root, offset)
+        && index.scope_names_a_class(&class, path)
+        && let Known::Yes(list) = members_of(index, scopes, root, path, &class)
+        && let Known::Unknown(UnknownReason::NotDeclaredHere(..)) | Known::Yes(_) = &found
+    {
+        let written = crate::sema::resolve::qualified_name_at(root, offset)
+            .map(|(written, _)| written)
+            .unwrap_or_default();
+        let named: Vec<ProjectDefinition> = list
+            .members
+            .into_iter()
+            .filter(|member| member.fact.name.as_str() == written.as_str())
+            .map(|member| ProjectDefinition {
+                file: member.file,
+                fact: member.fact,
+            })
+            .collect();
+        if named.is_empty() {
+            Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)))
+        } else {
+            Known::Yes(ProjectDefinitions {
+                found: named,
+                conditional: 0,
+            })
+        }
+    } else {
+        found
+    };
+    match found {
         Known::Yes(mut found) => {
             // **A synonym is not a second entity, and a definition beats a forward declaration.** Both rules were in
             // `ProjectIndex::definition` and neither was here, so every query on this path answered `Ambiguous` for a
@@ -442,38 +478,10 @@ pub fn definitions_across_files(
                     });
                 }
             }
-            // **The class the definition is written for answers an unqualified member use.** Inside
-            // `void C::g() { … }`, `items` names `C`'s member — the same rule `this->items` follows — and asking the
-            // index by bare spelling instead answers every class's `items`: measured on a fixture with two classes,
-            // `size` inside `Widget::area` came back `Ambiguous("size")`, and a name only `Gadget` declares came back
-            // as `Gadget`'s member from a body that cannot name it.
-            if !naming_a_member
-                && let Some(class) = the_class_a_definition_is_written_for(root, offset)
-                && index.scope_names_a_class(&class, path)
-                && let Known::Yes(list) = members_of(index, scopes, root, path, &class)
+            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
             {
-                let named: Vec<ProjectDefinition> = list
-                    .members
-                    .into_iter()
-                    .filter(|member| member.fact.name.as_str() == &*name)
-                    .map(|member| ProjectDefinition {
-                        file: member.file,
-                        fact: member.fact,
-                    })
-                    .collect();
-                if !named.is_empty() {
-                    return Known::Yes(ProjectDefinitions {
-                        found: named,
-                        conditional: 0,
-                    });
-                }
-            }
-            return if naming_a_member {
                 index.definitions(&name, path)
             } else {
-                // **An ordinary name does not reach into a class.** The definition's own class has been asked above;
-                // if it does not declare the spelling, what remains is the names actually in scope — answering with
-                // some other class's member is a wrong answer where silence is an honest one.
                 index.definitions_in_scope(&name, path)
             };
         }
@@ -774,6 +782,17 @@ pub(crate) fn the_class_a_definition_is_written_for(
     None
 }
 
+/// **Does the cursor sit inside a definition written `void C::g() { … }`?**
+///
+/// The plural query asks it to decide whether a bare name may reach into a class at all — a `.cpp` that defines a
+/// member writes that member's class nowhere else. The singular query narrows further and asks the class itself; see
+/// [`the_class_a_definition_is_written_for`].
+pub(crate) fn inside_a_definition_written_with_a_qualifier(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+) -> bool {
+    the_class_a_definition_is_written_for(root, offset).is_some()
+}
 /// The answer to a cross-file question about a macro name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMacro {
