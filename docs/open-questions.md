@@ -2249,3 +2249,42 @@ The next instrument is a **bisect of the class body itself**: parse slices of `j
 successive lines with a plain `ParserConfig` and record the first slice whose declarations after the line stop carrying
 the class scope. That sentence is the whole task; the fixture written for the simplified shape was dropped rather than
 kept green, because a test that passes before its fix is not evidence.
+#### The bisect result: three lines reproduce it, and no macro knows the names
+
+`cpp_dump --errors-only` on slices of `json.hpp` narrowed the trigger to its smallest form. **Nothing is defined** — no
+`#define` anywhere:
+
+```cpp
+struct X {
+    void f(bool check) {
+        JSON_TRY
+        {
+        }
+        JSON_CATCH(...) {}
+    }
+    void after() {}
+};
+```
+
+```text
+errors=1   (with `JSON_TRY`/`JSON_CATCH`)
+errors=0   (the same with `try`/`catch`)
+```
+
+and the tree explains the class-body loss:
+
+```text
+ClassBody@9..135
+CompoundStat@34..117          ← the method's body swallowed the second macro's block too
+InitListExpr@46..76
+ErrorNode@103..104
+Token(Identifier)@122..127 "after"   ← not a declaration: every member after the mistake is rubble
+CompoundStat@129..134
+```
+
+`JSON_ASSERT`, the lambda, the leading assertion and even the `#if` are all unnecessary — the bisect removed each of
+them and the error stayed. What is left is the shape **`NAME { … }` then `NAME ( … ) { … }` at statement position**,
+which the parser reads as an expression and then as a *function definition* — which cannot exist inside a function
+body. That is the rule to change: inside a body, a declaration that ends with `}` and consumed a block is not a
+declaration, and reading it as a macro call with a block is what stops the swallow. The grammar already has that
+reader (`parse_macro_call`, extended in `3192964f` to accept no argument group); the missing piece is the decision.
