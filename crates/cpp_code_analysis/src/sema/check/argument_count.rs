@@ -100,6 +100,22 @@ impl Check for ArgumentCount {
                 continue;
             }
 
+            // **A name this file binds to something that is not a function is not a free function of that name.**
+            // `auto [increment, copy] = instance.make_incrementer(); … copy()` was reported as "`copy` needs 2
+            // argument(s) and this call passes fewer" — the index's `copy`-shaped function (two parameters) was
+            // judged, while the name in this file is a **structured binding** holding the second lambda of a
+            // `std::pair`. The scopes are the authority on what a name in this file means, so they are asked before
+            // the index is: a call through a variable is a call of *that object*, and its arity is a question about
+            // a lambda or a `std::function`, which this check does not resolve.
+            if let crate::Known::Yes(binding) = crate::sema::resolve::definition_at(
+                context.scopes(),
+                context.tree(),
+                usize::from(callee.syntax().text_range().start()),
+            ) && binding.kind != crate::BindingKind::Function
+            {
+                continue;
+            }
+
             // **This file first, and the index too** — a callee declared here is read from the tree, which is where
             // its `...` is; one declared in another file is a **fact** the cook already produced —
             // `DeclFact::parameter_list`, the field whose own documentation says it is stored *"because a query holds

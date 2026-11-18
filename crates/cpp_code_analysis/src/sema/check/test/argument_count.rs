@@ -132,3 +132,34 @@ fn an_unresolvable_callee_is_not_judged() {
         "nothing declares `unknown`, so nothing says how many it takes",
     );
 }
+
+/// **A name this file binds to a variable is not a free function of that name.**
+///
+/// Reported from an editor on `test_cpp/src/lambdas.cpp`:
+///
+/// ```cpp
+/// auto [increment, copy] = instance.make_incrementer();   // a pair of lambdas
+/// increment();
+/// std::cout << copy() << …;                               // ← "`copy` needs 2 argument(s)"
+/// ```
+///
+/// The index holds a function called `copy` with two parameters, and the check judged the call against *that* while
+/// the name in this file is a structured binding holding the second lambda of the pair. The scopes are asked before
+/// the index now, and a binding that is not a function ends the question — the same silence the module documents for
+/// every call whose target it cannot resolve.
+#[test]
+fn a_call_through_a_variable_is_not_a_free_function_of_that_name() {
+    let codes = codes_of(
+        "int copy(int first, int last) { return first + last; }\n\
+         void g() {\n\
+             auto [increment, copy] = std::pair{1, 2};\n\
+             (void)increment;\n\
+             (void)copy();\n\
+         }\n",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::ArgumentCount,
+        "the name is a structured binding here, not the function",
+    );
+}

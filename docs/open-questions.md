@@ -1770,3 +1770,67 @@ What a correct implementation needs, in order:
 
 That is a feature with its own measurements (which of the five a project of this size actually uses, and how deep a
 pipeline gets), not a fix to bend into this round.
+## The structured binding, the template-template alias, and what a `copy()` call actually is
+
+Reported together from `test_cpp`, three screenshots deep. One of the three was a wrong answer and is fixed; the other
+two are the inference features described here, measured.
+
+### `copy()` reported as "needs 2 argument(s)" (fixed)
+
+```cpp
+auto [increment, copy] = instance.make_incrementer();   // a std::pair of two lambdas
+increment();
+std::cout << copy() << instance.count << '\n';          // ← argument-count: `copy` needs 2 argument(s)
+```
+
+The check resolved the callee **by name** and judged the index's `copy`-shaped function — two parameters — while the
+name in this file is a structured binding holding the second lambda of the pair. `argument-count` now asks the
+**scopes** before the index: a binding that is not a function ends the question, which is the same silence the module
+documents for every call whose target it cannot resolve. After: `0 item(s)` on `lambdas.cpp`, and the test
+`argument_count::a_call_through_a_variable_is_not_a_free_function_of_that_name` reports the old finding when the
+guard is taken out.
+
+### The type of `copy` — a structured binding of a pair of lambdas (not fixed)
+
+The hover now answers the truth but not the type:
+
+```text
+`copy` — a variable of type `auto`, declared in a function body
+The type is deduced from the initializer, and that could not be typed: the type of
+`instance.make_incrementer()` is not known here, so what its members are is not known either.
+```
+
+Two deductions are missing and they are two different features: `make_incrementer`'s return is
+`std::pair{by_reference, by_value}` — **class template argument deduction** from a braced list of two lambdas, whose
+own types are unnamed closure types — and a structured binding's element type is `std::pair`'s `first`/`second`. The
+structured-binding hint path exists (`TypeHintKind::StructuredBinding`), but it asks the same `type_at` this does, so
+it is equally silent here. A correct answer needs a name for a closure type, which the summary does not record (a
+lambda's fact is a function whose name the language does not let anyone write).
+
+### `ContainerOf<std::vector, int>{}.size()` (not fixed, and the measurement says why)
+
+```cpp
+template <template <typename, typename> class Container, typename T>
+using ContainerOf = Container<T, std::allocator<T>>;
+…
+ContainerOf<std::vector, int>{}.size()
+```
+
+Two independent gaps, measured with `inspect`:
+
+```text
+members --class "ContainerOf<std::vector, int>"        0 member(s), 1 unlisted base
+                                                       unlisted base `Container`: NotDeclaredHere
+members --class "std::vector<int, std::allocator<int>>"  NotDeclaredHere("std::pmr::std::vector")
+```
+
+The first says the **alias was never expanded**: `members_of` took the alias template for a class and read its target
+`Container<T, std::allocator<T>>` as a *base clause*, whose head is `Container`. The second says the class behind it
+is spelled wrongly by the resolver — `std::pmr::std::vector` is a qualified name assembled from two scopes, not one a
+file writes.
+
+So the fix is two steps, in this order: `members_of` must expand an **alias template** — including one whose
+parameter is itself a template — before it looks for members (the mechanism is `a_spelling_through_the_aliases`,
+which already substitutes `Container`→`std::vector`, `T`→`int`), and the qualified-name assembly that produced
+`std::pmr::std::vector` has to be found and fixed on its own, because it will be wrong for every inline namespace the
+standard library declares, not only this file's.
