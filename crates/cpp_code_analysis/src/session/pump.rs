@@ -608,6 +608,27 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
 
+        // **And a slice of the cooking queue, which this path used to leave to two other callers.** `index_everything`
+        // and `diagnose_everything` both claim cooks; `advance` — the server's timer callback — did not, so a file a
+        // *query* asked to have rendered (`Session::view`'s ask, the demand-driven contract) had no reader while the
+        // index queue was empty: measured on `EmmyLuaCodeStyle`, with `LSP.cpp` open, `pending_cooking()` stayed at
+        // **33** and `re_read_backlog()` at **1 681** across 4 000 calls, and `pending_work()` — which counts the cook
+        // queue — never reached zero, so every caller looping on it spun while nothing was rendered.
+        //
+        // The gate is the index queue's emptiness, for the reason the cooking queue has always been served after it: a
+        // render needs the file's summary, and a summary is what the queue produces.
+        if self.is_idle() {
+            let claimed = self.claim_cooking(COOK_SLICE);
+            if !claimed.is_empty() {
+                let materials = self.materials_for(claimed);
+                let rendered = self.render_them(materials);
+                let committed = self.commit_them(rendered).len();
+                if crate::probes::cooking() {
+                    eprintln!("advance: cooked {committed} file(s)");
+                }
+            }
+        }
+
         // **And a whole program if one is owed**, in the same three phases the pump takes apart — this path has no
         // lock to keep free, so it takes them in a row. The clock and the budget are inside
         // [`Session::read_a_program_now`] (`the_program_to_read`), so a caller that has just edited reads nothing.

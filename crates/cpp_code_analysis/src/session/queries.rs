@@ -168,6 +168,22 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Known::Yes(found) = &found {
             self.want_refinement(&found.file);
         }
+        // **A qualified name the shape reading does not hold: ask for the declaring file's *rendering*.**
+        //
+        // The reading a compiler gets is the rendered one — conditionals evaluated, macros expanded — and a summary
+        // built from the file's own text is not it: `nlohmann/json.hpp`'s `basic_json` ends up as one 333 362-byte
+        // declaration because `#if JSON_DIAGNOSTICS` is **0** in a header the file includes (dead code a raw parse
+        // still reads), so `basic_json::object` is absent from L1 and `nlohmann::json::object` has no answer.
+        //
+        // `Session::view` is the asking side of that contract: on a miss it records the file for a rendering and
+        // answers `None` (`ask_for_a_rendering`), and the pump renders it. Nothing is guessed here — the file asked
+        // for is the one the index says declares the class.
+        if let Known::Unknown(UnknownReason::NotDeclaredHere(name)) = &found
+            && let Some((qualifier, _)) = name.rsplit_once("::")
+            && let Known::Yes(class) = self.store.index().definition(qualifier, &view.path)
+        {
+            let _ = self.view(&class.file);
+        }
         found
     }
 

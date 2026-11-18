@@ -229,7 +229,37 @@ fn the_two_reported_hovers() {
     // **Is the class's header cooked at all**, and does its cooked reading hold the member?
     {
         let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
-        let cooked_reading = session.cook(&json);
+        // **The contract**: a query that cannot answer asks for the class's file, the pump renders it, the next
+        // query answers. The ask happens inside `Session::definition`; here the pump is run explicitly.
+        let object_at = {
+            let view = session
+                .view_of_the_file(&path)
+                .expect("the file has a view");
+            view.source
+                .find("json::object")
+                .expect("the call is written")
+                + "json::".len()
+        };
+        {
+            let view = session
+                .view_of_the_file(&path)
+                .expect("the file has a view");
+            let first = session.definition(
+                &view,
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(object_at),
+            );
+            println!("[ask] first query: {first:?}");
+        }
+        let mut demand_slices = 0usize;
+        while session.pending_work() > 0 && demand_slices < 400 {
+            session.advance(64);
+            demand_slices += 1;
+        }
+        println!(
+            "[ask] pump after the query: {demand_slices} slice(s), pending {}",
+            session.pending_work()
+        );
+        let cooked_reading = None::<()>;
         println!(
             "[cooked] cook returned: {}",
             if cooked_reading.is_some() {
