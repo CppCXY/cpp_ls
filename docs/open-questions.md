@@ -2236,3 +2236,16 @@ forward, and the second is the one the "silent under-read" argument points at:
    `NotDeclaredHere` for that class's members; it should send the query to a cooked reading (which *does* have the
    closure's macros) or say the reading is partial. This is the general contract: an under-read reading must be
    visible to the layer above it rather than look like an absence.
+#### A negative result worth keeping
+
+A fixture of the simplified shape — `#include "macro.h"` with `JSON_TRY`, a class whose method holds the macro block
+and the lambda, then another member — **does not reproduce the truncation**: the class body survives, and
+`Widget::after_the_method` is in the L1 summary before anything cooks. The `#if JSON_DIAGNOSTICS` region is what
+disappears first (the macro is undefined without the closure, so the region is inactive), and what remains parses.
+
+So the json.hpp trigger needs more of the file than the method does — the measured boundary is `assert_invariant`
+(line 1253) as the last scoped member, with the union `json_value` (and its `destroy` switch) immediately before it.
+The next instrument is a **bisect of the class body itself**: parse slices of `json.hpp` from `class basic_json` to
+successive lines with a plain `ParserConfig` and record the first slice whose declarations after the line stop carrying
+the class scope. That sentence is the whole task; the fixture written for the simplified shape was dropped rather than
+kept green, because a test that passes before its fix is not evidence.
