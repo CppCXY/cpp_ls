@@ -17,7 +17,6 @@ extend-ignore-re = [
   # 如果 typ 正则过于宽泛，建议移除或改为精确的 extend-words 条目
   # "(?i)\\b(?:\\w*typ|typ_\\w*)\\b",
 ]
-
 [default.extend-words]
 mis = "mis"
 PARM = "PARM"
