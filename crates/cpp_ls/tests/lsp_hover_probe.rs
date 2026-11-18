@@ -82,8 +82,50 @@ fn the_two_reported_hovers() {
     while session.pending_work() > 0 && slices < 4000 {
         session.advance(64);
         slices += 1;
+        if slices % 400 == 0 {
+            let (pending, open, rest) = session.queue_sizes();
+            println!(
+                "[pump] {slices}: queue {pending} ({open} open / {rest} rest), cooking {}, refinements {}, re-read {}",
+                session.pending_cooking(),
+                session.refinements_wanted(),
+                session.re_read_backlog()
+            );
+        }
     }
     let _ = session.cook(&path);
+    // **The demand the query makes**: one ask for the class's own file, then the pump.
+    let json_file = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
+    session.want_refinement(&json_file);
+    let asked = session.refinements_wanted();
+    let mut demand_slices = 0usize;
+    while session.pending_work() > 0 && demand_slices < 2000 {
+        session.advance(64);
+        demand_slices += 1;
+        if demand_slices % 500 == 0 {
+            println!(
+                "[demand] {demand_slices}: queue {}, cooking {}, refinements {}, re-read {}",
+                session.pending(),
+                session.pending_cooking(),
+                session.refinements_wanted(),
+                session.re_read_backlog()
+            );
+        }
+    }
+    println!(
+        "[demand] asked {asked}, drained in {demand_slices} slice(s), leftover {}",
+        session.pending_work()
+    );
+    // **The pump's own closure walk**, with LSP.cpp as the open document — the state an editor is in.
+    session.want_the_closure_cooked(&path);
+    let mut closure_slices = 0usize;
+    while session.pending_work() > 0 && closure_slices < 4000 {
+        session.advance(64);
+        closure_slices += 1;
+    }
+    println!(
+        "[pump] closure walk: {closure_slices} slice(s), pending {}",
+        session.pending_work()
+    );
     println!(
         "indexed in {:?} ({slices} slice(s), pending {})",
         started.elapsed(),
@@ -187,6 +229,15 @@ fn the_two_reported_hovers() {
     // **Is the class's header cooked at all**, and does its cooked reading hold the member?
     {
         let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
+        let cooked_reading = session.cook(&json);
+        println!(
+            "[cooked] cook returned: {}",
+            if cooked_reading.is_some() {
+                "a reading"
+            } else {
+                "none"
+            }
+        );
         match session.index().cooked_declarations(&json) {
             Some(cooked) => {
                 let object = cooked.iter().find(|fact| {

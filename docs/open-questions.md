@@ -2323,3 +2323,30 @@ Two changes closed the report:
 the include and not without it. The fixture now includes the header and the test is a normal one: a qualified name
 inside a definition written with a qualifier resolves through a cross-file alias, and the rule that answers
 *unqualified* names from the definition's class leaves it alone.
+## The goal after the workaround: facts from the reading a compiler reads
+
+The heuristics are gone (`ba475cca`, `7d31b027`). What is left is the real question: **which reading answers**. The
+measurements so far:
+
+```text
+json.hpp, L1 shape parse      74 children of basic_json's ClassBody, 8 errors   → basic_json::object absent
+json.hpp, rendered reading    761 declarations                                  → basic_json::object present
+```
+
+and, with the rendered reading in the index, **both** reported places answer: `nlohmann::json::object` is
+`basic_json::object` (`json.hpp:1960:23`) and `items` is `WorkspaceDiagnosticReport::items` (`lsp.h:587:52`).
+
+So the defect is not knowledge — it is *when* the knowledge exists. Three gaps were measured on the real project:
+
+1. **`want_the_closure_cooked` queues one level only.** With `LSP.cpp` open it queued `LSP.h` alone; `json.hpp` (two
+   levels down) is never queued, so nothing ever renders the header that declares the class.
+2. **A refinement ask is consumed without a cook.** `session.want_refinement(json.hpp)` leaves
+   `refinements_wanted() == 1`, and after the first slices it is 0 while `cooked_declarations(json.hpp)` is still
+   `None`: the re-read pass took the file and built nothing for it.
+3. **`advance` never serves the cook queue.** After the index queue drains (`queue 0`), `pending_cooking()` stays at
+   **33** and `re_read_backlog()` at **1681** across 4 000 `advance(64)` calls; `pending_work()` (which counts the cook
+   queue) therefore never reaches zero, and every caller that loops on it spins.
+
+The next change is on the asking side, where the design already puts it: a hover that cannot answer a qualified name
+identifies the file that declares the class and asks for **that file's cooked reading** (`Session::cook`, one file,
+cached), then asks again. That is "look at the file the question is about", not a guess about shapes.
