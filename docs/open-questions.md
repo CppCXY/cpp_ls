@@ -2398,3 +2398,16 @@ The fixes, in the order they had to happen:
    stayed at 53 while the facts were in the index.
 
 No grammar shape rule was added; the three from the earlier attempt stay reverted (`ba475cca`, `7d31b027`).
+### The two mysteries this round closed, and one number corrected
+
+**The "rendered view" was the file's own text.** `view_of_the_file(json.hpp)` reported 74 children and 8 parse
+errors, which looked like a second, inconsistent rendering. `json.hpp` is **341 559 bytes**, and the view's text was
+exactly 341 559 bytes: the view is of the file's *own tokens* — the honest reading when no rendering is cached — while
+the answer came from the **cooked** reading (761 declarations). There is no second rendering; the probe's label was
+wrong and is corrected in `crates/cpp_ls/tests/lsp_hover_probe.rs`.
+
+**The "release gate hang" was self-inflicted.** `idle.rs` was reported as stalled three times; each time it had a
+`cpp_ls` server child alive with 0.05 s of CPU, and each time it passed when run alone (14 s). It also passed in the
+full `cargo test --release -p cpp_ls --tests` batch (**32 test binaries, 0 failed**) once nothing killed the spawn in
+flight. The lesson for the gate itself: a server-flow test that is being watched by a killed job looks exactly like a
+deadlock.

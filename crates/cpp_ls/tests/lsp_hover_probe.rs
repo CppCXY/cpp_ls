@@ -292,7 +292,7 @@ fn the_two_reported_hovers() {
                     });
                     match body {
                         Some(body) => println!(
-                            "[measure] rendered basic_json ClassBody: {} child(ren), {} byte(s), {} parse error(s)",
+                            "[measure] view of json.hpp (its own text when no rendering is cached): {} child(ren), {} byte(s), {} parse error(s)",
                             body.children().count(),
                             view.source.len(),
                             view.tree.get_errors().len()
