@@ -296,10 +296,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // It is left in the parser rather than deleted because the measurement is the interesting object: the next
         // person to read "64% of nodes are bodies" will reach for this, and the number that says it buys nothing
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
-        let config = ParserConfig::default()
+        let mut config = ParserConfig::default()
             .with_dialect(self.config.dialect())
             .with_cuda(self.config.cuda())
             .with_language(self.config.language_for(path));
+        // **The closure's macros, which the doc on this type promised and this call did not pass.** A file's own
+        // `#define`s reach the grammar through the directive walk; one from an included header does not, and the rule
+        // that reads `NAME { … }` as a macro needs it: measured on `nlohmann/json.hpp`, `JSON_TRY` is defined in
+        // `detail/macro_scope.hpp`, the block was read as a braced initialisation, and the recovery swallowed
+        // **333 362 bytes** of `basic_json` — every member after it indexed with no class scope.
+        if let Some(facts) = self.macro_facts {
+            config = config.with_macros_from_includes(facts);
+        }
         let tree = { CppParser::parse(source, config) };
         let summary = { self.index_tree(path, source, &tree, key, true) };
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is

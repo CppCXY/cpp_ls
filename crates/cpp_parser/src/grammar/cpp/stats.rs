@@ -523,7 +523,8 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         // reading unless the file really did define `Widget`.
         CppTokenKind::Identifier
             if p.peek_next_token() == CppTokenKind::LeftBrace
-                && p.is_a_macro_defined_here(p.current_token_text()) =>
+                && (p.is_a_macro_defined_here(p.current_token_text())
+                    || p.is_a_macro(p.current_token_text()) == Some(true)) =>
         {
             parse_macro_call(p)
         }
