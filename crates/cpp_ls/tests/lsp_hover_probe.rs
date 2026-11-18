@@ -102,7 +102,10 @@ fn the_two_reported_hovers() {
             let mut scopes: std::collections::BTreeMap<String, usize> =
                 std::collections::BTreeMap::new();
             for declaration in &summary.declarations {
-                let scope = declaration.scope.as_ref().map_or("(none)".to_string(), |s| s.to_string());
+                let scope = declaration
+                    .scope
+                    .as_ref()
+                    .map_or("(none)".to_string(), |s| s.to_string());
                 *scopes.entry(scope).or_default() += 1;
             }
             let top: Vec<(String, usize)> = scopes
@@ -115,7 +118,10 @@ fn the_two_reported_hovers() {
                 .declarations
                 .iter()
                 .filter(|declaration| {
-                    declaration.scope.as_ref().is_some_and(|scope| scope.as_str() == "nlohmann::basic_json")
+                    declaration
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.as_str() == "nlohmann::basic_json")
                 })
                 .map(|declaration| declaration.name.to_string())
                 .collect();
@@ -124,6 +130,56 @@ fn the_two_reported_hovers() {
                 summary.declarations.len()
             );
             println!("[summary] members: {}", names.join(" "));
+            let tail: Vec<String> = summary
+                .declarations
+                .iter()
+                .rev()
+                .take(12)
+                .map(|declaration| {
+                    format!(
+                        "{}::{}",
+                        declaration.scope.as_ref().map_or("(none)", |s| s.as_str()),
+                        declaration.name
+                    )
+                })
+                .collect();
+            println!("[summary] last declarations: {}", tail.join(" "));
+            if let Some(last) = summary
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.as_str() == "nlohmann::basic_json")
+                })
+                .max_by_key(|declaration| declaration.name_range.start_offset)
+            {
+                let written = std::fs::read_to_string(&json).unwrap_or_default();
+                let at = last.name_range.start_offset;
+                let text = written.get(at.saturating_sub(120)..(at + 40).min(written.len()));
+                println!(
+                    "[summary] last scoped member {} at {at}: {:?}",
+                    last.name,
+                    text.unwrap_or("")
+                );
+            }
+            for wanted in ["parse", "dump", "size", "object"] {
+                let found: Vec<String> = summary
+                    .declarations
+                    .iter()
+                    .filter(|declaration| declaration.name == wanted)
+                    .map(|declaration| {
+                        format!(
+                            "{}::{} ({:?})",
+                            declaration.scope.as_ref().map_or("(none)", |s| s.as_str()),
+                            declaration.name,
+                            declaration.kind
+                        )
+                    })
+                    .collect();
+                println!("[summary] {wanted}: {found:?}");
+            }
         } else {
             println!("[summary] json.hpp: no summary");
         }

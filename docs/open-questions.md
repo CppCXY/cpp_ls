@@ -2191,3 +2191,26 @@ class body is lost: recovery swallows the rest, so every later member is a decla
 
 The next fixture is therefore a class whose method contains that `JSON_TRY { … } JSON_CATCH(...) {}` shape followed by
 another member, asserting the later member is still declared — and then the parse fix, whatever it turns out to be.
+### Where the class body is lost: the boundary is measured
+
+`json.hpp` summary: the last member with scope `nlohmann::basic_json` is **`assert_invariant`**, at byte 50 279 (the
+name is on line 1253). Everything after it is parsed but **scope-less** — `parse` (three overloads), `dump`, `size`,
+`object` are indexed as `(none)::name`, which is why `basic_json::parse` and `basic_json::object` answer
+`NotDeclaredHere`: the index holds them, the class does not.
+
+The construct between `assert_invariant` and `parse` is `set_parents()`:
+
+```cpp
+void set_parents()
+{
+#if JSON_DIAGNOSTICS
+    switch (m_type) { case value_t::array: { … } … case value_t::null: … default: { break; } }
+#endif
+}
+```
+
+A fixture of that shape alone (`tests/class_body_continuity.rs`) **does not reproduce**: the member after it still
+belongs to the class. So the boundary depends on something else in the file — the next instrument is a bisect of the
+class body itself (index slices of `json.hpp` from `class basic_json` to successive lines, and find the first slice
+whose members after the line stop carrying the class's scope). The measurement above says the answer lies between
+line 1253 and `parse`.
