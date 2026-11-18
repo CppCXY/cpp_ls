@@ -423,15 +423,6 @@ pub struct CppParser<'a> {
     /// file* the cursor is rather than what a construct decided, and a rollback rewinds the cursor through the
     /// same directives the count was taken over. Restoring a stale count would make it disagree with the tokens.
     open_conditionals: isize,
-    /// **The names this file `#define`s**, so a statement that begins with one can be read as the macro it is.
-    ///
-    /// The grammar's other macro rules ask the caller's table ([`CppParser::is_a_macro`]), which answers `None` when
-    /// no include closure was supplied — and the index's shape reading supplies none. This set is evidence the file
-    /// carries itself: a `#define` is its own text, and `#undef` takes the name back out.
-    ///
-    /// Not part of [`Checkpoint`], for the same reason as the count above: it describes the file at the cursor, and a
-    /// rollback rewinds the cursor through the same directives that filled it.
-    defined_macros: std::collections::HashSet<Box<str>>,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -631,7 +622,6 @@ impl<'a> CppParser<'a> {
             declaration_ended_inside_specifiers: false,
             terminator_came_from_a_branch: false,
             open_conditionals: 0,
-            defined_macros: std::collections::HashSet::new(),
             parse_config: config,
             errors,
         }
