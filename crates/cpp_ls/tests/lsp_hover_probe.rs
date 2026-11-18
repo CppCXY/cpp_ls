@@ -348,6 +348,19 @@ fn the_two_reported_hovers() {
             }
             cpp_code_analysis::Known::No => println!("[definitions] no"),
         }
+        // **What the walk sees now**, after the pump — the count is the first thing to read.
+        {
+            let in_scope = session
+                .index()
+                .declarations_in("nlohmann::basic_json", &path)
+                .len();
+            let by_name = session
+                .index()
+                .definition("nlohmann::basic_json::object", &path);
+            println!(
+                "[index now] declarations_in(basic_json) = {in_scope}, definition = {by_name:?}"
+            );
+        }
         // **What the session's own resolution says**, which is what the card is built from.
         match session.definition(&view, ReadingOffset::new(at)) {
             cpp_code_analysis::Known::Yes(found) => println!(

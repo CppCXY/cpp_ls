@@ -2350,3 +2350,21 @@ So the defect is not knowledge — it is *when* the knowledge exists. Three gaps
 The next change is on the asking side, where the design already puts it: a hover that cannot answer a qualified name
 identifies the file that declares the class and asks for **that file's cooked reading** (`Session::cook`, one file,
 cached), then asks again. That is "look at the file the question is about", not a guess about shapes.
+### The last mile, measured: the facts are filed but the graph does not see them
+
+With the eviction and ask fixes in place, the index holds the rendered reading of `nlohmann/json.hpp` — **761
+declarations, `object: Some(Function)`** — and `nlohmann::json::object` still answers `NotDeclaredHere`, because the
+*visibility walk* never looks at those facts:
+
+```text
+declarations_in("nlohmann::basic_json") = 53        ← the L1 summary's members, not the 761
+index.definition("nlohmann::basic_json::object")    = NotDeclaredHere
+cooked_declarations(json.hpp)                       = 761, object present
+```
+
+The three sources that should join are `the_reading_for(file, asking)` (which reading a lookup uses), the name index's
+`by_scope` postings (what `declarations_in` reads), and `insert_a_reading`'s guard
+`if let Some(&sequence) = self.sequence.get(&path)` (which is what adds a cooked reading to those postings). The trace
+for `CPPLS_TRACE_NAMES=1` prints the insert for `stl_map.h` in the same run and **not** for `json.hpp`, while
+`cooking: filed … json.hpp … 761` prints — so the reading reaches the map and not the postings, and the next step is
+the one print at the top of `insert_a_reading` that says which call is missing.
