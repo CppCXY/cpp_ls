@@ -2214,3 +2214,25 @@ belongs to the class. So the boundary depends on something else in the file — 
 class body itself (index slices of `json.hpp` from `class basic_json` to successive lines, and find the first slice
 whose members after the line stop carrying the class's scope). The measurement above says the answer lies between
 line 1253 and `parse`.
+### The `json.hpp` parse: what fixed the shape, and what is still missing
+
+**Fixed** (`3192964f`): the grammar read `NAME { … }` as a braced initialisation even when the file itself says
+`#define NAME …`. `parse_stat` now claims that shape as a macro whose body supplies the block, with the file's own
+`#define` as the evidence, and `parse_macro_call` reads its argument group only when a `(` is there. The minimal
+reproduction (`tests/class_body_continuity.rs`) failed with `expected }, but get ;` before and passes now.
+
+**Wired** (`4eb6b8f2`): `FileIndexer::macro_facts` was documented as the parse's evidence and never passed to it;
+`ParserConfig::with_macros_from_includes` is now applied when the caller supplies facts.
+
+**Still missing, and why the real file is unchanged.** `json.hpp`'s `JSON_TRY` comes from
+`detail/macro_scope.hpp`, and a file's **L1 summary is built before its closure is read** — the per-file index path
+has no facts to pass, so the rule does not fire and the class body is still one 333 362-byte declaration. Two ways
+forward, and the second is the one the "silent under-read" argument points at:
+
+1. **Feed the L1 parse once the closure is known** — a second pass over files whose first parse shows a declaration
+   swallowing the rest of its class body. The unit path already builds a `MacroView`; the per-file path would need to
+   keep one.
+2. **Detect the truncation and refuse to answer from it** — a summary that lost a class body must not answer
+   `NotDeclaredHere` for that class's members; it should send the query to a cooked reading (which *does* have the
+   closure's macros) or say the reading is partial. This is the general contract: an under-read reading must be
+   visible to the layer above it rather than look like an absence.

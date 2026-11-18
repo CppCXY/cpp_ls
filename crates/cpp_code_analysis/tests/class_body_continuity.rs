@@ -415,3 +415,34 @@ void f(bool check) {
     }
     assert!(errors.is_empty(), "{} error(s)", errors.len());
 }
+
+/// **A class body survives a method it cannot read.** The recovery inside a broken body must end at the body's own
+/// `}`, not at the class's — otherwise the members written after the mistake are declarations of nothing, which is
+/// the failure `json.hpp` shows at 333 362 bytes.
+#[test]
+fn a_member_after_a_broken_method_body_is_still_a_member() {
+    let source = "\
+struct Widget {
+    int before = 0;
+
+    void broken() {
+        FOO { @@@ }
+    }
+
+    void after_the_mistake() {}
+
+    int also_after = 0;
+};
+";
+    let session = session_of(&[("/p/widget.h", source)]);
+    assert_eq!(
+        declared_at(&session, "/p/widget.h", "after_the_mistake"),
+        "Widget::after_the_mistake",
+        "the member after a broken body is Widget's"
+    );
+    assert_eq!(
+        declared_at(&session, "/p/widget.h", "also_after"),
+        "Widget::also_after",
+        "and so is the one after that"
+    );
+}
