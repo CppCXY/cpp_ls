@@ -248,6 +248,33 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     let declared = declarations_by_offset(view);
     let parameters = parameter_offsets(view);
     let macros = macro_names(view);
+    // **The identifiers that are *invoked*** — whose next significant token is `(`.
+    //
+    // A function-like macro's name at statement position is `NAME ( tokens )`, and the grammar reads that shape as a
+    // *declaration* when it can: two adjacent invocations become one declaration whose specifier is the first and
+    // whose declarator is the second, so every second one is drawn as a function. Measured on
+    // `CodeFormatCore/src/Config/LuaStyle.cpp`: **7 of 20 `BOOL_OPTION` tokens** came out `Function, declaration`
+    // that way, while the rest of the same macro's uses were `Macro`.
+    //
+    // A preprocessor expands a function-like macro before any grammar sees it, so for a name this file defines as a
+    // macro the declaration reading is not a fact about the token. This set is what lets step 1 stand aside for it.
+    let invoked: std::collections::HashSet<usize> = {
+        let mut invoked = std::collections::HashSet::new();
+        let mut previous: Option<(usize, CppTokenKind)> = None;
+        for token in view.tree.get_tokens() {
+            if cpp_parser::is_trivia(token.kind) {
+                continue;
+            }
+            if token.kind == CppTokenKind::LeftParen
+                && let Some((start, kind)) = previous
+                && kind == CppTokenKind::Identifier
+            {
+                invoked.insert(start);
+            }
+            previous = Some((token.range.start_offset, token.kind));
+        }
+        invoked
+    };
     let defined = definitions_of(view);
     let members = member_kinds(index, view, &types, &shapes);
     let qualified = qualified_names(view);
@@ -314,7 +341,13 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         let at = range.start_offset;
 
         // 1. The declaration's own name. One hash lookup, and it is asked of every identifier in the file.
+        // **An invoked macro this file defines is the macro, whatever the tree made of the statement.** The
+        // declaration reading wins this shape whenever it can (`BOOL_OPTION(a)` alone is a declarator of nothing, and
+        // `BOOL_OPTION(a) BOOL_OPTION(b)` is a declaration with the first as its specifier), and for a name the
+        // preprocessor expands the reading is not a fact about the token at all.
+        let is_an_invoked_macro = invoked.contains(&at) && macros.contains_key(text);
         if let Some(binding) = declared.get(&at)
+            && !is_an_invoked_macro
             && let Some(kind) = kind_of_binding(
                 index,
                 binding,

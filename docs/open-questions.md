@@ -2129,3 +2129,45 @@ measured on `test_cpp/src/strings.cpp` after the change: `84:6 views function` (
 namespace` (the qualifier), `105:5 views function` (the call).
 
 Reverting the change makes exactly those three tests red again (measured), so they pin it.
+## A macro drawn as a function: the declaration reading wins inside a body
+
+**Reported from an editor on `CodeFormatCore/src/Config/LuaStyle.cpp`**: `BOOL_OPTION` was coloured `function` on
+some lines and `macro` on others. Measured by `tests/semantic_real_probe.rs`: **7 of 33 invocations** were
+`Function, declaration` (the rest `Macro`), and the seven were every *second* one.
+
+### What the tree says
+
+The parser pairs adjacent invocations into one declaration — a function-like macro's shape `NAME ( tokens )` is also
+a declarator, and at statement position the declaration reading is tried first:
+
+```text
+BOOL_OPTION(detect_end_of_line)      →  Declaration { DeclSpecifierSeq { MacroCall BOOL_OPTION(…) }, …
+BOOL_OPTION(insert_final_newline)       … Declarator { NameExpr BOOL_OPTION(…) } }
+```
+
+so the first is a macro in a specifier and the second is the *name of a declarator* — a function. The grammar claims
+that shape as a macro invocation only for names `written_in_the_implementations_namespace` reserves
+(`__glibcxx_…`, `_GLIBCXX_…`); `a_macro_invocation_starts_at` is where that condition lives, and an ordinary
+`BOOL_OPTION` does not satisfy it.
+
+### What was fixed
+
+`session::semantic::classified_names` now knows which identifiers are **invoked** (their next significant token is
+`(`) and which spellings this file **defines** as macros, and step 1 stands aside for that pair: an invoked macro is
+classified `Macro` whatever the tree made of the statement. A preprocessor expands a function-like macro before any
+grammar sees it, so the declaration reading is not a fact about that token. Measured after: **0 of 33** (and
+`NUMBER_OPTION` 0 of 4), with the analysis suite at 872 passed.
+
+The index is not affected: `ProjectIndex::definition("BOOL_OPTION")` answers `NotDeclaredHere` both before and after,
+so the misparse never became a declaration fact.
+
+### Still open
+
+1. **A hermetic fixture.** The shape does not reproduce from a small copy of the file — the declaration reading
+   succeeds only in the real file's state, and two attempts at a minimal source (a pair of invocations; the verbatim
+   macro definitions plus the body) both classified every token as `Macro` even with the fix disabled. The way to
+   get one is to dump the rendering (`view.source`, 15 626 bytes), disable the rule, and bisect the window until the
+   `Function` disappears; the probe already prints the rendering.
+2. **The grammar reading itself.** `BOOL_OPTION(a) BOOL_OPTION(b)` is still one declaration in the tree. A fix there
+   would remove the misparse for every consumer (hover, completion, checks) rather than for the colour pass, and it
+   is the same rule that decides `__glibcxx_function_requires(…)` — a change to weigh against the whole corpus.
