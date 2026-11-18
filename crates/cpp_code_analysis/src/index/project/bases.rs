@@ -810,6 +810,18 @@ pub(crate) fn a_type_spelling_with_its_arguments(written: &str) -> &str {
         let before = name;
         name = name.trim_end_matches(['*', '&']).trim();
         name = name.strip_prefix("::").unwrap_or(name).trim();
+        // **A cv-qualifier is not part of the name a class is filed under.** `const Foo` and `Foo` are one class,
+        // and a declaration's recorded type now keeps its leading `const` — so the object of `cfoo.call(…)` is
+        // `const Foo`, and a member query handed that spelling found no class at all: the deduction behind a
+        // generic lambda's parameter answered nothing for a `const` object while the same question about a
+        // non-`const` one answered `Foo&`. Stripped here rather than in every caller because this function is the
+        // one place the class *name* is cut out of a type spelling.
+        for qualifier in ["const ", "volatile ", "const volatile ", "volatile const "] {
+            if let Some(rest) = name.strip_prefix(qualifier) {
+                name = rest.trim();
+                break;
+            }
+        }
         if name == before {
             break;
         }

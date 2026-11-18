@@ -232,6 +232,15 @@ fn what_the_editor_is_told_about_a_file() {
 
     // **Three pulls, a second apart**: the first one usually arrives while the index is still reading, and the
     // reported defect was about what the *settled* answer is.
+    //
+    // **`CPPLS_ANSWERS_SETTLE_MS` slows the loop down** for a project whose index takes longer than a second to
+    // read: a server withholds every *check* finding until the file's closure is indexed (`is_closure_ready`), so a
+    // 2 000-file project answers `0 item(s)` on three pulls inside five seconds — measured on a production project,
+    // where the same probe on a smaller one had reported findings. The default keeps the old timing.
+    let settle = std::env::var("CPPLS_ANSWERS_SETTLE_MS")
+        .ok()
+        .and_then(|written| written.parse::<u64>().ok())
+        .unwrap_or(1500);
     let mut items = Vec::new();
     for pull in 0..3 {
         let response = server.request(
@@ -244,7 +253,7 @@ fn what_the_editor_is_told_about_a_file() {
             .cloned()
             .unwrap_or_default();
         println!("pull {pull}: {} item(s)", items.len());
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(settle));
     }
 
     println!("\n# findings ({} item(s))", items.len());
@@ -354,13 +363,21 @@ fn what_the_editor_is_told_about_a_file() {
             .cloned()
             .unwrap_or_else(|| format!("kind {kind}"));
         // The token's text, so a reader can see which one is meant.
+        //
+        // **At a character boundary, or not at all.** The protocol counts this column in *bytes*, and a file with a
+        // comment in Chinese has tokens whose span falls inside a multi-byte character — slicing at the byte offset
+        // panicked ("start byte index 512 is not a char boundary; it is inside '的'"), which took the whole probe
+        // down after the findings had already been printed. A token that starts mid-character is one this reader
+        // cannot quote, and quoting nothing is the answer.
         let at = text
             .lines()
             .take(line as usize)
             .map(|line| line.len() + 1)
             .sum::<usize>()
             + character as usize;
-        let spelling: String = text[at.min(text.len())..]
+        let spelling: String = text
+            .get(at.min(text.len())..)
+            .unwrap_or_default()
             .chars()
             .take(length as usize)
             .collect();

@@ -133,6 +133,50 @@ fn an_unresolvable_callee_is_not_judged() {
     );
 }
 
+/// **A call inside a member call's object is not the member call.**
+///
+/// Reported from a production project, twice in one file:
+///
+/// ```cpp
+/// if (!Manager::GetInstance().Init(size))      // `Init needs 1 argument(s) and this call passes fewer`
+/// constexpr auto per_second = duration_cast<microseconds>(seconds{ 1 }).count();
+///                                              // `count takes 0 argument(s) and this call passes more`
+/// ```
+///
+/// Both calls pass the right number. The judged node was the **object's** call — `GetInstance()` (no arguments) and
+/// `duration_cast<…>(…)` (one) — because `member_access_above` walked *up* from that callee and found the member
+/// access of the **enclosing** postfix expression: `…GetInstance().Init` and `…).count`. So `Init` was judged against
+/// `GetInstance()`'s zero arguments, and `count` against `duration_cast`'s one. A callee is a member call only when
+/// the access is on the callee's own path — the walk must stop at the call that owns the callee.
+#[test]
+fn a_call_under_a_member_access_is_not_that_member_call() {
+    let fewer = codes_of(
+        "struct Manager {\n\
+         \x20   static Manager& instance();\n\
+         \x20   void init(int size);\n\
+         };\n\
+         void g() { Manager::instance().init(4); }\n",
+    );
+    assert_silent_about(
+        &fewer,
+        DiagnosticCode::ArgumentCount,
+        "`init` gets its one argument; `instance()` is a different call",
+    );
+
+    let more = codes_of(
+        "struct Span {\n\
+         \x20   int count() const;\n\
+         };\n\
+         Span make(int seed);\n\
+         int g() { return make(1).count(); }\n",
+    );
+    assert_silent_about(
+        &more,
+        DiagnosticCode::ArgumentCount,
+        "`count()` gets none; `make(1)` is the object",
+    );
+}
+
 /// **A name this file binds to a variable is not a free function of that name.**
 ///
 /// Reported from an editor on `test_cpp/src/lambdas.cpp`:

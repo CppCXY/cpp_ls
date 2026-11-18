@@ -1734,6 +1734,8 @@ pub(crate) fn read_specifiers_named(
     let mut an_unnamed_body = false;
     // Was an **elaborated keyword** (`struct`, `class`, `union`, `enum`) written here? See the `BuiltinType` arm.
     let mut elaborated = false;
+    // Was a **`const`** written in the sequence, before the type's name? See the end of this function.
+    let mut const_written = false;
 
     for child in specifiers.children_with_tokens() {
         let Some(node) = child.into_node() else {
@@ -1820,8 +1822,12 @@ pub(crate) fn read_specifiers_named(
             }
             // Not part of what the type is called. Qualifiers, attributes, storage class, `constexpr`, `inline`,
             // `friend` — a caller that needs to know a declaration was `static` or `friend` asks the declaration.
-            CppSyntaxKind::ConstQual
-            | CppSyntaxKind::VolatileQual
+            //
+            // **Except `const`, which is part of the type it is written on** — see the end of this function.
+            CppSyntaxKind::ConstQual => {
+                const_written = true;
+            }
+            CppSyntaxKind::VolatileQual
             | CppSyntaxKind::RestrictQual
             | CppSyntaxKind::Attribute
             | CppSyntaxKind::AttributeList
@@ -1890,10 +1896,14 @@ pub(crate) fn read_specifiers_named(
         }
     }
 
-    if !builtin.is_empty() {
-        return Type::builtin(builtin.join(" "));
-    }
-
+    // **A `const` written before the type's name stays with it.** This function used to drop it, with the argument
+    // that "this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type" — and
+    // that argument is true about *lookup*, which is what [`base_type_name`] and [`Type::class_name`] strip
+    // qualifiers for. It is false about the two questions a **declaration's recorded type** answers: whether a value
+    // converts to it (`const char*` accepts a string literal and `char*` does not, which is where a production
+    // project's `static constexpr const char* Name = "…";` was reported as "does not convert to `char*`"), and what
+    // a reader is shown — the hover on that declaration said `char*`, which is not the type the file wrote.
+    //
     // **The last name wins**, and the shape the rule exists for is a macro standing where a specifier goes: the
     // grammar reads `_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;` as one
     // specifier sequence holding three names, and the type is the **last** of them. No C++ type is spelled as two
@@ -1903,24 +1913,30 @@ pub(crate) fn read_specifiers_named(
     // Measured, and it is what made `std::cin` unanswerable: MSVC's `<iostream>` declares `cin` twice, and a reader
     // that took the first name recorded `__PURE_APPDOMAIN_GLOBAL` where the cooked reading of the same line recorded
     // `istream`, so the two declarations disagreed about the type and neither answered.
-    if let Some(named) = named {
-        return named;
-    }
-
-    // **A class body nothing named is a type, and it has no spelling here.** `void` is not "no answer": it is a
-    // *different type*, and recording it made `static const struct { … } priority[];` answer `void[]` — measured on
-    // the `LuaLexer.cpp` fixture this was written for, and the hover then printed the wrong signature instead of
-    // the file's own text. The empty spelling is what [`declared_type_of`] reads as "no type to name", which is
-    // the honest answer for a spelling a compiler would print as `struct { … }` and this layer does not model.
-    //
-    // **An elaborated keyword with no name after it is the same answer**, and it is the leftover half of the
-    // `BuiltinType` note above: `struct` where an unexpanded macro should have named the type. Returning `void`
-    // would claim a type the file never wrote.
-    if (an_unnamed_body || elaborated) && spelling.is_none() {
+    let answer = if !builtin.is_empty() {
+        Type::builtin(builtin.join(" "))
+    } else if let Some(named) = named {
+        named
+    } else if (an_unnamed_body || elaborated) && spelling.is_none() {
+        // **A class body nothing named is a type, and it has no spelling here.** `void` is not "no answer": it is a
+        // *different type*, and recording it made `static const struct { … } priority[];` answer `void[]` — measured
+        // on the `LuaLexer.cpp` fixture this was written for, and the hover then printed the wrong signature instead
+        // of the file's own text. The empty spelling is what [`declared_type_of`] reads as "no type to name", which
+        // is the honest answer for a spelling a compiler would print as `struct { … }` and this layer does not model.
+        //
+        // **An elaborated keyword with no name after it is the same answer**, and it is the leftover half of the
+        // `BuiltinType` note above: `struct` where an unexpanded macro should have named the type. Returning `void`
+        // would claim a type the file never wrote.
         return Type::builtin("");
+    } else {
+        spelling.unwrap_or_else(|| Type::builtin("void"))
+    };
+    match const_written {
+        true => Type::Qualified {
+            of: std::sync::Arc::new(answer),
+        },
+        false => answer,
     }
-
-    spelling.unwrap_or_else(|| Type::builtin("void"))
 }
 
 /// **Where the argument list that ends this spelling starts**, if one does.
@@ -2639,13 +2655,19 @@ mod tests {
 
     /// **The pointer lives in the declarator and the base in the specifiers**, and the two have to be joined in
     /// the right order — outermost operator nearest the type.
+    ///
+    /// **`const Widget*` is a pointer to a `const Widget`, and the `const` is part of the answer.** This expectation
+    /// used to be `Widget*`, because the specifier reader dropped qualifiers on the argument that they say nothing
+    /// about *which class* a spelling names — true for a member lookup, false for the type a declaration records: it
+    /// made `static constexpr const char* Name = "…";` a `char*`, and a string literal "does not convert" to that.
+    /// `Type::class_name` remains transparent to the qualifier, so lookups are unaffected.
     #[test]
     fn a_pointer_and_a_reference_are_read_out_of_the_declarator() {
         assert_eq!(written("Widget* p;", "p"), "Widget*");
         assert_eq!(written("Widget** pp;", "pp"), "Widget**");
         assert_eq!(written("Widget& r;", "r"), "Widget&");
         assert_eq!(written("Widget&& rr;", "rr"), "Widget&&");
-        assert_eq!(written("const Widget* q;", "q"), "Widget*");
+        assert_eq!(written("const Widget* q;", "q"), "const Widget*");
     }
 
     /// **A name is read without its template arguments and with them.** The class question wants the first, the
@@ -2807,9 +2829,12 @@ mod tests {
     /// **Attributes and declaration specifiers are not part of a type.** The old reader answered
     /// `const [[nodiscard]] constexpr size_type` for a return type, because it stripped a list of keywords from
     /// text; the syntax says which nodes are the type, and everything else is dropped.
+    ///
+    /// **`const` is not in that list.** It is a cv-qualifier and part of the type it is written on, which is why
+    /// `static const int count` records `const int`; `constexpr`, `static` and an attribute are not types at all.
     #[test]
     fn attributes_and_specifiers_are_not_part_of_the_type() {
-        assert_eq!(written("static const int count = 1;", "count"), "int");
+        assert_eq!(written("static const int count = 1;", "count"), "const int");
         assert_eq!(written("constexpr int size = 2;", "size"), "int");
         assert_eq!(written("[[nodiscard]] int f();", "f"), "int()");
     }

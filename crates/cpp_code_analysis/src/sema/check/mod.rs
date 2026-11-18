@@ -1671,6 +1671,13 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 /// `member_access_of` answers for the **node that holds the operator**, and a call's callee is the identifier to its
 /// right: the access is the parent. Walking up a couple of levels rather than asserting the shape keeps this honest for
 /// the grammar's other spellings (`(*p).f`, `a.b.f`), where the callee's parent is not always the outermost access.
+///
+/// **The walk stops at the call that owns the callee.** A member access *above* it is the enclosing postfix
+/// expression, in which this call is the **object** — `Manager::instance().init(4)` and `make(1).count()` both have
+/// their call in that position — and reading it answers "this call is the member call of a name written after it".
+/// Measured on a production project, twice in one file: `init` was judged against `instance()`'s zero arguments
+/// ("needs 1 and this call passes fewer") and `count` against `make`'s one ("takes 0 and this call passes more"),
+/// for two calls that pass exactly what they should.
 pub fn member_access_above(
     node: &cpp_parser::CppSyntaxNode,
 ) -> Option<crate::sema::resolve::MemberAccess> {
@@ -1680,7 +1687,11 @@ pub fn member_access_above(
         if let Some(access) = crate::sema::resolve::member_access_of(&node) {
             return Some(access);
         }
-        current = node.parent();
+        let parent = node.parent()?;
+        if cpp_parser::CppSyntaxKind::from(parent.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
+            return None;
+        }
+        current = Some(parent);
     }
     None
 }

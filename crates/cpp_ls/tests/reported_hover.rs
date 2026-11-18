@@ -562,9 +562,7 @@ fn a_construction_of_an_alias_in_a_namespace_names_the_member() {
     let _ = session.index_everything();
 
     let view = session.view_of_the_file(&file).expect("the written text");
-    let at = source
-        .find("MadeInside<Duo, int>{}.put")
-        .expect("the use")
+    let at = source.find("MadeInside<Duo, int>{}.put").expect("the use")
         + "MadeInside<Duo, int>{}.".len();
     let hover = cpp_ls::handlers::hover::hover(
         &session,
@@ -588,4 +586,3 @@ fn a_construction_of_an_alias_in_a_namespace_names_the_member() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
-

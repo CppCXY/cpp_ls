@@ -2018,3 +2018,51 @@ silent. `parameter_hints` now asks, after the declaration's own parameters, for 
 pack (`_Args&&...`); `_Filter` itself declares only the two-argument `operator()`. Naming the predicate `__r` would be a
 wrong answer printed into the code, so the exact-arity rule refuses it — and
 `a_call_through_an_object_with_the_wrong_arity_is_not_hinted` pins that refusal.
+
+
+## Three false findings in a production project: a call under a member access, and a dropped `const`
+
+Round 43, three screenshots from the same project, each a finding on a line a compiler accepts:
+
+```text
+`count` takes 0 argument(s) and this call passes more      duration_cast<microseconds>(seconds{1}).count()
+`Init` needs 1 argument(s) and this call passes fewer      Manager::GetInstance().Init(size)
+`FacilityName` is initialised with a value that does not   static constexpr const char* FacilityName = "…";
+  convert to `char*`
+```
+
+### A call in the object position of a member call is not that member call (fixed)
+
+The first two are one bug in `member_access_above`, which walks **up** to three levels from a callee looking for a
+member access. A callee inside a postfix expression has one above it — the enclosing `…GetInstance().Init` and
+`…).count` — so the **inner** call was judged as the member call of the name written after it: `Init` against
+`GetInstance()`'s zero arguments, `count` against `duration_cast`'s one.
+
+The walk now stops at the `CallExpr` that owns the callee: an access above that node belongs to the expression the
+call is the *object* of. Witness: `argument_count::a_call_under_a_member_access_is_not_that_member_call`, which
+reports the old findings when the stop is removed (measured).
+
+### A declaration's type keeps its `const` (fixed)
+
+`read_specifiers_named` dropped cv-qualifiers, with the argument that they say nothing about *which class* a spelling
+names — true for a member lookup (`Type::class_name` is transparent to `Qualified`), false for the type a declaration
+records. `static constexpr const char* FacilityName` recorded `char*`, the value is `const char*`, and
+`assign-type-check` refused a string literal — while the hover on the same declaration showed the truncated type.
+
+`const` in the specifier sequence is now part of the type (`Type::Qualified`), and the two renderers that prepend the
+*declaration's* qualifiers stop printing a second one (`a_type_with_its_written_qualifiers`). `volatile` is unchanged:
+it is still dropped and still added back by the renderer.
+
+The ripple, all measured rather than assumed: `math`-style lookups needed `a_type_spelling_with_its_arguments` to strip
+a leading qualifier — without it `members_of("const Foo")` found no class, and the generic-lambda deduction answered
+nothing for a `const` object (`lambda_parameters.rs` caught it: `const Foo&` became absent). Four expectations that
+had encoded the dropping were corrected, each with the reason in place: `a_pointer_and_a_reference_are_read_out_of_the_declarator`
+(`const Widget*`), `attributes_and_specifiers_are_not_part_of_the_type` (`static const int` → `const int`),
+`a_declaration_that_names_its_type_keeps_it`, and the `using`-alias line in the renderer. `FORMAT_VERSION` 36 → 37,
+because a summary's `type_of` is what the hover and the check read.
+
+### Still open: the `>` `=` split
+
+The syntax error at line 340 of that file is the one recorded in the previous round — a macro body arriving through the
+in-force channel with `>=` split into `> =` — and it costs every finding after it, which is why the same file's
+`cstyle-cast` and `use-nullptr` findings disappeared from the pull once it was reported. Next round's work.

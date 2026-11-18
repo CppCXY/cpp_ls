@@ -138,10 +138,12 @@ pub fn a_line(fact: &DeclFact, syntax: Option<&CppDeclaration>, value: Option<i6
         DeclKind::Function => a_function(fact),
         DeclKind::Type if fact.type_of.is_some() => {
             format!(
-                "using {} = {}{};",
+                "using {} = {};",
                 fact.name,
-                the_written_qualifiers(syntax),
-                a_type(fact.type_of.as_deref().unwrap_or(""))
+                a_type_with_its_written_qualifiers(
+                    fact.type_of.as_deref().unwrap_or(""),
+                    the_written_qualifiers(syntax),
+                )
             )
         }
         DeclKind::Type => a_class(fact, syntax),
@@ -416,8 +418,10 @@ fn a_variable(fact: &DeclFact, value: Option<i64>, syntax: Option<&CppDeclaratio
         // written through, which is the one thing it may not. The syntax still has them, so they are read from the
         // declaration's own specifier sequence; a `Foo* const p` writes its `const` in the declarator, where it
         // qualifies the pointer and not the type named here.
-        out.push_str(the_written_qualifiers(syntax));
-        out.push_str(&a_type(ty));
+        out.push_str(&a_type_with_its_written_qualifiers(
+            ty,
+            the_written_qualifiers(syntax),
+        ));
         out.push(' ');
     }
     out.push_str(&fact.name);
@@ -476,6 +480,32 @@ fn the_qualifiers_in(syntax: Option<&CppSyntaxNode>) -> &'static str {
 ///
 /// The spelling is the *input*; the output is generated. A spelling this layer cannot parse is printed back as a name,
 /// which is the model's answer for a type it does not model — not a copy of the declaration.
+///
+/// **[`a_type`], with the qualifiers the declaration wrote in front of it** — and never twice.
+///
+/// A declaration's recorded type now carries its **leading `const`** (`static constexpr const char* Name` records
+/// `const char*`, not `char*` — see `read_specifiers_named`), and the *syntax* still has the same word. Printing both
+/// gave `const const Widget*` and `using Name = const const char*`, which is what `a_variable_keeps_its_qualifiers`
+/// and `an_alias_is_a_using_line` caught. `volatile` is still only in the syntax, so it is still prepended here.
+pub fn a_type_with_its_written_qualifiers(written: &str, qualifiers: &str) -> String {
+    let printed = a_type(written);
+    let qualifiers = qualifiers.trim();
+    if qualifiers.is_empty() {
+        return printed;
+    }
+    let mut missing: Vec<&str> = Vec::new();
+    for word in qualifiers.split_whitespace() {
+        if !printed.starts_with(word) {
+            missing.push(word);
+        }
+    }
+    match missing.is_empty() {
+        true => printed,
+        false => format!("{} {printed}", missing.join(" ")),
+    }
+}
+
+/// **A type, as the model writes it** — see [`a_type`], which this function is the qualified form of.
 pub fn a_type(written: &str) -> String {
     let written = written.trim();
     if written.is_empty() {

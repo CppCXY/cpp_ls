@@ -327,6 +327,21 @@ use std::path::{Path, PathBuf};
 /// exist — and no `CallExpr` for the statement itself (`a56783f2`). A summary made before this holds the phantom
 /// declaration, and every algorithm called at statement scope was invisible to hover, signature help and the checks
 /// that read a call.
+///
+/// # Why this moved to 37
+///
+/// **A declaration's recorded type keeps its `const`.** `read_specifiers_named` dropped qualifiers on the argument
+/// that they say nothing about *which class* a spelling names — true for a member lookup, false for the type a
+/// declaration records:
+///
+/// ```text
+/// static constexpr const char* FacilityName = "RelayServer";    recorded char*, written const char*
+/// ```
+///
+/// The value is a string literal, whose type is `const char*`, so `assign-type-check` reported that it "does not
+/// convert to `char*`" on a line a compiler accepts — and the hover on that declaration showed the truncated type.
+/// Every summary made before this holds the truncated `type_of`, and `type_of` is what both read.
+///
 /// # Why this moved to 36
 ///
 /// **The macro environment a closure composes is part of the reading.** `the_indexed_environment` took each
@@ -335,7 +350,7 @@ use std::path::{Path, PathBuf};
 /// left both names defined, and `std::min(a, b)` was cooked into `std::((( a ) < ( b )) ? ( a ) : ( b ))`. A
 /// rendering made before this holds the expansion, and it is keyed by the environment it was made from — which was
 /// itself the wrong one, so no other change reaches it. See `tests/undef_of_an_included_macro.rs`.
-pub const FORMAT_VERSION: u32 = 36;
+pub const FORMAT_VERSION: u32 = 37;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

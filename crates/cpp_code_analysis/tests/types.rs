@@ -404,9 +404,13 @@ int f() {
 /// A **plain** declaration is unaffected: the type it was written with is still the answer.
 ///
 /// The spelling is now **written by the reader** rather than cut out of the declaration's text, so it is the same
-/// type with the whitespace of a spelling rather than the whitespace of a file — `Widget*` for `const Widget* w`
+/// type with the whitespace of a spelling rather than the whitespace of a file — `const Widget*` for `const Widget* w`
 /// where the text cut used to give `Widget *`. That is the one visible difference, and it is deliberate: the reader
-/// is what knows that the `*` belongs to the `Widget` and the `const` does not.
+/// is what knows the `*` belongs to the `Widget`.
+///
+/// **The `const` is part of it**, which this expectation used to say was not — the reader dropped qualifiers as
+/// "not part of what the type is called". That is right for a lookup and wrong for a recorded type: it made
+/// `static constexpr const char* Name = "…";` a `char*` and had `assign-type-check` refuse a string literal.
 #[test]
 fn a_declaration_that_names_its_type_keeps_it() {
     assert_eq!(
@@ -415,7 +419,7 @@ fn a_declaration_that_names_its_type_keeps_it() {
             "w"
         )
         .as_deref(),
-        Some("Widget*")
+        Some("const Widget*")
     );
 }
 
