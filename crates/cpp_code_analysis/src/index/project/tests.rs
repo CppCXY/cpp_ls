@@ -3820,3 +3820,51 @@ fn an_undef_in_a_header_is_reached_like_a_define() {
         "the later header undefines it: {found:?}"
     );
 }
+
+/// **A reading that rendered to nothing does not displace one with declarations.**
+///
+/// This is `nlohmann/json.hpp` at the layer that answered wrongly: the on-its-own reading held **761** declarations,
+/// a program reading filed after it held **0**, and every lookup made from that program saw the empty one — measured
+/// as `declarations_in("nlohmann::basic_json") == 53` (the raw summary's members) while the class's members were in
+/// the index. The insert refuses the empty reading now; this pins the refusal at the query a reader feels.
+#[test]
+fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
+    let mut index = index(&[
+        (
+            "/p/a.h",
+            "struct Widget {\n    int size;\n    int area();\n};\n",
+        ),
+        (
+            "/p/main.cpp",
+            "#include \"a.h\"\nint main() { return 0; }\n",
+        ),
+    ]);
+    let cooked_of = |index: &ProjectIndex, path: &str| {
+        let summary = index
+            .summary(Path::new(path))
+            .expect("the fixture is summarized");
+        crate::index::CookedFile::declarations(summary.declarations.clone())
+    };
+    // The reading a render produces for the header, filed on its own.
+    index.insert_cooked(Path::new("/p/a.h"), cooked_of(&index, "/p/a.h"));
+    // A program that read `main.cpp`, and — the defect — an empty reading it produced for the header.
+    index.insert_cooked_in_a_program(
+        Path::new("/p/main.cpp"),
+        7,
+        cooked_of(&index, "/p/main.cpp"),
+    );
+    index.insert_cooked_in_a_program(Path::new("/p/a.h"), 7, crate::index::CookedFile::default());
+
+    let members = index
+        .declarations_in("Widget", Path::new("/p/main.cpp"))
+        .len();
+    assert!(
+        members >= 2,
+        "the class's members are still visible from the program that read the header: {members}"
+    );
+    let found = index.definition("Widget::size", Path::new("/p/main.cpp"));
+    assert!(
+        matches!(found, Known::Yes(_)),
+        "and a member resolves: {found:?}"
+    );
+}

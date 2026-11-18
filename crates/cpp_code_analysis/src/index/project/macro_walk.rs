@@ -654,6 +654,30 @@ impl ProjectIndex {
     ) {
         let path = normalize(path);
 
+        // **An empty reading never displaces one with declarations.** A render that declines — a provisional unit, a
+        // program whose closure is not in hand — produces a `CookedFile` with nothing in it, and filing it under the
+        // asking program makes every lookup made from that program see nothing. Measured on `nlohmann/json.hpp`: the
+        // on-its-own reading held **761** declarations, a program reading filed after it held **0**, and
+        // `declarations_in("nlohmann::basic_json")` answered the **53** of the raw summary while every member of the
+        // class was in the index. The refusal is asked against both the file's summary and any reading already filed:
+        // either is enough to say the file declares things.
+        if reading.declarations.is_empty()
+            && (self
+                .summaries
+                .get(&path)
+                .is_some_and(|summary| !summary.declarations.is_empty())
+                || self.cooked.get(&path).is_some_and(|readings| {
+                    readings
+                        .every()
+                        .any(|(_, prior)| !prior.declarations.is_empty())
+                }))
+        {
+            if crate::probes::cooking() {
+                eprintln!("insert: refused an empty reading of {path}");
+            }
+            return;
+        }
+
         // **Which id this reading is filed under, and whether it changed** — decided before anything is touched,
         // because the answer is a fact about the map and the effects below are on other fields of `self`.
         let (id, changed) = {
@@ -696,8 +720,10 @@ impl ProjectIndex {
             .clear();
 
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
-        let tracing =
-            crate::probes::names() && (path.ends_with("stl_map.h") || path.ends_with("iostream"));
+        let tracing = crate::probes::names()
+            && (path.ends_with("stl_map.h")
+                || path.ends_with("iostream")
+                || path.ends_with("json.hpp"));
         if tracing {
             eprintln!(
                 "[names] insert_a_reading {}: sequence {:?} id {id} declarations {} diagnostics {:?}",
