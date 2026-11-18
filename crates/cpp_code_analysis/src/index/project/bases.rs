@@ -792,3 +792,33 @@ pub(crate) fn base_type_name(written: &str) -> &str {
 
     name
 }
+
+/// **The same spelling, with its template argument list kept.**
+///
+/// [`base_type_name`] and this one differ in exactly one step — whether the trailing `<…>` comes off — and the
+/// difference is what a query needs: a *class*'s members are found under its bare name, while an **alias template**'s
+/// target is substituted by the arguments the use wrote (`ContainerOf<std::vector, int>` → `Container<T,
+/// std::allocator<T>>` with `Container = std::vector`, `T = int`). Handing the alias walk the bare name left the
+/// target unsubstituted: `members_of_inner` answered *"0 member(s), 1 unlisted base `Container`"* and
+/// `ContainerOf<std::vector, int>{}.size()` could not be typed.
+///
+/// Everything else is the same, and has to be: the leading `::`, the declarators written after the type and the
+/// elaborated keywords are *not* part of the name in either spelling.
+pub(crate) fn a_type_spelling_with_its_arguments(written: &str) -> &str {
+    let mut name = written.trim();
+    loop {
+        let before = name;
+        name = name.trim_end_matches(['*', '&']).trim();
+        name = name.strip_prefix("::").unwrap_or(name).trim();
+        if name == before {
+            break;
+        }
+    }
+    for keyword in ["struct ", "class ", "union ", "enum "] {
+        if let Some(rest) = name.strip_prefix(keyword) {
+            name = rest.trim();
+            break;
+        }
+    }
+    name
+}

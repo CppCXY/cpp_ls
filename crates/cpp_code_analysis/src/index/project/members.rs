@@ -1286,7 +1286,20 @@ pub(crate) fn members_of_inner(
     // must not invent findings (`undefined-field`) stays silent instead of reporting every member of `std::string` as
     // undefined. See [`resolve_aliases_or_unresolved`] for the measurement.
     let (resolved, _arguments, missing) =
-        resolve_aliases_or_unresolved(shapes, index, scopes, root, path, base_type_name(class));
+        // **With its arguments**, because an alias *template*'s target is substituted by them: `base_type_name` strips
+        // them (`ContainerOf<std::vector, int>` → `ContainerOf`), and a stripped alias has no arguments to put into
+        // `Container<T, std::allocator<T>>` — so the walk read that target as the class `Container`, answered
+        // `unlisted base `Container``, and `ContainerOf<std::vector, int>{}.size()` could not be typed. Measured on
+        // `test_cpp`'s `templates.cpp`; the walk itself takes the class *name* after the substitution, so passing the
+        // arguments changes nothing for a spelling that is not an alias.
+        resolve_aliases_or_unresolved(
+            shapes,
+            index,
+            scopes,
+            root,
+            path,
+            a_type_spelling_with_its_arguments(class),
+        );
     if let Some(missing) = missing {
         if crate::probes::members() {
             eprintln!("members_of_inner: {class} names {missing}, which nothing declares");
@@ -1307,7 +1320,12 @@ pub(crate) fn members_of_inner(
     //
     // The retry is by the **last segment only** — the name the class is declared under, whatever namespaces wrap it —
     // and it runs only when the scoped spelling missed, so a class that is where the spelling says is unaffected.
-    let mut class = (*resolved).to_string();
+    // **The class *name*, which is what the index keys.** The walk above is given the spelling with its arguments, so
+    // that an alias template's target can be substituted by them — but a member lookup is by name (`Box`, not
+    // `Box<int>`), and the arguments the use wrote are applied to the *members* one layer up, in
+    // [`crate::index::project::substituted_members`]. Measured: with the arguments kept here, `members_of("Box<int>")`
+    // answered `Unknown(NotDeclaredHere("Box<int>"))` and four tests in `tests/types.rs` failed.
+    let mut class = base_type_name(&resolved).to_string();
     let own = match direct_members(shapes, index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(UnknownReason::NotDeclaredHere(_)) => {

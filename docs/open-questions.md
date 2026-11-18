@@ -1829,15 +1829,27 @@ The first says the **alias was never expanded**: `members_of` took the alias tem
 is spelled wrongly by the resolver — `std::pmr::std::vector` is a qualified name assembled from two scopes, not one a
 file writes.
 
-**One of the two causes is fixed and one is not.** The alias walk decides whether a `<…>` is the *qualifier's*
-argument list (to be stripped: `outer<int>::member`) or the alias's own (to be kept) by asking whether a `::` follows
-the `<` — and `ContainerOf<std::vector, int>` answers yes *inside its own arguments*, so the list was stripped before
-it was read: the head became `ContainerOf`, the written arguments came back empty, and the target was substituted
-with nothing. It now asks where the list **closes** (`the_close_of`, pinned by
-`member_facts::tests::the_close_of_an_argument_list_is_its_matching_angle`).
+**Fixed, after two rounds and three bugs.** The reported symptom was the hover on `.size()`:
 
-What is left is the next step of the same walk: with the arguments kept, its target is
-`std::vector<int, std::allocator<int>>` and the walk has to resolve *that* spelling as a declaration — `is_declared`
-and the inline-namespace search both take spellings that carry arguments, and `std::vector<int, std::allocator<int>>`
-is not one the index keys (`rsplit_once("::")` on it splits inside `std::allocator`). That is the piece the next
-round starts from, together with `std::pmr::std::vector`.
+```text
+before   The type of `ContainerOf<std::vector, int>{}` is not known here, so `size` cannot be resolved
+after    constexpr size_t size() const
+         `std::vector::size` — a function returning `size_t`, in `std::vector`
+```
+
+Three things were wrong, and each is now pinned by a test:
+
+1. **`members_of_inner` stripped the arguments before following the alias** — it handed `base_type_name(class)`, and
+   an alias *template* has nothing to substitute without them: `Container<T, std::allocator<T>>` stayed as written,
+   its `class_name()` was `Container`, and the answer was *"0 member(s), 1 unlisted base `Container`"*. It now hands
+   `a_type_spelling_with_its_arguments(class)` — the same normalization (`::`, declarators, `struct`) without the one
+   step that removes the list — which is `tests/alias_members.rs`, failing with the old call.
+2. **The alias walk read the alias's own argument list as a qualifier's** when the arguments contained a `::`
+   (`ContainerOf<std::vector, int>`): it asked "is there a `::` after the `<`", which is true *inside* those
+   arguments, and stripped them. It now asks where the list **closes** (`the_close_of`), pinned by
+   `member_facts::tests::the_close_of_an_argument_list_is_its_matching_angle`.
+3. **`std::pmr::std::vector`** is what a *lazily indexed* project answers for `std::vector`: `<vector>`'s own
+   declarations are not in the index yet, while `std::pmr`'s alias for it is, and the walk followed that alias from
+   the wrong scope. Fully indexed the query answers 142 members — so the spelling was an artefact of the query order,
+   not of the resolution. Nothing is changed for it here; it is listed because it is what a probe run on a cold index
+   shows, and a reader of these measurements should know which state they came from.
