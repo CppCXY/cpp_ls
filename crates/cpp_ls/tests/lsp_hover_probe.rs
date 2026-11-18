@@ -272,6 +272,37 @@ fn the_two_reported_hovers() {
             "[ask] pump after the query: {demand_slices} slice(s), pending {}",
             session.pending_work()
         );
+        // **The two measurements the goal asks for**: what a cook costs, and what the rendered class body holds.
+        {
+            let cook_started = std::time::Instant::now();
+            let again = session.cook(&json);
+            println!(
+                "[measure] cook(json.hpp) = {:?}, a reading: {}",
+                cook_started.elapsed(),
+                again.is_some()
+            );
+            match session.view_of_the_file(&json) {
+                Some(view) => {
+                    let body = view.root.descendants().find(|node| {
+                        cpp_parser::CppSyntaxKind::from(node.kind())
+                            == cpp_parser::CppSyntaxKind::ClassBody
+                            && node.parent().is_some_and(|parent| {
+                                parent.text().to_string().contains("class basic_json")
+                            })
+                    });
+                    match body {
+                        Some(body) => println!(
+                            "[measure] rendered basic_json ClassBody: {} child(ren), {} byte(s), {} parse error(s)",
+                            body.children().count(),
+                            view.source.len(),
+                            view.tree.get_errors().len()
+                        ),
+                        None => println!("[measure] rendered basic_json ClassBody: not found"),
+                    }
+                }
+                None => println!("[measure] no rendered view of json.hpp"),
+            }
+        }
         let cooked_reading = None::<()>;
         println!(
             "[cooked] cook returned: {}",
