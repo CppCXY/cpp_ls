@@ -807,10 +807,25 @@ pub(crate) fn alias_target_of(
     // `outer<int>::handle_type h; h.` offered `outer`'s own members while `outer::handle_type h;` (the same class
     // without the argument) offered the target's. Stripping runs only when the `<` is left of the last `::`, which is
     // exactly the shape of a qualified name whose qualifier is a template-id.
+    //
+    // **And "left of the last `::`" is not that shape.** `ContainerOf<std::vector, int>` — an alias whose own
+    // argument list *contains* a `::` — matched it, so the arguments were stripped before they were read: the head
+    // became `ContainerOf`, `written_arguments` came back empty, the target `Container<T, std::allocator<T>>` was
+    // substituted with nothing, and the walk settled on the class `Container`. Measured on `test_cpp`'s
+    // `templates.cpp`: `members_of("ContainerOf<std::vector, int>")` answered *"0 member(s), 1 unlisted base
+    // `Container`"* — the alias's target read as a base clause.
+    //
+    // What tells the two apart is where the list **closes**: a qualifier's closes before the `::` that continues the
+    // name, while an alias's own is the end of the name (or what the rest of the spelling continues from).
+    let qualifier_ends_before_the_last_scope = match class.find('<') {
+        Some(open) => the_close_of(class, open).is_some_and(|close| class[close..].contains("::")),
+        None => false,
+    };
     let stripped_qualifier = without_template_arguments(class);
-    let class = match (class.rfind('<'), class.rfind("::")) {
-        (Some(argument_list), Some(scope)) if argument_list < scope => stripped_qualifier.as_str(),
-        _ => class,
+    let class = if qualifier_ends_before_the_last_scope {
+        stripped_qualifier.as_str()
+    } else {
+        class
     };
     // **The arguments come off before the name is looked up, and go back on afterwards.**
     //
@@ -897,6 +912,26 @@ pub(crate) fn alias_target_of(
     }
 }
 
+/// **The `>` that closes the `<` at `open`**, counting nested lists — `None` for a list that never closes.
+///
+/// Used to tell a *qualifier*'s argument list from an alias's own: `outer<int>::member` closes before the `::` that
+/// continues the name, `ContainerOf<std::vector, int>` closes at the end of it.
+fn the_close_of(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, character) in text.char_indices().skip_while(|(at, _)| *at < open) {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 /// Is this spelling a declaration this analysis can see?
 ///
 /// Used to choose between the two ways of reading an alias's target — relative to the alias's scope, or as a
@@ -989,4 +1024,27 @@ pub(crate) fn through_a_namespace_alias(
         }
     }
     rewritten
+}
+
+#[cfg(test)]
+mod tests {
+    use super::the_close_of;
+
+    /// **The `>` that closes a `<`** — the question that tells a qualifier's argument list from an alias's own.
+    ///
+    /// `outer<int>::handle_type` closes before the `::`, so the list belongs to the qualifier and is stripped;
+    /// `ContainerOf<std::vector, int>` closes at the end, so it is the alias's own list and must be **kept** — the
+    /// walk used "is there a `::` after the `<`" as its test, which is true in both and stripped the second one's
+    /// arguments before they were read.
+    #[test]
+    fn the_close_of_an_argument_list_is_its_matching_angle() {
+        assert_eq!(the_close_of("outer<int>::handle_type", 5), Some(9));
+        assert_eq!(the_close_of("ContainerOf<std::vector, int>", 11), Some(28));
+        assert_eq!(
+            the_close_of("A<B<C>>::D", 1),
+            Some(6),
+            "a nested list closes at its own matching angle, not its first `>`"
+        );
+        assert_eq!(the_close_of("Unclosed<int", 8), None);
+    }
 }

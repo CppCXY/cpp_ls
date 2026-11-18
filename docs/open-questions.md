@@ -1829,8 +1829,15 @@ The first says the **alias was never expanded**: `members_of` took the alias tem
 is spelled wrongly by the resolver — `std::pmr::std::vector` is a qualified name assembled from two scopes, not one a
 file writes.
 
-So the fix is two steps, in this order: `members_of` must expand an **alias template** — including one whose
-parameter is itself a template — before it looks for members (the mechanism is `a_spelling_through_the_aliases`,
-which already substitutes `Container`→`std::vector`, `T`→`int`), and the qualified-name assembly that produced
-`std::pmr::std::vector` has to be found and fixed on its own, because it will be wrong for every inline namespace the
-standard library declares, not only this file's.
+**One of the two causes is fixed and one is not.** The alias walk decides whether a `<…>` is the *qualifier's*
+argument list (to be stripped: `outer<int>::member`) or the alias's own (to be kept) by asking whether a `::` follows
+the `<` — and `ContainerOf<std::vector, int>` answers yes *inside its own arguments*, so the list was stripped before
+it was read: the head became `ContainerOf`, the written arguments came back empty, and the target was substituted
+with nothing. It now asks where the list **closes** (`the_close_of`, pinned by
+`member_facts::tests::the_close_of_an_argument_list_is_its_matching_angle`).
+
+What is left is the next step of the same walk: with the arguments kept, its target is
+`std::vector<int, std::allocator<int>>` and the walk has to resolve *that* spelling as a declaration — `is_declared`
+and the inline-namespace search both take spellings that carry arguments, and `std::vector<int, std::allocator<int>>`
+is not one the index keys (`rsplit_once("::")` on it splits inside `std::allocator`). That is the piece the next
+round starts from, together with `std::pmr::std::vector`.
