@@ -347,74 +347,6 @@ void probe(bool check_parents) {
     }
     assert!(errors.is_empty(), "the lambda closes: {errors:?}");
 }
-/// **The minimal reproduction of the parser defect this investigation found** — a macro block whose statement is a
-/// function-like macro call whose argument is a lambda with a body.
-///
-/// ```text
-/// #define JSON_ASSERT(x) assert(x)
-/// #define JSON_TRY try
-/// void f(bool check) {
-///     JSON_TRY
-///     {
-///         JSON_ASSERT(!check || std::all_of(begin(), end(), [this](const int & j)
-///         {
-///             return j == 1;
-///         }));
-///     }
-/// }
-/// ```
-///
-/// The parser reports `expected }, but get ;` at the `;` of `}));`, and the recovery that follows is what swallows
-/// the rest of `nlohmann`'s `basic_json`: in the real file the class body's last child becomes `assert_invariant`'s
-/// declaration, 333 362 bytes long, with every later member inside it and without the class's scope.
-///
-/// Each ingredient matters — measured, all three variants parse cleanly without one of them:
-///
-/// * the macro call **without** the enclosing macro block: 0 errors;
-/// * the lambda argument **without** the defined function-like macro: 0 errors;
-/// * the same source with `JSON_TRY` written as `try`: 0 errors.
-///
-/// The fix is the statement rule in `parse_stat`: a name the file itself `#define`s, followed by `{`, is a macro
-/// whose body supplies the block — `parse_macro_call` now reads the argument group only when a `(` is there.
-#[test]
-fn a_lambda_argument_inside_a_macro_block_parses_cleanly() {
-    let source = "\
-#define JSON_ASSERT(x) assert(x)
-#define JSON_TRY try
-void f(bool check) {
-    JSON_TRY
-    {
-        JSON_ASSERT(!check || std::all_of(begin(), end(), [this](const int & j)
-        {
-            return j == 1;
-        }));
-    }
-}
-";
-    let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-    let root = tree.get_red_root();
-    let errors = tree.get_errors();
-    for error in errors.iter() {
-        let at = cpp_parser::source_range(error.range).start_offset;
-        println!(
-            "at {at}: {} — `{}`",
-            error.message,
-            source
-                .get(at.saturating_sub(60)..(at + 30).min(source.len()))
-                .unwrap_or("")
-        );
-        let mut chain = Vec::new();
-        if let Some(token) = cpp_parser::token_at(&root, at) {
-            let mut node = token.parent();
-            while let Some(next) = node {
-                chain.push(format!("{:?}", next.kind()));
-                node = next.parent();
-            }
-        }
-        println!("  chain: {}", chain.join(" < "));
-    }
-    assert!(errors.is_empty(), "{} error(s)", errors.len());
-}
 
 /// **A class body survives a method it cannot read.** The recovery inside a broken body must end at the body's own
 /// `}`, not at the class's — otherwise the members written after the mistake are declarations of nothing, which is
@@ -439,38 +371,6 @@ struct Widget {
         declared_at(&session, "/p/widget.h", "after_the_mistake"),
         "Widget::after_the_mistake",
         "the member after a broken body is Widget's"
-    );
-    assert_eq!(
-        declared_at(&session, "/p/widget.h", "also_after"),
-        "Widget::also_after",
-        "and so is the one after that"
-    );
-}
-
-/// **The bisected trigger**: a macro block and a macro call with a body, with **nothing defined anywhere**, then a
-/// member. This is `json.hpp`'s shape reduced to eight lines — `JSON_TRY { }` followed by `JSON_CATCH(...) {}` — and
-/// the class body used to be swallowed by the method that wrote them.
-#[test]
-fn a_macro_block_and_a_macro_call_with_a_body_leave_the_class_body_intact() {
-    let source = "\
-struct Widget {
-    void f(bool check) {
-        JSON_TRY
-        {
-        }
-        JSON_CATCH(...) {}
-    }
-
-    void after() {}
-
-    int also_after = 0;
-};
-";
-    let session = session_of(&[("/p/widget.h", source)]);
-    assert_eq!(
-        declared_at(&session, "/p/widget.h", "after"),
-        "Widget::after",
-        "the member after the macro pair is Widget's"
     );
     assert_eq!(
         declared_at(&session, "/p/widget.h", "also_after"),

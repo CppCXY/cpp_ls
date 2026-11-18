@@ -512,23 +512,6 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             parse_a_macro_that_stands_for_a_declaration(p)
         }
 
-        // **A macro that stands for a statement and opens a block** — `JSON_TRY { … }`, where the file itself says
-        // `#define JSON_TRY try`. The expression reading takes `NAME { … }` for a braced initialisation of a variable
-        // named `NAME`, which is valid C++ for a temporary and wrong for a macro: measured in `nlohmann`'s
-        // `json.hpp`, `JSON_TRY { JSON_ASSERT(… lambda … ) }` came out an `InitListExpr` that lost a `}`
-        // (`expected }, but get ;` at the `;` of `}));`), and the recovery that followed swallowed **333 362 bytes**
-        // of `basic_json` — `parse`, `dump` and `size` were then indexed with no class scope at all.
-        //
-        // The evidence is the file's own `#define`, not a guess from the spelling, so `Widget{1, 2};` keeps its
-        // reading unless the file really did define `Widget`.
-        CppTokenKind::Identifier
-            if p.peek_next_token() == CppTokenKind::LeftBrace
-                && (p.is_a_macro_defined_here(p.current_token_text())
-                    || p.is_a_macro(p.current_token_text()) == Some(true)) =>
-        {
-            parse_macro_call(p)
-        }
-
         // Everything else is a declaration or an expression statement.
         _ => parse_declaration_or_expression_statement(p),
     };
@@ -974,11 +957,9 @@ fn parse_macro_call(p: &mut CppParser) -> ParseResult {
     p.bump();
     name.complete(p);
 
-    // **The group is optional**: `NAME { … }` is a macro whose body supplies a statement block (`JSON_TRY { … }`,
-    // where the body is `try`), and it has no argument list at all.
-    if p.current_token() == CppTokenKind::LeftParen {
-        decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
-    }
+    decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+
+    // What the macro's body supplies. A block is the body of a macro that expands to a statement or a whole
     // definition (`IF_EXIST(op) if (…)`, gtest's `TEST(A, B) { … }`); a `;` is the ordinary function-like macro;
     // and **nothing at all** is the case this rule exists for — a body that is a complete statement of its own.
     match p.current_token() {
@@ -1050,26 +1031,6 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
     match decls::parse_declaration(p) {
         Ok(marker) => {
-            // **A function definition cannot stand inside a function body.** A macro that expands to a *compound*
-            // statement — `JSON_CATCH(exception) catch(exception) {}`, `do { … } while (0)` — is read by the
-            // declaration rule as a definition of a function named after the macro, because `NAME ( parameter ) { … }`
-            // is exactly that shape. The block it consumes then belongs to the macro, and the enclosing body closes
-            // one `}` early: measured in `nlohmann/json.hpp`, `JSON_CATCH(...) {}` inside `basic_json`'s
-            // `assert_invariant` swallowed the rest of the class — **333 362 bytes**, with `parse`, `dump` and `size`
-            // indexed without a class scope. Nothing legal is given up: a function definition is not a statement, and
-            // a declaration ending without a `;` inside a body has no other reading.
-            //
-            // `parse_macro_call` is the reader that already owns this shape: a name, an optional argument group, and
-            // a block.
-            if p.is_inside_a_body()
-                && p.token_kind_at(start) == CppTokenKind::Identifier
-                && p.token_kind_at(decls::next_significant_index(p, start))
-                    == CppTokenKind::LeftParen
-                && p.last_consumed_token_kind() == Some(CppTokenKind::RightBrace)
-            {
-                p.rollback(checkpoint);
-                return parse_macro_call(p);
-            }
             // The declaration reading **succeeded**, and that is not the end of the question: a macro invocation
             // from an included header reads as a function declaration too — `__glibcxx_function_requires(_Concept<T>)`
             // is `NAME ( parameter )`, and the declaration rule has no reason to refuse it. What separates the two
@@ -1099,31 +1060,6 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
             if a_macro_invocation_starts_at(p, start) {
                 return parse_a_macro_invocation_statement(p, start);
-            }
-            // **A macro that expands to a block, at statement position**: `NAME { … }`. The declaration reading has
-            // just failed, and this is the shape where failing costs more than the statement — the recovery skips to
-            // the next `}`, which is the enclosing body's when the block was a macro's (`JSON_TRY { }` in
-            // `nlohmann/json.hpp` swallowed the rest of `basic_json` that way). Read as the macro call it is.
-            //
-            // It costs a braced temporary as a *statement* — `Widget{1, 2};` does nothing anyway — and only when the
-            // declaration reading failed, so `Widget w{1, 2};` keeps its reading.
-            if p.is_inside_a_body()
-                && p.token_kind_at(start) == CppTokenKind::Identifier
-                && p.token_kind_at(decls::next_significant_index(p, start))
-                    == CppTokenKind::LeftBrace
-            {
-                // **Speculative**, because the block may be rubble rather than a macro body: `FOO { @@@ }` is a
-                // statement this grammar cannot read at all, and claiming it as a macro call would make the failure
-                // the class body's. A failed attempt is rolled back and the ordinary recovery runs.
-                let retry = p.checkpoint();
-                let errors_before = p.error_count();
-                match parse_macro_call(p) {
-                    // **A block read without a new error** is one the shape can be trusted with; the parse may
-                    // swallow rubble silently (`FOO { @@@ }` reports the `@`, so it is refused here and the ordinary
-                    // recovery runs).
-                    Ok(marker) if p.error_count() == errors_before => return Ok(marker),
-                    _ => p.rollback(retry),
-                }
             }
             // **A reserved invocation in front of the declaration it annotates**, on the same line:
             //
@@ -1213,22 +1149,8 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     // `#` alone on a line has none.
     let directive_is_include = p.current_token() == CppTokenKind::Identifier
         && matches!(p.current_token_text(), "include" | "include_next");
-    // **The one directive whose effect the grammar itself uses**: a name this file defines can be claimed as a
-    // macro at statement position without asking the caller for an include closure the index does not have.
-    let defines =
-        p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "define";
-    let undefines =
-        p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "undef";
     if p.current_token() == CppTokenKind::Identifier {
         p.bump();
-    }
-    if (defines || undefines) && p.current_token() == CppTokenKind::Identifier {
-        let name = p.current_token_text().to_string();
-        if defines {
-            p.note_a_defined_macro(&name);
-        } else {
-            p.forget_a_defined_macro(&name);
-        }
     }
 
     // Reading the rest token by token keeps the text in the tree; the preprocessor layer re-reads

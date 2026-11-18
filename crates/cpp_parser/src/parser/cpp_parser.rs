@@ -1494,12 +1494,6 @@ impl<'a> CppParser<'a> {
     /// could be asked at all. See [`ParserConfig::is_a_macro_at`] for what the three answers mean, and
     /// [`CppParser::token_range_at`] for why the position is part of the question: a macro's body is in force from
     /// an offset, so `_STD` is a macro below the `#include` that defines it and an identifier above.
-    /// **How many errors the parse has reported so far** — what a speculative reading asks to tell a shape it
-    /// read cleanly from one it merely survived.
-    pub fn error_count(&self) -> usize {
-        self.errors.len()
-    }
-
     pub fn is_a_macro(&self, name: &str) -> Option<bool> {
         self.parse_config
             .is_a_macro_at(name, self.current_token_range().start_offset)
@@ -1656,22 +1650,6 @@ impl<'a> CppParser<'a> {
     /// Called by the directive rule, which is the one place a directive is read — including the ones read by rules
     /// that are not that rule's caller. It is called with the cursor on the name (not on the `#`), and only when
     /// the directive has one: the null directive (`#` alone on a line) names nothing.
-    /// **Record a name this file `#define`s**, so that a statement written `NAME { … }` can be read as the macro
-    /// whose body supplies the block rather than as a braced initialisation of a variable named `NAME`.
-    pub fn note_a_defined_macro(&mut self, name: &str) {
-        self.defined_macros.insert(name.into());
-    }
-
-    /// **Forget a name this file `#undef`s.** The last directive before the cursor is the one in force.
-    pub fn forget_a_defined_macro(&mut self, name: &str) {
-        self.defined_macros.remove(name);
-    }
-
-    /// **Is `name` a macro this file has defined and not undefined?** — see [`CppParser::defined_macros`].
-    pub fn is_a_macro_defined_here(&self, name: &str) -> bool {
-        self.defined_macros.contains(name)
-    }
-
     pub fn note_a_directive_name(&mut self) {
         let opens_or_closes = match self.current_token_text() {
             "if" | "ifdef" | "ifndef" => 1,

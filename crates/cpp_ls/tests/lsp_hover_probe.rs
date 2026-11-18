@@ -184,6 +184,24 @@ fn the_two_reported_hovers() {
             println!("[summary] json.hpp: no summary");
         }
     }
+    // **Is the class's header cooked at all**, and does its cooked reading hold the member?
+    {
+        let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
+        match session.index().cooked_declarations(&json) {
+            Some(cooked) => {
+                let object = cooked.iter().find(|fact| {
+                    fact.name.as_str() == "object"
+                        && fact.scope.as_deref() == Some("nlohmann::basic_json")
+                });
+                println!(
+                    "[cooked] json.hpp: {} declaration(s), object: {:?}",
+                    cooked.len(),
+                    object.map(|fact| fact.kind)
+                );
+            }
+            None => println!("[cooked] json.hpp: no cooked reading"),
+        }
+    }
     // **What the index holds for the chain**, which is what a qualified lookup has to work with.
     for name in [
         "object",
