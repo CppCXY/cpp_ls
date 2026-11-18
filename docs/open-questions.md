@@ -2368,3 +2368,33 @@ The three sources that should join are `the_reading_for(file, asking)` (which re
 for `CPPLS_TRACE_NAMES=1` prints the insert for `stl_map.h` in the same run and **not** for `json.hpp`, while
 `cooking: filed … json.hpp … 761` prints — so the reading reaches the map and not the postings, and the next step is
 the one print at the top of `insert_a_reading` that says which call is missing.
+## The goal landed: the answer comes from the rendered reading
+
+Both places of the report now answer, and neither needed a grammar rule:
+
+```text
+nlohmann::json::object  →  `nlohmann::basic_json::object`, json.hpp:1960:23      (was NO CARD)
+SerializeArray(items)   →  `lsp::WorkspaceDiagnosticReport::items`, lsp.h:587:52
+```
+
+The chain that made it work, each link measured on `EmmyLuaCodeStyle`:
+
+| link | before | after |
+|---|---|---|
+| `json.hpp`'s ClassBody in the raw parse | 74 children, 8 errors | — (the raw parse is not what answers) |
+| `json.hpp`'s rendered reading | — | **761 declarations**, `basic_json::object` present |
+| `declarations_in("nlohmann::basic_json")` | **53** (the summary's members) | **123** |
+| `index.definition("nlohmann::basic_json::object")` | `NotDeclaredHere` | `Yes` |
+
+The fixes, in the order they had to happen:
+
+1. **The pump serves the cook queue** (`advance` claimed nothing), so a render asked for by a query is built.
+2. **A rendering ask is pending work** (`pending_work` counted neither `macro_work` nor the cook queue).
+3. **The ask follows the alias** (`nlohmann::json`'s `type_of = basic_json<>` names the class's file, not the alias's).
+4. **`ask_for_the_cooked_reading`** exists for a name query — a cached rendering is not a cooked declaration list.
+5. **Eviction is LRU, not FIFO** — the file a query needs must not be evicted by the wave behind it.
+6. **`Readings::any` prefers a reading with declarations**, and `insert_a_reading` **refuses an empty reading** over a
+   file that declares things: an empty program reading was shadowing the 761-declaration one, which is why the count
+   stayed at 53 while the facts were in the index.
+
+No grammar shape rule was added; the three from the earlier attempt stay reverted (`ba475cca`, `7d31b027`).
