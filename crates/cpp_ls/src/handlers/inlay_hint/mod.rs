@@ -222,7 +222,8 @@ pub fn type_hint_of(file: &VfsFile, hint: cpp_code_analysis::TypeHint) -> Option
     let position = position_in_file(file, hint.offset)?;
     let label = match hint.kind {
         cpp_code_analysis::TypeHintKind::Auto
-        | cpp_code_analysis::TypeHintKind::StructuredBinding => format!(": {}", hint.label),
+        | cpp_code_analysis::TypeHintKind::StructuredBinding
+        | cpp_code_analysis::TypeHintKind::LambdaParameter => format!(": {}", hint.label),
         cpp_code_analysis::TypeHintKind::DeducedReturn => format!(" -> {}", hint.label),
     };
     Some(InlayHint {

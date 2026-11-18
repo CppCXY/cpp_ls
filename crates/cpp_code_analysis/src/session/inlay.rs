@@ -22,11 +22,16 @@
 //!
 //! What is still not hinted, and why:
 //!
-//! * **a lambda parameter** — `[](auto x)` is a template, and the type exists only at a call site (this layer holds one
-//!   file and one tree);
 //! * **a lambda's deduced return** — its type is unnamed and `deduced_returns_of` starts from a binding a lambda does
 //!   not have;
 //! * **a type written already** — `int n = 1;` needs no `int:` in front of it, and the hint would be noise.
+//!
+//! **A generic lambda's parameter is hinted now** — `[](auto &&x)` passed to a function that calls it with `*this`
+//! gets `x: Foo&` — and that one breaks the "this layer holds one file" rule the paragraph above used to state: the
+//! type comes from the callee's body, in the callee's file, which is why the deduction is a [`Session`] question and
+//! this module only asks it ([`lambda_parameter_hints`]).
+//!
+//! [`Session`]: crate::Session
 //!
 //! See `docs/buglist.md` for the two that remain.
 //!
@@ -88,6 +93,12 @@ pub enum TypeHintKind {
     StructuredBinding,
     /// `auto f(…) { … }` — the return type the body deduces.
     DeducedReturn,
+    /// **A generic lambda's parameter** — `[](auto &&x) {}` passed to a callable that calls it: the type the
+    /// argument at the call site gives `x`, which is not visible in this file at all. Drawn like [`Auto`] (`: T`),
+    /// and it is a *parameter's* type rather than a variable's.
+    ///
+    /// [`Auto`]: TypeHintKind::Auto
+    LambdaParameter,
 }
 
 /// **The types a file does not write, in `range`.**
@@ -574,4 +585,71 @@ fn call_expressions(root: &CppSyntaxNode, range: SourceRange) -> Vec<CppSyntaxNo
 /// Is an offset inside a range?
 fn contains(range: SourceRange, offset: usize) -> bool {
     offset >= range.start_offset && offset <= range.end_offset()
+}
+
+/// **A generic lambda's parameter type, for each `auto` parameter in `range`.**
+///
+/// `[](auto &&x) {}` is a template whose parameter has no type until a call gives it one, and this file holds no call
+/// — the closure's type is decided at the call site the lambda is an **argument** of. `deduce` answers for one
+/// parameter, and `None` is the ordinary answer: see
+/// [`Session::a_generic_lambdas_parameter_type`](crate::Session::a_generic_lambdas_parameter_type) for the four rules
+/// that decide when a call site can be read at all.
+///
+/// The hint goes where a parameter's type is written — after the name, inside the `(…)` — and only for a parameter
+/// **written `auto`**: one with a type already says it. A parameter with no name (`[](auto) {}`) gets none, because
+/// there is nothing to attach a label to.
+pub fn lambda_parameter_hints<H>(
+    view: &FileView,
+    range: SourceRange,
+    mut deduce: H,
+) -> Vec<TypeHint>
+where
+    H: FnMut(&CppSyntaxNode) -> Option<String>,
+{
+    let mut hints = Vec::new();
+    for node in view.root.descendants() {
+        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::LambdaExpr
+            || !contains(range, node.text_range().start().into())
+        {
+            continue;
+        }
+        let Some(list) = node.descendants().find_map(|child| {
+            use cpp_parser::CppAstNode as _;
+            cpp_parser::CppParamList::cast(child)
+        }) else {
+            continue;
+        };
+        for parameter in list.get_params() {
+            if !parameter.is_auto() {
+                continue;
+            }
+            // **The last identifier is the name**, and a parameter without one has no place for a label: the tokens
+            // before it are the type (`auto`, `auto&&`), and a default value or a pack comes after.
+            let Some(name) = cpp_parser::CppAstNode::syntax(&parameter)
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(|token| {
+                    cpp_parser::CppTokenKind::from(token.kind())
+                        == cpp_parser::CppTokenKind::Identifier
+                })
+                .last()
+            else {
+                continue;
+            };
+            let at = usize::from(name.text_range().end());
+            if !contains(range, at) {
+                continue;
+            }
+            if let Some(label) = deduce(cpp_parser::CppAstNode::syntax(&parameter))
+                && is_a_type_spelling(&label)
+            {
+                hints.push(TypeHint {
+                    offset: at,
+                    label,
+                    kind: TypeHintKind::LambdaParameter,
+                });
+            }
+        }
+    }
+    hints
 }

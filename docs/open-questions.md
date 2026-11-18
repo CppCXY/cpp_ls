@@ -1697,26 +1697,37 @@ a type — and a variable template is still told apart from a variable. After: `
 The test is `semantic::a_class_template_and_its_specializations_are_one_kind`; it fails without the change with
 `[("main", Function), ("first", Property)]` — `Pair` absent.
 
-### Not fixed: the generic lambda's parameter type
+### Fixed: the generic lambda's parameter type
 
-Measured: `19` inlay hints for `strings.cpp`, none of them a type for `x` in `[](auto &&x) {}`. The hint machinery
-(`session::inlay`) deduces `auto n = …`, structured bindings, a lambda's *return* type and a call's parameter
-*names*; a **generic lambda parameter** is not an `auto` variable and is not deduced by any of them.
-
-What the answer needs, and what is in place for it:
+Measured, before: `19` inlay hints for `strings.cpp`, none of them a type for `x` in `[](auto &&x) {}`. After:
 
 ```text
-foo.call([](auto &&x) {});
-    the call's argument 0 is the closure, so the callee's parameter `Fn&&` is what it binds to;
-    the callee's body calls `fn(*this)`, and `*this` types as `Foo` (measured with `inspect type`);
-    `auto&&` binds an lvalue, so the parameter is `Foo&` — and `const Foo&` for the const overload.
+22 item(s)
+  147:25  : Foo&          foo.call(…)
+  150:26  : const Foo&    cfoo.call(…)
+  156:26  : const Bar&    cbar.call(…)
+                        (bar.call at 153 gets none, as the fixture's own comments ask)
 ```
 
-That is a three-step inference across a template instantiation: the argument's binding, the body's use of the
-parameter, and the reference rules. The fixture's own comments also ask for two refinements that make it harder —
-`Bar::call` (both overloads viable) must produce **no** hint, and `cbar` must produce `const Bar &` — which means the
-overload set has to be pruned by the object's constness before the deduction runs.
+The answer is not in this file: `[](auto &&x)` is a template, and the type exists only at the call the closure is an
+**argument** of. So the deduction reads the callee's body — `void call(Fn &&fn) const { fn(*this); }` — where the
+parameter is called with `*this`: `Fn` is what the body passes it, `auto&&` binds an lvalue, and the answer is `Foo&`.
+The four rules that make that answer honest are each a measurement (`test_cpp`'s `strings.cpp`, and the fixture in
+`crates/cpp_code_analysis/tests/lambda_parameters.rs`):
 
-Not landed rather than half-landed: a hint that guessed `Foo` where the answer is `Foo&` would be a new wrong answer
-in the place this session was fixing wrong answers. The next step is to build the deduction as its own function with
-the three steps above and the two ambiguity rules as tests, not to special-case the inlay handler.
+```text
+1. the object's constness decides which overloads are callable   cfoo reaches only the const `call`
+2. a non-const object prefers the non-const member               foo → `Foo&`, not `const Foo&`
+3. an unevaluable `requires` clause leaves the choice open        bar (both overloads constrained) → no hint
+4. a single reachable candidate is answered even with a clause    cbar → `const Bar&`
+```
+
+`*this` is `const T` in a `const` member — the one qualifier the type of `this` does not carry here, and the whole
+difference between the first and the second line above — so the `const` is added from the chosen member's own
+`DeclModifiers::CONST`.
+
+Two shapes are deliberately silent: a lambda that is not a call argument (there is no call site to read), and a
+parameter the callee's body never calls (the deduction has no argument to take a type from). The deduction is
+`Session::a_generic_lambdas_parameter_type`; `inlay::lambda_parameter_hints` only places the answer, so the pass that
+reads the other file stays the session's — the same seam `Session::type_hints` already had for a call's parameter
+names.

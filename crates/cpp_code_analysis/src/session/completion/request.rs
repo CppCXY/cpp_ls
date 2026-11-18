@@ -692,6 +692,13 @@ impl<F: FileProvider + Clone> Session<F> {
                     })
             },
         );
+        // **And a generic lambda's parameter**, whose type exists only at the call the lambda is an argument of —
+        // see [`Session::a_generic_lambdas_parameter_type`], which is where the four rules live.
+        hints.extend(crate::inlay::lambda_parameter_hints(
+            view,
+            range,
+            |parameter| self.a_generic_lambdas_parameter_type(view, parameter),
+        ));
         for hint in &mut hints {
             let Some(placed) = view.file_offset_of(ReadingOffset::new(hint.offset)) else {
                 continue;
@@ -700,4 +707,254 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         hints
     }
+    /// **The type a generic lambda's `auto` parameter has at the call site it is passed to.**
+    ///
+    /// `foo.call([](auto &&x) {})` is the shape: the closure is an **argument**, so until the callee is read there is
+    /// no type for `x` at all. The answer comes from the callee's body —
+    /// `void call(Fn &&fn) const { fn(*this); }` — where the parameter is called with `*this`: `Fn` is deduced from
+    /// what the body passes it, `auto&&` binds an lvalue, and `x` is `Foo&` (or `const Foo&` in the `const` overload,
+    /// where `*this` is `const Foo`).
+    ///
+    /// # The four rules, each of them measured on `test_cpp`'s `strings.cpp`
+    ///
+    /// 1. **The object's constness decides which overloads can be called**: a `const` object reaches only the `const`
+    ///    members, so `cfoo.call(…)` has one candidate.
+    /// 2. **A non-`const` object prefers the non-`const` member** — the language's own ranking of the implicit object
+    ///    parameter — so `foo.call(…)` is the non-`const` `call` and `x` is `Foo&`, not `const Foo&`.
+    /// 3. **A `requires` clause this layer cannot evaluate leaves the choice open** while more than one candidate
+    ///    survives: `Bar::call` declares both overloads with `requires requires { fn(*this); }`, and `bar.call(…)`
+    ///    gets no hint. A single candidate is still answered when it carries one — `cbar.call(…)` reaches only the
+    ///    `const` member, and the clause is not what chose it.
+    /// 4. **The parameter is the one the body calls**, by name: `Fn &&fn` gives `fn`, and the body's `fn(…)` is where
+    ///    the type comes from. A parameter the body never calls is not deduced.
+    ///
+    /// `None` for every other shape — the lambda is not passed to a call, the callee has no declaration the index can
+    /// name, the parameter has no name, the body never calls it — and that is the ordinary answer: a hint that guessed
+    /// would put a wrong type inside the reader's line, which is the failure this round is about.
+    pub fn a_generic_lambdas_parameter_type(
+        &self,
+        view: &FileView,
+        parameter: &cpp_parser::CppSyntaxNode,
+    ) -> Option<String> {
+        use cpp_parser::CppAstNode as _;
+
+        // **What the parameter was written with** — the rule that turns a deduced type into a spelling: `auto`
+        // decays, `auto&` is a reference, `auto&&` keeps the argument's value category. The **type** and not the
+        // parameter's text: `auto &&a` carries its name, and a spelling that has to be trimmed is one that will be
+        // trimmed wrongly somewhere.
+        let declared = cpp_parser::CppParam::cast(parameter.clone())?;
+        let binding = WrittenBinding::of(&declared.get_type_text())?;
+
+        // **The call the lambda is an argument of.** Not the lambda's own body: the type comes from its caller.
+        let lambda = parameter.ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::LambdaExpr
+        });
+        let lambda = lambda?;
+        let call = lambda.ancestors().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+        })?;
+        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
+        let at = arguments
+            .iter()
+            .position(|argument| argument.text_range() == lambda.text_range())?;
+
+        // **A member call**, which is the shape a callback is normally passed to: `object.member(…)`.
+        let callee = call.children().next()?;
+        let access = crate::sema::check::member_access_above(&callee);
+        let access = access?;
+        let object_at = usize::from(access.object.text_range().start());
+        let crate::Known::Yes(object) = self.type_at(view, ReadingOffset::new(object_at)) else {
+            return None;
+        };
+        let object_is_const = self.the_object_is_const(view, object_at);
+        let object_is_const = object_is_const?;
+
+        let members = self.members_of(view, &object.type_of);
+        let crate::Known::Yes(list) = members else {
+            return None;
+        };
+        let mut candidates: Vec<&crate::index::project::ProjectMember> = list
+            .members
+            .iter()
+            .filter(|member| member.fact.kind == crate::DeclKind::Function)
+            .filter(|member| member.fact.name == access.member)
+            // **The argument has to be a *template parameter* of the callee.** `call(std::function<void(Foo&)>)`
+            // needs no deduction — the type is written — so a candidate with a concrete parameter is not this
+            // question's.
+            .filter(|member| {
+                // **A parameter the callee *declares as a template parameter*** — its own head names it, which is a
+                // question about that declaration rather than the naming convention a check reads
+                // (`names_a_template_parameter_for_a_check` knows `T` and `_Ty`, and `Fn` is neither).
+                let Some(list) = member.fact.parameter_list() else {
+                    return false;
+                };
+                let types = crate::sema::overload::parameters_in(list).0;
+                let Some(written) = types.get(at) else {
+                    return false;
+                };
+                // **The type is the first word** — `parameters_in` keeps the parameter's name (`"Fn &&fn"`), and
+                // `const` may stand in front of the type rather than after it.
+                let mut words = written.split_whitespace();
+                let mut first = words.next().unwrap_or_default();
+                if first == "const" {
+                    first = words.next().unwrap_or_default();
+                }
+                let core = first.trim_end_matches(['&', '*']);
+                member
+                    .fact
+                    .parameters()
+                    .iter()
+                    .any(|parameter| parameter == core)
+            })
+            // Rule 1: a `const` object reaches only the `const` members.
+            .filter(|member| {
+                !object_is_const || member.fact.modifiers.contains(crate::DeclModifiers::CONST)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        // Rule 3: a constraint that cannot be evaluated leaves the choice open, while more than one survives.
+        let constrained = |member: &&crate::index::project::ProjectMember| {
+            member
+                .fact
+                .requires_clause()
+                .is_some_and(|clause| !clause.trim().is_empty())
+        };
+        if candidates.len() > 1 && candidates.iter().any(constrained) {
+            return None;
+        }
+        // Rule 2: on a non-`const` object the non-`const` member is the better match.
+        if !object_is_const
+            && candidates
+                .iter()
+                .any(|member| !member.fact.modifiers.contains(crate::DeclModifiers::CONST))
+        {
+            candidates
+                .retain(|member| !member.fact.modifiers.contains(crate::DeclModifiers::CONST));
+        }
+        if candidates.len() != 1 {
+            return None;
+        }
+        let chosen = candidates[0];
+
+        // Rule 4: the parameter's name, and the body's call of it.
+        let name =
+            crate::sema::call_syntax::parameter_names_from_text(chosen.fact.parameter_list()?)?
+                .get(at)
+                .cloned()
+                .flatten()?;
+        let declaring = self.view_of_the_file(&chosen.file)?;
+        // **That member's own body**, not the file: the first call named `fn` in a file that declares two classes is
+        // the other class's, and the report this answers is a project where it was — `cbar.call(…)` was answered with
+        // the type `Foo::call` passes its callback.
+        let declared_at = self
+            .the_declaration_node(&chosen.file, chosen.fact.name_range.start_offset)
+            .unwrap_or_else(|| declaring.root.clone());
+        let (argument, spelled) = the_argument_the_body_passes(&declaring, &declared_at, &name)?;
+        let crate::Known::Yes(passed) = self.type_at(
+            &declaring,
+            ReadingOffset::new(usize::from(argument.text_range().start())),
+        ) else {
+            return None;
+        };
+        // **`*this` is `const T` in a `const` member** — the one qualifier the type of `this` does not carry here, and
+        // the difference between `Foo&` and `const Foo&`, which is the whole answer for `cfoo.call(…)`.
+        let mut deduced = passed.type_of;
+        if spelled.trim() == "*this" && chosen.fact.modifiers.contains(crate::DeclModifiers::CONST)
+        {
+            deduced = format!("const {deduced}");
+        }
+        let lvalue = spelled.trim().starts_with('*') || is_a_name_expression(&argument);
+        binding.bind(&deduced, lvalue)
+    }
+}
+
+/// **How a generic lambda's parameter was written**, which is what turns a deduced type into a name.
+///
+/// The three forms are three different answers for one deduced `T`: `auto` copies (and drops a reference),
+/// `auto&` binds an lvalue only, and `auto&&` is a forwarding reference that keeps whatever the argument's value
+/// category was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrittenBinding {
+    ByValue,
+    Reference,
+    Forwarding,
+    ConstReference,
+}
+
+impl WrittenBinding {
+    /// `None` for a parameter that is not written with `auto` at all.
+    fn of(written: &str) -> Option<WrittenBinding> {
+        let written: String = written
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        if !written.contains("auto") {
+            return None;
+        }
+        Some(match written.as_str() {
+            "auto" => WrittenBinding::ByValue,
+            "auto&" => WrittenBinding::Reference,
+            "auto&&" => WrittenBinding::Forwarding,
+            "constauto&" => WrittenBinding::ConstReference,
+            _ => return None,
+        })
+    }
+
+    /// The spelling the parameter's type has, given the type the call site passes and whether it is an lvalue.
+    fn bind(self, deduced: &str, lvalue: bool) -> Option<String> {
+        match self {
+            WrittenBinding::ByValue => Some(deduced.to_string()),
+            WrittenBinding::Reference => lvalue.then(|| format!("{deduced}&")),
+            WrittenBinding::Forwarding if lvalue => Some(format!("{deduced}&")),
+            WrittenBinding::Forwarding => Some(format!("{deduced}&&")),
+            WrittenBinding::ConstReference => Some(format!("const {deduced}&")),
+        }
+    }
+}
+
+/// **The argument a callee's body passes to its callback parameter**, and its text.
+///
+/// `void call(Fn&& fn) { fn(*this); }` — asked for `fn`, this is `*this`. The first call of that name **in a
+/// statement of the body** is the answer: a callback invoked twice with different types would be one this layer
+/// cannot spell, and a hint from the first call would be a guess about the second.
+fn the_argument_the_body_passes(
+    declaring: &FileView,
+    declaration: &cpp_parser::CppSyntaxNode,
+    name: &str,
+) -> Option<(cpp_parser::CppSyntaxNode, String)> {
+    for call in declaration.descendants().filter(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+    }) {
+        let Some(callee) = call.children().next() else {
+            continue;
+        };
+        if callee.text().to_string().trim() != name {
+            continue;
+        }
+        let Some(arguments) = crate::sema::call_syntax::arguments_of(&call) else {
+            continue;
+        };
+        let Some(argument) = arguments.into_iter().next() else {
+            continue;
+        };
+        let spelled = declaring
+            .get_token_text(cpp_parser::source_range(argument.text_range()))
+            .unwrap_or_default()
+            .to_string();
+        return Some((argument, spelled));
+    }
+    None
+}
+
+/// **Is this expression a name** — an identifier, a member access, a subscript, a dereference? Those are the shapes
+/// that bind to a reference; a literal, a call and a braced initialisation are prvalues.
+///
+/// A *node* question rather than a text one, because `f() + 0` and `f()` share a text prefix and differ in category.
+fn is_a_name_expression(argument: &cpp_parser::CppSyntaxNode) -> bool {
+    matches!(
+        cpp_parser::CppSyntaxKind::from(argument.kind()),
+        cpp_parser::CppSyntaxKind::NameExpr | cpp_parser::CppSyntaxKind::MemberExpr
+    )
 }
