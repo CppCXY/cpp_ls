@@ -446,3 +446,35 @@ struct Widget {
         "and so is the one after that"
     );
 }
+
+/// **The bisected trigger**: a macro block and a macro call with a body, with **nothing defined anywhere**, then a
+/// member. This is `json.hpp`'s shape reduced to eight lines — `JSON_TRY { }` followed by `JSON_CATCH(...) {}` — and
+/// the class body used to be swallowed by the method that wrote them.
+#[test]
+fn a_macro_block_and_a_macro_call_with_a_body_leave_the_class_body_intact() {
+    let source = "\
+struct Widget {
+    void f(bool check) {
+        JSON_TRY
+        {
+        }
+        JSON_CATCH(...) {}
+    }
+
+    void after() {}
+
+    int also_after = 0;
+};
+";
+    let session = session_of(&[("/p/widget.h", source)]);
+    assert_eq!(
+        declared_at(&session, "/p/widget.h", "after"),
+        "Widget::after",
+        "the member after the macro pair is Widget's"
+    );
+    assert_eq!(
+        declared_at(&session, "/p/widget.h", "also_after"),
+        "Widget::also_after",
+        "and so is the one after that"
+    );
+}

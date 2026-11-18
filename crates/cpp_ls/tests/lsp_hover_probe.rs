@@ -221,6 +221,21 @@ fn the_two_reported_hovers() {
         } else {
             found + "SerializeArray(".len()
         };
+        // **The plural answer too**, so a disagreement between the two queries is visible.
+        match session.definitions(&view, ReadingOffset::new(at)) {
+            cpp_code_analysis::Known::Yes(found) => println!(
+                "[definitions] {:?}",
+                found
+                    .found
+                    .iter()
+                    .map(|definition| definition.fact.qualified_name())
+                    .collect::<Vec<_>>()
+            ),
+            cpp_code_analysis::Known::Unknown(reason) => {
+                println!("[definitions] unknown: {reason:?}")
+            }
+            cpp_code_analysis::Known::No => println!("[definitions] no"),
+        }
         // **What the session's own resolution says**, which is what the card is built from.
         match session.definition(&view, ReadingOffset::new(at)) {
             cpp_code_analysis::Known::Yes(found) => println!(

@@ -1494,6 +1494,12 @@ impl<'a> CppParser<'a> {
     /// could be asked at all. See [`ParserConfig::is_a_macro_at`] for what the three answers mean, and
     /// [`CppParser::token_range_at`] for why the position is part of the question: a macro's body is in force from
     /// an offset, so `_STD` is a macro below the `#include` that defines it and an identifier above.
+    /// **How many errors the parse has reported so far** — what a speculative reading asks to tell a shape it
+    /// read cleanly from one it merely survived.
+    pub fn error_count(&self) -> usize {
+        self.errors.len()
+    }
+
     pub fn is_a_macro(&self, name: &str) -> Option<bool> {
         self.parse_config
             .is_a_macro_at(name, self.current_token_range().start_offset)

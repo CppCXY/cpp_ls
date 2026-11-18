@@ -1050,6 +1050,26 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
     match decls::parse_declaration(p) {
         Ok(marker) => {
+            // **A function definition cannot stand inside a function body.** A macro that expands to a *compound*
+            // statement — `JSON_CATCH(exception) catch(exception) {}`, `do { … } while (0)` — is read by the
+            // declaration rule as a definition of a function named after the macro, because `NAME ( parameter ) { … }`
+            // is exactly that shape. The block it consumes then belongs to the macro, and the enclosing body closes
+            // one `}` early: measured in `nlohmann/json.hpp`, `JSON_CATCH(...) {}` inside `basic_json`'s
+            // `assert_invariant` swallowed the rest of the class — **333 362 bytes**, with `parse`, `dump` and `size`
+            // indexed without a class scope. Nothing legal is given up: a function definition is not a statement, and
+            // a declaration ending without a `;` inside a body has no other reading.
+            //
+            // `parse_macro_call` is the reader that already owns this shape: a name, an optional argument group, and
+            // a block.
+            if p.is_inside_a_body()
+                && p.token_kind_at(start) == CppTokenKind::Identifier
+                && p.token_kind_at(decls::next_significant_index(p, start))
+                    == CppTokenKind::LeftParen
+                && p.last_consumed_token_kind() == Some(CppTokenKind::RightBrace)
+            {
+                p.rollback(checkpoint);
+                return parse_macro_call(p);
+            }
             // The declaration reading **succeeded**, and that is not the end of the question: a macro invocation
             // from an included header reads as a function declaration too — `__glibcxx_function_requires(_Concept<T>)`
             // is `NAME ( parameter )`, and the declaration rule has no reason to refuse it. What separates the two
@@ -1079,6 +1099,31 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
             if a_macro_invocation_starts_at(p, start) {
                 return parse_a_macro_invocation_statement(p, start);
+            }
+            // **A macro that expands to a block, at statement position**: `NAME { … }`. The declaration reading has
+            // just failed, and this is the shape where failing costs more than the statement — the recovery skips to
+            // the next `}`, which is the enclosing body's when the block was a macro's (`JSON_TRY { }` in
+            // `nlohmann/json.hpp` swallowed the rest of `basic_json` that way). Read as the macro call it is.
+            //
+            // It costs a braced temporary as a *statement* — `Widget{1, 2};` does nothing anyway — and only when the
+            // declaration reading failed, so `Widget w{1, 2};` keeps its reading.
+            if p.is_inside_a_body()
+                && p.token_kind_at(start) == CppTokenKind::Identifier
+                && p.token_kind_at(decls::next_significant_index(p, start))
+                    == CppTokenKind::LeftBrace
+            {
+                // **Speculative**, because the block may be rubble rather than a macro body: `FOO { @@@ }` is a
+                // statement this grammar cannot read at all, and claiming it as a macro call would make the failure
+                // the class body's. A failed attempt is rolled back and the ordinary recovery runs.
+                let retry = p.checkpoint();
+                let errors_before = p.error_count();
+                match parse_macro_call(p) {
+                    // **A block read without a new error** is one the shape can be trusted with; the parse may
+                    // swallow rubble silently (`FOO { @@@ }` reports the `@`, so it is refused here and the ordinary
+                    // recovery runs).
+                    Ok(marker) if p.error_count() == errors_before => return Ok(marker),
+                    _ => p.rollback(retry),
+                }
             }
             // **A reserved invocation in front of the declaration it annotates**, on the same line:
             //

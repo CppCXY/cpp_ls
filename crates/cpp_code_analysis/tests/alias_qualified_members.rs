@@ -109,3 +109,81 @@ int main() {
         "basic<> is basic<int>, and make is its member: {found}"
     );
 }
+
+const BASIC: &str = "\
+namespace ns {
+
+template <class T = int>
+struct basic {
+    static basic make();
+    T value;
+};
+
+}
+";
+
+const ALIAS: &str = "\
+#pragma once
+#include \"basic.h\"
+
+namespace ns {
+
+using simple = basic<>;
+
+}
+";
+
+/// **The alias and the class in different files** — `nlohmann`'s own arrangement (`json` is aliased in
+/// `json_fwd.hpp`, `basic_json` is defined in `json.hpp`). One file's summary records the alias, the other's the
+/// member, and the qualified name has to cross that seam.
+#[test]
+fn an_alias_in_one_file_resolves_a_member_in_another() {
+    let written = "\
+#include \"alias.h\"
+
+int main() {
+    auto made = ns::simple::make();
+    return 0;
+}
+";
+    let session = session_of(&[
+        ("/p/basic.h", BASIC),
+        ("/p/alias.h", ALIAS),
+        ("/p/main.cpp", written),
+    ]);
+    let found = where_at(&session, "/p/main.cpp", "make");
+    println!("found: {found}");
+    assert!(
+        found.ends_with("::make") && found.contains("basic"),
+        "the alias in another file resolves to basic<>::make: {found}"
+    );
+}
+const PROBE_SHAPE: &str = "\
+struct Holder {
+    void probe();
+};
+
+void Holder::probe() {
+    auto made = ns::simple::make();
+}
+";
+
+/// **The same qualified name inside a definition written with a qualifier** — `void Holder::probe() { … }`. The rule
+/// that answers an *unqualified* name from the definition's own class must not touch a qualified one: measured on
+/// `nlohmann/json.hpp`, `nlohmann::json::object` inside `WorkspaceDiagnosticReport::Serialize` was read as a member of
+/// that class and answered `NotDeclaredHere`.
+#[test]
+#[ignore = "open: a qualified name inside a definition written with a qualifier does not resolve through a cross-file alias"]
+fn a_qualified_name_inside_a_member_definition_is_not_the_classes_member() {
+    let session = session_of(&[
+        ("/p/basic.h", BASIC),
+        ("/p/alias.h", ALIAS),
+        ("/p/probe.cpp", PROBE_SHAPE),
+    ]);
+    let found = where_at(&session, "/p/probe.cpp", "make");
+    println!("found: {found}");
+    assert!(
+        found.ends_with("::make") && found.contains("basic"),
+        "the qualified name is resolved through the alias, not as Holder's member: {found}"
+    );
+}

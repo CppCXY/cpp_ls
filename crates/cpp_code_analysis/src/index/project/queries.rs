@@ -130,15 +130,21 @@ pub fn definition_across_files(
     // declares nothing of that spelling, the answer is that the class does not declare it rather than another
     // class's member of the same name.
     let found = definitions_across_files(index, declaring, scopes, root, path, offset);
-    let found = if crate::sema::resolve::member_access_at(root, offset).is_none()
+    // **The rule is for an *unqualified* name.** `nlohmann::json::object` in the body of
+    // `WorkspaceDiagnosticReport::Serialize` is a qualified name: it names the class it wants, and what the enclosing
+    // definition's class declares has no bearing on it. Measured: reading it as this class's member turned the correct
+    // plural answer (`basic_json::object`) into `NotDeclaredHere` — the class does not declare a member spelled
+    // `nlohmann::json::object`.
+    let written = crate::sema::resolve::qualified_name_at(root, offset)
+        .map(|(written, _)| written)
+        .unwrap_or_default();
+    let found = if !written.contains("::")
+        && crate::sema::resolve::member_access_at(root, offset).is_none()
         && let Some(class) = the_class_a_definition_is_written_for(root, offset)
         && index.scope_names_a_class(&class, path)
         && let Known::Yes(list) = members_of(index, scopes, root, path, &class)
         && let Known::Unknown(UnknownReason::NotDeclaredHere(..)) | Known::Yes(_) = &found
     {
-        let written = crate::sema::resolve::qualified_name_at(root, offset)
-            .map(|(written, _)| written)
-            .unwrap_or_default();
         let named: Vec<ProjectDefinition> = list
             .members
             .into_iter()
@@ -477,6 +483,18 @@ pub fn definitions_across_files(
                         conditional: 0,
                     });
                 }
+            }
+            // **A qualified name the scope tree cannot place, but the index holds in full.** `nlohmann::json::object`
+            // is the measured case: `json` is `using json = basic_json<>;`, so the *class* the member lives in is not
+            // the qualifier a reader wrote — the branch above asks `members_of(nlohmann::json)`, which finds no class
+            // of that name, and the fallback then asks for a name in scope, which a class member is not. The index
+            // already resolves the spelling through the alias (`basic_json::object`, scope `nlohmann::basic_json`), so
+            // the question is asked of it directly before saying the name is not declared.
+            if !(naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset))
+                && name.contains("::")
+                && let Known::Yes(found) = index.definition(&name, path)
+            {
+                return Known::Yes(ProjectDefinitions::one(found));
             }
             return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
             {
