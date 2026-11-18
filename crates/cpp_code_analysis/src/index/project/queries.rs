@@ -404,7 +404,7 @@ pub fn definitions_across_files(
             // (`std::cin.eof()` is the measured case: the base walk cannot open `basic_istream`, and `eof` is
             // reachable only by name), so it asks for every scope. So does a cursor inside a definition written
             // `void C::g() { … }`, whose body may name `C`'s members with no object and no qualifier at all —
-            // see [`inside_a_definition_written_with_a_qualifier`]. Everything else is an ordinary name lookup, and
+            // see [`the_class_a_definition_is_written_for`]. Everything else is an ordinary name lookup, and
             // an ordinary name does not reach into a class: measured on a two-file project, go-to-definition on
             // `printf` in a `.cpp` answered **three** declarations — a class's member, its out-of-class definition,
             // and `stdio.h`'s `printf` — while the only one the file can name is the last.
@@ -722,28 +722,25 @@ pub(crate) fn template_parameters_in(declaration: &str) -> Vec<String> {
         .collect()
 }
 
-/// The names a declaration's `template <…>` introduces, in order — `template <typename T, class U>` answers `["T", "U"]`.
+/// **The class a member function definition is written for** — `Widget` in `int Widget::area() { … }`, and
+/// `lsp::WorkspaceDiagnosticReport` in `nlohmann::json lsp::WorkspaceDiagnosticReport::Serialize() { … }`.
 ///
 /// A member function defined out of class has its class **in another file**, while the scope tree is built from the
 /// text of *this* one: `void C::g() { n = 1; }` opens a function scope whose qualifier names no scope here, so `n` is
-/// not in any scope the walk can reach and the project layer is asked instead. `n` may well be `C::n`, which is why
-/// the scope rule that drops class members from a bare name ([`ProjectIndex::definitions_in_scope`]) must not be
-/// applied inside such a body — it would take away the one answer a `.cpp` has.
+/// not in any scope the walk can reach. It may well be `C::n`, which is why this function exists: the class's own
+/// member list is the first place an unqualified name in that body is looked up, the same rule `this->n` follows.
 ///
 /// # What it reads, and the direction it can be wrong in
 ///
 /// The identifier immediately before the parameter list's `(`: `void C::g(…)` and `auto C::g(…) -> std::string`
 /// define a qualified name, while `std::string g(…)` returns a qualified type and defines an unqualified one. The
 /// window is bounded by the last whitespace before the `(`, which is what tells those two apart. Written as a
-/// spelling rather than a walk of the grammar's own shapes — the declarator of a definition holds only its
-/// parameter list, and the name it declares sits in the specifier sequence, which is the seam
-/// `sema::scopes::declarator_as` documents. A miss answers `false` and the scope rule applies; it cannot invent a
-/// **The class a member function definition is written for** — `Widget` in `int Widget::area() { … }`, and
-/// `lsp::WorkspaceDiagnosticReport` in `nlohmann::json lsp::WorkspaceDiagnosticReport::Serialize() { … }`.
+/// spelling rather than a walk of the grammar's own shapes — the declarator of a definition holds only its parameter
+/// list, and the name it declares sits in the specifier sequence, which is the seam
+/// `sema::scopes::declarator_as` documents. A miss answers `None` and the caller's ordinary scope rule applies; it
+/// cannot return a class the program never named.
 ///
 /// `None` for a free function, for a definition written without a qualifier, and for an offset outside every body.
-/// This is the scope an unqualified member name is looked up in — the same rule that makes `this->items` and
-/// `items` mean the same thing inside a member function.
 pub(crate) fn the_class_a_definition_is_written_for(
     root: &cpp_parser::CppSyntaxNode,
     offset: usize,
@@ -775,38 +772,6 @@ pub(crate) fn the_class_a_definition_is_written_for(
     }
 
     None
-}
-
-/// member, because the query it enables is the one that was made before the rule existed.
-pub(crate) fn inside_a_definition_written_with_a_qualifier(
-    root: &cpp_parser::CppSyntaxNode,
-    offset: usize,
-) -> bool {
-    let mut node = cpp_parser::token_at(root, offset).and_then(|token| token.parent());
-
-    while let Some(current) = node {
-        let is_a_definition = cpp_parser::CppSyntaxKind::from(current.kind())
-            == cpp_parser::CppSyntaxKind::Declaration
-            && current.children().any(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::CompoundStat
-            });
-        if is_a_definition {
-            let text = current.text().to_string();
-            let before_the_parameters = text.split('(').next().unwrap_or_default();
-            let name = before_the_parameters
-                .split_whitespace()
-                .next_back()
-                .unwrap_or_default();
-            if name.contains("::") {
-                return true;
-            }
-        }
-
-        node = current.parent();
-    }
-
-    false
 }
 
 /// The answer to a cross-file question about a macro name.
