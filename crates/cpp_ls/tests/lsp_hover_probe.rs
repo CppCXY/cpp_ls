@@ -1,0 +1,128 @@
+//! **The two hover reports from `CodeFormatServer/src/LSP/LSP.cpp`, asked in rendering coordinates.**
+//!
+//! The file→rendering mapping is a layer of its own; this probe skips it by finding the token **in the rendering** and
+//! asking there, so the answer is the analysis's and not the mapping's.
+//!
+//! ```text
+//! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
+//! cargo test -p cpp_ls --test lsp_hover_probe -- --ignored --nocapture
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
+use cpp_code_analysis::file::paths::DiskFiles;
+use cpp_code_analysis::index::watch::WatchFilter;
+use cpp_code_analysis::session::{OpenDocuments, Session, SessionFiles};
+
+fn project() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
+    )
+}
+
+/// Every source the server and the core of the project have, so a hover's closure is really indexed.
+fn project_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![
+        root.join("CodeFormatServer/src"),
+        root.join("CodeFormatCore/src"),
+    ];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry = entry.path();
+            if entry.is_dir() {
+                pending.push(entry);
+            } else if entry
+                .extension()
+                .is_some_and(|it| it == "cpp" || it == "h" || it == "hpp")
+            {
+                files.push(entry);
+            }
+        }
+    }
+    files
+}
+
+fn card(session: &Session<DiskFiles>, path: &Path, at: usize) -> String {
+    let view = session.view_of_the_file(path).expect("the file has a view");
+    let reading = ReadingOffset::new(at);
+    let file = view
+        .file_offset_of(reading)
+        .unwrap_or_else(|| FileOffset::new(at));
+    match cpp_ls::handlers::hover::hover(session, &view, reading, file) {
+        None => "NO CARD".to_string(),
+        Some(hover) => match hover.contents {
+            lsp_types::HoverContents::Markup(markup) => markup.value,
+            other => format!("{other:?}"),
+        },
+    }
+}
+
+#[test]
+#[ignore = "a probe: opens a real project and prints the two hover cards"]
+fn the_two_reported_hovers() {
+    let root = project();
+    let path = root.join("CodeFormatServer/src/LSP/LSP.cpp");
+    let text = std::fs::read_to_string(&path).expect("the reported file is here");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    let files = project_files(&root);
+    println!("{} project file(s)", files.len());
+    session.add_project_files(files);
+    session.did_open(&path, &text);
+    let started = std::time::Instant::now();
+    let mut slices = 0usize;
+    while session.pending_work() > 0 && slices < 4000 {
+        session.advance(64);
+        slices += 1;
+    }
+    let _ = session.cook(&path);
+    println!(
+        "indexed in {:?} ({slices} slice(s), pending {})",
+        started.elapsed(),
+        session.pending_work()
+    );
+    let view = session.view_of_the_file(&path).expect("the file has a view");
+    let rendering = view.source.to_string();
+
+    // **The tokens, found in the rendering**: the last `object` of the `nlohmann::json::object()` call, and the
+    // `items` of `SerializeArray(items)`.
+    for (label, needle) in [
+        ("json::object", "json::object"),
+        ("SerializeArray(items)", "SerializeArray(items)"),
+    ] {
+        let Some(found) = rendering.rfind(needle) else {
+            println!("{label}: not in the rendering");
+            continue;
+        };
+        let at = if needle == "json::object" {
+            found + "json::".len()
+        } else {
+            found + "SerializeArray(".len()
+        };
+        // **What the session's own resolution says**, which is what the card is built from.
+        match session.definition(&view, ReadingOffset::new(at)) {
+            cpp_code_analysis::Known::Yes(found) => println!(
+                "[definition] kind {:?}, scope {:?}, file {:?}",
+                found.fact.kind, found.fact.scope, found.file
+            ),
+            cpp_code_analysis::Known::Unknown(reason) => {
+                println!("[definition] unknown: {reason:?}")
+            }
+            cpp_code_analysis::Known::No => println!("[definition] no"),
+        }
+        let around = rendering.get(found.saturating_sub(60)..(at + 40).min(rendering.len()));
+        println!(
+            "--- {label} at rendered {at} ---\n{}\n\n{}\n",
+            around.unwrap_or(""),
+            card(&session, &path, at)
+        );
+    }
+}
