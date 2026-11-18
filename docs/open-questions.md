@@ -2101,3 +2101,31 @@ type_at(numbers | std::views::filter  →  Unknown: a `|` between a range and a 
 
 That is the item `docs/ranges.md` already records: naming a view needs a range type, an adaptor-closure type and a
 per-adaptor element rule. It is not a missing lookup; the name does not exist in the source or in the header.
+
+
+## A qualifier this file declares is answered from the tree, not only from the index
+
+Three `semantic_token` unit tests were red:
+
+```text
+a_constructor_defined_beside_its_class_is_drawn_as_its_class
+a_constructor_with_a_mem_initializer_is_drawn_as_its_class
+the_qualifier_of_a_member_definition_is_the_class
+```
+
+all on the **qualifier** of an out-of-class definition — the first `Pattern` of `Pattern::Pattern() {}` — where the
+encoder produced **no token at all** (`None`). The assertions were right: for `X::Y`, `X` names a class or a namespace
+and never a function ([basic.lookup.qual]), and a constructor's name is its class's.
+
+The reader was asking one layer too few. Ordinary lookup is deliberately skipped for a name followed by `::` — the rule
+that fixed `std::views::split` in a file declaring `void views() {}` — and the only remaining path was
+`ProjectIndex::kind_of`, so a session whose fixture had **not indexed** its file answered nothing. A server always
+indexes; these fixtures (`a_held_file`, one `load`) do not.
+
+Both halves were fixed at the right layer: the assertions stand, and the pass now asks the **open file's own scopes**
+for a qualifier, accepting only the binding kinds a nested-name-specifier can be (class, enumeration, type alias,
+namespace, template parameter). A function binding is still refused, so `views::split` keeps its namespace colour —
+measured on `test_cpp/src/strings.cpp` after the change: `84:6 views function` (the declaration), `87:52 views
+namespace` (the qualifier), `105:5 views function` (the call).
+
+Reverting the change makes exactly those three tests red again (measured), so they pin it.

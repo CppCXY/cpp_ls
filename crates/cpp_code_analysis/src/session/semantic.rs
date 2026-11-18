@@ -425,6 +425,44 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
             // answered `struct Value` from the index. One name, two layers, two answers.
         }
 
+        // **A qualifier this file itself names** — `Pattern::Pattern() { … }` in a file that declares `struct Pattern`.
+        //
+        // Step 3's rule is that a name followed by `::` is a **nested-name-specifier** and must not be read as an
+        // ordinary name: `std::views::split`, in a file that declares `void views() {}`, took that *function*. That
+        // rule is about ordinary lookup, and a qualifier cannot be a function at all ([basic.lookup.qual]) — so when
+        // this file's own scopes resolve the spelling to a class, an enumeration, a namespace or a type alias, that
+        // binding *is* the answer and the index need not have read the file yet.
+        //
+        // Measured: three semantic-token tests — a constructor defined beside its class, the same with a member
+        // initialiser, and an ordinary member's definition — had **no token at all** on the qualifier, because the
+        // only remaining path was `ProjectIndex::kind_of` and their fixtures' sessions never indexed anything. The
+        // assertions were right; the reader was asking a layer that had not been given the file. A server always
+        // indexes, so the tests could have been given a warm index instead — and this rule is still worth having,
+        // because it answers from the tree that is already open rather than from a summary of it.
+        if opens_a_qualified_name
+            && defined.contains(text)
+            && let Held::InThisFile(binding) = held_at(view, at)
+            && matches!(
+                binding.kind,
+                BindingKind::Class
+                    | BindingKind::Enum
+                    | BindingKind::Alias
+                    | BindingKind::Typedef
+                    | BindingKind::Namespace
+                    | BindingKind::TemplateParameter
+            )
+            && let Some(kind) = kind_of_binding(index, &binding, view, false, &shapes)
+        {
+            out.push(Name {
+                range,
+                kind,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: Provenance::Held,
+            });
+            continue;
+        }
+
         // 3b. **A macro an `#include` brought in.** Asked here — before the index-wide name query below — for the same
         //     reason step 2 is asked before it: the preprocessor sees text, so a name that is a macro in force **is**
         //     the macro to a reader, and the declaration sharing its spelling is a different thing that happens to be
