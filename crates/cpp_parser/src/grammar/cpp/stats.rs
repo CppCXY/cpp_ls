@@ -512,6 +512,22 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             parse_a_macro_that_stands_for_a_declaration(p)
         }
 
+        // **A macro that stands for a statement and opens a block** — `JSON_TRY { … }`, where the file itself says
+        // `#define JSON_TRY try`. The expression reading takes `NAME { … }` for a braced initialisation of a variable
+        // named `NAME`, which is valid C++ for a temporary and wrong for a macro: measured in `nlohmann`'s
+        // `json.hpp`, `JSON_TRY { JSON_ASSERT(… lambda … ) }` came out an `InitListExpr` that lost a `}`
+        // (`expected }, but get ;` at the `;` of `}));`), and the recovery that followed swallowed **333 362 bytes**
+        // of `basic_json` — `parse`, `dump` and `size` were then indexed with no class scope at all.
+        //
+        // The evidence is the file's own `#define`, not a guess from the spelling, so `Widget{1, 2};` keeps its
+        // reading unless the file really did define `Widget`.
+        CppTokenKind::Identifier
+            if p.peek_next_token() == CppTokenKind::LeftBrace
+                && p.is_a_macro_defined_here(p.current_token_text()) =>
+        {
+            parse_macro_call(p)
+        }
+
         // Everything else is a declaration or an expression statement.
         _ => parse_declaration_or_expression_statement(p),
     };
@@ -957,9 +973,11 @@ fn parse_macro_call(p: &mut CppParser) -> ParseResult {
     p.bump();
     name.complete(p);
 
-    decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
-
-    // What the macro's body supplies. A block is the body of a macro that expands to a statement or a whole
+    // **The group is optional**: `NAME { … }` is a macro whose body supplies a statement block (`JSON_TRY { … }`,
+    // where the body is `try`), and it has no argument list at all.
+    if p.current_token() == CppTokenKind::LeftParen {
+        decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+    }
     // definition (`IF_EXIST(op) if (…)`, gtest's `TEST(A, B) { … }`); a `;` is the ordinary function-like macro;
     // and **nothing at all** is the case this rule exists for — a body that is a complete statement of its own.
     match p.current_token() {
@@ -1149,8 +1167,22 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     // `#` alone on a line has none.
     let directive_is_include = p.current_token() == CppTokenKind::Identifier
         && matches!(p.current_token_text(), "include" | "include_next");
+    // **The one directive whose effect the grammar itself uses**: a name this file defines can be claimed as a
+    // macro at statement position without asking the caller for an include closure the index does not have.
+    let defines =
+        p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "define";
+    let undefines =
+        p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "undef";
     if p.current_token() == CppTokenKind::Identifier {
         p.bump();
+    }
+    if (defines || undefines) && p.current_token() == CppTokenKind::Identifier {
+        let name = p.current_token_text().to_string();
+        if defines {
+            p.note_a_defined_macro(&name);
+        } else {
+            p.forget_a_defined_macro(&name);
+        }
     }
 
     // Reading the rest token by token keeps the text in the tree; the preprocessor layer re-reads

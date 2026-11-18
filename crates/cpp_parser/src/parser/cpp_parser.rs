@@ -423,6 +423,15 @@ pub struct CppParser<'a> {
     /// file* the cursor is rather than what a construct decided, and a rollback rewinds the cursor through the
     /// same directives the count was taken over. Restoring a stale count would make it disagree with the tokens.
     open_conditionals: isize,
+    /// **The names this file `#define`s**, so a statement that begins with one can be read as the macro it is.
+    ///
+    /// The grammar's other macro rules ask the caller's table ([`CppParser::is_a_macro`]), which answers `None` when
+    /// no include closure was supplied — and the index's shape reading supplies none. This set is evidence the file
+    /// carries itself: a `#define` is its own text, and `#undef` takes the name back out.
+    ///
+    /// Not part of [`Checkpoint`], for the same reason as the count above: it describes the file at the cursor, and a
+    /// rollback rewinds the cursor through the same directives that filled it.
+    defined_macros: std::collections::HashSet<Box<str>>,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -622,6 +631,7 @@ impl<'a> CppParser<'a> {
             declaration_ended_inside_specifiers: false,
             terminator_came_from_a_branch: false,
             open_conditionals: 0,
+            defined_macros: std::collections::HashSet::new(),
             parse_config: config,
             errors,
         }
@@ -1640,6 +1650,22 @@ impl<'a> CppParser<'a> {
     /// Called by the directive rule, which is the one place a directive is read — including the ones read by rules
     /// that are not that rule's caller. It is called with the cursor on the name (not on the `#`), and only when
     /// the directive has one: the null directive (`#` alone on a line) names nothing.
+    /// **Record a name this file `#define`s**, so that a statement written `NAME { … }` can be read as the macro
+    /// whose body supplies the block rather than as a braced initialisation of a variable named `NAME`.
+    pub fn note_a_defined_macro(&mut self, name: &str) {
+        self.defined_macros.insert(name.into());
+    }
+
+    /// **Forget a name this file `#undef`s.** The last directive before the cursor is the one in force.
+    pub fn forget_a_defined_macro(&mut self, name: &str) {
+        self.defined_macros.remove(name);
+    }
+
+    /// **Is `name` a macro this file has defined and not undefined?** — see [`CppParser::defined_macros`].
+    pub fn is_a_macro_defined_here(&self, name: &str) -> bool {
+        self.defined_macros.contains(name)
+    }
+
     pub fn note_a_directive_name(&mut self) {
         let opens_or_closes = match self.current_token_text() {
             "if" | "ifdef" | "ifndef" => 1,
