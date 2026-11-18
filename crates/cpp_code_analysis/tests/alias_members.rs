@@ -88,3 +88,74 @@ fn an_alias_templates_members_are_the_members_of_the_class_it_names() {
         );
     }
 }
+
+/// **A construction of an alias declared in an anonymous namespace is still a construction of a class.**
+///
+/// The reported shape was `ContainerOf<std::vector, int>{}.size()` on `test_cpp`'s `templates.cpp`, where the alias is
+/// at the top of the file inside `namespace { … }` and the use is outside it. That detail decided the answer: the
+/// file's scopes do not reach into the anonymous namespace from the use, so the *index* answered the head's
+/// declaration, whose `type_of` is the alias's target `Container<T, std::allocator<T>>` — `Some`, so the
+/// construction arm's old guard (`type_of().is_none()`, meant to tell a class from an alias) sent it to the
+/// spelling fallback, and that fallback refuses a spelling with a space in it. Two template arguments are written
+/// `A, B`, so the construction answered "the type … is not known here". The same alias at file scope worked,
+/// because the binding came from the tree and its `type_of` was `None`: the same declaration answered differently
+/// depending on where in the file it was written.
+#[test]
+fn a_construction_of_an_alias_in_an_anonymous_namespace_is_a_class() {
+    const SOURCE: &str = "\
+template <typename First, typename Second>
+struct Duo {
+    void put(First first, Second second) { (void)first; (void)second; }
+};
+
+template <template <typename, typename> class Container, typename T>
+using MadeOutside = Container<T, T>;
+
+namespace {
+template <template <typename, typename> class Container, typename T>
+using MadeInside = Container<T, T>;
+}  // namespace
+
+void use() {
+    MadeOutside<Duo, int>{}.put(1, 2);
+    MadeInside<Duo, int>{}.put(3, 4);
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let view = session
+        .view_of_the_file("/p/a.cpp")
+        .expect("the file is readable");
+
+    for alias in ["MadeOutside<Duo, int>", "MadeInside<Duo, int>"] {
+        let wanted = format!("{alias}{{}}");
+        let construction = view
+            .root
+            .descendants()
+            .find(|node| node.text().to_string() == wanted)
+            .unwrap_or_else(|| panic!("`{wanted}` is in the tree"));
+        let Known::Yes(found) = session.type_of_the_expression(&view, &construction) else {
+            panic!("`{wanted}` is a temporary of the class the alias names");
+        };
+        let Known::Yes(list) = session.members_of(&view, &found.type_of) else {
+            panic!("`{}` is a class, so it has members", found.type_of);
+        };
+        let names: Vec<String> = list
+            .members
+            .iter()
+            .map(|member| member.fact.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "put"),
+            "`{wanted}` is a `Duo<int, int>`, whose members are `put`: {names:?}"
+        );
+    }
+}

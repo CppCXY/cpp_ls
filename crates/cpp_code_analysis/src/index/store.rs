@@ -2880,11 +2880,23 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
     ) -> Option<cpp_parser::MacroEnvironment> {
+        // **The order in which the closure was last written — parents before children, later includes before
+        // earlier ones.** A name is decided by the *first* file this walk reaches that says anything about it, and
+        // that is the file whose `#define`/`#undef` is in force where the closure ends.
+        //
+        // It used to be a **breadth-first** walk read backwards, which is a different order and a wrong one as soon
+        // as an include redefines or takes away what a header it included had said. A chain `main.cpp` →
+        // `pch.h` → `defined.h` came out `[defined, pch, main]`, so `defined.h`'s `#define` was decided before
+        // `pch.h`'s later `#undef` and the name stayed a macro — measured on a production project whose precompiled
+        // header does exactly that with the SDK's `min`/`max`, where `std::min(a, b)` was then cooked into
+        // `std::((( a ) < ( b )) ? ( a ) : ( b ))` and reported as *expected `;` after expression*.
+        //
+        // A stack, with the includes pushed in their written order, pops them **last first** — which is the order a
+        // compiler writes them in, reversed.
         let mut order: Vec<PathBuf> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
-        pending.push_back(path.to_path_buf());
-        while let Some(next) = pending.pop_front() {
+        let mut pending: Vec<PathBuf> = vec![path.to_path_buf()];
+        while let Some(next) = pending.pop() {
             let key = normalize_path(&next, cfg!(windows));
             if !seen.insert(key.clone()) {
                 continue;
@@ -2895,12 +2907,12 @@ impl<F: FileProvider> SummaryStore<F> {
             order.push(next.clone());
             for include in &summary.includes {
                 if let Some(resolved) = &include.resolved {
-                    pending.push_back(resolved.clone());
+                    pending.push(resolved.clone());
                 }
             }
         }
 
-        // **The last definition wins**, so the closure is walked backwards and the first entry seen for a name is kept.
+        // **The last definition wins**, and the first file that speaks for a name is the one that decides it.
         let mut entries: Vec<cpp_parser::IncludedMacro> = Vec::new();
         let mut chosen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2913,7 +2925,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // **empty**. `uv.h`: 13 263 tokens in, 0 bytes out; the same file rendered with its own guard excluded is
         // 37 112 bytes and 1 712 declarations.
         let root = normalize_path(path, cfg!(windows));
-        for file in order.iter().rev() {
+        for file in order.iter() {
             let key = normalize_path(file, cfg!(windows));
             if key == root {
                 continue;
@@ -2922,12 +2934,39 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             };
             for fact in summary.macros.iter().rev() {
-                if !fact.kind.is_definition()
-                    || !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
+                // **A definition is evidence only when it is unconditional; an `#undef` decides its name either
+                // way.** A `#define` inside an `#if` may not have run, so claiming the name is a macro would be a
+                // guess — the rule this walk has always had. An `#undef` inside one is the mirror, and the mirror
+                // is not symmetric: "this compilation may have taken the name away" cannot be evidence that the
+                // name *is* a macro, because the earlier definition the walk is about to read is exactly what may
+                // have been cancelled. So the name is left out.
+                //
+                // Measured on a production project's precompiled header, which takes the SDK's `min`/`max` away
+                // inside `#if defined(_WIN32)` — `_WIN32` comes from the compile command, and this walk
+                // has no condition evaluator at all. Skipping the guarded `#undef` kept `min` defined, the cook
+                // expanded `std::min(a, b)` into `std::((( a ) < ( b )) ? ( a ) : ( b ))`, and the file was
+                // reported as *expected `;` after expression* on a line a compiler accepts. See
+                // `tests/undef_of_an_included_macro.rs`.
+                let is_a_definition = fact.kind.is_definition();
+                if is_a_definition
+                    && !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
                 {
                     continue;
                 }
+                // **The first fact this walk meets for a name is the last one written**, so a name is *decided* by
+                // it — and an `#undef` decides that the name is not a macro where the closure ends.
+                //
+                // Skipping the `#undef` before this point is what made a whole file a syntax error: a
+                // Windows-shaped precompiled header includes the SDK's `min`/`max` and then `#undef`s them (the
+                // usual way to make `std::min` writable), and the earlier definition from a deeper header was kept
+                // because the `#undef` was filtered out here. The cook then expanded `std::min(a, b)` at the use
+                // into `std::((( a ) < ( b )) ? ( a ) : ( b ))` — a `::` followed by a parenthesis — and the file
+                // reported *expected `;` after expression* on a line a compiler accepts. Witnesses:
+                // `tests/undef_of_an_included_macro.rs`.
                 if !chosen.insert(fact.name.to_string()) {
+                    continue;
+                }
+                if !fact.kind.is_definition() {
                     continue;
                 }
                 let Some(range) = fact.body_range else {

@@ -327,7 +327,15 @@ use std::path::{Path, PathBuf};
 /// exist — and no `CallExpr` for the statement itself (`a56783f2`). A summary made before this holds the phantom
 /// declaration, and every algorithm called at statement scope was invisible to hover, signature help and the checks
 /// that read a call.
-pub const FORMAT_VERSION: u32 = 35;
+/// # Why this moved to 36
+///
+/// **The macro environment a closure composes is part of the reading.** `the_indexed_environment` took each
+/// included file's **last definition** of a name and never let an `#undef` decide one, and it walked the closure
+/// breadth-first backwards — so a precompiled header that includes the SDK's `min`/`max` and then `#undef`s them
+/// left both names defined, and `std::min(a, b)` was cooked into `std::((( a ) < ( b )) ? ( a ) : ( b ))`. A
+/// rendering made before this holds the expansion, and it is keyed by the environment it was made from — which was
+/// itself the wrong one, so no other change reaches it. See `tests/undef_of_an_included_macro.rs`.
+pub const FORMAT_VERSION: u32 = 36;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

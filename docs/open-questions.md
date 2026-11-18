@@ -1853,3 +1853,112 @@ Three things were wrong, and each is now pinned by a test:
    the wrong scope. Fully indexed the query answers 142 members — so the spelling was an artefact of the query order,
    not of the resolution. Nothing is changed for it here; it is listed because it is what a probe run on a cold index
    shows, and a reader of these measurements should know which state they came from.
+
+## The alias hover was still wrong, and a production project's `#undef` cascade
+
+Round 41, two reports from the same session: the `ContainerOf` hover that was reported fixed still answered "not
+known here", and a production project reported two syntax errors in one file — both on lines a compiler accepts.
+
+### `ContainerOf<std::vector, int>{}.size()` — the previous round measured the wrong token (fixed)
+
+The section above ends with "after: `constexpr size_t size() const`", and **that measurement was taken at the wrong
+offset**: `editor_answers_probe` was told `CPPLS_ANSWERS_HOVER=size() << VectorOf<int>`, which found `181:115` — the
+`size()` of `VectorOf<int>{}`, the *next* call on the same line. The reported token is `181:89`, and it still
+answered
+
+```text
+`size`
+The type of `ContainerOf<std::vector, int>{}` is not known here, so `size` cannot be resolved.
+```
+
+The member list was right (the previous round's fix stands: `members_of("ContainerOf<std::vector, int>")` answers the
+142 members of `std::vector`), and the hover never asked it: `member_markdown` asks the **type of the receiver**
+first, and *that* is what was unknown.
+
+The cause is one predicate in `type_of`'s construction arm:
+
+```rust
+Known::Yes(named) if named.type_of(root, scopes).is_none() => { … the head's own spelling … }
+```
+
+It asks whether the head's **declaration has a type**, which is not the question. A class has none, a `using`-alias
+declared in the file has none (the declarator reader has no declarator to read), and an alias the **index** answered
+has one — its target `Container<T, std::allocator<T>>`. So the same alias took a different arm depending on where its
+declaration sat:
+
+```text
+file scope        the scopes answer it   -> type_of is None -> spelling arm -> works
+namespace { … }   the index answers it   -> type_of is Some -> fallback arm -> refuses
+```
+
+and the fallback (`a_type_the_expression_names`) refuses any spelling containing a space — which `A, B` writes. The
+result was "not known here" for an alias with two arguments, `Works` for the same alias with one, and a hover whose
+answer depended on the *file position* of a declaration.
+
+The arm now asks `NamedDeclaration::names_a_type()` — class, enum, alias or `typedef`, in either the scope tree or the
+index. Witnesses: `cpp_code_analysis`'s `a_construction_of_an_alias_in_an_anonymous_namespace_is_a_class` (fails with
+the old guard, measured) and `cpp_ls`'s `a_construction_of_an_alias_in_a_namespace_names_the_member` (the card).
+`reported_hover`'s `a_member_declared_twice_shows_both_declarations_and_their_clauses` also changed: a `const` object's
+card now shows the one overload it can call and a mutable object's shows both, which is what the code has done since
+the constness query landed — the test's old expectation (always both, plus the sentence) had not been re-run.
+
+### A macro an included header `#undef`s stayed in force in the cook (fixed, three readers)
+
+The production report: a file whose precompiled header includes the platform's `min`/`max` and then `#undef`s them —
+the standard way to make `std::min` writable — was reported with two syntax errors. The cooked stream held
+
+```text
+std::((( a ) < ( b )) ? ( a ) : ( b ))          // what the cook made of `std::min(a, b)`
+```
+
+a `::` with a parenthesis after it, which no grammar accepts. Measured: `render_a_cooked` through the **unit** path
+(this file has a held timeline), 2 diagnostics — one real, one cascade. `inspect diagnostics` answered the same from
+the cook cache, so the fresh render was the only way to see it.
+
+Three readers each lost the `#undef`, and the same shape is in all three: a filter written for a **definition** does
+not match an `#undef`, which has no body:
+
+1. `MacroView::visible_binding` wanted `unconditional || body.is_some()`. A *guarded* `#undef` in force matched
+   neither, so the earlier definition stayed "visible". It now also matches `TuEvent::is_an_undef`.
+2. `MacroView::visible_body_in_force` wanted `!unconditional && body_text.is_some()`, and the **in-force channel is
+   consulted before the positional one** — so the body collected from the guarded `#define` answered first. It now
+   stops at an in-force `#undef` and answers `None` there.
+3. `SummaryStore::the_indexed_environment` (the composed path, no unit) skipped every guarded fact — right for a
+   `#define`, wrong for an `#undef` — and walked the closure breadth-first *backwards*. Both are fixed: a definition
+   is evidence only when unconditional, an `#undef` decides its name either way, and the walk is now parents-first,
+   later-includes-first (the order in which the closure was last written).
+
+`Walked` also keeps a body it has already collected when a later `#undef` in force arrives; it now removes it, which
+is what makes the in-force channel agree with the timeline.
+
+Measured after: `render_a_cooked` on the same file — **0 diagnostics**, `std::min(...)` left as written. The
+`FORMAT_VERSION` moved 35 → 36: the environment a closure composes is part of the reading, and a rendering made from
+the wrong one is keyed by it, so nothing else reaches it. `tests/undef_of_an_included_macro.rs` pins the composed path
+(unconditional and guarded).
+
+### The third screenshot is not from this project (open)
+
+Its file has `::CreateTextFilter(ppTextFilter, &_textFilter)` and a declaration `HRSERULT CreateTextFilter(ITextFilter**)`
+on a line of its own. Nothing under the project root contains `ppTextFilter` or that two-argument call, and
+`filtertext.h`'s declaration has **one** parameter, so the file is from somewhere else (another workspace, or a
+version not on disk). What it shows besides the error — an inlay `ppTextFilter: &_textFilter` — is a parameter-name
+hint drawn before the *second* argument with the *first* parameter's name; that needs the file to reproduce.
+
+### The second error in that file is a different defect, and it is open
+
+Line 340 of the same file is `if (SUCCEEDED(::CreateTextFilter(&_textFilter)))`, and the cooked stream reads
+
+```text
+if (( ( ( HRESULT ) ( ::CreateTextFilter(&_textFilter) ) ) > = 0 ))
+```
+
+`>=` has become **`> =`** — two tokens — so the parser sees `>` followed by `=` and reports *expected primary
+expression*. The `#undef` fix removed the line-239 error and left this one, and it is a different reader: the macro
+body was rebuilt from the *in-force* channel (`SUCCEEDED` is defined under a guard in the platform's `winerror.h`), and
+that reconstruction splits the comparison operator. A fixture with the same `#define` at file scope does **not**
+reproduce it (0 errors), which is the measurement that says the split is in the in-force body path rather than in the
+lexer.
+
+Measured state: 1 error before this round's fix (line 239, the `min` expansion) plus this one; after it, this one.
+Not fixed here — it needs the in-force body path instrumented the way `visible_binding` was, and a fixture whose
+`#define` sits behind a guard in an included header.

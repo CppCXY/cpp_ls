@@ -1934,6 +1934,17 @@ pub(crate) struct TuEvent {
     pub(crate) unconditional: bool,
 }
 
+impl TuEvent {
+    /// **Is this event an `#undef`?** — the shape [`TimelineBuilder::record`] writes for one, and only for one.
+    ///
+    /// A definition carries both its `function_like` answer and its body, unconditionally (`then_some` on a
+    /// definition is always `Some`); an `#undef` carries neither. That is why this is not "no body": a definition
+    /// whose replacement list nobody stored still has its `MacroBody`.
+    pub(crate) fn is_an_undef(&self) -> bool {
+        self.function_like.is_none()
+    }
+}
+
 /// Where one file was entered, and how much of the timeline was already behind it.
 #[derive(Clone, Debug)]
 pub(crate) struct TuFrame {
@@ -3005,8 +3016,9 @@ impl<'unit> MacroView<'unit> {
         // The cook path was fixed long ago (`visible_binding`, whose note is the measurement); this one was not, and
         // it is the inherited half of the defect `tests/nested_conditional.rs` reproduces: a file could not see what
         // another file defined behind a guard that held.
-        let (at, index) =
-            self.last_visible_of(name, |event| event.unconditional || event.body.is_some())?;
+        let (at, index) = self.last_visible_of(name, |event| {
+            event.unconditional || event.body.is_some() || event.is_an_undef()
+        })?;
         Some((at, &self.unit.events[index as usize]))
     }
 
@@ -3049,18 +3061,36 @@ impl<'unit> MacroView<'unit> {
     /// this filter is what hid it. The same masked every conditional definition in a compiler's own headers, which is
     /// why `_STL_STRINGIZE` (48 recordings) and the `_MSVC_*` attribute macros all read as undefined.
     ///
-    /// A conditional fact with **no** body is still not a binding: that is an `#undef` in a branch, or a definition
-    /// whose replacement list nobody carried, and [`UnitDefinitions::of`] answers `None` for it either way.
+    /// A conditional fact with **no** body is a binding only when it is an `#undef` — see [`TuEvent::is_an_undef`].
+    ///
+    /// **An `#undef` in force is a binding, and this is the half that was missing.** The filter used to be
+    /// `unconditional || body.is_some()`, and an `#undef` has neither: it is written inside an `#if` and it writes
+    /// no replacement list. So the *earlier* definition of the name stayed "visible" and the cook expanded it —
+    /// measured on a production project whose precompiled header takes the SDK's `min`/`max` away inside
+    /// `#if defined(_WIN32)`: a `std::min(a, b)` at the use was cooked into
+    /// `std::((( a ) < ( b )) ? ( a ) : ( b ))`, and the file was reported as *expected `;` after expression* on a
+    /// line a compiler accepts. [`UnitDefinitions::of`] answers `None` for an undef, so the name falls through to
+    /// the compiler's own seed — which is exactly "not a macro here".
     pub(crate) fn visible_binding(&self, name: &str) -> Option<(usize, u32)> {
-        self.last_visible_of(name, |event| event.unconditional || event.body.is_some())
+        self.last_visible_of(name, |event| {
+            event.unconditional || event.body.is_some() || event.is_an_undef()
+        })
     }
 
     /// [`MacroView::the_body_in_force`] as the timeline index of that fact.
+    ///
+    /// **An `#undef` in force takes the body away**, and it has to be looked for here rather than skipped: the last
+    /// fact in force for a name is what the name means, so a body collected from an earlier `#if`-guarded `#define`
+    /// is gone the moment a later `#if`-guarded `#undef` of it is in force. `last_visible_of` filters, so an undef
+    /// that is filtered out is indistinguishable from one that never happened — the name keeps a body the
+    /// compilation took away, and the cook expands it. Measured on a production project: `std::min(a, b)` became
+    /// `std::((( a ) < ( b )) ? ( a ) : ( b ))` and the file was reported as a syntax error.
     pub(crate) fn visible_body_in_force(&self, name: &str) -> Option<u32> {
-        self.last_visible_of(name, |event| {
-            !event.unconditional && event.body_text.is_some()
-        })
-        .map(|(_, index)| index)
+        let (_, index) = self.last_visible_of(name, |event| {
+            !event.unconditional && (event.body_text.is_some() || event.is_an_undef())
+        })?;
+        let event = &self.unit.events[index as usize];
+        event.body_text.is_some().then_some(index)
     }
 
     /// **The part of a file's rendering that is its environment, as one number** — the identity of a reading.
@@ -4254,6 +4284,16 @@ fn walk_one_file<'a>(
             // The **evidence** is still two channels: definitions only from what no condition guards, and
             // bodies from everything in force. The state above is a third, separate thing — it exists to answer
             // *conditions*, and it deliberately carries no bodies.
+            //
+            // **An `#undef` in force decides its name on both channels.** Its guard does not matter: a name this
+            // walk has just seen taken away is not one any earlier `#define` in the closure still defines, and a
+            // `#define` behind an `#if` is exactly what a later `#undef` behind another `#if` cancels — the
+            // Windows precompiled header shape this was measured on (`min`/`max`). Without the `remove`, the
+            // in-force channel kept the body it had already collected, and the in-force channel is consulted
+            // before the positional one.
+            if !fact.kind.is_definition() {
+                walked.conditional_bodies.remove(&*fact.name);
+            }
             if matches!(fact.guard, FactGuard::Unconditional) {
                 walked.entries.push((from_offset, fact, source));
             } else if fact.kind.is_definition()

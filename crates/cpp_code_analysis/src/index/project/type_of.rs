@@ -690,7 +690,18 @@ pub(crate) fn type_of_expression_inner(
                 //
                 // **And a class template with no written arguments deduces them** — `std::pair pair{1, 2}` is a
                 // `pair<int, int>`; see [`the_arguments_a_braced_initialisation_deduces`].
-                Known::Yes(named) if named.type_of(root, scopes).is_none() => {
+                //
+                // **The question is whether the head names a type, not whether its declaration has one.** This asked
+                // `type_of(...).is_none()`, which is true for a class *and* for a `using`-alias declared in this file
+                // (the declarator reader has no declarator to read) — but false for an alias the index answered, whose
+                // `type_of` is its target. `ContainerOf<std::vector, int>` is an alias template in `test_cpp`'s
+                // anonymous namespace, and the use is outside it: the file's scopes miss the binding, the index answers
+                // it, the target `Container<T, std::allocator<T>>` is `Some`, and the head fell to the spelling arm
+                // below — which refuses a spelling with a space in it, so a construction of an alias with two
+                // arguments answered "the type ... is not known here". Where the alias was at file scope the binding
+                // came from the tree instead and the same construction worked: one declaration's *file position*
+                // decided the answer, which is not a rule about types.
+                Known::Yes(named) if named.names_a_type() => {
                     let spelled = first.text().to_string();
                     let spelled = spelled.trim();
                     let elements = the_elements_of_a_braced_list(expression);
@@ -2452,12 +2463,33 @@ impl NamedDeclaration {
         }
     }
 
+    /// **Does this name a type?** — a class, an enumeration, an alias or a `typedef`.
+    ///
+    /// The question a *construction* asks of its head: `Widget{…}` and `ContainerOf<int>{…}` are temporaries of a type,
+    /// and what that type is follows from the head being one. It is deliberately not [`Self::type_of`], which answers
+    /// "the type this declaration was written with": an alias has one (its target) and a class does not, while both
+    /// name a type, and a head that is a type has the same answer either way.
+    ///
+    /// A **namespace** is not a type here even though [`crate::BindingKind::is_type_like`] says it is: that predicate
+    /// answers "may this name follow a `::`", and `ns{}` is not a temporary.
+    pub(crate) fn names_a_type(&self) -> bool {
+        match self {
+            NamedDeclaration::Here(binding) => matches!(
+                binding.kind,
+                crate::BindingKind::Class
+                    | crate::BindingKind::Enum
+                    | crate::BindingKind::Alias
+                    | crate::BindingKind::Typedef
+            ),
+            NamedDeclaration::Indexed(fact, _, _) => fact.kind == crate::DeclKind::Type,
+        }
+    }
+
     /// The type this declaration was written with.
     ///
     /// `None` for a function — `make` is not a `Widget` and has no members — which is the distinction
     /// [`DeclFact::type_of`] documents.
-    pub(crate) fn type_of(
-        &self,
+    pub(crate) fn type_of(        &self,
         root: &cpp_parser::CppSyntaxNode,
         scopes: &crate::ScopeTree,
     ) -> Option<Type> {

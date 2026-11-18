@@ -128,10 +128,13 @@ fn a_member_of_an_instance_answers_in_the_instance_terms() {
 
 /// `cfoo.call(...)` on a `const Foo` showed the **non-const** `call`, and `Bar`'s `requires`-clause never appeared.
 ///
-/// A class may declare a name twice and tell the two apart by `const` (and by a trailing `requires`). The object's
-/// constness is not in the type model yet — `type_of` is `Foo` for both `Foo foo;` and `const Foo cfoo;` — so the card
-/// lists **every** declaration of the name, with the qualifiers the facts now record; the reader's own line says which
-/// object they are calling it on.
+/// **A `const` object's card is the overload it can call; a mutable one's lists both.**
+///
+/// A class may declare a name twice and tell the two apart by `const` (and by a trailing `requires`). This test used to
+/// assert that the card **always** listed both declarations with the sentence "a `const` object can only call the
+/// `const` one" — the reader had to apply the rule themselves. The card now applies it: [`Session::the_object_is_const`]
+/// reads the object's own specifier sequence, so `cfoo.call(…)` shows only `void call(Fn&& fn) const`, and a mutable
+/// `foo.call(…)` still shows both, because there both are callable.
 #[test]
 fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
     let root: PathBuf = std::env::temp_dir().join("cppls-hover-qualifiers");
@@ -151,6 +154,8 @@ fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
                   cfoo.call([](auto &&x) {});\n\
                   const Bar cbar;\n\
                   cbar.call([](auto &&x) {});\n\
+                  Foo foo;\n\
+                  foo.call([](auto &&x) {});\n\
                   }\n";
     std::fs::write(&file, source).expect("the fixture writes");
 
@@ -166,34 +171,56 @@ fn a_member_declared_twice_shows_both_declarations_and_their_clauses() {
     let _ = session.index_everything();
     let view = session.view_of_the_file(&file).expect("the written text");
 
-    for (needle, must_say) in [
-        ("cfoo.call", "void call(Fn&& fn) const"),
-        ("cbar.call", "const requires requires"),
-    ] {
-        let line = source.find(needle).expect("the use");
+    // **The *last* occurrence**, because `foo.call` is a substring of `cfoo.call` — the first match was the const
+    // object's use, and the mutable one's card was never asked for (measured: the assertion below failed with the
+    // const object's card).
+    let card_at = |needle: &str| -> String {
+        let line = source.rfind(needle).expect("the use");
         let at = line + needle.find("call").expect("the member name");
         let hover = cpp_ls::handlers::hover::hover(
             &session,
             &view,
-            ReadingOffset::new(at + 1),
-            FileOffset::new(at + 1),
+            ReadingOffset::new(at),
+            FileOffset::new(at),
         )
         .expect("a member has a card");
-        let text = match hover.contents {
+        match hover.contents {
             lsp_types::HoverContents::Markup(markup) => markup.value,
             other => format!("{other:?}"),
-        };
+        }
+    };
+
+    // **A `const` object may only call the `const` overload**, so that one is the card — and the other is not listed.
+    for (needle, the_one, the_other) in [
+        (
+            "cfoo.call",
+            "void call(Fn&& fn) const",
+            "void call(Fn&& fn)\n",
+        ),
+        (
+            "cbar.call",
+            "const requires requires",
+            "void call(Fn&& fn) requires requires",
+        ),
+    ] {
+        let text = card_at(needle);
+        assert!(text.contains(the_one), "the card names {the_one:?}: {text}");
         assert!(
-            text.contains(must_say),
-            "the card must say {must_say:?}: {text}"
-        );
-        assert!(
-            text.contains("const Foo")
-                || text.contains("const Bar")
-                || text.contains("`const` object"),
-            "and it must say which one a const object may call: {text}"
+            !text.contains(the_other),
+            "and not the overload a `const` object cannot call ({the_other:?}): {text}"
         );
     }
+
+    // **A mutable object can call either**, so nothing decides between them and both are shown with the rule.
+    let text = card_at("foo.call");
+    assert!(
+        text.contains("void call(Fn&& fn)\n") && text.contains("void call(Fn&& fn) const"),
+        "both declarations are listed for a mutable object: {text}"
+    );
+    assert!(
+        text.contains("`const` object can only call"),
+        "and the card says which one a `const` object would mean: {text}"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -494,3 +521,71 @@ fn a_lambda_initializer_is_explained_rather_than_printed() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **An alias's construction is hovered as the class it names, wherever the alias was declared.**
+///
+/// Reported with a screenshot on `test_cpp`'s `templates.cpp`: `ContainerOf<std::vector, int>{}.size()` answered "The
+/// type of `ContainerOf<std::vector, int>{}` is not known here, so `size` cannot be resolved", while the identical
+/// alias at file scope answered the member. The alias there is inside `namespace { … }` and the use is outside it —
+/// see `cpp_code_analysis`'s `a_construction_of_an_alias_in_an_anonymous_namespace_is_a_class` for the analysis half.
+/// This is the card: a member of the class the alias names, not a sentence about an unknown type.
+#[test]
+fn a_construction_of_an_alias_in_a_namespace_names_the_member() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-alias-namespace");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "template <typename First, typename Second>\n\
+                  struct Duo {\n\
+                  \x20   void put(First first, Second second) { (void)first; (void)second; }\n\
+                  };\n\
+                  \n\
+                  namespace {\n\
+                  template <template <typename, typename> class Container, typename T>\n\
+                  using MadeInside = Container<T, T>;\n\
+                  }  // namespace\n\
+                  \n\
+                  void use() {\n\
+                  \x20   MadeInside<Duo, int>{}.put(1, 2);\n\
+                  }\n";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source
+        .find("MadeInside<Duo, int>{}.put")
+        .expect("the use")
+        + "MadeInside<Duo, int>{}.".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a member has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        !text.contains("is not known here"),
+        "the construction's type is the class the alias names: {text}"
+    );
+    assert!(
+        text.contains("put"),
+        "and the card names the member that was hovered: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
