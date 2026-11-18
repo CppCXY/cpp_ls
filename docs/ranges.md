@@ -642,3 +642,54 @@ The measurement that matters for the order: **(1) is a defect that has nothing t
 containing a lambda is misclassified everywhere — and it is the cheapest. (2) is next because it is a fact the
 index holds and loses. (3) and (4) are the range machinery, and (5) is the largest and the least useful until the
 first four are right.
+
+
+## The first step of the pipeline: a pipe names the view the standard fixes
+
+Round 44, following the order in this document. A closure on its own still has no type — `std::views::filter(pred)` is
+`__adaptor::_Partial<_Filter, Pred>`, an internal class whose second argument is an unnamed closure — but a **pipe**
+does: the standard says which view class each adaptor produces, and that the range is passed through `views::all_t`.
+
+```text
+numbers | std::views::take(2)       std::ranges::take_view<std::ranges::ref_view<std::vector<int>>>
+numbers | std::views::filter(pred)  std::ranges::filter_view<std::ranges::ref_view<std::vector<int>>, (lambda)>
+make() | std::views::take(2)        std::ranges::take_view<std::ranges::owning_view<std::vector<int>>>
+```
+
+Three pieces, and only the third is an inference:
+
+* **which view class** — a closed table keyed on the adaptor's spelling, which must contain `views::`
+  (`filter`, `transform`, `take`, `drop`, `reverse`, `take_while`, `drop_while`). A project's own `items | filter(x)`
+  is therefore not a view, and `a_project_own_pipe_is_not_named_as_a_view` pins the refusal.
+* **whether it carries the callable** — `filter_view`'s second template argument *is* the predicate; `take_view` has
+  none, because the count is a constructor argument. Reading that the other way round would print an arity the
+  standard does not have.
+* **`views::all_t<R>`** — `ref_view<R>` for an lvalue that is not a view, `owning_view<R>` for a prvalue, and the view
+  itself for the result of another adaptor (which is why a chain of five composes).
+
+Measured on `test_cpp`'s `ranges.cpp`, the reported line:
+
+```text
+27:14  type : std::ranges::take_view<std::ranges::drop_view<std::ranges::reverse_view<
+              std::ranges::transform_view<std::ranges::filter_view<
+              std::ranges::ref_view<std::vector<int>>, (lambda)>, (lambda)>>>>
+```
+
+Pinned by `tests/ranges.rs`: `a_pipeline_names_the_view_the_standard_fixes`,
+`a_pipeline_over_a_temporary_owns_the_range`, `a_project_own_pipe_is_not_named_as_a_view`.
+
+### The lambda is `(lambda)`, and why it is not its position
+
+`(lambda at ranges.cpp:27:39)` was written first and was **context-dependent**: the position needs the file's text, and
+asking the session for the view makes the answer depend on *who asked*. The index pass resolves names through
+`&mut |_| None`, so the first query in that process answered the fallback — and `type_of` **remembers** an expression's
+answer in the index, so every later query was served that fallback: `inspect inlay` alone printed
+`(lambda at ranges.cpp:27:39)`, and `inspect inlay --index` printed `(lambda)`. A type that changes with the order of
+the questions is not a type. `(lambda)` is the same answer from every caller, and it says what the argument is: the
+closure type of a predicate.
+
+### What is still open
+
+A closure's own type, and a view whose callable is a named function rather than a lambda (the template argument would
+be a function reference, a second deduction). Both are the same missing capability: a representation for a type that
+has no spelling.

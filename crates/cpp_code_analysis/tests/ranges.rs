@@ -59,6 +59,91 @@ int main() {
     );
 }
 
+/// **A pipeline names the view the standard fixes** — `numbers | std::views::take(2)` is a `take_view`.
+///
+/// The closure's own type is internal to the library (`__adaptor::_Partial<_Filter, …>`) and its second argument is an
+/// unnamed closure type, so `std::views::filter(pred)` alone still has no type. A *pipe* does: the standard says which
+/// view class each adaptor produces and that the range is passed through `views::all_t`.
+///
+/// ```text
+/// numbers | std::views::take(2)      std::ranges::take_view<std::ranges::ref_view<std::vector<int>>>
+/// numbers | std::views::filter(pred) std::ranges::filter_view<std::ranges::ref_view<std::vector<int>>, (lambda)>
+/// ```
+///
+/// The position is asked of the **operator**, which is the byte whose innermost expression is the whole pipe.
+#[test]
+fn a_pipeline_names_the_view_the_standard_fixes() {
+    let source = "
+#include <ranges>
+#include <vector>
+int main() {
+    std::vector<int> numbers{5, 3, 1};
+    auto first2 = numbers | std::views::take(2);
+    auto odds = numbers | std::views::filter([](int v) { return v > 2; });
+    auto both = numbers | std::views::filter([](int v) { return v > 2; }) | std::views::reverse;
+}
+";
+    assert_eq!(
+        type_after(source, "| std::views::take"),
+        Some("std::ranges::take_view<std::ranges::ref_view<std::vector<int>>>".to_string()),
+        "an adaptor with no callable is one template argument: the range, borrowed"
+    );
+    assert_eq!(
+        type_after(source, "| std::views::filter"),
+        Some(
+            "std::ranges::filter_view<std::ranges::ref_view<std::vector<int>>, (lambda)>"
+                .to_string()
+        ),
+        "a predicate adaptor carries the callable, which a lambda describes without naming"
+    );
+    assert_eq!(
+        type_after(source, "| std::views::reverse"),
+        Some(
+            "std::ranges::reverse_view<std::ranges::filter_view<std::ranges::ref_view<std::vector<int>>, (lambda)>>"
+                .to_string()
+        ),
+        "a second adaptor takes the first view whole — `all_t` of a view is the view"
+    );
+}
+
+/// **A range that is a temporary is owned, not borrowed** — `views::all_t` says `owning_view` for a prvalue.
+#[test]
+fn a_pipeline_over_a_temporary_owns_the_range() {
+    let source = "
+#include <ranges>
+#include <vector>
+std::vector<int> make_numbers();
+int main() {
+    auto first2 = make_numbers() | std::views::take(2);
+}
+";
+    assert_eq!(
+        type_after(source, "| std::views::take"),
+        Some("std::ranges::take_view<std::ranges::owning_view<std::vector<int>>>".to_string()),
+        "`make_numbers()` is a prvalue, so `all_t` moves it into an `owning_view`"
+    );
+}
+
+/// **A pipe of a project's own is not a view.** The adaptor table is keyed on a spelling that must contain `views::`,
+/// because `items | filter(x)` is a function call the project wrote and answering `filter_view` would be a type from
+/// another library.
+#[test]
+fn a_project_own_pipe_is_not_named_as_a_view() {
+    let source = "
+#include <vector>
+std::vector<int> filter(std::vector<int> const& values);
+int main() {
+    std::vector<int> numbers{1, 2};
+    auto mine = numbers | filter(numbers);
+}
+";
+    assert_eq!(
+        type_after(source, "| filter"),
+        None,
+        "nothing in the standard says what this pipe is"
+    );
+}
+
 /// **A pipeline a reader names keeps the element the pipe yields.**
 ///
 /// `element_of_a_range_expression` answers a pipe written in place, and `for (auto v : items | …)` has always worked.

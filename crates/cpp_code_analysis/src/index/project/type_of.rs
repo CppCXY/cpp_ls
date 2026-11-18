@@ -861,6 +861,23 @@ pub(crate) fn type_of_expression_inner(
     //   would then have to keep right for every platform's widths; a wrong type shown for an `auto` is worse than
     //   `auto`, because the second says the file did not spell it and the first says it did.
     if let Some((operator, left, right)) = binary_operands_of(expression) {
+        // **A pipeline names a view, and the standard spells it.** `numbers | std::views::filter(pred)` is
+        // `filter_view<all_t<decltype(numbers)>, Pred>`, and the standard fixes every one of those pieces: which
+        // view class an adaptor produces, that the range is passed through `views::all_t`, and that a predicate
+        // adaptor carries its callable as the second template argument.
+        //
+        // This is the *first* half of the pipe the project could answer: the closure's own type
+        // (`__adaptor::_Partial<_Filter, …>`) is internal to the library and its second argument is an unnamed
+        // closure type, so `views::filter(pred)` alone still has no type — but a *pipeline* has one, because the
+        // view class is in the standard. See `docs/ranges.md`.
+        if operator == "|"
+            && let Some((view, file)) = the_view_a_pipeline_names(
+                memo, shapes, index, declaring, scopes, root, path, &left, &right, depth,
+            )
+        {
+            return Known::Yes((view, file));
+        }
+
         // **A class's own operator** — `a + b` on a type that declares `operator+`, `a == b` on one that declares
         // `operator==`. It is tried **before** the builtin rules below, because those are answers about arithmetic
         // and a class that overloads an operator has said what it means: `Money + Money` is `Money`, not "the two
@@ -1658,6 +1675,188 @@ pub(crate) fn binary_operands_of(
         (Some(operator), [left, right]) => Some((operator, left.clone(), right.clone())),
         _ => None,
     }
+}
+
+/// **The view a `range | adaptor` names** — `numbers | std::views::filter(pred)` is a `filter_view`, and the standard
+/// fixes every piece of it.
+///
+/// # What the standard already says, and what this reads
+///
+/// ```text
+/// numbers | std::views::filter(pred)      std::ranges::filter_view<views::all_t<R>, Pred>
+/// numbers | std::views::take(2)           std::ranges::take_view<views::all_t<R>>
+/// numbers | std::views::reverse           std::ranges::reverse_view<views::all_t<R>>
+/// ```
+///
+/// So the answer needs three things, and only the third is an inference:
+///
+/// * **which view class** — a closed table, the standard's own (`filter`, `transform`, `take`, `drop`, `reverse`,
+///   `take_while`, `drop_while`), keyed on the adaptor's **spelling**, which must contain `views::` so that a
+///   project's own `filter(x)` is not one of them;
+/// * **whether it carries the callable** — a predicate adaptor's second template argument *is* the callable, and the
+///   others have none: `take_view`'s count is a constructor argument, not a template one;
+/// * **`views::all_t<R>`** — `ref_view<R>` for an lvalue that is not itself a view, `owning_view<R>` for an rvalue,
+///   and the view unchanged for the result of another adaptor.
+///
+/// # What is still not answered
+///
+/// A closure **on its own** — `std::views::filter(pred)` before a pipe — has the library's internal type
+/// (`__adaptor::_Partial<std::ranges::views::_Filter, Pred>`), whose second argument is a closure type nothing can
+/// spell; this rule answers only where the standard names the result. And a callable this rule cannot describe —
+/// anything but a lambda written at the call — leaves the answer `None` rather than a view with a made-up argument.
+#[allow(clippy::too_many_arguments)]
+fn the_view_a_pipeline_names(
+    memo: &TypeMemo,
+    shapes: &crate::sema::declarations::ShapeTable,
+    index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    left: &cpp_parser::CppSyntaxNode,
+    right: &cpp_parser::CppSyntaxNode,
+    depth: usize,
+) -> Option<(Type, PathBuf)> {
+    let (view, carries_the_callable, callable) = the_adaptor_a_use_names(right)?;
+    // **`views::all_t<R>`.** The left operand's type first; a pipeline is already a view because that is what the
+    // call it stands for returns (checked by its spelling, which this layer wrote itself for the inner pipeline).
+    let (left_type, file) = match type_of_expression_memoed(
+        memo,
+        shapes,
+        index,
+        declaring,
+        scopes,
+        root,
+        path,
+        left,
+        depth + 1,
+    ) {
+        Known::Yes(found) => found,
+        _ => return None,
+    };
+    let written = left_type.to_string();
+    let all = match is_a_view_spelling(&written) {
+        true => left_type,
+        false => {
+            // **The value category is the left operand's, not the type's.** A variable names an lvalue, and
+            // `views::all_t` borrows it (`ref_view`); a call's result is a prvalue, and `all_t` *owns* it
+            // (`owning_view`). Both are the standard's answers for the operand they are given.
+            let borrowed = matches!(
+                cpp_parser::CppSyntaxKind::from(left.kind()),
+                cpp_parser::CppSyntaxKind::IdentifierExpr | cpp_parser::CppSyntaxKind::IndexExpr
+            ) || (cpp_parser::CppSyntaxKind::from(left.kind())
+                == cpp_parser::CppSyntaxKind::UnaryExpr
+                && left.text().to_string().trim_start().starts_with('*'));
+            let of = match borrowed {
+                true => "std::ranges::ref_view",
+                false => "std::ranges::owning_view",
+            };
+            Type::Named {
+                name: of.to_string(),
+                arguments: vec![left_type],
+            }
+        }
+    };
+    let mut arguments = vec![all];
+    if carries_the_callable {
+        arguments.push(callable?);
+    }
+    Some((
+        Type::Named {
+            name: view.to_string(),
+            arguments,
+        },
+        file,
+    ))
+}
+
+/// **The view class an adaptor use names, and the callable it carries** — `None` for anything that is not one of the
+/// standard's adaptors.
+///
+/// The spelling is what decides, and it must contain `views::`: `numbers | filter(x)` is a project's own pipe, and
+/// answering `filter_view` for it would be a type from another library. The callable is read only when it is a
+/// **lambda written at the call** — a lambda has no name, so it is described by where it is
+/// (`(lambda at a.cpp:12:34)`), which is the one spelling that designates it; a named function's type is a function
+/// reference, which is a second deduction this rule does not do.
+fn the_adaptor_a_use_names(
+    right: &cpp_parser::CppSyntaxNode,
+) -> Option<(&'static str, bool, Option<Type>)> {
+    let kind = cpp_parser::CppSyntaxKind::from(right.kind());
+    // `std::views::take(2)` — a call whose callee names the adaptor, and whose arguments are the adaptor's own.
+    let (callee, arguments) = match kind {
+        cpp_parser::CppSyntaxKind::CallExpr => {
+            let mut arguments: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+            let mut callee = None;
+            for child in right.children() {
+                match callee {
+                    None => callee = Some(child),
+                    Some(_) => arguments.push(child),
+                }
+            }
+            (callee?, arguments)
+        }
+        _ => (right.clone(), Vec::new()),
+    };
+    let spelling = callee.text().to_string();
+    let spelling = spelling.trim();
+    if !spelling.contains("views::") {
+        return None;
+    }
+    let written = spelling
+        .rsplit("::")
+        .next()
+        .unwrap_or(spelling)
+        .trim()
+        .to_string();
+    let (view, carries) = match written.as_str() {
+        "filter" => ("std::ranges::filter_view", true),
+        "transform" => ("std::ranges::transform_view", true),
+        "take" => ("std::ranges::take_view", false),
+        "drop" => ("std::ranges::drop_view", false),
+        "reverse" => ("std::ranges::reverse_view", false),
+        "take_while" => ("std::ranges::take_while_view", true),
+        "drop_while" => ("std::ranges::drop_while_view", true),
+        _ => return None,
+    };
+    if !carries {
+        return Some((view, false, None));
+    }
+    // The callable is the adaptor's *first* argument (`take_while`'s predicate), and a lambda is the shape this
+    // describes.
+    let callable = arguments.first().and_then(a_lambdas_spelling)?;
+    Some((view, true, Some(callable)))
+}
+
+/// **How a lambda is spelled when it is a type argument** — `(lambda)`.
+///
+/// A closure type has no name, and this says what kind of type the argument is without inventing one: the second
+/// template argument of `filter_view` *is* the closure type of the predicate, and "(lambda)" is the honest description
+/// of it. It is never a declaration's type — `auto g = [](int a) { … }` still answers "a lambda's closure type".
+///
+/// # Why not the position
+///
+/// `(lambda at a.cpp:7:17)` was written first and it was **context-dependent**, which was measured: the answer needs
+/// the file's text, this layer has none, and asking the session for the view makes the answer depend on *who asked*.
+/// The index pass resolves names through `&mut |_| None`, so the first query in that process answered `(lambda)` —
+/// and `type_of` **remembers** an expression's answer in the index, so every later query in the same process was
+/// served the fallback: `inspect inlay` alone printed `(lambda at a.cpp:7:17)`, and the same command with `--index`
+/// printed `(lambda)`. A type that changes with the order of the questions is not a type; `(lambda)` is the same
+/// answer from every caller.
+fn a_lambdas_spelling(node: &cpp_parser::CppSyntaxNode) -> Option<Type> {
+    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::LambdaExpr {
+        return None;
+    }
+    Some(Type::named("(lambda)"))
+}
+
+/// **Is this spelling one this layer writes for a view?** — `std::ranges::filter_view<…>`.
+///
+/// The test is deliberately narrow: a view *class* from a header is not recognised here (it would need the class's
+/// bases — `view_interface`), and treating one as a range value would add a `ref_view` around something that is
+/// already a view. Only the spellings this rule and `element_of_a_range_expression` write are accepted.
+fn is_a_view_spelling(written: &str) -> bool {
+    let written = written.trim();
+    written.starts_with("std::ranges::") && written.contains("_view<")
 }
 
 /// **What a class's `operator<name>` returns** — the member's own return type, read from the file that declares the
