@@ -975,7 +975,20 @@ impl ProjectIndex {
     }
 
     pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
-        Some(self.cooked_reading(path)?.declarations.as_slice())
+        let reading = self.cooked_reading(path)?;
+        // **An empty reading of a file that declares things is not a reading.** The insert refuses one when the
+        // summary is already in the map, but a reading can be filed before its own summary is — measured on
+        // `nlohmann/json.hpp`, where the index held "a cooked reading, 0 declarations" while the rendered reading has
+        // **761**: every query read the empty one, and the ask that would have rendered the file saw "already read"
+        // and stopped. The summary is the distinction, and asking it here is independent of insert order.
+        if reading.declarations.is_empty()
+            && self
+                .summary(path)
+                .is_some_and(|summary| !summary.declarations.is_empty())
+        {
+            return None;
+        }
+        Some(reading.declarations.as_slice())
     }
 
     /// **The whole cooked reading** of the file at `path`: what a compiler sees declared there, what the parse of

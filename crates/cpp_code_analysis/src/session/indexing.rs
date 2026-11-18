@@ -769,7 +769,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// argument that put the cooking backlog here: a summary the pass is about to revise is not a summary a check may
     /// call a fact.
     pub fn pending_work(&self) -> usize {
-        self.queue.pending() + self.cooking.len() + self.refinements_wanted()
+        self.queue.pending()
+            + self.cooking.len()
+            + self.refinements_wanted()
+            // **The renderings a query asked for.** They are not in `cooking` yet — `advance` moves them there — and
+            // leaving them out is what let a pump stop with an ask outstanding: measured on `EmmyLuaCodeStyle`, a
+            // hover that asked for `json.hpp`'s rendering saw `pending_work() == 0`, pumped nothing, and the file
+            // was never rendered.
+            + self.macro_work.lock().map(|work| work.len()).unwrap_or(0)
     }
 
     /// **Module units the session has been told to read and has not read yet** — a *separate* count, because the

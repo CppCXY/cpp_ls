@@ -180,11 +180,53 @@ impl<F: FileProvider + Clone> Session<F> {
         // for is the one the index says declares the class.
         if let Known::Unknown(UnknownReason::NotDeclaredHere(name)) = &found
             && let Some((qualifier, _)) = name.rsplit_once("::")
-            && let Known::Yes(class) = self.store.index().definition(qualifier, &view.path)
         {
-            let _ = self.view(&class.file);
+            // **The files whose rendering the question needs**, asked in the only place a query can ask: `view` is
+            // the asking side of the rendering contract — on a miss it records the file and answers `None`, and the
+            // pump renders it. Nothing here guesses: the files are the index's own facts about the qualifier.
+            for file in self
+                .files_a_qualified_name_needs(qualifier, &view.path)
+                .into_iter()
+                .take(8)
+            {
+                if self.store.index().cooked_declarations(&file).is_none() {
+                    let _ = self.view(&file);
+                }
+            }
         }
         found
+    }
+
+    /// **The files whose rendering a qualified member question needs** — the qualifier's own declaration and, when
+    /// that is an **alias**, the class it names.
+    ///
+    /// `nlohmann::json` is the measured case: its fact is in `json_fwd.hpp` (`using json = basic_json<>;`, whose
+    /// `type_of` records the target — `[fact] ns::simple: kind Type, type_of Some("basic<>")`), while the class and
+    /// its members are in `json.hpp`. Asking for the alias's own file renders a file with no class in it, so the
+    /// target is followed — from the fact the index recorded, not from a spelling rule.
+    fn files_a_qualified_name_needs(&self, qualifier: &str, from: &Path) -> Vec<PathBuf> {
+        let index = self.store.index();
+        let Known::Yes(found) = index.definition(qualifier, from) else {
+            return Vec::new();
+        };
+        let mut files = vec![found.file.clone()];
+        // `basic_json<>` → `basic_json`, and the target is qualified by the scope the alias was declared in unless it
+        // already names one (`using simple = ::ns::basic<>;`).
+        if let Some(target) = found.fact.type_of.as_deref() {
+            let base = target.split('<').next().unwrap_or(target).trim();
+            if !base.is_empty() && base != found.fact.name.as_str() {
+                let scope = found.fact.scope.as_deref().unwrap_or("");
+                let qualified = if base.contains("::") || scope.is_empty() {
+                    base.to_string()
+                } else {
+                    format!("{scope}::{base}")
+                };
+                if let Known::Yes(class) = index.definition(&qualified, from) {
+                    files.push(class.file.clone());
+                }
+            }
+        }
+        files
     }
 
     /// **Is the object this name denotes `const`?** — the one question a member access's overload set depends on, and
