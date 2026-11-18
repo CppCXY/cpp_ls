@@ -56,6 +56,7 @@ use crate::index::project::{Callee, callee_of_a_call};
 use crate::sema::call_syntax::{arguments_of, parameter_list_of, parameter_names_from_text};
 use crate::sema::scopes::parameters_of;
 use crate::{FileView, Known, ProjectIndex};
+use cpp_parser::CppAstNode;
 
 /// One parameter name, at the argument it belongs to.
 ///
@@ -397,10 +398,17 @@ where
         // *declares constructors*, and a constructor declares parameters. Reported from `EmmyLuaCodeStyle`:
         // `LuaParser(file, std::move(luaLexer.GetTokens()))` showed no hints at all — the constructor branch is what
         // answers there, and the function branch below is unchanged for every other call.
-        // **The declaration's own parameters, then a callable object's `operator()`.** The order matters: a *free
-        // function* call resolves in the first branch, and only a callee that names no function at all — a variable
-        // of a class type — reaches the second. The other order would read a function's **return** type and hint its
-        // `operator()`'s parameters for a call the function itself declares.
+        // **The declaration's own parameters, then a callable object's `operator()`, then a lambda's own list.** The
+        // order matters: a *free function* call resolves in the first branch, and only a callee that names no
+        // function at all — a variable — reaches the others. The other order would read a function's **return** type
+        // and hint its `operator()`'s parameters for a call the function itself declares.
+        // **A callee that names no function is a variable, and there are two kinds**: an object of a class that
+        // declares `operator()`, and a closure — which has no name for its type and is in no index, so its own
+        // parameter list beside the declaration is the only evidence.
+        let a_variables_call = || {
+            callable_object_parameter_names(index, view, &call, arguments.len())
+                .or_else(|| a_lambdas_parameter_names(view, &call, arguments.len()))
+        };
         let names =
             constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
                 let Known::Yes(callee) = callee_of_a_call(
@@ -414,7 +422,7 @@ where
                 ) else {
                     // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
                     // wrong parameter is a wrong answer printed into the code.
-                    return callable_object_parameter_names(index, view, &call, arguments.len());
+                    return a_variables_call();
                 };
                 let resolved = started.elapsed();
 
@@ -445,9 +453,7 @@ where
                         names.as_ref().map(Vec::len).unwrap_or(0)
                     );
                 }
-                names.or_else(|| {
-                    callable_object_parameter_names(index, view, &call, arguments.len())
-                })
+                names.or_else(a_variables_call)
             });
         let Some(names) = names else {
             continue;
@@ -537,6 +543,55 @@ fn callable_object_parameter_names(
         }
     }
     best
+}
+
+/// **What a call of a variable that holds a lambda hands its arguments** — the lambda's own parameter names.
+///
+/// ```cpp
+/// auto by_value = [counter]() mutable { return ++counter; };
+/// by_value();                                     // nothing is written after the name
+/// auto initialised = [value = counter + 10]() -> int { return value; };
+/// initialised();
+/// ```
+///
+/// The callee names a *variable*, so there is no function declaration and no class with an `operator()` either — a
+/// closure type is unnamed and is in no index. The lambda's parameter list is in the tree, in the declaration's own
+/// initialiser, and it is the only answer: reported from an editor on a file of lambdas, where **every** call through
+/// one of them was unhinted (`by_ref()`, `empty()`, `by_value()`, `template_lambda(4)`, `capture_pack(1, 2, 3)` …).
+///
+/// The arity has to match, and a **pack** takes any count from its position on: `[](auto... args)` is one parameter and
+/// any number of arguments, which is what `capture_pack(1, 2, 3)` passes.
+fn a_lambdas_parameter_names(
+    view: &FileView,
+    call: &CppSyntaxNode,
+    passed: usize,
+) -> Option<Vec<Option<String>>> {
+    let callee = call.children().next()?;
+    // A member call is its receiver's question (`w.f(…)`), and a qualified name is not a variable of this file.
+    if crate::sema::check::member_access_above(&callee).is_some() {
+        return None;
+    }
+    let at = usize::from(callee.text_range().start());
+    let Known::Yes(binding) = crate::sema::resolve::definition_at(&view.scopes, &view.root, at)
+    else {
+        return None;
+    };
+    if binding.kind != crate::BindingKind::Variable {
+        return None;
+    }
+    // **The declaration this name is in**, and the lambda its initialiser holds. The declarator is asked for by the
+    // binding's own name range, so a declaration of two lambdas on one line answers for the right one.
+    let declarator = crate::sema::types::declarator_declaring(&view.root, binding.name_range)?;
+    let holder = declarator.parent()?;
+    let lambda = cpp_parser::typed_descendants::<cpp_parser::CppLambdaExpr>(&holder).next()?;
+    let list = lambda.get_params()?;
+    let text = list.syntax().text().to_string();
+    let names = parameter_names_from_text(&text)?;
+    let a_pack = text.contains("...");
+    if names.len() != passed && !(a_pack && names.len() < passed) {
+        return None;
+    }
+    Some(names)
 }
 
 /// The parameter names of the declaration a call names, or `None` when they cannot be read.

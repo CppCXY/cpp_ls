@@ -390,18 +390,23 @@ int f(int y) {
     assert!(hints_of(source).is_empty(), "{:?}", hints_of(source));
 }
 
-/// A lambda held in a variable has parameters of its own, and they are not read: `g`'s declaration has no
-/// parameter list — the list belongs to the lambda *expression*, which is a different construct — so there is
-/// nothing a hint could be named after.
+/// **A lambda held in a variable has parameters, and they are read** — `auto g = [](int a) { … }; g(1);` names `a`.
+///
+/// This expectation used to say the opposite ("the list belongs to the lambda *expression*, which is a different
+/// construct — so there is nothing a hint could be named after"). That was a limit of this reader, not a rule of the
+/// language, and it left every call through a lambda unhinted: reported from an editor on a file of lambdas where
+/// `template_lambda(4)`, `stored(5)`, `apply_to(5, [](int value) { … })` and the rest showed nothing at all. The list
+/// is in the declaration's own initialiser, and it is the one place the names are written.
 #[test]
-fn a_call_of_a_lambda_variable_is_not_hinted() {
+fn a_call_of_a_lambda_variable_is_hinted() {
     let source = "\
 int f() {
     auto g = [](int a) { return a; };
     return g(1);
 }
 ";
-    assert!(hints_of(source).is_empty(), "{:?}", hints_of(source));
+    let argument = source.find("g(1)").expect("the fixture") + "g(".len();
+    assert_eq!(hints_of(source), vec![(argument, "a".to_string())]);
 }
 
 /// **A member declared in a class and called through `this`.** The declaration is in the class body, the call is

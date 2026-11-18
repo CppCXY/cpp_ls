@@ -2066,3 +2066,38 @@ because a summary's `type_of` is what the hover and the check read.
 The syntax error at line 340 of that file is the one recorded in the previous round — a macro body arriving through the
 in-force channel with `>=` split into `> =` — and it costs every finding after it, which is why the same file's
 `cstyle-cast` and `use-nullptr` findings disappeared from the pull once it was reported. Next round's work.
+
+
+## Calls through a lambda were unhinted: the parameter list is beside the declaration (fixed)
+
+Reported from an editor with a file of lambdas: `by_ref()`, `by_value()`, `template_lambda(4)`, `stored(5)`,
+`apply_to(5, [](int value) { … })` — "a whole pile of lambda calls, none of them hinted".
+
+The callee names a **variable**, so there is no function declaration to read a parameter list from, and a closure type
+has no name and is in no index — the `operator()` branch added for `views::filter` does not help either, because the
+type of a lambda is not a class name. The names are in the **declaration's own initialiser**, and that is where they
+are read now: the binding's declarator, the `InitDeclarator` above it, and the `LambdaExpr` inside its initializer.
+
+Measured on `test_cpp`'s `lambdas.cpp`: **3 parameter hints → 16**. The one that had been the test's own expectation,
+`a_call_of_a_lambda_variable_is_not_hinted`, now reads `a_call_of_a_lambda_variable_is_hinted` — the old name recorded a
+limit ("the list belongs to the lambda *expression*, which is a different construct"), not a rule of the language.
+
+Not covered, deliberately: a **pack** (`[](auto... args)`) stays silent, because the variadic rule that keeps `...` in a
+C function unhinted applies to it too; and a call through a **structured binding** (`auto [increment, copy] = …`), whose
+element type is a pair's member and not a lambda this reader can name.
+
+### The `views` adaptors still get no hint, and the pipeline still has no type — both measured, both open
+
+```text
+std::views::filter(numbers, pred)     →  __r: __p:            (fixed last round: it is the two-argument operator())
+std::views::filter(pred)              →  nothing              `_Filter` declares only operator()(_Range&&, _Pred&&);
+                                                              the one-argument form is the adaptor-closure base's pack,
+                                                              which has no name to print
+type_at(std::views::filter(pred))     →  UnknownType("std::views::filter(…)")
+type_at(numbers | std::views::filter  →  Unknown: a `|` between a range and a closure is `operator|`, and the closure's
+         (pred))                                              type is the unnamed `_Partial` — the answer would contain
+                                                              a type nobody can write
+```
+
+That is the item `docs/ranges.md` already records: naming a view needs a range type, an adaptor-closure type and a
+per-adaptor element rule. It is not a missing lookup; the name does not exist in the source or in the header.
