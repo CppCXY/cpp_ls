@@ -2551,3 +2551,73 @@ constexpr T twice(T value) {
         "a use inside `twice` is that function's parameter, not the enumeration's member: {names:#?}"
     );
 }
+/// **A class template and its specializations are one kind of thing** — a type.
+///
+/// Reported from an editor: in `test_cpp`'s `templates.cpp`, `std::cout << Pair<int, int>{1, 2}.sum() …` drew `Pair`
+/// as plain text while the hover on the same byte answered `struct Pair`. The index's answer was
+/// `Unknown(Ambiguous("Pair"))`, because the four declarations the file writes — the primary template, a partial
+/// specialization, an explicit specialization and an explicit instantiation — were compared by
+/// `IndexedKind`'s **`template`** flag, which was "the fact has template parameters". A class template has them and
+/// an explicit specialization does not, so two of the four disagreed and the token was dropped.
+///
+/// The flag means a *variable* template (its one reader draws a variable with it as `variableTemplate`), so a class
+/// template's head setting it was the defect. Both halves are pinned here: the type is classified through the
+/// **index** — the header declares it, which is the layer whose answer was `Ambiguous` — and a variable template is
+/// still drawn apart from a variable.
+#[test]
+fn a_class_template_and_its_specializations_are_one_kind() {
+    let header = "\
+template <typename T, typename U = int>
+struct Pair {
+    T first;
+    U second;
+};
+
+template <typename T>
+struct Pair<T, T> {
+    T only;
+};
+
+template <>
+struct Pair<bool, int> {
+    bool left;
+    int right;
+};
+
+template struct Pair<long, long>;
+";
+    let source = "\
+#include \"b.h\"
+int main() {
+    return Pair<int, int>{1, 2}.first;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/b.h", header)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let found: Vec<(String, NameKind)> = session
+        .classified_names(&view)
+        .into_iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()].to_string(),
+                name.kind,
+            )
+        })
+        .collect();
+    assert!(
+        found.contains(&("Pair".to_string(), NameKind::Type)),
+        "the header's class template is a type at its use: {found:?}"
+    );
+
+    let variables = "\
+template <typename T>
+constexpr bool is_pair_like = true;
+
+int f() { return is_pair_like<int>; }
+";
+    assert_eq!(
+        kind_of(variables, "is_pair_like"),
+        Some(NameKind::VariableTemplate),
+        "and a variable template is still drawn apart from a variable"
+    );
+}

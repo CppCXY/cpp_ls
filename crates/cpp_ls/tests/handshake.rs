@@ -578,7 +578,7 @@ fn a_project_configuration_reaches_the_servers_behaviour() {
     project.write("main.cpp", MAIN_CPP);
     project.write(".cppls.toml", "[hover]\nenable = false\n");
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -775,10 +775,19 @@ struct Server {
     messages: Receiver<Value>,
     /// What the server logged, kept so that a failure says *why* rather than only that.
     log: Arc<Mutex<String>>,
+    /// **How long one request waits**, which a test whose subject reads the standard library raises — see
+    /// [STD_LIBRARY_TIMEOUT] and [Server::start_within].
+    within: Duration,
 }
 
 impl Server {
     fn start(root: &Path) -> Server {
+        Server::start_within(root, TIMEOUT)
+    }
+
+    /// [Server::start] with the caller's own per-request deadline, for a test whose first query waits for a
+    /// standard-library closure to be read.
+    fn start_within(root: &Path, within: Duration) -> Server {
         // **The server's own level and log path, under the test's control.** Both are command-line flags
         // (`--log-level`, default `info`; `--log-path`, default `none`) rather than `RUST_LOG`, so a test could not
         // ask the server to say what it did — and the first attempt to diagnose the handshake failures ended exactly
@@ -826,6 +835,7 @@ impl Server {
             stdin,
             messages,
             log,
+            within,
         }
     }
 
@@ -843,7 +853,7 @@ impl Server {
     /// Send a request and wait for its response, answering anything the server asks on the way.
     fn request(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        self.wait_for(|message| message["id"] == json!(id))
+        self.wait_for_within(self.within, |message| message["id"] == json!(id))
     }
 
     /// Send a request until its answer is not `null`, or give up.
@@ -961,7 +971,12 @@ impl Server {
 
     /// Wait for a message the closure accepts, answering the server's own requests while waiting.
     fn wait_for(&mut self, accept: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + TIMEOUT;
+        self.wait_for_within(self.within, accept)
+    }
+
+    /// [`Server::wait_for`] with the caller's own deadline.
+    fn wait_for_within(&mut self, within: Duration, accept: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + within;
 
         loop {
             let remaining = deadline
@@ -1101,7 +1116,7 @@ fn a_declaration_a_macro_makes_is_found_over_the_wire() {
     project.write("api.h", API_H);
     project.write("main.cpp", API_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1175,7 +1190,7 @@ fn a_branch_nobody_takes_is_answered_as_clean() {
     project.write("cfg.h", CFG_H);
     project.write("main.cpp", BRANCH_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1241,7 +1256,7 @@ fn an_error_typed_into_an_open_file_is_answered() {
     let project = Project::new("diagnostics-after-an-edit");
     project.write("main.cpp", CLEAN_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1305,7 +1320,7 @@ fn a_diagnostic_about_deleted_text_is_gone_by_the_next_pull() {
     let project = Project::new("diagnostics-clear-after-a-fix");
     project.write("main.cpp", CLEAN_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1402,7 +1417,7 @@ fn a_finding_about_deleted_text_does_not_survive_a_busy_index() {
     let broken = "#include \"h0.h\"\nint main() { return 0 }\n";
     project.write("main.cpp", clean);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1497,7 +1512,7 @@ fn the_reported_file_is_answered() {
     let project = Project::new("reported-file");
     project.write("main.cpp", REPORTED_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1698,7 +1713,7 @@ fn a_members_members_are_offered_over_the_wire() {
     project.write("widget.h", NAMESPACED_WIDGET_H);
     project.write("main.cpp", MEMBER_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -1824,7 +1839,7 @@ fn a_standard_library_member_list_has_each_spelling_once() {
     let project = Project::new("completion-std-string");
     project.write("main.cpp", STD_STRING_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -2291,7 +2306,7 @@ fn a_member_access_on_the_last_line_of_a_body_offers_the_members() {
     let project = Project::new("completion-last-line");
     project.write("main.cpp", LAST_LINE_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -3642,7 +3657,7 @@ fn a_signature_is_shown_while_the_arguments_are_typed() {
     let project = Project::new("signature-help");
     project.write("main.cpp", SIGNATURE_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -3766,7 +3781,7 @@ fn a_completion_item_resolves_to_its_declarations_documentation() {
     let project = Project::new("completion-resolve");
     project.write("main.cpp", RESOLVE_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -4001,7 +4016,7 @@ fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
     let project = Project::new("hover");
     project.write("main.cpp", HOVER_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -4646,7 +4661,7 @@ fn the_chosen_template_overload_is_shown_instantiated() {
     project.write("take.h", TAKE_H);
     project.write("main.cpp", TAKE_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -4720,7 +4735,7 @@ void h(S s) {
     project.write("shapes.h", SHAPES_H);
     project.write("main.cpp", SHAPES_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -4788,7 +4803,7 @@ fn the_definition_of_a_call_leads_with_the_overload_it_means() {
     project.write("overloads.h", OVERLOADS_H);
     project.write("main.cpp", OVERLOADS_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -4855,7 +4870,7 @@ fn the_overload_a_call_means_is_marked_in_the_hover_list() {
     project.write("overloads.h", OVERLOADS_H);
     project.write("main.cpp", OVERLOADS_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5019,7 +5034,7 @@ fn a_completion_inside_a_macros_argument_is_about_that_argument() {
     let project = Project::new("completion-in-a-macro-argument");
     project.write("main.cpp", MACRO_ARGUMENT_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5102,7 +5117,7 @@ fn a_signature_survives_being_inside_a_macro_argument() {
     let project = Project::new("signature-in-a-macro");
     project.write("main.cpp", SIGNATURE_IN_A_MACRO_CPP);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5313,7 +5328,7 @@ fn a_declaration_in_the_viewed_file_is_reported_on_its_own_line() {
          }\n",
     );
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5346,8 +5361,13 @@ fn a_declaration_in_the_viewed_file_is_reported_on_its_own_line() {
     // a deliberate cost, because a rendering cannot be built behind an `&self`. In that first reading every offset is
     // the file's, so both readers below agree by accident and a test that asked once would pass on the broken answer.
     // Measured: with the fix disabled this test still passed, which is what sent it back here.
-    let mut answer = server.ask_until_it(
+    // **The deadline of a test that reads a standard-library header**, which this one does four times over
+    // (`<vector>`, `<string>`, `<format>`, `<iostream>`): measured alone, 27 s, and under `cargo test`'s parallel load
+    // the same wait went over the 30 s `TIMEOUT` and failed the suite. See [`STD_LIBRARY_TIMEOUT`], which exists for
+    // exactly this and is already used by the tests whose subject is that slow.
+    let mut answer = server.ask_until_it_within(
         100,
+        STD_LIBRARY_TIMEOUT,
         |id| {
             json!({
                 "id": id,
@@ -5361,8 +5381,9 @@ fn a_declaration_in_the_viewed_file_is_reported_on_its_own_line() {
         |answer| !answer["result"].is_null(),
     );
     for _ in 0..4 {
-        answer = server.ask_until_it(
+        answer = server.ask_until_it_within(
             100,
+            STD_LIBRARY_TIMEOUT,
             |id| {
                 json!({
                     "id": id,
@@ -5426,7 +5447,7 @@ fn what_the_completion_answers_here() {
 
     let project = Project::new("completion-report");
     project.write("main.cpp", &source);
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5694,7 +5715,7 @@ fn a_macro_hover_shows_its_own_define_line() {
     let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\n#define STD std::\n\nint main() {\n    STD c;\n    return 0;\n}\n";
     project.write("main.cpp", source);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
@@ -5757,7 +5778,7 @@ fn the_call_hierarchy_answers_over_the_wire() {
                 int both(int a, int b) {\n    return add(a, b) + subtract(a, b);\n}\n";
     project.write("main.cpp", main);
 
-    let mut server = Server::start(project.root());
+    let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
     let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(

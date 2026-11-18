@@ -402,8 +402,15 @@ impl Type {
                         Known::Yes(())
                     }
                 } else if matches!(from_core, Type::Builtin { .. })
-                    || matches!(to_core, Type::Builtin { .. })
+                    && matches!(to_core, Type::Builtin { .. })
                 {
+                    // **Both pointees, or no answer.** A `No` here says "these two builtins are different types", and
+                    // that is the only pair this relation can decide: a `Named` pointee is a class *or an alias this
+                    // layer has not substituted*, and comparing it with a builtin is a guess about a name rather than
+                    // about a type. Measured on `test_cpp`'s `strings.cpp`: `std::string_view::data()` answered
+                    // `const value_type*` (its class declares `using const_pointer = const value_type*;`), so every
+                    // `std::from_chars(text.data(), …)` was reported as *"this passes `text.data()` where
+                    // `const char*` is declared"* — a false `param-type-check` on a call that is correct.
                     Known::No
                 } else {
                     Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
@@ -2514,6 +2521,32 @@ mod tests {
 
     use crate::Known;
 
+    /// **A `Named` pointee is not a refusal** — a class's own alias is not a type this relation can compare.
+    ///
+    /// Reported from an editor: `std::from_chars(text.data(), text.data() + text.size(), parsed)` on a
+    /// `std::string_view` was flagged *"this passes `text.data()` where `const char*` is declared"*. `data()` is
+    /// declared `const_pointer data() const`, the class writes `using const_pointer = const value_type*;`, and the
+    /// spelling arrived here as a pointer to **`value_type`** — an alias this layer had not substituted. Comparing it
+    /// with `char*` answered `No`, and every such call was reported.
+    ///
+    /// Two builtins still disagree, which is the case this arm exists for: `char*` is not `int*`.
+    #[test]
+    fn a_named_pointee_is_not_a_refusal() {
+        let from = parse_type_spelling("const value_type*");
+        let to = parse_type_spelling("const char*");
+        assert!(
+            matches!(from.convertible_to(&to), Known::Unknown(_)),
+            "an unresolved alias in a pointer is not a refusal: {from:?} -> {to:?}"
+        );
+        assert!(
+            matches!(
+                parse_type_spelling("char*").convertible_to(&parse_type_spelling("int*")),
+                Known::No
+            ),
+            "two builtin pointees that differ are still a refusal"
+        );
+    }
+
     /// **A parameter inside a template-id is still a parameter.**
     ///
     /// Reported from an editor: hovering `box.query(1)` on a `Box<int>` answered `std::optional<V> query(int key)` —
@@ -2998,12 +3031,17 @@ mod tests {
             ),
             "a const reference may bind to a temporary a constructor builds"
         );
+        // **A `Named` pointee is a class *or a typedef this layer has not substituted*, and the two are
+        // indistinguishable here.** `FILE` is an opaque struct's typedef and `value_type` is `char`; one is a
+        // refusal and the other is the same type as `char*`. Answering `No` for both is what reported every
+        // `std::from_chars(text.data(), …)` on a `std::string_view` as an error, so the algebra says `Unknown` and
+        // leaves the class question to the layer that can ask the index — see `sema::convert`.
         assert!(
             matches!(
                 string_pointer.convertible_to(&parse_type_spelling("FILE*")),
-                Known::No
+                Known::Unknown(_)
             ),
-            "a pointer to a builtin is not a pointer to a class"
+            "a pointer to a named type is not this relation's answer"
         );
         assert!(
             matches!(

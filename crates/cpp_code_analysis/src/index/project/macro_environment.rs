@@ -293,7 +293,13 @@ impl IndexedKind {
             // member has *no* scope and so was not one, and an untyped scoped variable was one wrongly. See
             // [`DeclFact::enumerator`].
             enumerator: found.enumerator,
-            template: !found.parameters().is_empty(),
+            // **The flag means a *variable* template**, which is what its name says and what its one reader uses it
+            // for (`semantic.rs` draws a `Variable` with it as `variableTemplate`). A *class* template's head set it
+            // too, and then a class template and its explicit specialization — `Pair<T, U>`, `Pair<T, T>`,
+            // `Pair<bool, int>` and `template struct Pair<long, long>;` — became two different answers: `kind_of`
+            // said `Ambiguous` and a use of the type got **no colour at all**, while the hover on the same byte
+            // answered `struct Pair`. Measured on `test_cpp/src/templates.cpp:166`.
+            template: found.kind == DeclKind::Variable && !found.parameters().is_empty(),
             constructor: found.kind == DeclKind::Function
                 && found.returns.is_none()
                 && found

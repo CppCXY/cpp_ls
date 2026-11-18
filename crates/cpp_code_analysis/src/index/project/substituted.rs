@@ -231,6 +231,39 @@ pub fn substituted_members(
                 .iter()
                 .any(|name| name == member.fact.name.as_str())
     };
+    // **One pass is not enough, and the pass's own order is what decides.** A class's aliases name each other:
+    // libstdc++'s `basic_string_view` writes `using value_type = _CharT;` and `using const_pointer = const
+    // value_type*;`, so expanding `const_pointer` produces a spelling that still holds `value_type` — and
+    // `substituted_spelling` walks the alias list once, in its own order, which may already have passed the name the
+    // expansion introduced. Measured: `data()`'s answer came out `const value_type*`, `convertible_to` compared it
+    // with a parameter written `const char*`, answered `No`, and every `std::from_chars(text.data(), …)` in a real
+    // project was reported as *"this passes `text.data()` where `const char*` is declared"*.
+    //
+    // So the rewrite is repeated until it stops changing, bounded by a handful of passes rather than a `changed` flag:
+    // an alias that names itself would otherwise spin, and an alias chain deeper than four is a library experiment
+    // rather than a spelling. **The scan that guards the loop is what makes it affordable** — a member's type usually
+    // mentions no alias of its class at all, and the pass below is O(names × length), so asking "does this spelling
+    // hold any of them" first is the difference between one scan and one pass per member of every standard-library
+    // class. Measured after the first version of this loop: a cold start of a four-header project went from 27 s to
+    // over 30 s, which is what put the guard here.
+    let through_the_aliases = |spelling: &str| -> String {
+        let mut spelling = spelling.to_string();
+        for _ in 0..MAX_ALIAS_PASSES {
+            if !alias_names
+                .iter()
+                .any(|name| spelling.contains(name.as_str()))
+            {
+                break;
+            }
+            let next =
+                crate::sema::types::substituted_spelling(&spelling, &alias_names, &alias_targets);
+            if next == spelling {
+                break;
+            }
+            spelling = next;
+        }
+        spelling
+    };
     for member in list
         .members
         .iter_mut()
@@ -238,28 +271,17 @@ pub fn substituted_members(
     {
         if !alias_names.is_empty() {
             if let Some(spelling) = member.fact.detail_mut().parameter_list.as_mut() {
-                *spelling = crate::sema::types::substituted_spelling(
-                    spelling,
-                    &alias_names,
-                    &alias_targets,
-                );
+                *spelling = through_the_aliases(spelling);
             }
             if let Some(spelling) = member.fact.returns.as_mut() {
-                *spelling = crate::sema::types::substituted_spelling(
-                    spelling,
-                    &alias_names,
-                    &alias_targets,
-                )
-                .into();
+                *spelling = through_the_aliases(spelling).into();
             }
         }
         // **`type_of` is a `SmolStr`**, so it takes the same rewrite and converts its own result back.
         if !alias_names.is_empty()
             && let Some(spelling) = member.fact.type_of.as_mut()
         {
-            *spelling =
-                crate::sema::types::substituted_spelling(spelling, &alias_names, &alias_targets)
-                    .into();
+            *spelling = through_the_aliases(spelling).into();
         }
     }
     for member in &mut list.members {

@@ -32,6 +32,14 @@ use super::*;
 /// cyclic `typedef` from looping.
 pub(crate) const MAX_ALIAS_HOPS: usize = 24;
 
+/// **How many times one spelling's aliases are expanded in a row** — see the loop in [substituted_members].
+///
+/// Four is more than any library chain this project has met (const_pointer → alue_type → _CharT is two), and
+/// the bound is a stop for an alias that names itself rather than a budget a real class is expected to need.
+///
+/// [substituted_members]: crate::index::project::substituted_members
+pub(crate) const MAX_ALIAS_PASSES: usize = 4;
+
 /// **A spelling with the aliases a class declares followed through** — `pointer` → `_Val*`, and
 /// `_Alloc_traits::reference` → `std::size_t&`.
 ///

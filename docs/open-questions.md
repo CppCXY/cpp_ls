@@ -1640,3 +1640,83 @@ Measured after the swap (`EmmyLuaCodeStyle`):
 
 The first cook pays for the composition (4.7 ms, still two orders under the 100 ms target); every later cook, and the
 whole cold start, do not. Suite: 868 passed (the comment-edit test is the 868th).
+## The three accuracy reports of 2026-11-18, and what is left
+
+Reported against `C:\Users\zc\Desktop\test_cpp` with three screenshots: a false `param-type-check` on every
+`std::from_chars(text.data(), …)`, a generic lambda's parameter with no deduced type, and `Pair` — a class template
+with a partial and an explicit specialization — with no semantic token.
+
+The probe that reads these three answers out of a real server is `crates/cpp_ls/tests/editor_answers_probe.rs`: it
+opens one file, pulls diagnostics until they settle, then prints the findings, the inlay hints and the semantic tokens
+whose text is one of `CPPLS_ANSWERS_NEEDLES`. Two of the three were its first measurements.
+
+### Fixed: the false `param-type-check`
+
+Measured, before: `2 item(s)`, `this passes 'text.data()' where 'const char*' is declared for 'from_chars'` (twice).
+
+`std::string_view::data()` is declared `const_pointer data() const`, and the class writes
+`using const_pointer = const value_type*;`. The type reached the relation as `Pointer { Qualified { Named
+{ "value_type" } } }` — an alias this layer had not substituted — and `convertible_to` compared it with
+`Pointer { Qualified { Builtin "char" } }`. That arm answered `No` whenever *either* pointee was a builtin:
+
+```text
+matches!(from_core, Builtin) || matches!(to_core, Builtin)   →   No
+```
+
+so a pointer to an unresolved *name* was reported as a refusal. It now needs **both** pointees to be builtins, which
+is the only pair the algebra can decide: a `Named` pointee is a class **or a typedef** — `FILE` is the first,
+`value_type` is the second — and the relation cannot tell them apart. The class question belongs to `sema::convert`,
+which asks the index.
+
+The trade is stated where it is made (`sema::types` and the test
+`a_pointer_does_not_bind_to_a_non_const_reference_or_to_another_pointers_class`): `char*` against a parameter written
+`FILE*` now answers `Unknown` rather than `No`, so that one *true* positive is no longer reported by
+`param-type-check`. Every `from_chars` call in a real project being wrong is a worse trade than one opaque-typedef
+mismatch being silent — and the mismatch needs a symbol table (`FILE` is a class, `value_type` is not) that this
+layer does not have.
+
+After: `0 item(s)` on the same file.
+
+### Fixed: `Pair` drawn as plain text
+
+Measured, before: tokens for `Pair` at 14:8, 22:8, 30:8 and 114:17 — the four declarations — and **none** at 166:18,
+its use, while `hover` on that byte answered `struct Pair`.
+
+`classified_names` asks the index `kind_of`, which answers only when every declaration agrees on `IndexedKind`. That
+type compares `kind`, `scope`, `enumerator`, `constructor` **and `template`**, and `template` was
+"the fact has template parameters" — true for the primary template and the partial specialization, false for the
+explicit specialization and the explicit instantiation. Two of the four disagreed, so the answer was
+`Unknown(Ambiguous("Pair"))` and no token was sent.
+
+`template` means a **variable** template: it is documented as "is this a variable template?" and its only reader
+(`kind_of_index`) draws a `Variable` with it as `variableTemplate`. The flag is now
+`kind == DeclKind::Variable && !parameters().is_empty()`, so a class template and its specializations are one answer —
+a type — and a variable template is still told apart from a variable. After: `166:18`, `166:48`, `166:79` are all
+`type`.
+
+The test is `semantic::a_class_template_and_its_specializations_are_one_kind`; it fails without the change with
+`[("main", Function), ("first", Property)]` — `Pair` absent.
+
+### Not fixed: the generic lambda's parameter type
+
+Measured: `19` inlay hints for `strings.cpp`, none of them a type for `x` in `[](auto &&x) {}`. The hint machinery
+(`session::inlay`) deduces `auto n = …`, structured bindings, a lambda's *return* type and a call's parameter
+*names*; a **generic lambda parameter** is not an `auto` variable and is not deduced by any of them.
+
+What the answer needs, and what is in place for it:
+
+```text
+foo.call([](auto &&x) {});
+    the call's argument 0 is the closure, so the callee's parameter `Fn&&` is what it binds to;
+    the callee's body calls `fn(*this)`, and `*this` types as `Foo` (measured with `inspect type`);
+    `auto&&` binds an lvalue, so the parameter is `Foo&` — and `const Foo&` for the const overload.
+```
+
+That is a three-step inference across a template instantiation: the argument's binding, the body's use of the
+parameter, and the reference rules. The fixture's own comments also ask for two refinements that make it harder —
+`Bar::call` (both overloads viable) must produce **no** hint, and `cbar` must produce `const Bar &` — which means the
+overload set has to be pruned by the object's constness before the deduction runs.
+
+Not landed rather than half-landed: a hint that guessed `Foo` where the answer is `Foo&` would be a new wrong answer
+in the place this session was fixing wrong answers. The next step is to build the deduction as its own function with
+the three steps above and the two ambiguity rules as tests, not to special-case the inlay handler.
