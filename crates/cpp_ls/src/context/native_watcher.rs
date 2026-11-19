@@ -281,6 +281,7 @@ mod tests {
             Arc::new(connection),
             ClientCapabilities::default(),
             crate::context::ClientId::Other,
+            None,
         );
         let context = server.snapshot();
         let watcher = NativeFileWatcher::default();

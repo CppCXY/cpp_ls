@@ -179,6 +179,11 @@ pub async fn process_did_close_document(
         .close_document(&context, uri.clone())
         .await;
 
+    // **And the decorations for this file are cleared**, which is a message and not a consequence: a notification is
+    // not an edit, so nothing on the client side knows the file it dimmed is gone (`vscode-clangd#600`: after a
+    // restart the old ranges stayed and code that had become live was still greyed out).
+    crate::handlers::inactive_regions::clear(&context, uri.clone()).await;
+
     let Some(path) = uri_to_file_path(&uri) else {
         return Some(());
     };

@@ -41,6 +41,7 @@ impl LspServer {
             connection.connection.clone(),
             params.capabilities.clone(),
             client_id,
+            params.initialization_options.as_ref(),
         );
 
         Self {

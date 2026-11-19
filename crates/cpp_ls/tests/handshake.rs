@@ -7275,3 +7275,100 @@ int main() {
         "and nothing of the declaration's parameter is left in it: {markdown}"
     );
 }
+
+/// **A client that asks for inactive regions gets them over the wire, versioned, and an empty list on close.**
+///
+/// The notification is clangd's `textDocument/inactiveRegions` (`docs/inactive-regions.md`), a **push**: no request
+/// asks for it and a client that missed one never hears again, which is why the pump sends it from its idle drain
+/// rather than from a handler. The three properties this test pins are the three the design note says a client
+/// depends on:
+///
+/// * the capability is advertised only when the client asked (the opt-in is `initializationOptions` here, because
+///   the protocol's capability list drops non-standard fields);
+/// * the params carry the **document version**, so a client can drop one about text it no longer holds;
+/// * `didClose` is answered with an **empty list**, because nothing else tells a client its decorations are stale.
+#[test]
+fn inactive_regions_are_sent_to_a_client_that_asks_for_them() {
+    const DEAD_BRANCHES: &str = "\
+#define ON 1
+#if ON
+int live;
+#else
+int dead;
+#endif
+";
+    let project = Project::new("inactive-regions");
+    project.write("a.cpp", DEAD_BRANCHES);
+    let mut server = Server::start(project.root());
+    let a_uri = uri_of(&project.root().join("a.cpp"));
+
+    let initialized = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            // **The opt-in**, in the one container the protocol keeps for an extension flag.
+            "initializationOptions": { "inactiveRegions": true },
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["inactiveRegionsProvider"],
+        json!(true),
+        "a client that asked is told the server sends them: {initialized}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": a_uri, "languageId": "cpp", "version": 1, "text": DEAD_BRANCHES }
+        }),
+    );
+
+    // **The push**, which no request above asked for: the cook lands, the idle drain sees the open file, and the
+    // regions go out. The deadline is the whole project's first read, which is one file here.
+    let sent = server.wait_for_within(Duration::from_secs(60), |message| {
+        message["method"] == json!("textDocument/inactiveRegions")
+            && message["params"]["regions"]
+                .as_array()
+                .is_some_and(|regions| !regions.is_empty())
+    });
+    let params = &sent["params"];
+    assert_eq!(
+        params["textDocument"]["version"],
+        json!(1),
+        "the notification says which text it describes: {sent}"
+    );
+    let regions = params["regions"].as_array().expect("regions is a list");
+    assert_eq!(regions.len(), 1, "one dead branch, one range: {sent}");
+    // The span starts at the `#else` (line 4 in a one-based file, so line index 3) and ends where the line after
+    // `#endif` begins: a directive range includes its own line terminator, so the last dead line is covered whole.
+    assert_eq!(regions[0]["start"]["line"], json!(3), "{sent}");
+    assert_eq!(regions[0]["start"]["character"], json!(0), "{sent}");
+    assert_eq!(regions[0]["end"]["line"], json!(6), "{sent}");
+    assert_eq!(regions[0]["end"]["character"], json!(0), "{sent}");
+
+    server.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": a_uri } }),
+    );
+    let cleared = server.wait_for_within(Duration::from_secs(30), |message| {
+        message["method"] == json!("textDocument/inactiveRegions")
+            && message["params"]["regions"]
+                .as_array()
+                .is_some_and(|regions| regions.is_empty())
+    });
+    assert_eq!(
+        cleared["params"]["textDocument"]["uri"],
+        json!(a_uri),
+        "the empty list names the file it clears: {cleared}"
+    );
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}

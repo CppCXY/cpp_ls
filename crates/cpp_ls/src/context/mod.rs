@@ -15,6 +15,7 @@ pub use client::ClientProxy;
 pub use client_id::{ClientId, get_client_id};
 pub use diagnostics::DiagnosticService;
 pub use lsp_features::LspFeatures;
+pub(crate) use lsp_features::wants_inactive_regions;
 use lsp_server::{Connection, ErrorCode, RequestId, Response};
 use lsp_types::ClientCapabilities;
 pub use native_watcher::NativeFileWatcher;
@@ -41,11 +42,16 @@ impl ServerContext {
         conn: Arc<Connection>,
         client_capabilities: ClientCapabilities,
         client_id: ClientId,
+        initialization_options: Option<&serde_json::Value>,
     ) -> Self {
         let client = Arc::new(ClientProxy::new(conn));
 
         let analysis = Arc::new(AnalysisState::new());
-        let lsp_features = Arc::new(LspFeatures::new(client_capabilities, client_id));
+        let lsp_features = Arc::new(LspFeatures::new(
+            client_capabilities,
+            client_id,
+            initialization_options,
+        ));
         let status_bar = Arc::new(StatusBar::new(
             client.clone(),
             lsp_features.supports_work_done_progress(),

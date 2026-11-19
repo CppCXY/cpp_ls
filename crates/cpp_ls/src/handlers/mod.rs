@@ -35,6 +35,7 @@ mod format;
 mod formatting;
 pub mod hover;
 pub mod implementation;
+pub mod inactive_regions;
 mod initialized;
 mod inlay_hint;
 mod notification_handler;

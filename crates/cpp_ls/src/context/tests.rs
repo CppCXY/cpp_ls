@@ -28,6 +28,7 @@ async fn a_cancelled_request_answers_without_waiting_for_its_work() {
         Arc::new(server),
         ClientCapabilities::default(),
         ClientId::Other,
+        None,
     );
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     context
@@ -52,6 +53,7 @@ async fn a_request_is_not_answered_from_a_later_document_version() {
         Arc::new(server),
         ClientCapabilities::default(),
         ClientId::Other,
+        None,
     );
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     context

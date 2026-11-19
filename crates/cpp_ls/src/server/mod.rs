@@ -71,6 +71,18 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
             "typeHierarchyProvider".to_string(),
             serde_json::Value::Bool(true),
         );
+        // **clangd's inactive-region notification is an extension, so its flag is written by hand too.** A client
+        // that asked for it (see `context::wants_inactive_regions`) is told the server sends it; a client that did not
+        // sees nothing, because a client that never heard of the method would only log an unhandled notification.
+        if crate::context::wants_inactive_regions(
+            &initialization_params.capabilities,
+            initialization_params.initialization_options.as_ref(),
+        ) {
+            object.insert(
+                "inactiveRegionsProvider".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
     let initialize_data = serde_json::json!({
         "capabilities": server_capabilities,

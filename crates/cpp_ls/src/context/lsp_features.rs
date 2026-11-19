@@ -9,15 +9,36 @@ pub struct LspFeatures {
     /// because whether a client can draw one is not in its capability list. See
     /// [`LspFeatures::client_id`].
     client_id: ClientId,
+    /// **Did the client ask to be sent inactive regions?** — clangd's `textDocument/inactiveRegions`, which is not in
+    /// the protocol and therefore not in [`ClientCapabilities`]: `lsp_types` drops the field. The answer comes from the
+    /// two containers the protocol *does* keep (`capabilities.experimental` and `initializationOptions`), read at
+    /// construction time; see [`LspFeatures::supports_inactive_regions`].
+    inactive_regions: bool,
 }
 
 #[allow(unused)]
 impl LspFeatures {
-    pub fn new(client_capabilities: ClientCapabilities, client_id: ClientId) -> Self {
+    pub fn new(
+        client_capabilities: ClientCapabilities,
+        client_id: ClientId,
+        initialization_options: Option<&serde_json::Value>,
+    ) -> Self {
+        let inactive_regions = wants_inactive_regions(&client_capabilities, initialization_options);
         Self {
             client_capabilities,
             client_id,
+            inactive_regions,
         }
+    }
+
+    /// **Does the client want `textDocument/inactiveRegions`?**
+    ///
+    /// The notification is clangd's extension, so no standard capability names it. A client says yes in one of the two
+    /// places the protocol keeps for exactly this — `capabilities.experimental` (clangd-adjacent clients put their
+    /// flags there) or `initializationOptions` (the settings bag a VS Code client owns) — and anything else is a no,
+    /// because sending a notification a client did not ask for is a message it may log as an error.
+    pub fn supports_inactive_regions(&self) -> bool {
+        self.inactive_regions
     }
 
     /// **Which editor asked.** A client's capability list names the *standard* semantic token types it knows, so a
@@ -162,4 +183,21 @@ impl LspFeatures {
             .and_then(|watch| watch.dynamic_registration)
             .unwrap_or_default()
     }
+}
+
+/// **Did either of the protocol's two extension containers say yes?**
+///
+/// Kept out of the constructor for testability, and because the two are read the same way: a JSON object with an
+/// `inactiveRegions` member that is `true`. A client that sends the key with any other value has not asked for it.
+pub(crate) fn wants_inactive_regions(
+    capabilities: &ClientCapabilities,
+    initialization_options: Option<&serde_json::Value>,
+) -> bool {
+    let read = |container: Option<&serde_json::Value>| {
+        container
+            .and_then(|value| value.get("inactiveRegions"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    read(capabilities.experimental.as_ref()) || read(initialization_options)
 }

@@ -676,6 +676,16 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .await
                 .unwrap_or((0, 0));
 
+            // **The inactive regions of the files this slice cooked**, sent as soon as the commit lands.
+            //
+            // A push has no request to be repeated, and this is the moment the answer becomes available: the spans
+            // are a by-product of the cook, so before it a file has none (`None`) and after it the client is owed
+            // them. The loop's idle branch is not enough — a slice ends with `continue`, so an iteration that cooked
+            // never reaches it — and waiting for one that does would leave a file opened and left alone undimmed.
+            if cooked > 0 {
+                crate::handlers::inactive_regions::publish_all(&context).await;
+            }
+
             // **The pull's answer, computed while nobody is waiting.** A first pull for a new reading is the expensive
             // one (36.6 ms on `CodeFormat.cpp`, 109 ms on a cold session, against 2.2 ms for a repeat), and the pump is
             // the one party that knows when a new reading exists — it just committed one. `pending == 0` keeps it out of
@@ -959,6 +969,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         }
                     })
                     .await;
+
+                // **The first load's inactive regions**, sent beside the diagnostics it just published: the client
+                // opened its files before the project was read, so nothing had a rendering to answer from at
+                // `didOpen` — and unlike a request, a notification is never asked for again.
+                crate::handlers::inactive_regions::publish_all(&context).await;
             } else if was_pending {
                 // **…and the hints, for the same reason and with a measurement of their own.**
                 //
@@ -993,6 +1008,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 if context.lsp_features().supports_refresh_code_lens() {
                     context.client().refresh_code_lenses();
                 }
+                // **…and the inactive regions, which are a *push* and therefore have no refresh to fall back on.**
+                // A file's dead branches become answerable only when its cook lands (the per-file cook of the file's
+                // own closure), which is after `didOpen` and after every `didChange`; nothing asks a server to repeat
+                // a notification, so this is where the second answer goes out.
+                crate::handlers::inactive_regions::publish_all(&context).await;
             }
             let revision = context
                 .analysis()
@@ -1150,6 +1170,7 @@ mod tests {
             Arc::new(connection),
             ClientCapabilities::default(),
             ClientId::Other,
+            None,
         );
         let context = server.snapshot();
         let root = std::env::temp_dir().join("cpp-ls-install-session");
@@ -1189,6 +1210,7 @@ mod tests {
             Arc::new(connection),
             ClientCapabilities::default(),
             ClientId::Other,
+            None,
         );
         let context = server.snapshot();
         let root = std::env::temp_dir().join("cpp-ls-stale-session");
