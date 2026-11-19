@@ -629,6 +629,38 @@ impl ParsedDefinitions {
         self.parsed.insert(key, definition.clone());
         definition
     }
+
+    /// **Define one fact in a table** — the step a caller that *composes* an environment needs between "this
+    /// `#define` is in force" and "the next condition is evaluated against it".
+    ///
+    /// The analysis composes a header's environment out of summaries when no translation unit covers the file
+    /// (`SummaryStore::the_indexed_environment`), and a condition in that walk is a question about the table built
+    /// so far: `#if JSON_USE_EXCEPTION` is decided by a `#define` in another file, and `JSON_TRY`/`JSON_CATCH` are
+    /// only defined inside the branch that `#if` selects. The walk has the replacement list as **text** and not as
+    /// tokens, which is what this takes; the parse is the same one [`configuration_from_environment_and`] does, so
+    /// the table the conditions read and the table the renderer reads cannot disagree about what a definition says.
+    ///
+    /// `None` for `parameters` is an object-like macro; `body` may be empty (`#define GUARD`), and an empty body is
+    /// a definition all the same — a condition that asks `defined(GUARD)` must hear yes. `false` when the text is
+    /// not a definition this reader can put back together, which is the caller's to count.
+    pub fn define_in(
+        &mut self,
+        table: &mut crate::macros::MacroTable,
+        name: &str,
+        parameters: Option<&str>,
+        body: &str,
+        at: usize,
+    ) -> bool {
+        let parameters: Option<std::sync::Arc<str>> = parameters.map(std::sync::Arc::from);
+        let body: std::sync::Arc<str> = std::sync::Arc::from(body);
+        match self.definition(name, parameters.as_ref(), &body) {
+            Some(definition) => {
+                table.define_shared_at(definition, at);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// `#define NAME(params) body` → the definition it spells: the same reader the directive layer uses, so a
@@ -768,19 +800,45 @@ pub fn configuration_from_environment_and(
     // corpus, which is why it changed — the SAL annotations of `sal.h`/`specstrings.h` are function-like macros
     // that expand to nothing (`_Struct_size_bytes_(size)` on `ncrypt.h:267`), and reading them as names left
     // `typedef _Struct_size_bytes_ ( … ) struct …` in the stream.
+    // **Definitions and undefs go into the table in one order, by the offset each is in force from.** The table
+    // answers "the last binding inserted whose offset has been reached", so insertion order *is* the semantics
+    // between two bindings of one name: inserting every definition first and every `#undef` after would make an
+    // early `#undef` win over a later `#define`, and a name an include took away could never come back.
+    enum BindingAt<'s> {
+        Defined(cpp_parser::DefinitionFacts<'s>),
+        Undefined(&'s str),
+    }
+    let mut in_order: Vec<(usize, BindingAt<'_>)> = Vec::new();
     environment.for_each_definition(&mut |facts| {
+        in_order.push((facts.at, BindingAt::Defined(facts)));
+    });
+    environment.for_each_undefinition(&mut |name, at| {
+        in_order.push((at, BindingAt::Undefined(name)));
+    });
+    // Stable, so two bindings at the same offset keep the order their channel gave them — definitions of different
+    // names at one offset do not interact.
+    in_order.sort_by_key(|(at, _)| *at);
+
+    for (at, binding) in in_order {
+        let facts = match binding {
+            BindingAt::Undefined(name) => {
+                out.table.undefine(name, at);
+                continue;
+            }
+            BindingAt::Defined(facts) => facts,
+        };
         let usable = !facts.function_like || facts.parameters.is_some();
         if !usable {
             // No parameter names in the evidence — see the field's note.
             out.function_like_without_parameters += 1;
-            return;
+            continue;
         }
 
         // A definition the evidence carries **without a body** is counted rather than parsed: there is nothing to
         // expand, and the count is what says how much of the corpus is in that state.
         let Some(body) = facts.body_text else {
             out.without_a_body += 1;
-            return;
+            continue;
         };
 
         match parsed.definition(facts.name, facts.parameters, body) {
@@ -788,7 +846,7 @@ pub fn configuration_from_environment_and(
             Some(definition) => out.table.define_shared_at(definition, facts.at),
             None => out.unreadable += 1,
         }
-    });
+    }
 
     // The **in-force** bodies take effect from offset 0: they are not positional evidence but a body a condition
     // settled, and the file sees them from its first line. See `Configuration::in_force_without_a_parameter_list`.

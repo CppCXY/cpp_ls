@@ -420,6 +420,20 @@ pub trait MacroFacts {
     /// question.
     fn for_each_definition<'s>(&'s self, visit: &mut dyn FnMut(DefinitionFacts<'s>));
 
+    /// Every **`#undef`** this environment contributes, as `(name, from_offset)`.
+    ///
+    /// [`MacroFacts::for_each_definition`] leaves these out on purpose — an `#undef` is not a definition — but a
+    /// caller building a **table** has to apply them, and at the offset they came into force at: a name a later
+    /// include took away must not stay a macro in a rendering that reads past that include, and a name an earlier
+    /// include took away must. `nlohmann`'s headers are the shape that needs both halves: `json.hpp` includes
+    /// `detail/macro_scope.hpp` at the top, uses `JSON_TRY` throughout the class, and includes
+    /// `detail/macro_unscope.hpp` at the bottom, which is where `JSON_TRY` is `#undef`ed.
+    ///
+    /// The default visits nothing, which is the honest answer for an environment whose caller never recorded one.
+    fn for_each_undefinition<'s>(&'s self, visit: &mut dyn FnMut(&'s str, usize)) {
+        let _ = visit;
+    }
+
     /// Every body that only the **in-force** channel has, as a [`BodyFacts`].
     ///
     /// See [`MacroFacts::body_text_in_force`] for what that channel is and why it is kept apart.
@@ -708,6 +722,17 @@ impl MacroFacts for MacroEnvironment {
                     parameters: binding.parameters.as_ref(),
                     body_text: binding.body.as_ref(),
                 });
+            }
+        }
+    }
+
+    /// Every `#undef` the includes contribute, **one entry per binding**, with the offset it came into force at.
+    fn for_each_undefinition<'s>(&'s self, visit: &mut dyn FnMut(&'s str, usize)) {
+        for (name, history) in &self.by_name {
+            for binding in history {
+                if binding.definition.is_none() {
+                    visit(name, binding.at);
+                }
             }
         }
     }

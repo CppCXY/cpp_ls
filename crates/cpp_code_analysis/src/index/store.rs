@@ -2869,53 +2869,144 @@ impl<F: FileProvider> SummaryStore<F> {
     /// **The macro bodies in force in a file, from the index alone** — phase 2 of `docs/indexing-design.md`.
     ///
     /// [`SummaryStore::closure_environment`] answers the same question by walking the closure with the preprocessor's
-    /// conditionals evaluated, which is a whole-program parse. This takes every **unconditional** `#define` the index
-    /// recorded in the closure, in include order (later files and later directives win), and reads the replacement lists
-    /// out of the defining files. A name whose definitions are all conditional is left out — unknown rather than
-    /// guessed, which is exactly the answer the shape-only reading gives for it, so this never claims more than it knows.
+    /// conditionals evaluated, which is a whole-program parse. This one walks **summaries**: the closure in reading
+    /// order, one file read per defining file, and a slice per body — no preprocessing of the text, no parse of
+    /// anything but the file being refined.
     ///
-    /// What it costs: a breadth-first walk over summaries, one file read per defining file, and a slice per body. No
-    /// preprocess, no render, no parse of anything but the file being refined.
+    /// **A fact inside an `#if` is decided from the stored question**, not ignored: the summary keeps each region's
+    /// condition ([`crate::SummaryGuards`]), the walk carries the table forwards, and the answer is evaluated where
+    /// the condition's branch is entered. Until this existed, every conditional `#define` was left out — a rule
+    /// written when there was no evaluator at all — and the consequence was measured on `nlohmann/json.hpp`:
+    /// `JSON_TRY`/`JSON_CATCH` are defined inside `#if`/`#elif`, so the rendering kept the macro calls as text,
+    /// `JSON_CATCH (std::out_of_range&) { … }` did not parse, and every member of the class after that point was
+    /// filed without its class scope.
+    ///
+    /// What it costs: a walk over summaries, one file read per defining file, a slice per body, and one condition
+    /// evaluation per branch of the conditionals the facts are written in.
     pub(crate) fn the_indexed_environment(
         &self,
         path: &Path,
     ) -> Option<cpp_parser::MacroEnvironment> {
-        // **The order in which the closure was last written — parents before children, later includes before
-        // earlier ones.** A name is decided by the *first* file this walk reaches that says anything about it, and
-        // that is the file whose `#define`/`#undef` is in force where the closure ends.
+        // **The closure in reading order, and where each file's contribution lands.** Two things are computed
+        // together:
         //
-        // It used to be a **breadth-first** walk read backwards, which is a different order and a wrong one as soon
-        // as an include redefines or takes away what a header it included had said. A chain `main.cpp` →
-        // `pch.h` → `defined.h` came out `[defined, pch, main]`, so `defined.h`'s `#define` was decided before
-        // `pch.h`'s later `#undef` and the name stayed a macro — measured on a production project whose precompiled
-        // header does exactly that with the SDK's `min`/`max`, where `std::min(a, b)` was then cooked into
-        // `std::((( a ) < ( b )) ? ( a ) : ( b ))` and reported as *expected `;` after expression*.
+        // * **the order a compiler reads the directives in** — a file's own `#define`s *and* its `#include`s, at the
+        //   offsets they are written at, because an `#undef` written after an include is later than what the include
+        //   brought in (`pch.h: #include "defined.h"` then `#undef min` — visiting the file's facts before its
+        //   includes gets that order exactly backwards, which is what a `#undef` test caught);
+        // * **`from`** — the offset **in the file being rendered** from which that contribution is in force: the
+        //   offset of the root's `#include` that reached the file, which every nested include inherits.
         //
-        // A stack, with the includes pushed in their written order, pops them **last first** — which is the order a
-        // compiler writes them in, reversed.
-        let mut order: Vec<PathBuf> = Vec::new();
+        // The second is the whole of the fix for `nlohmann/json.hpp`: it includes `detail/macro_scope.hpp` at its top
+        // (where `JSON_TRY` is defined) and `detail/macro_unscope.hpp` at its bottom (where it is `#undef`ed). A flat
+        // environment has one answer per name, so the `#undef` — being later — was the answer for the whole file, and
+        // the class body rendered with `JSON_CATCH (std::out_of_range&) { … }` in it. With the offset the environment
+        // is a *timeline*: defined from the first include's line, taken away at the last one.
+        enum Step {
+            /// Read this file: its facts and includes become events, in the order they are written.
+            Enter { file: PathBuf, from: usize },
+            /// One macro fact of a file already entered.
+            Fact {
+                file: PathBuf,
+                from: usize,
+                index: usize,
+            },
+        }
+        let root = normalize_path(path, cfg!(windows));
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut pending: Vec<PathBuf> = vec![path.to_path_buf()];
-        while let Some(next) = pending.pop() {
-            let key = normalize_path(&next, cfg!(windows));
+        let mut order: Vec<(usize, PathBuf, usize)> = Vec::new();
+        let mut pending: Vec<Step> = vec![Step::Enter {
+            file: path.to_path_buf(),
+            from: 0,
+        }];
+        while let Some(step) = pending.pop() {
+            let Step::Enter { file, from } = step else {
+                let Step::Fact { file, from, index } = step else {
+                    unreachable!("the only two steps are `Enter` and `Fact`")
+                };
+                order.push((from, file, index));
+                continue;
+            };
+            let key = normalize_path(&file, cfg!(windows));
+            // **One visit per file.** A header included twice contributes at its first position, which is the same
+            // choice the reverse walk made and what keeps a guarded header from being walked twice.
             if !seen.insert(key.clone()) {
                 continue;
             }
             let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
                 continue;
             };
-            order.push(next.clone());
+            let is_the_root = key == root;
+            // **The file's own directives, in the order they are written** — includes and `#define`s together,
+            // sorted by offset and pushed reversed so that the first one is popped first.
+            let mut events: Vec<(usize, Step)> =
+                Vec::with_capacity(summary.includes.len() + summary.macros.len());
             for include in &summary.includes {
                 if let Some(resolved) = &include.resolved {
-                    pending.push(resolved.clone());
+                    // A child of the root arrives at its own `#include`'s offset; anything deeper arrives at the
+                    // offset of the include that reached *the root's* include.
+                    let child_from = if is_the_root {
+                        include.range.start_offset
+                    } else {
+                        from
+                    };
+                    events.push((
+                        include.range.start_offset,
+                        Step::Enter {
+                            file: resolved.clone(),
+                            from: child_from,
+                        },
+                    ));
                 }
+            }
+            for (index, fact) in summary.macros.iter().enumerate() {
+                events.push((
+                    fact.range.start_offset,
+                    Step::Fact {
+                        file: file.clone(),
+                        from,
+                        index,
+                    },
+                ));
+            }
+            events.sort_by_key(|(offset, _)| *offset);
+            for (_, event) in events.into_iter().rev() {
+                pending.push(event);
             }
         }
 
-        // **The last definition wins**, and the first file that speaks for a name is the one that decides it.
-        let mut entries: Vec<cpp_parser::IncludedMacro> = Vec::new();
-        let mut chosen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // **The table the conditions are asked about**, seeded with what the compiler predefines.
+        //
+        // A condition is a question about the *configuration* as much as about the headers — `#if defined(_CPPUNWIND)`
+        // is decided by the compile command, not by any file this walk reads — and an unseeded table answers
+        // `Unknown` for every such region. `self.index.macros()` is the same seed the renderer's own table starts
+        // from (`Session::rendering_of`), so the two cannot disagree about what the compilation defines.
+        let mut table = crate::preprocess::macros::MacroTable::from_marked(self.index.macros());
+        let mut parsed = crate::cooked::ParsedDefinitions::new();
+
+        // **One decision per `(offset, name)`** — the definition a file leaves behind, or `None` for a name it takes
+        // away. A file's directives all land at one offset in the rendered file (the `#include` that reached it), so
+        // only the state it leaves is observable from there, and a later file at the same offset replaces an earlier
+        // one's answer exactly as the preprocessor would.
+        //
+        // The value is `(function_like, shape, body, parameters)`: `body` is `None` for an `#undef`, and `Some("")`
+        // for a `#define` with no replacement list — which is still a definition, because `#if defined(NAME)` hears
+        // yes for one.
+        let mut decisions: std::collections::HashMap<
+            (usize, String),
+            (bool, cpp_parser::MacroBody, Option<String>, Option<String>),
+        > = std::collections::HashMap::new();
         let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // **A region's answer is remembered per file**: the question "is this `#if` taken" is asked about the
+        // condition's *own* offset, where the renderer asks it with a state per offset (`cache::env::compose`). This
+        // walk has one growing table and one position — the fact it is standing on — and taking the answer there is
+        // right for every shape but one: a condition that names a macro its own body defines. Deciding
+        // `#ifndef X / #define X` again *after* the `#define` would answer that the region is not taken, and every
+        // fact after it would be dropped. So the answer is remembered per `(region, branch)`.
+        let mut answers_per_file: std::collections::HashMap<
+            String,
+            std::collections::HashMap<(u32, usize), Option<bool>>,
+        > = std::collections::HashMap::new();
         // **The file being rendered contributes nothing to its own starting environment.** Its `#define`s are what
         // *it* says, and the renderer reads them itself, in order, from offset 0 — handing them back as "what was in
         // force before the first line" would make a definition later in the file visible earlier. Measured, and it is
@@ -2924,8 +3015,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // translation unit), so it entered the environment, `#ifndef X` was false, and every guarded header rendered
         // **empty**. `uv.h`: 13 263 tokens in, 0 bytes out; the same file rendered with its own guard excluded is
         // 37 112 bytes and 1 712 declarations.
-        let root = normalize_path(path, cfg!(windows));
-        for file in order.iter() {
+        for (from, file, index) in order.iter() {
             let key = normalize_path(file, cfg!(windows));
             if key == root {
                 continue;
@@ -2933,76 +3023,164 @@ impl<F: FileProvider> SummaryStore<F> {
             let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
                 continue;
             };
-            for fact in summary.macros.iter().rev() {
-                // **A definition is evidence only when it is unconditional; an `#undef` decides its name either
-                // way.** A `#define` inside an `#if` may not have run, so claiming the name is a macro would be a
-                // guess — the rule this walk has always had. An `#undef` inside one is the mirror, and the mirror
-                // is not symmetric: "this compilation may have taken the name away" cannot be evidence that the
-                // name *is* a macro, because the earlier definition the walk is about to read is exactly what may
-                // have been cancelled. So the name is left out.
+            let Some(fact) = summary.macros.get(*index) else {
+                continue;
+            };
+            let answers = answers_per_file.entry(key.clone()).or_default();
+            // **A `#define` outside every `#if` is a fact; one inside is a question.** The question is answered by
+            // the conditions the summary stored (`SummaryGuards::conditionals`), evaluated against the table built so
+            // far — which is what makes `JSON_TRY`/`JSON_CATCH` visible to a rendering: they are defined inside
+            // `#if (defined(__cpp_exceptions) || …) … #elif …` in `macro_scope.hpp`, and a walk that ignores
+            // conditional definitions leaves a header full of macro calls no parser can read.
+            let visibility = a_facts_visibility(&summary.guards, fact, &table, answers);
+            let is_a_definition = fact.kind.is_definition();
+            let taken = match visibility {
+                crate::Visibility::Active => true,
+                crate::Visibility::Inactive => false,
+                // **An undecided `#undef` still decides, and an undecided `#define` does not.** The pair is the one
+                // the reverse walk had, and it is conservative in the direction that matters: claiming a name is a
+                // macro because a `#if` *might* have defined it poisons every use downstream, while an `#undef` that
+                // might have run is the direction that keeps a name out of the table.
                 //
                 // Measured on a production project's precompiled header, which takes the SDK's `min`/`max` away
-                // inside `#if defined(_WIN32)` — `_WIN32` comes from the compile command, and this walk
-                // has no condition evaluator at all. Skipping the guarded `#undef` kept `min` defined, the cook
-                // expanded `std::min(a, b)` into `std::((( a ) < ( b )) ? ( a ) : ( b ))`, and the file was
-                // reported as *expected `;` after expression* on a line a compiler accepts. See
-                // `tests/undef_of_an_included_macro.rs`.
-                let is_a_definition = fact.kind.is_definition();
-                if is_a_definition
-                    && !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
-                {
-                    continue;
-                }
-                // **The first fact this walk meets for a name is the last one written**, so a name is *decided* by
-                // it — and an `#undef` decides that the name is not a macro where the closure ends.
-                //
-                // Skipping the `#undef` before this point is what made a whole file a syntax error: a
-                // Windows-shaped precompiled header includes the SDK's `min`/`max` and then `#undef`s them (the
-                // usual way to make `std::min` writable), and the earlier definition from a deeper header was kept
-                // because the `#undef` was filtered out here. The cook then expanded `std::min(a, b)` at the use
-                // into `std::((( a ) < ( b )) ? ( a ) : ( b ))` — a `::` followed by a parenthesis — and the file
-                // reported *expected `;` after expression* on a line a compiler accepts. Witnesses:
-                // `tests/undef_of_an_included_macro.rs`.
-                if !chosen.insert(fact.name.to_string()) {
-                    continue;
-                }
-                if !fact.kind.is_definition() {
-                    continue;
-                }
-                let Some(range) = fact.body_range else {
-                    continue;
-                };
-                if !texts.contains_key(&key) {
-                    let Some(text) = self.files.read(file) else {
-                        continue;
-                    };
-                    texts.insert(key.clone(), text);
-                }
-                let Some(text) = texts.get(&key) else {
+                // inside `#if defined(_WIN32)`: keeping `min` defined expanded `std::min(a, b)` into
+                // `std::((( a ) < ( b )) ? ( a ) : ( b ))` and reported *expected `;` after expression* on a line a
+                // compiler accepts. See `tests/undef_of_an_included_macro.rs`.
+                crate::Visibility::Unknown => !is_a_definition,
+            };
+            if !taken {
+                continue;
+            }
+            let place = (*from, fact.name.to_string());
+            if !is_a_definition {
+                // **An `#undef` in force takes the name away from that offset on** — in the table the next condition
+                // reads, and in the timeline the renderer is given.
+                table.undefine(&fact.name, *from);
+                decisions.insert(place, (fact.function_like, fact.body, None, None));
+                continue;
+            }
+            let Some(range) = fact.body_range else {
+                // **A `#define` with no replacement list is a definition all the same.** `#define GUARD` turns the
+                // name into a macro that expands to nothing, and `#if defined(GUARD)` must hear yes; the old walk
+                // left it out entirely, so an empty definition was invisible to every later condition.
+                parsed.define_in(&mut table, &fact.name, None, "", *from);
+                decisions.insert(
+                    place,
+                    (fact.function_like, fact.body, Some(String::new()), None),
+                );
+                continue;
+            };
+            if !texts.contains_key(&key) {
+                let Some(text) = self.files.read(file) else {
                     continue;
                 };
-                let Some(body) = text.get(range.start_offset..range.start_offset + range.length)
-                else {
-                    continue;
-                };
-                // A function-like macro is substituted by parameter, and the list is the text between the name and the
-                // replacement list — the one piece a fact does not carry and the source does.
-                let parameters = fact.function_like.then(|| {
-                    text.get(fact.range.start_offset + fact.range.length..range.start_offset)
-                        .map(str::trim)
-                        .unwrap_or("()")
-                });
-                entries.push(cpp_parser::IncludedMacro::defined_with_body_and_parameters(
-                    0,
-                    &fact.name,
+                texts.insert(key.clone(), text);
+            }
+            let Some(text) = texts.get(&key) else {
+                continue;
+            };
+            let Some(body) = text.get(range.start_offset..range.start_offset + range.length) else {
+                continue;
+            };
+            // A function-like macro is substituted by parameter, and the list is the text between the name and the
+            // replacement list — the one piece a fact does not carry and the source does.
+            let parameters = fact.function_like.then(|| {
+                text.get(fact.range.start_offset + fact.range.length..range.start_offset)
+                    .map(str::trim)
+                    .unwrap_or("()")
+                    .to_string()
+            });
+            // **The table the next condition reads** — the same parse the renderer's environment goes through, so a
+            // definition cannot say one thing to a `#if` and another to the stream.
+            parsed.define_in(&mut table, &fact.name, parameters.as_deref(), body, *from);
+            decisions.insert(
+                place,
+                (
                     fact.function_like,
                     fact.body,
-                    Some(body),
+                    Some(body.to_string()),
                     parameters,
-                ));
-            }
+                ),
+            );
+        }
+        let mut entries: Vec<cpp_parser::IncludedMacro> = decisions
+            .into_iter()
+            .map(
+                |((from, name), (function_like, shape, body, parameters))| match body {
+                    Some(body) => cpp_parser::IncludedMacro::defined_with_body_and_parameters(
+                        from,
+                        &name,
+                        function_like,
+                        shape,
+                        Some(&body),
+                        parameters.as_deref(),
+                    ),
+                    // An `#undef`: the name is not a macro from `from` on, and the entry says so — the table the
+                    // renderer builds applies it with the same offset the definitions carry.
+                    None => cpp_parser::IncludedMacro {
+                        from_offset: from,
+                        name: std::sync::Arc::from(name.as_str()),
+                        definition: None,
+                        body_text: None,
+                        parameters: None,
+                    },
+                },
+            )
+            .collect();
+        entries.sort_by(|left, right| {
+            left.from_offset
+                .cmp(&right.from_offset)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        if crate::probes::cooking() {
+            Self::trace_the_composed_environment(
+                path,
+                &order,
+                &entries,
+                &table,
+                &["JSON_TRY", "JSON_CATCH", "JSON_NOEXCEPTION", "_CPPUNWIND"],
+            );
         }
         Some(cpp_parser::MacroEnvironment::from_included_macros(entries))
+    }
+
+    /// **A trace of one composed environment** — the files it walked, the decisions it made, and the names a probe
+    /// asked about, so a rendering that still holds a macro call can be told from one that never saw the `#define`.
+    fn trace_the_composed_environment(
+        path: &Path,
+        order: &[(usize, PathBuf, usize)],
+        entries: &[cpp_parser::IncludedMacro],
+        table: &crate::preprocess::macros::MacroTable,
+        watched: &[&str],
+    ) {
+        eprintln!(
+            "[environment] {}: {} file(s) in the closure, {} decision(s), {} in the table",
+            path.display(),
+            order.len(),
+            entries.len(),
+            table.len()
+        );
+        for name in watched {
+            let own: Vec<String> = entries
+                .iter()
+                .filter(|entry| entry.name.as_ref() == *name)
+                .map(|entry| {
+                    format!(
+                        "{} at {}",
+                        if entry.definition.is_some() {
+                            "defined"
+                        } else {
+                            "undefined"
+                        },
+                        entry.from_offset
+                    )
+                })
+                .collect();
+            eprintln!(
+                "[environment] {name}: in the table {}, in the timeline {own:?}",
+                table.get(name).is_some()
+            );
+        }
     }
 
     /// **The file's own timeline, walked from what this store holds** — the second pass's fallback arm needs one.
@@ -3620,4 +3798,70 @@ fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
         bytes.push(0);
     }
     crate::cache::fnv1a64(&bytes)
+}
+
+/// **Was the region a fact was written in compiled?** — asked of the conditions the summary stored, against the
+/// table the walk has built so far.
+///
+/// The rule is [`crate::SummaryGuards::visibility_of`]'s — every enclosing region must be taken, one that is not
+/// makes the answer `Inactive`, and one that cannot be decided makes it `Unknown` — with one difference: the answer
+/// for a region's branch is **remembered**, because this walk stands at one position (the fact) rather than at the
+/// condition's own offset.
+///
+/// # Why the answer is remembered rather than recomputed
+///
+/// A condition can name a macro its own body defines, and the canonical shape is
+///
+/// ```cpp
+/// #ifndef _STD_BEGIN
+/// #define _STD_BEGIN namespace std {
+/// #endif
+/// ```
+///
+/// Recomputing `#ifndef _STD_BEGIN` at the second fact of that body would find the name defined *by its own
+/// region* and answer that the region is not taken — so every fact after the first would be dropped. Remembering
+/// the first answer is what makes the region decide once, which is what the preprocessor does: the condition is
+/// read where it is written, and the body does not change it.
+///
+/// The key is `(region, branch)` rather than the region: an `#if`/`#elif` pair is one region with two bodies, and
+/// the two branches are different questions with different answers.
+fn a_facts_visibility(
+    guards: &crate::summary::SummaryGuards,
+    fact: &crate::summary::MacroFact,
+    table: &crate::preprocess::macros::MacroTable,
+    answers: &mut std::collections::HashMap<(u32, usize), Option<bool>>,
+) -> crate::Visibility {
+    let crate::summary::FactGuard::Region(innermost) = fact.guard else {
+        return crate::Visibility::Active;
+    };
+
+    let mut unknown = false;
+    for at in guards.conditions_of(innermost) {
+        // **The branch the fact sits in**, which is what makes an `#elif` body a different question from the `#if`
+        // body of the same region.
+        let Some(region) = guards.region_at(at.region, fact.range.start_offset) else {
+            unknown = true;
+            continue;
+        };
+        let key = (at.region, region.active_branch);
+        let answer = match answers.get(&key) {
+            Some(answer) => *answer,
+            None => {
+                let answer = region.visibility(table);
+                answers.insert(key, answer);
+                answer
+            }
+        };
+        match answer {
+            Some(true) => {}
+            Some(false) => return crate::Visibility::Inactive,
+            None => unknown = true,
+        }
+    }
+
+    if unknown {
+        crate::Visibility::Unknown
+    } else {
+        crate::Visibility::Active
+    }
 }

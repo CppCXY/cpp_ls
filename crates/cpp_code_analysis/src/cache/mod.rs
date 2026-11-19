@@ -350,7 +350,22 @@ use std::path::{Path, PathBuf};
 /// left both names defined, and `std::min(a, b)` was cooked into `std::((( a ) < ( b )) ? ( a ) : ( b ))`. A
 /// rendering made before this holds the expansion, and it is keyed by the environment it was made from — which was
 /// itself the wrong one, so no other change reaches it. See `tests/undef_of_an_included_macro.rs`.
-pub const FORMAT_VERSION: u32 = 37;
+/// # Why this moved to 38
+///
+/// **A composed environment is a timeline, and it evaluates the conditionals it stored.** Two changes, both of which
+/// change what a rendering says:
+///
+/// * a `#define` inside an `#if` is decided from the stored question instead of being ignored, so a header whose
+///   macros live behind a guard (`JSON_TRY`, `JSON_CATCH` in `nlohmann/detail/macro_scope.hpp`) now expands instead
+///   of being left as text;
+/// * the environment carries each included file's contribution **at the offset of the `#include` that reached it**,
+///   and an `#undef` is a decision like a definition — so `json.hpp`'s `detail/macro_unscope.hpp` no longer takes
+///   `JSON_TRY` away from the whole file, only from the point it is included at.
+///
+/// Measured on `nlohmann/json.hpp`: the cooked reading went from 6 parse errors and **151** `ClassBody` children to
+/// **0** errors and 242 members of `basic_json`, `operator[]` among them — the members after the first `at` had been
+/// filed without their class scope, which is what made `json["data"].` unanswerable.
+pub const FORMAT_VERSION: u32 = 38;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
