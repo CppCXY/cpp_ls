@@ -84,9 +84,14 @@ fn a_dead_branch_is_a_span_and_an_unread_file_says_nothing() {
 
     session.index_everything();
     session.cook(&path);
-    let spans = session
+    let answer = session
         .inactive_regions(&path)
         .expect("the cooked file answers");
+    assert!(
+        answer.is_exact(),
+        "every branch in this fixture is decided by a macro the file defines: {answer:?}"
+    );
+    let spans = &answer.spans;
     // **One span, because there is no live code between the two dead branches**: `merge_span` joins pieces whose
     // ends touch, and what sits between them is the first branch's `#endif`, a blank line and the second branch's
     // `#if` — a directive that opens a branch nobody takes is part of the span, so the tail is one grey range.
@@ -110,7 +115,7 @@ fn a_dead_branch_is_a_span_and_an_unread_file_says_nothing() {
     assert!(!covered(live), "the live branch is not greyed out");
     assert!(covered(dead), "the dead branch is");
     assert!(covered(also_dead), "and so is the second one");
-    for span in &spans {
+    for span in spans {
         assert!(
             span.end_offset() <= A_DEAD_BRANCH.len(),
             "a span is inside the file it describes: {span:?}"
@@ -129,7 +134,10 @@ fn a_file_with_no_directives_has_no_regions() {
     let path = root.join("plain.cpp");
     session.index_everything();
     session.cook(&path);
-    assert_eq!(session.inactive_regions(&path), Some(Vec::new()));
+    assert_eq!(
+        session.inactive_regions(&path).map(|answer| answer.spans),
+        Some(Vec::new())
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -156,7 +164,8 @@ int dead;
     session.cook(&path);
     let spans = session
         .inactive_regions(&path)
-        .expect("the cooked file answers");
+        .expect("the cooked file answers")
+        .spans;
     assert_eq!(spans.len(), 1, "one dead branch, one span: {spans:?}");
     let include = source.find("#include").expect("the include line");
     assert!(
@@ -191,6 +200,40 @@ fn a_warm_start_answers_the_spans_the_record_carries() {
     assert_eq!(
         from_the_record, from_the_render,
         "a warm start must not answer different spans than a cold one"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A branch decided by an assumed-undefined name is a guess, and the answer says so.**
+///
+/// This is the gate the plan puts before the protocol: `#if SOMETHING` with no definition anywhere is C's rule that
+/// an undefined identifier is `0`, and the branch is chosen **by a guess about the configuration**. A client that
+/// painted the resulting span grey would be drawing over code the user's real build may compile, so the answer
+/// carries the count and `is_exact()` answers "may I paint this?".
+#[test]
+fn a_branch_decided_by_an_undefined_name_is_not_exact() {
+    let source = "\
+#if NOT_DEFINED_ANYWHERE
+int guessed;
+#else
+int live;
+#endif
+";
+    let (mut session, root) = session_of(&[("a.cpp", source)]);
+    let path = root.join("a.cpp");
+    session.index_everything();
+    session.cook(&path);
+    let answer = session
+        .inactive_regions(&path)
+        .expect("the cooked file answers");
+    assert!(
+        answer.assumed_undefined >= 1,
+        "the branch was chosen by the undefined-is-zero rule: {answer:?}"
+    );
+    assert!(!answer.is_exact(), "so the spans must not be painted");
+    assert!(
+        !answer.spans.is_empty(),
+        "and there is still a span to report: {answer:?}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

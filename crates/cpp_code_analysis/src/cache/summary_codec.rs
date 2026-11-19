@@ -1763,7 +1763,10 @@ const COOKED_MAGIC: &[u8; 8] = b"CPPLSCKR";
 /// in file coordinates. They cannot be derived from a rendering after the fact (a rendering has no dead text, and "no
 /// token" is indistinguishable from a comment), so a warm start that dropped them would answer "nothing is greyed
 /// out" for a file full of dead branches.
-const COOKED_VERSION: u32 = 3;
+///
+/// 4: and **how many of those branches were decided by C's undefined-is-zero rule** (`assumed_undefined`). A consumer
+/// that paints the spans must not paint a guess, and a warm start that lost the count would paint one silently.
+const COOKED_VERSION: u32 = 4;
 
 /// **The record has its rendering with it** — see [`COOKED_VERSION`].
 const COOKED_HAS_A_RENDERING: u8 = 1;
@@ -1806,6 +1809,8 @@ pub fn encode_the_cooked_record(
         for span in &rendered.inactive {
             put_range(&mut out, *span);
         }
+        // And **how many of them were a guess** — the number that decides whether a client may paint them.
+        put_u32(&mut out, rendered.assumed_undefined as u32);
     }
     out
 }
@@ -1931,10 +1936,14 @@ pub fn decode_the_cooked_record(
     for _ in 0..reader.count()? {
         inactive.push(reader.range()?);
     }
+    let assumed_undefined = reader.u32()? as usize;
     Ok((
         reading,
         Some(crate::preprocess::cooked::RenderedCooked::from_parts(
-            text, spans, inactive,
+            text,
+            spans,
+            inactive,
+            assumed_undefined,
         )),
     ))
 }
@@ -2185,6 +2194,8 @@ fn a_cooked_record_with_its_rendering_round_trips() {
         ],
         // **And the regions this configuration did not compile**, which no rendering text can answer for.
         vec![SourceRange::new(7, 9), SourceRange::new(20, 4)],
+        // With the count of branches that were a guess, so a warm start paints the same answer a cold one does.
+        3,
     );
 
     let bytes = encode_the_cooked_record(&reading, Some(&rendered));
@@ -2200,6 +2211,10 @@ fn a_cooked_record_with_its_rendering_round_trips() {
     assert_eq!(
         rendering.inactive, rendered.inactive,
         "the inactive regions are the half a rendering cannot derive, so a warm start must get them back"
+    );
+    assert_eq!(
+        rendering.assumed_undefined, rendered.assumed_undefined,
+        "and so is the count that says whether the spans were a guess"
     );
 
     // **And the record without one says so**, which is what a program read writes: facts, no per-file spans.

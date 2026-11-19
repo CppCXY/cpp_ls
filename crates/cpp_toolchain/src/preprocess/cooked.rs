@@ -221,6 +221,7 @@ impl CookedStream {
             text,
             spans,
             inactive: self.inactive.clone(),
+            assumed_undefined: self.assumed_undefined,
             written_order: std::sync::OnceLock::new(),
         }
     }
@@ -284,6 +285,13 @@ pub struct RenderedCooked {
     /// Empty for a file with no conditionals, and empty for a rendering read back from a record written before this
     /// field existed; the record's version is what tells those apart (`COOKED_VERSION`).
     pub inactive: Vec<SourceRange>,
+    /// **How many branches were decided by C's "an undefined identifier is `0`" rule**, rather than by a definition
+    /// the walk held — copied from [`CookedStream::assumed_undefined`].
+    ///
+    /// The one number a consumer that *paints* [`RenderedCooked::inactive`] must respect: a branch nobody defined a
+    /// name for is a branch this configuration **guessed** about, and a guess painted grey is the visible wrongness
+    /// this feature must not have. Zero means every span was decided from a definition the walk actually held.
+    pub assumed_undefined: usize,
     /// **The reverse direction**, `(written start, cooked start)`, sorted by the file offset — built on the first
     /// question that needs it and never invalidated, because a rendering does not change. See
     /// [`RenderedCooked::the_rendering_offset_of`].
@@ -308,11 +316,17 @@ impl RenderedCooked {
     ///
     /// `inactive` comes from the same record: a rendering has no dead text in it, so the spans cannot be derived from
     /// `text` after the fact ("no token" and "a comment" are indistinguishable), which is why the record carries them.
-    pub fn from_parts(text: String, spans: Vec<RenderedSpan>, inactive: Vec<SourceRange>) -> Self {
+    pub fn from_parts(
+        text: String,
+        spans: Vec<RenderedSpan>,
+        inactive: Vec<SourceRange>,
+        assumed_undefined: usize,
+    ) -> Self {
         RenderedCooked {
             text,
             spans,
             inactive,
+            assumed_undefined,
             written_order: std::sync::OnceLock::new(),
         }
     }

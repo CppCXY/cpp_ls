@@ -6,6 +6,32 @@
 
 use super::*;
 
+/// **The regions of a file this configuration does not compile**, with the one fact a caller that paints them must
+/// respect — the answer to "may I paint these?" in one value.
+///
+/// The spans are the preprocessor's own by-product: one range per dead branch, in the file's coordinates, directive
+/// lines included on purpose so one dead branch is one range. `assumed_undefined` is what says whether the
+/// configuration *knew* when it decided them — a branch nobody defined a name for is a branch that was **guessed**,
+/// and a guess painted grey is the failure this feature must not have (`docs/inactive-regions.md` §8).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InactiveRegions {
+    /// The dead regions, in source order, in the file's own coordinates.
+    pub spans: Vec<cpp_parser::SourceRange>,
+    /// Branches decided by C's "an undefined identifier is `0`" rule rather than by a definition the walk held.
+    ///
+    /// Zero means every span was decided from a definition the cook actually had. Non-zero means the project's
+    /// configuration is incomplete — no compile database, an include nobody resolved — and a span may cover code the
+    /// user's real build compiles.
+    pub assumed_undefined: usize,
+}
+
+impl InactiveRegions {
+    /// **May this answer be painted?** — every span was decided from a definition the configuration had.
+    pub fn is_exact(&self) -> bool {
+        self.assumed_undefined == 0
+    }
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// **The file's own tokens — the reading that means nothing and is for positions.**
     ///
@@ -196,6 +222,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **The regions of the file this configuration does not compile**, in the file's own coordinates — what an
     /// editor greys out.
     ///
+    ///
     /// Answered from the file's **rendering** ([`Session::known_rendering_of`], which also reads a persisted record
     /// back), because the spans are a by-product of the walk that decided the branches: they are offsets into the
     /// file's own text, so a consumer turns one into a line/column range with the file's own line index and no
@@ -203,9 +230,9 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` when no rendering is read yet: the call asks for one, and a later request answers. That is the same
     /// "not now, next time" contract [`Session::view`] documents, and it is why the caller must be the pump's idle
-    /// drain or a request that can re-ask. **A file with no directives answers `Some(vec![])`** — "nothing is
+    /// drain or a request that can re-ask. **A file with no directives answers `Some(empty)`** — "nothing is
     /// inactive" is an answer, and `None` is reserved for "nobody has read this yet".
-    pub fn inactive_regions(&self, path: impl AsRef<Path>) -> Option<Vec<cpp_parser::SourceRange>> {
+    pub fn inactive_regions(&self, path: impl AsRef<Path>) -> Option<InactiveRegions> {
         // The index's spelling, for the reason `view` gives: a client sends `C:\…`, the resolver wrote `c:/…`, and a
         // lookup by the caller's spelling finds nothing.
         let requested = path.as_ref();
@@ -217,7 +244,10 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| requested.to_path_buf());
         let file = self.vfs.held(&key)?;
         if let Some(rendered) = self.known_rendering_of(&file.path, &file.text) {
-            return Some(rendered.inactive.clone());
+            return Some(InactiveRegions {
+                spans: rendered.inactive.clone(),
+                assumed_undefined: rendered.assumed_undefined,
+            });
         }
         self.ask_for_a_rendering(&file.path, &file.text);
         None

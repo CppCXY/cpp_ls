@@ -753,8 +753,8 @@ pub fn the_grep(opened: &Opened, pattern: &str, limit: usize) -> Result<Answer, 
 /// a by-product of the branch decisions, and no summary can answer for them. Every range is in the file's own
 /// coordinates, which is why this prints `line:column` from the file's text and not from any rendering offset.
 pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
-    let mut spans = match opened.session.inactive_regions(&opened.file) {
-        Some(spans) => spans,
+    let answer = match opened.session.inactive_regions(&opened.file) {
+        Some(answer) => answer,
         None => {
             let _ = opened.session.cook(&opened.file);
             opened
@@ -763,13 +763,22 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
                 .ok_or_else(|| format!("{} could not be cooked", opened.file.display()))?
         }
     };
+    let exact = answer.is_exact();
+    let assumed = answer.assumed_undefined;
+    let mut spans = answer.spans;
     spans.sort_by_key(|span| span.start_offset);
 
     let text = opened.text.as_str();
     let mut report = format!(
-        "{} inactive region(s) in {}\n",
+        "{} inactive region(s) in {}{}\n",
         spans.len(),
-        opened.file.display()
+        opened.file.display(),
+        match exact {
+            true => String::new(),
+            false => format!(
+                " — **{assumed} branch(es) were decided by an assumed-undefined name**, so these spans are a guess and must not be painted"
+            ),
+        }
     );
     let mut regions = Vec::with_capacity(spans.len());
     for span in &spans {
@@ -794,6 +803,8 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
     }
     let value = json!({
         "file": opened.file.display().to_string(),
+        "assumed_undefined": assumed,
+        "exact": exact,
         "regions": regions,
     });
     Ok(Answer::new(report, value))
