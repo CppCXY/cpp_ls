@@ -2764,3 +2764,25 @@ const std::vector<int>&  v[0]   int&    →  const int&
 **Still open beside it** is the argument-conversion half: `json["data"]` answers `basic_json&` because every
 `operator[]` of `basic_json` returns `reference`, and a class whose overloads return *different* types needs a choice by
 converting the argument, which no layer does yet.
+
+**Fixed in `70c6785c`.** Both a member call and a subscript now rank the declarations by converting the arguments, using
+the resolver `std::format`'s overloads already go through. The missing piece was the candidate list: `member_candidates`
+asks the index for every declaration of one name **in one class scope** (one posting query — overloads live in one scope
+by the language's rule, so it costs what the singular lookup costs), instead of a member-list walk of every base.
+
+```text
+s.get(0)    int   →  int
+s.get("z")  int   →  double
+s[0]        int&  →  int&
+s["z"]      int&  →  double&
+```
+
+`overload_by_arguments.rs` pins the four and fails without the change. Nested in the operator path it is asked **before**
+the arity choice, so the member list that choice builds is not built at all when the arguments decided; in the member-call
+path the overload **count** is asked before the argument types, so a name with one declaration costs one posting query.
+Measured: a warm diagnostics pull of `LuaParser/src/File/LuaSource.cpp` is **215 ms**, against **376 ms** for that file's
+`assign-type-check` alone in the round that measured the member list.
+
+**What is still not ranked**, and it is the next step rather than a defect: a candidate whose parameter needs a
+**user-defined conversion** is `Unranked` (a check must not invent one), and a template candidate is deduced rather than
+ranked. Both are documented at the top of `sema/overload.rs`.
