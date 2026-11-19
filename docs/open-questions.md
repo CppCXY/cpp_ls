@@ -2681,3 +2681,29 @@ the first inside MSVC's `string.h` C++ overloads (`template < size_t _Size > inl
 ( & _Destination ) [ _Size ], … ) throw ( ) { … }`), and the rest a cascade after it that reaches `lua.h`'s
 `extern void *(lua_touserdata) (…)` declarations. The individual shapes parse on their own (measured with
 `cpp_dump`), so the next instrument is the stream's first error's surroundings, not the shapes.
+### The program reading of a C file still has 15 parse errors, and they are a `>=`
+
+After the C seed (above) removed the C++ blocks from Lua's `ldebug.c` program stream, the stream still reports **15**
+`expected primary expression` errors, and the text at the first one is
+
+```text
+( ( s ) -> shrlen > = 0 )
+```
+
+— `lobject.h:420`'s `#define strisshr(ts) ((ts)->shrlen >= 0)`, with the `>=` split into two tokens **and** a space put
+between them. The lexer splits `>>`, `>=` and `>>=` on purpose (`CppLexer::push`, so `vector<vector<int>>` can be put
+back together by byte adjacency), and the renderer's rule is that tokens that touched stay touching; something in the
+**unit walk's** body reconstruction loses both the adjacency and the body's own whitespace, because every token of that
+expansion is space-separated (`( ( s ) ->` has spaces the source does not).
+
+Measured, to keep the next round narrow:
+
+```text
+hermetic single-file cook (a new test)    ((s)->shrlen>=0)        correct
+two-file cook through inspect              ((s)->shrlen>=0)        correct
+the unit walk's stream of ldebug.c         ( ( s ) -> shrlen > = 0 )
+```
+
+So the renderer and the cook are right, and the walk's `MacroBody` — the one built from `bodied` facts and replayed by
+`UnitDefinitions` — is where the spelling is lost. The artifact is `target/lua-render4/ldebug.c.parsed`, first error at
+`52862..52863`; `crates/cpp_parser/tests/stream_errors_probe.rs` (`CPPLS_STREAM=…`) prints the offsets and the context.
