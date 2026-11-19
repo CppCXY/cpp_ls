@@ -2626,3 +2626,24 @@ Two guards, both measured by the fixture in `crates/cpp_ls/tests/reported_hover.
   a declaration's specifiers are code, and no word of a comment can be part of a type;
 * what survives must still be a **type**: if removing the macro's word leaves only specifier keywords
   (`constexpr bool` minus `bool` is `constexpr`), the correction answers nothing and the fact's own spelling stands.
+### The two open items beside `is_string`, closed in the same round
+
+**The member list's doubled `typename`.** The alias pass expanded a name into the spelling its declaration wrote —
+`using const_iterator = typename _Mybase::const_iterator;` — and then replaced *that* spelling's own tail on the next
+pass, so `std::map`'s `find` returned `typename _Tree<…>::typename _Tree<…>::typename _Mybase::const_iterator`, a
+spelling no compiler reads. `substituted_spelling_from` now keeps a word that stands after `::` (it is the name the
+class on the left declares), while the qualifier in front of it is still substituted. Measured: 0 spellings containing
+`::typename` in `members --class 'std::map<std::string, std::string, std::less<>>'`, and the same `find` reads
+`typename _Tree<_Tmap_traits<…>>::const_iterator`.
+
+**The card's `_Ty2`.** `members_of("std::pair<const std::string, std::string>")` answers `second: std::string`, and the
+card still said `_Ty2`: `the_class_after_the_operator` reduces the reached handle to a **bare class name**, and the
+hover asked that class first, so it was reading the member list of the class template. The walk is now
+`the_type_after_the_operator` (the same four hops, returning the reached *type*), and `member_markdown` asks the
+object's own type first and the arrow's class second. Measured: `std::string second` / "a variable of type
+`std::string`", where it said `_Ty2` before, and the smart-pointer arrow test still passes.
+
+**What is left** is overload selection for a subscript that really has several different answers: `json["data"]`
+answers `basic_json&` because every `operator[]` of `basic_json` returns `reference`, and the list's first member is
+taken once `member_fact` refuses with `Ambiguous`. A class whose overloads return *different* types needs a choice by
+argument conversion, which is the next step for the type layer.
