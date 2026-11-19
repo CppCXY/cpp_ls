@@ -214,6 +214,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         let empty_brace_pair = index > 0
             && gap.comments.is_empty()
             && !split[index]
+            // **Only a reflow joins an author's `{` newline `}` into `{}`**: with `ColumnLimit: 0` clang-format leaves
+            // the break (the corpus, formatted with that setting, keeps every empty body split).
+            && style.count(StyleOption::ColumnLimit) > 0
             && stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
             && stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
         // **Inside a `// clang-format off` span the gap is the source's**, byte for byte: no re-spacing, no re-indenting.
@@ -1152,7 +1155,7 @@ fn wrapping_lines(
                 crate::roles::BraceKind::Function | crate::roles::BraceKind::Lambda
             ) && style.text(StyleOption::AllowShortFunctionsOnASingleLine)
                 == "None"
-                && reflows;
+                && style.count(StyleOption::ColumnLimit) > 0;
             if a_block
                 || never_one_line
                 || (wraps && crate::wrapping::split_empty_body(style, kind))
@@ -1167,11 +1170,14 @@ fn wrapping_lines(
             } else {
                 // **`{}` on one line, even under `Allman`**: `AlignAnalyzer::AlignAnalyzer() {}` is the oracle's
                 // answer, and the author's own break before the brace is joined when the file is being reflowed.
+                // With `ColumnLimit: 0` nothing is reflowed — clang-format leaves an author's `{` newline `}` alone
+                // (measured: the corpus, formatted with that setting, keeps every empty body split, and joining them
+                // was 4 524 spacing-only lines).
                 wrapped[index] = false;
                 if reflows {
                     attached[index] = true;
+                    attached[index + 1] = true;
                 }
-                attached[index + 1] = true;
             }
         } else if wraps {
             wrapped[index] = true;

@@ -69,7 +69,7 @@ one line is broken by our line structure. The 6 323 spacing-only lines are that 
 | `UseTab: ForIndentation` | 4 / 29 | 3 954 / 6 850 | 11 / 29 match, **231** lines |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 6 331 / 8 657 | 15 / 29 match, **132** lines |
 | `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 4 040 / 6 906 | 17 / 29 match, 90 lines |
-| `ColumnLimit: 0` | **6 / 29** | 4 433 / 6 506 | 10 / 29 match, 4 524 lines |
+| `ColumnLimit: 0` | **11 / 29** | **609** / 6 510 | **25 / 29 match, 6 lines** |
 
 What each row says, in the order the fixes will come:
 

@@ -15,7 +15,12 @@ use cpp_formatter::config::Style;
 /// Format `input` with this project's style and compare against the oracle's answer, then re-format the answer.
 #[track_caller]
 fn check(input: &str, expected: &str) {
-    let style = style();
+    check_with(style(), input, expected);
+}
+
+/// The same, with the style spelled by the case — for the answers that depend on an option.
+#[track_caller]
+fn check_with(style: Style, input: &str, expected: &str) {
     let path = std::path::Path::new("snippet.cpp");
     let actual = cpp_formatter::format_file(path, input, &style);
     let actual = actual.trim_end_matches('\n');
@@ -83,4 +88,15 @@ fn a_block_holding_a_comment_keeps_its_lines() {
         formatted.contains("{\n  /* nothing */\n}"),
         "a comment is not an empty block: {formatted:?}"
     );
+}
+
+/// **`ColumnLimit: 0` is "do not reflow"**: an empty body the author wrote as `{` newline `}` keeps that shape, where
+/// an 80-column style joins it into `{}`. Measured on the corpus: clang-format 23.1.5 keeps every empty body split in
+/// text it formats with that setting, and joining them was thousands of spacing-only lines.
+#[test]
+fn without_a_column_limit_an_empty_body_keeps_the_authors_lines() {
+    let mut unlimited = style();
+    unlimited.set_from_text("ColumnLimit", "0");
+    check_with(unlimited.clone(), "void f() {\n}\n", "void f() {\n}\n");
+    check_with(unlimited, "void f() {}\n", "void f() {}\n");
 }
