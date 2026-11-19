@@ -2715,3 +2715,33 @@ produced; text the file wrote keeps the range test. Measured on the same stream:
 expansion reads `(((s )->shrlen >= 0) ? …)`. `crates/cpp_code_analysis/tests/program_stream_separators.rs` pins the
 split operators (`>=`, `<=`, `>>`) and a clean parse, and fails without the change. `FORMAT_VERSION` is 40 so a stored
 program reading made with the old spacing is not served.
+
+## An alias of a template: its arguments reach the members
+
+`std::string` is `using string = basic_string<char, char_traits<char>, allocator<char>>`, and two layers stopped at the
+alias, both because the *use* writes no `<…>`:
+
+* `substituted_members` asked `split_template_arguments("std::string")` — `None` — and returned the list untouched, so
+  `members_of("std::string")` answered `value_type: _Elem` where `members_of("std::basic_string<char>")` answered
+  `char`;
+* `a_members_answer_as_a_type` asked `template_parameters_for("std::string")` — `[]` — so `reference` → `value_type&` →
+  `_Elem` → `_Elem&`.
+
+Both now resolve the alias first (its own `type_of`), and the target is **qualified through the index**, because the
+alias writes it unqualified: with the bare `basic_string` a member question found no class and the answer was the
+alias's *name*, `reference` — no type either.
+
+Measured through the server, before → after:
+
+```text
+std::string&             s[0]   _Elem&  →  char&
+const std::string&       s[0]   _Elem&  →  char&      (not `const char&` yet)
+std::vector<int>&        v[0]   int&    →  int&
+const std::vector<int>&  v[0]   int&    →  int&       (not `const int&` yet)
+```
+
+**What is left is the qualifier half of the overload choice**: a `const` object must pick `const_reference operator[]
+const`, and the type layer still takes the first member the list has. It needs the object's constness threaded into
+`operator_returns_of_with_arguments`/`a_members_answer_as_a_type` (the hover already does this filter for the card, via
+`Session::the_object_is_const`), and it is the same shape as the argument-conversion choice recorded above: the member
+list has both declarations and something has to decide between them.
