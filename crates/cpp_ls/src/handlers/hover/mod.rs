@@ -1880,8 +1880,18 @@ fn declaration_markdown(
     //
     // Measured on a CUDA project: `#define FLAT __inline__ __attribute__((always_inline)) __attribute__((cold))` was
     // the declaration's whole meaning and the card showed `int f_flat(int x)`.
-    let annotations =
-        session.the_attributes_before_a_declaration(&found.file, fact.range.start_offset);
+    // **A local has no annotations of its own here, and the walk would take its enclosing declaration's.** The walk
+    // starts at the *declaration* the fact's offset is in, which for a parameter or a local is the function — so the
+    // macro before the function became the parameter's annotation: measured on Lua 5.5.0's `ldebug.c`, the parameter
+    // `level` of `LUA_API int lua_getstack (lua_State *L, int level, lua_Debug *ar)` was drawn `extern int level`
+    // (`LUA_API` is `#define LUA_API extern`), and the sentence beside it correctly said "a variable of type `int`,
+    // declared in a function body". A *declaration* in a function body can carry an annotation; a parameter's
+    // specifiers are its own and the sentence already names the body.
+    let annotations = if fact.local {
+        Vec::new()
+    } else {
+        session.the_attributes_before_a_declaration(&found.file, fact.range.start_offset)
+    };
     let (attributes, specifiers) = the_annotations_as_the_card_shows_them(&annotations);
     let node = session.the_declaration_node(&found.file, fact.range.start_offset);
     // **The qualifiers a declaration keeps in its own specifier sequence.** They are not in the fact: `type_of` is a

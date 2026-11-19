@@ -756,3 +756,61 @@ struct User {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A parameter's card is the parameter's, not its function's.** Reported from an editor on Lua 5.5.0's `ldebug.c`:
+/// the parameter `level` of `LUA_API int lua_getstack (lua_State *L, int level, lua_Debug *ar)` was drawn
+/// `extern int level` — `LUA_API` is `#define LUA_API extern`, and it belongs to the function.
+///
+/// The attributes walk starts at the *declaration* the fact's offset is in, which for a parameter is the function, so
+/// the macro before the function became the parameter's annotation. The sentence beside it was right all along ("a
+/// variable of type `int`, declared in a function body"), which is what makes the block the thing to assert on.
+#[test]
+fn a_parameters_card_is_not_its_functions_annotation() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-parameter-annotations");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.c");
+    let source = "\
+#define LUA_API extern
+
+LUA_API int lua_getstack (void *L, int level, void *ar) {
+    return level;
+}
+";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("int level").expect("the parameter") + "int ".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a parameter has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("int level"),
+        "the card draws the parameter: {text}"
+    );
+    assert!(
+        !text.contains("extern"),
+        "and not the annotation of the function it belongs to: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
