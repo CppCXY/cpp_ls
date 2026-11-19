@@ -322,7 +322,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let text = self.files.read(&path)?;
         let text_hash = crate::cache::content_hash(&text);
-        let seed = MacroTable::from_marked(self.store.index().macros());
+        let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
 
         Some(CookingMaterials {
             path,
@@ -847,7 +847,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
         let unit = self.translation_unit_of(&path)?;
         let text = self.files.read(&path)?;
-        let seed = MacroTable::from_marked(self.store.index().macros());
+        let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
         let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();
         let view = unit.environment_of(&path)?;

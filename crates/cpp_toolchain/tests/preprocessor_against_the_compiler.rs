@@ -292,3 +292,41 @@ fn what_an_invocation_expands_to_is_what_the_compiler_says() {
         compiler.display()
     );
 }
+
+/// **A two-character operator in a macro body is still one operator after the cook.**
+///
+/// The lexer deliberately splits `>>`, `>=` and `>>=` into one-byte tokens (`CppLexer::push`) so the grammar can put
+/// `std::vector<std::vector<int>>` back together by byte adjacency, and the renderer's rule is that tokens that
+/// touched stay touching. A body's tokens come from the `#define`'s own text, so they touched — and a rendering that
+/// writes `> =` gives the parser two tokens it will not join: measured on Lua 5.5.0's `lobject.h`,
+/// `#define strisshr(ts) ((ts)->shrlen >= 0)` rendered as `( ( s ) -> shrlen > = 0 )` in the program reading of
+/// `ldebug.c`, which is where 15 `expected primary expression` errors came from.
+#[test]
+fn an_operator_in_a_macro_body_keeps_its_characters_together() {
+    let source = "\
+#define strisshr(ts) ((ts)->shrlen >= 0)
+#define below(a, b) ((a) <= (b))
+#define shift(a) ((a) >> 2)
+#define both(a) ((a) >>= 1)
+int f(struct S *s, int a) {
+    return strisshr(s) + below(a, 1) + shift(a) + both(a);
+}
+";
+    let rendered = our_answer(source);
+    println!("{rendered}");
+    for (together, apart) in [
+        (">=", "> ="),
+        ("<=", "< ="),
+        (">>", "> >"),
+        (">>=", "> > ="),
+    ] {
+        assert!(
+            rendered.contains(together),
+            "`{together}` is one operator and the rendering must spell it: {rendered}"
+        );
+        assert!(
+            !rendered.contains(apart),
+            "`{together}` was rendered as `{apart}`, which the parser cannot put back together: {rendered}"
+        );
+    }
+}

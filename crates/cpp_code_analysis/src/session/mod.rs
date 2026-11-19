@@ -101,8 +101,57 @@ use crate::summary::{FileSummary, OutlineSymbol, UnitReading};
 use crate::symbol::{Known, UnknownReason};
 use crate::{PathInterner, cache};
 
-/// How many files one drain **cooks**.
+/// **What the compiler predefines, for one file's language.**
 ///
+/// The toolchain's predefines are probed **once, with a C++ source** — `predefined.cpp`, and its `-dM` output carries
+/// `__cplusplus` and `_MSVC_LANG`. A `.c` file is not a C++ file, and every C/C++ split in a system header takes the
+/// C++ branch while its seed says otherwise: `#ifdef __cplusplus` around a declaration, and MSVC's
+/// `extern "C++" { template < size_t _Size > inline errno_t __cdecl strcat_s ( char ( & _Destination ) [ _Size ] … ) }`
+/// in `string.h`.
+///
+/// Measured on Lua 5.5.0 (`C:\…\lua_src\lua-5.5.0`, no compilation database, so the toolchain is discovered): the
+/// program reading of `ldebug.c` — a **C** file — contained that C++ block, and the parse reported **15**
+/// `expected primary expression` errors, the first inside it; the file's own cook, whose closure is the same, was
+/// clean once the seed answered for C.
+///
+/// The C++ standard's own rule is the one applied: a translation unit compiled as C has no `__cplusplus`, so a header
+/// that asks is told no. `_MSVC_LANG` goes with it — MSVC's equivalent question — and the `__cpp_*` feature macros
+/// stay: every header gates them on `__cplusplus` first, which is now false.
+pub(crate) fn the_seed_for(
+    config: &CompilerConfig,
+    macros: &crate::Marked,
+    file: &Path,
+) -> MacroTable {
+    let mut seed = MacroTable::from_marked(macros);
+    if config.language_for(file).family() == Some(cpp_parser::features::Family::C) {
+        // **An `#undef` at offset 0, inserted after the definition** — the table's lookup reads the last binding at
+        // or before the offset, so this is what makes the name not a macro for the whole file.
+        seed.undefine("__cplusplus", 0);
+        seed.undefine("_MSVC_LANG", 0);
+    }
+    seed
+}
+
+/// **[`the_seed_for`], as the `Marked` a unit walk starts from.**
+///
+/// The walk decides *which branches exist* before any text is rendered: `#ifdef __cplusplus` inside a system header is
+/// answered while walking, so the seed the walk is given is what puts MSVC's `extern "C++" { template … }` blocks into
+/// a C program's stream. Measured on Lua 5.5.0's `ldebug.c`: 24 of those blocks and **15** parse errors in the program
+/// reading, none in the file's own cook.
+pub(crate) fn the_marked_seed_for(
+    config: &CompilerConfig,
+    macros: &crate::Marked,
+    root: &Path,
+) -> crate::Marked {
+    let mut seed = macros.clone();
+    if config.language_for(root).family() == Some(cpp_parser::features::Family::C) {
+        seed.undefine("__cplusplus");
+        seed.undefine("_MSVC_LANG");
+    }
+    seed
+}
+
+/// How many files one drain **cooks**.
 /// The same shape as the indexing slice, and for the same reason: cooking a file is a unit walk, a parse of the
 /// rendering and an index of it, so a slice keeps the writer lock short enough that the server answers between two
 /// of them. The rest stays in the list and the next drain takes the next few — see `Session::pending`, which is
@@ -1736,7 +1785,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // an answer, and saying so is better than cooking a program from texts nobody walked.
                 let unit = self.unit.as_ref()?;
                 let definitions = unit.definitions();
-                let seed = MacroTable::from_marked(&self.macros);
+                let seed = the_seed_for(&self.config, &self.macros, &self.root);
                 // **The include search, so `__has_include` is answerable.** Without it the operator answers
                 // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
                 // headers are full of. See [`Session::render_the_unit`].

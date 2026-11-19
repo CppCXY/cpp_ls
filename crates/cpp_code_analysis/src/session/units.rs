@@ -296,6 +296,12 @@ impl<F: FileProvider + Clone> Session<F> {
                         // lookup would otherwise answer `None` for the very file the walk starts at, and a timeline
                         // with no root is a timeline of an empty program.
                         let root_key = queue_key(path);
+                        // **The predefines as the file's language sees them** — see [	he_seed_for]: the probe is a
+                        // C++ source, and a .c program read with __cplusplus takes every C++ branch in every
+                        // system header (measured: 24 xtern "C++" blocks in Lua's ldebug.c stream, and 15
+                        // parse errors after them).
+                        let seed =
+                            crate::session::the_marked_seed_for(&self.config, index.macros(), path);
                         crate::TranslationUnit::walk(
                             root,
                             |wanted| {
@@ -308,7 +314,7 @@ impl<F: FileProvider + Clone> Session<F> {
                                 };
                                 Some((summary, text.as_str()))
                             },
-                            index.macros(),
+                            &seed,
                             &mut definitions,
                             // **Off, and this is why.** The sharing replays a file's cached contribution at the position
                             // it was recorded at in a *different* walk, and a preprocessor's positions are not portable
