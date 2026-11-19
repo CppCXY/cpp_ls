@@ -1,12 +1,15 @@
-# Greying out inactive code: what it would take
+# Greying out inactive code: what it took, and what is left
 
-Written after the round that fixed two of the editor's five Lua reports (`PF_VAHID`'s expansion and the colour of
-`ci->previous`) and explained the other three. **Nothing of this feature is implemented** — no protocol code, no span
-plumbing, no client work. What is here is what the two layers already answer, what is missing between them, what it
-would cost, and which of the open decisions are worth deciding *before* the first line is written.
+**The feature is implemented** — server and VS Code client — in the five commits listed in §7. This note is kept as the
+design record: what the two layers already answered, what was missing between them, what it cost, and which decisions
+were made *before* the first line was written. The measurements in §4 are the ones the plan was priced with; the ones
+that decided the gate are in §8.
 
 Every number below was measured with `crates/cpp_toolchain/tests/inactive_regions_probe.rs`
 (`cargo test --release -p cpp_toolchain --test inactive_regions_probe -- --ignored --nocapture`).
+
+**What is not done:** the program path (§7 step 4 — a file whose reading comes from a whole-program walk answers from
+the per-file cook instead, which is the same configuration and therefore the same spans), and the hover line of §5.5.
 
 ## 1. What the client needs, and why not the obvious shortcut
 
@@ -136,30 +139,29 @@ Three things follow:
 * **The region count is what the client feels**, not the byte count: a worst-case header is ~50 decorations, which is
   nothing for `setDecorations` and would be **50 000 token modifiers** for the approach clangd abandoned.
 
-## 5. Decisions this leaves open
+## 5. Decisions this leaves open — and how they were decided
 
 1. **Are the directive lines dimmed?** The spans include `#if`/`#elif`/`#else`/`#endif` (§2.3). Dimming them says "this
    whole construct is not compiled", which is true; leaving them bright keeps the line a reader would click to change
-   the configuration legible. A whole-line background decoration makes the first look intentional; cutting the
-   directives out of the span costs the "one dead branch is one range" property. **Recommendation: keep the spans as
-   they are, and let the client's whole-line option decide the look.**
+   the configuration legible. **Decided: keep them** — the spans go out as the preprocessor recorded them, so one dead
+   branch is one range, and the client may draw whole-line backgrounds if it wants that look.
 2. **Keep or filter the semantic tokens inside?** Our semantic tokens are computed from the **written** view
-   (`crates/cpp_ls/src/handlers/semantic_token/mod.rs:679`), so inactive text currently keeps its semantic colours.
-   clangd removes those tokens so the editor's own TextMate colours show through and the dim composes with them. Both
-   work: keeping them dims *accurate* colours, filtering gives the "dead code" look clangd chose. Filtering is one
-   binary search per token against the spans. **Decide it once and write the reason in the handler** — a half-filtered
-   look is the one outcome that is certainly wrong.
-3. **What does "inactive" mean with one configuration?** Ours is a single configuration per project, so a region
-   inactive for *another* target is dimmed. clangd and cpptools behave the same way, and the honest phrasing is "not
-   compiled by the configuration this server uses". It belongs in the setting's description, not only in this file.
+   (`crates/cpp_ls/src/handlers/semantic_token/mod.rs:679`), so inactive text keeps its semantic colours today.
+   clangd removes those tokens so the editor's own TextMate colours show through and the dim composes with them.
+   **Decided: keep them.** They are accurate for the text that is there, dimming composes with a colour, filtering is
+   one binary search per token plus a failure mode, and a reader editing a dead branch still benefits from the types
+   the tokens name. If the look turns out confusing, the filter is the next step and the reason is recorded here.
+3. **What does "inactive" mean with one configuration?** Ours is a single configuration per project. **Decided: the
+   setting says it** — "the current configuration" — and, more important, the answer is only painted when the
+   configuration actually knew: see the `assumed_undefined` gate in §8. A region the server guessed about is not greyed
+   at all.
 4. **Is there a fallback for clients that do not understand the notification?** Only `DiagnosticTag.Unnecessary` is
-   standard enough to rely on — VS Code fades such diagnostics by itself. The cost is that it is the *diagnostic*
-   channel: the Problems panel, the user's severity settings, and a contract with the checks. Zed converts clangd's
-   notification into exactly these diagnostics **client-side**; that is the model to copy if a fallback is wanted, not
-   a server that publishes them.
+   standard enough to rely on. **Decided: no server-side fallback** — a client that does not ask for the notification
+   gets nothing, which is the honest state of a feature it never heard of; Zed's client-side conversion is the model if
+   one is ever wanted.
 5. **Does a hover on dimmed code say so?** One line — "this region is excluded by the configuration" — is nearly free
-   once the spans are cached, and it is the question the dimming raises. clangd does not answer it; cpptools disables
-   IntelliSense in the region instead.
+   once the spans are cached, and it is the question the dimming raises. **Not done yet**; the spans are now one query
+   away (`Session::inactive_regions`), so this is the next small piece.
 
 ## 6. Alternatives, and why not
 
@@ -182,21 +184,61 @@ decision here becomes *visible* wrongness — grey text over code that compiles.
 3. **Persistence.** `CookedFile.inactive` in the codec, `FORMAT_VERSION` bumped, and a test that a warm start answers
    the same spans as a cold one — the `module-cache.md` failure mode (a missing field making a warm start silently
    different) is the precedent.
-4. **The program path.** `RenderedUnit` per-file spans and the attribution in `index_unit_rendering`.
-5. **The protocol.** Capability (raw JSON), notification with `version`, debounce, clear on close.
-6. **The client.** vscode-clangd's semantics — opacity by default, a background option, a setting, and the clear on
-   restart that #600 was about.
+## 7. What was built
 
-## 8. What could go wrong
+| Step | Where | Commit |
+| --- | --- | --- |
+| 1. The compiler comparison | `crates/cpp_toolchain/tests/preprocessor_against_the_compiler.rs` — markers outside the spans are the markers `g++ -E` keeps; a dead branch whose `#include` names a header that does not exist is one span covering the include line | `d48d82b9` |
+| 2. The spans travel | `RenderedCooked::inactive` → the cooked record (`COOKED_VERSION` 2 → 3) → `Session::inactive_regions` → `inspect inactive` | `965ca2d5` |
+| 3. The gate | `RenderedCooked::assumed_undefined` (`COOKED_VERSION` 3 → 4) → `InactiveRegions::is_exact`; a branch decided by C's undefined-is-zero rule is answered but **never painted** | `7f4ac636` |
+| 5. The protocol | `crates/cpp_ls/src/handlers/inactive_regions` — `inactiveRegionsProvider` written into the `initialize` result by hand, opt-in read from `experimental`/`initializationOptions`, `version` in the params, sent when a cook commits, empty list on `didClose` | `1975764b` |
+| 6. The client | `E:\vscode-cppls` — `initializationOptions.inactiveRegions`, the notification listener, one opacity decoration, drop-on-stale-version, clear on close/restart/stop, `cppls.inactiveRegions.enabled` | `ade1869` |
 
-* **A wrong region is now loud.** Every preprocessor bug in this project has so far surfaced as a name that does not
-  resolve; this feature paints the answer on the screen. That is a net gain — and the reason step 1 exists.
-* **Stale ranges.** Without `version`, an edit can leave a dimmed line of live code. With `version` and a client that
-  drops stale notifications, it cannot.
+Two things the plan got wrong and the implementation corrected:
+
+* **Step 4 (the program path) was not needed for the feature.** A file's own cook uses the same configuration the unit
+  walk would, so the per-file reading answers the same spans; the program path is only a *cheaper* way to get them for
+  files already read as a unit, and it stays owed for latency rather than for correctness.
+* **The idle drain is the wrong place to send from.** A slice ends with `continue`, so the iteration that cooked never
+  reaches the drain's refresh block; the notification goes out right after `commit_them` instead, which is also the
+  first moment the spans exist.
+
+## 8. What could go wrong — and what was measured
+
+* **A wrong region is now loud.** The gate is `assumed_undefined`: with an empty macro table the probe's 235 regions
+  over the CRT headers are an *upper bound* of what a project without a configuration would see, and every one of
+  those branches was decided by C's undefined-is-zero rule. Zero means the configuration knew; non-zero sends an empty
+  list, so the failure mode is "no grey" rather than "grey over live code". The compiler comparison in step 1 is the
+  other half: the spans the cook reports are the branches `g++ -E` drops.
+* **Stale ranges.** The params carry `version`; the client drops a notification older than the document it is looking
+  at (`describes_the_text`). Tested in `test/unit/inactiveRegions.test.mjs`.
 * **Two configurations in one session.** Not possible today (one configuration per project); if that changes, the
   notification's meaning has to change with it.
-* **The client's own bookkeeping.** 50 decorations a file is nothing; 50 leaked decorations a file across a restart is
-  the bug vscode-clangd shipped once.
+* **The client's own bookkeeping.** One decoration type per extension, ranges keyed by document URI, cleared on
+  `didClose`, on the document closing in the editor, on restart and on stop — the vscode-clangd #600 bug is the exact
+  state this ordering exists to prevent.
+* **The cost.** A notification per cooked open file: ~90 bytes per range, 1–54 ranges per file in the probe, sent when
+  a cook commits and never per keystroke. No semantic token is added, removed or filtered.
+
+## 9. Measured on a real project — and why most files answer "not paintable"
+
+`inspect inactive` against `E:\EmmyLuaCodeStyle` (108 project files, MSVC 14.35 headers resolved):
+
+```text
+CodeFormatServer/src/LSP/LSP.cpp   0 region(s)                assumed_undefined 0   → paintable (nothing to grey)
+3rd/nlohmann_json/.../json.hpp    17 region(s), 3 371 bytes   assumed_undefined 17  → not paintable
+3rd/lua-5.4.3/src/luaconf.h       18 region(s), 9 387 bytes   assumed_undefined 19  → not paintable
+```
+
+The gate is working, and it is the feature's real limitation: **a project without a compile database mostly gets no
+grey**, because the conditions of a portable header (`#if LUA_32BITS`, `#if JSON_HAS_...`) are names nobody defined —
+C's rule makes them `0`, and the branch that follows is a *guess about the configuration*. Painting it would be exactly
+the wrong-region failure §8 names. `LSP.cpp` is paintable because it has no conditional of its own; a *file's* answer
+is exact when every branch in it was decided from a definition, not when the project has a database.
+
+What would raise the paintable fraction, in order of value: a compile database (the defines arrive with the compile
+command), `[compile].args` in `.cppls.toml` for projects without one, and the preprocessor's own `-D` seeds. None of
+that is part of this feature — it is configuration quality, and the gate is how the feature refuses to paper over it.
 
 ## References
 
