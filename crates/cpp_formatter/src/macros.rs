@@ -143,11 +143,18 @@ mod tests {
     }
 
     #[test]
-    fn left_puts_one_space_before_each_backslash() {
+    fn left_aligns_the_run_to_its_longest_line() {
+        // **`Left` is a run alignment too**: every `\` gets the longest line's column plus one space (measured), so
+        // the two lines end at the same column instead of each hugging its own code.
         let input = "#define M        \\\n    body   \\\n    x\n";
         let output = align_escaped_newlines(input, &style_with("Left"));
-        assert!(output.contains("#define M \\\n"), "{output:?}");
-        assert!(output.contains("    body \\\n"), "{output:?}");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            lines[0].find('\\'),
+            lines[1].find('\\'),
+            "the backslashes share a column: {output:?}"
+        );
+        assert!(lines[0].starts_with("#define M "), "{output:?}");
     }
 
     #[test]
