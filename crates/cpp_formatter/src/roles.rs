@@ -87,6 +87,31 @@ pub fn of(source: &str) -> Roles {
             CppSyntaxKind::PointerType
             | CppSyntaxKind::ReferenceType
             | CppSyntaxKind::RValueReferenceType => {
+                // **A control statement`s condition is an expression, not a declaration**: the parser reads
+                // `if (isNameDefine && CheckGlobal(x, t))` as a declaration of `CheckGlobal` returning
+                // `isNameDefine&&`, and a declarator `&&` there made the formatter write `&&CheckGlobal` (measured).
+                // **Only the condition itself**: the walk stops at a compound statement, so a declaration inside an
+                // `if` body keeps its marks — the first version walked every ancestor and lost the mark of
+                // `const auto &style` because the parser had nested the statement under an `IfStat` (measured: the
+                // spacing of every reference in that file changed).
+                let in_a_condition = node
+                    .ancestors()
+                    .take_while(|ancestor| {
+                        CppSyntaxKind::from(ancestor.kind()) != CppSyntaxKind::CompoundStat
+                    })
+                    .any(|ancestor| {
+                        matches!(
+                            CppSyntaxKind::from(ancestor.kind()),
+                            CppSyntaxKind::IfStat
+                                | CppSyntaxKind::WhileStat
+                                | CppSyntaxKind::ForStat
+                                | CppSyntaxKind::SwitchStat
+                                | CppSyntaxKind::DoStat
+                        )
+                    });
+                if in_a_condition {
+                    continue;
+                }
                 for token in node
                     .descendants_with_tokens()
                     .filter_map(|it| it.into_token())

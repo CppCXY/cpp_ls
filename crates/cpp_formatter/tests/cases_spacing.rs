@@ -103,3 +103,19 @@ fn spacing_09_braced_list() {
 fn spacing_10_ternary() {
     check(r#"int t = a ? b : c;"#, r#"int t = a ? b : c;"#);
 }
+
+/// **A `&&` in a control statement's condition is an operator, not a declarator**: the parser reads
+/// `if (isNameDefine && CheckGlobal(x, t))` as a declaration of a function returning `isNameDefine&&`, and a
+/// declarator mark there made the formatter write `&&CheckGlobal` (measured on `NameStyleChecker.cpp`). The tree is
+/// consulted only for the condition itself — a declaration inside the body keeps its marks.
+#[test]
+fn spacing_15_logical_and_in_a_condition() {
+    check(
+        "void f() {\n    if (isNameDefine &&CheckGlobal(x, t)) {\n        g();\n    }\n}\n",
+        "void f() {\n    if (isNameDefine && CheckGlobal(x, t)) {\n        g();\n    }\n}\n",
+    );
+    check(
+        "void f() {\n    const auto &style = g();\n    (void)style;\n}\n",
+        "void f() {\n    const auto &style = g();\n    (void)style;\n}\n",
+    );
+}

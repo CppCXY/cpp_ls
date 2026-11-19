@@ -58,7 +58,11 @@ pub fn layout(widths: &[usize], first: usize, limit: usize) -> Option<Table> {
     let mut rows = total.div_ceil(available).max(1);
     while rows <= n {
         let columns = n.div_ceil(rows);
-        if let Some(table) = with_columns(widths, first, limit, columns) {
+        // **A single column is not a table**: it is the list written one element per line, which clang-format
+        // leaves to the general layout (`{` newline `"_G", "_ENV"};` stays on one line — measured).
+        if columns >= 2
+            && let Some(table) = with_columns(widths, first, limit, columns)
+        {
             return if rows == 1 { None } else { Some(table) };
         }
         rows += 1;
@@ -212,10 +216,17 @@ mod tests {
     }
 
     #[test]
+    fn a_single_column_is_not_a_table() {
+        // `std::set<…> X = {` then one element per line is not what clang-format writes for a short list: the two
+        // elements stay together, so a one-column layout must not be chosen.
+        assert_eq!(layout(&[6, 7], 74, 80), None);
+    }
+
+    #[test]
     fn the_widest_cell_of_a_column_sets_the_padding() {
-        // Three cells wide 4, 4, 6 at the first column: the narrow ones are padded to the wide one.
-        let table = layout(&[4, 4, 6], 0, 6).expect("a table");
-        assert_eq!(table.columns, 1);
-        assert_eq!(table.paddings, vec![2, 2, 0]);
+        // Two columns: the first column"s widest cell is 4 and the first cell is 3, so it gains one space.
+        let table = layout(&[3, 6, 4, 6], 0, 20).expect("a table");
+        assert_eq!(table.columns, 2);
+        assert_eq!(table.paddings, vec![1, 0, 0, 0]);
     }
 }

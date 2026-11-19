@@ -34,11 +34,11 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 5 / 29 | 1 443 / 6 850 | 19 / 29 match, 74 lines |
-| `Google` | 3 / 29 | 1 607 / 6 887 | 21 / 29 match, 68 lines |
-| `Microsoft` | 5 / 29 | **487** / 8 031 | 27 / 29 match, **4 lines** |
-| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 69 lines |
-| `LLVM, ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
+| `LLVM` | 5 / 29 | 1 441 / 6 850 | 19 / 29 match, **64 lines** |
+| `Google` | 3 / 29 | 1 605 / 6 887 | 21 / 29 match, 58 lines |
+| `Microsoft` | 5 / 29 | **485** / 8 031 | 28 / 29 match, **2 lines** |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 match, 57 lines |
+| `LLVM, ColumnLimit: 0` | **11 / 29** | **224** / 6 510 | **27 / 29 match, 8 lines** |
 
 The last row is the corpus's own style. It scores best for a reason that is also the best evidence the formatter
 works: `ColumnLimit: 0` is the one setting where clang-format itself does not reflow, so the only differences left
@@ -49,8 +49,8 @@ are the token-level ones — ten lines in three files.
 | style / option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
 | `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
-| `IndentWidth: 4` | 5 / 29 | 1 729 / 7 015 | 15 / 29 match, 148 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 443 / 6 850 | 18 / 29 match, 104 lines |
+| `IndentWidth: 4` | 5 / 29 | 1 726 / 7 015 | 15 / 29 match, 138 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 441 / 6 850 | 18 / 29 match, 94 lines |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
 | `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
 | `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
