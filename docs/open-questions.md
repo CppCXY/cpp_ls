@@ -2849,3 +2849,15 @@ one type rule that the rendering then needed.
 
 **What is left of the five:** the `ci_func(ci)->p` chain (hover asks the file's own text first; the mapping into a
 rendering cannot name a token written inside an invocation's argument list) and `lua_State`'s layout.
+
+## Greying out inactive code — researched, not started
+
+A new feature request, and the design note is [`inactive-regions.md`](inactive-regions.md). The short version: the
+answer already exists one layer down (`CookedStream.inactive`, recorded by the branch decision that had to be made
+anyway, one span per dead branch, in file coordinates), so the work is **plumbing, not a second implementation of the
+preprocessor**: `RenderedCooked` → `CookedFile` (codec + `FORMAT_VERSION`) → `Session`, plus the `UnitCook` path, and
+then clangd's `textDocument/inactiveRegions` notification (capability on both sides, `version` in the params, cleared on
+`didClose`). Measured with `crates/cpp_toolchain/tests/inactive_regions_probe.rs`: 77 regions over the 61 Lua sources
+(~113 B of JSON per file), 235 over the Windows SDK's CRT headers (~346 B per file, worst 54 regions in `corecrt.h`).
+Nothing of it is written yet, and the note records the four decisions to make first — the directive lines, the semantic
+tokens inside, what "inactive" means with one configuration, and the diagnostics fallback.
