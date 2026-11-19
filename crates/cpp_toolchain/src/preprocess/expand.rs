@@ -311,7 +311,15 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
     let region = span_of(tokens);
     expander.expand_into(&marked, region, None);
-    expander.finish()
+    let expansion = expander.finish();
+    if expansion.exhausted && crate::probes::cooking() {
+        eprintln!(
+            "expand: exhausted after {} pushed token(s) from {} input token(s)",
+            expansion.tokens.len(),
+            tokens.len()
+        );
+    }
+    expansion
 }
 
 /// Expand with no limit on the number of tokens, for callers that pass their own bound.
@@ -456,11 +464,25 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
     fn push(&mut self, token: Token, origin: Origin, region: Option<SourceRange>) -> bool {
         let origin = self.origin_of(&token, region, &origin);
 
-        if self.budget == 0 {
-            self.exhausted = true;
-            return false;
+        // **The budget counts program tokens, not the spaces between them.**
+        //
+        // It exists to stop a macro chain whose expansion *grows* (`#define A B B` / `#define B A A` and longer
+        // relatives), and whitespace is not part of that question: every macro body carries the spaces of the line it
+        // was written on, and a rendering keeps one token per space. Counting those made the budget a limit on the
+        // file's *layout* rather than on its expansion, and a real C file tripped it: `lvm.c` is 17 758 tokens and
+        // expands to 2.6×, but with the bodies' trivia it reached the 100 000-token budget after **46 717**
+        // significant tokens — so the rendering was a **prefix** ending mid-`s2v(...)`, and the seven parse errors
+        // filed for the file were all about the cut (measured on `C:\Users\zc\Desktop\lua-5.5.0`, 2026-11-20).
+        //
+        // A trivia token is still pushed, even at a spent budget: it cannot grow the stream without a program token
+        // before it, and appending the file's remaining spaces to a prefix changes nothing a consumer reads.
+        if !is_trivia(token.kind) {
+            if self.budget == 0 {
+                self.exhausted = true;
+                return false;
+            }
+            self.budget -= 1;
         }
-        self.budget -= 1;
 
         let space_before = match self.out.last() {
             None => false,
@@ -736,8 +758,19 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
 
             let marked: Vec<Marked> = raw.into_iter().map(Marked::from).collect();
             let saved = std::mem::take(&mut self.out);
+            // **A speculative expansion is not charged twice.** The tokens produced here are *arguments*: they are
+            // not appended to the stream, they are handed back to the call's substitution and expanded again when
+            // the body is rescanned. Charging the budget for both passes made the budget a limit on *work* rather
+            // than on the stream, and a real file paid it: `lvm.c` pushes 100 000 tokens for 47 497 of output
+            // (macro calls nested in macro arguments such as `setnilvalue(s2v(L->top.p++))` are the shape), so the
+            // rendering was cut mid-expansion and its parse errors were the cut's. Restoring the budget after the
+            // speculative pass leaves the final expansion charged once — which is what [`MAX_TOKENS`] describes.
+            let saved_budget = self.budget;
+            let saved_exhausted = self.exhausted;
             self.expand_into(&marked, region, None);
             let produced = std::mem::replace(&mut self.out, saved);
+            self.budget = saved_budget;
+            self.exhausted = saved_exhausted;
 
             let mut tokens: Vec<Marked> = produced
                 .into_iter()

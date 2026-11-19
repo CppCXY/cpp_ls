@@ -392,7 +392,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The fallback is not a substitute**, and the difference is measured: converting *both* to a `Configuration`
         // failed the two `tests/semantic.rs` tests about a directive-split return type, because a materialised table is
         // the state a file *starts* with rather than the state at each line.
-        let rendered = match (unit, configuration) {
+        let stream = match (unit, configuration) {
             (Some(unit), _) => {
                 let definitions = unit.definitions();
                 let view = unit.environment_of(path)?;
@@ -402,14 +402,29 @@ impl<F: FileProvider + Clone> Session<F> {
                     Some(seed),
                     true,
                 );
-                crate::preprocess::cooked::cook_with(text, &tokens, &macros).render()
+                crate::preprocess::cooked::cook_with(text, &tokens, &macros)
             }
             (None, Some(configuration)) => {
                 let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
-                crate::preprocess::cooked::cook_with(text, &tokens, &start).render()
+                crate::preprocess::cooked::cook_with(text, &tokens, &start)
             }
             (None, None) => return None,
         };
+        // **A rendering that is a prefix is not a reading of the file.** The expansion budget stops a pathological
+        // macro chain, and when it fires the stream holds a prefix — reporting its parse errors as the file's is the
+        // false positive `lvm.c` measured (7 errors at one position, all of them the cut). The count is printed by the
+        // probe because no user-facing answer may depend on it yet; `CookedStream::exhausted` is the fact a consumer
+        // that reports would need.
+        if crate::probes::cooking() {
+            eprintln!(
+                "render_cook: {} {} token(s) of {} cooked, exhausted {}",
+                path.display(),
+                stream.tokens.len(),
+                tokens.len(),
+                stream.exhausted
+            );
+        }
+        let rendered = stream.render();
         let indexer = FileIndexer::new(files, config);
         if crate::probes::cooking() {
             eprintln!(
