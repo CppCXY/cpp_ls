@@ -33,6 +33,7 @@ Two numbers, because two different defects produce them:
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
 | `LLVM` | 5 / 29 | 3 931 / 6 850 | **19 / 29 match, 53 lines** |
+| `Google` | 3 / 29 | 6 512 / 6 887 | **19 / 29 match, 65 lines** |
 | `Google` | 3 / 29 | 6 509 / 6 887 | **19 / 29 match, 65 lines** |
 | `Microsoft` | 5 / 29 | 4 468 / 8 041 | **26 / 29 match, 6 lines** |
 
@@ -126,7 +127,7 @@ Every one of these is a known gap with a reason, not a skipped comparison:
 
 | gap | why it is still open |
 | --- | --- |
-| the line **breaks** are the source's | the reflow layer is the next step (the table above); every corpus number is dominated by it |
+| the line **breaks** are the source's | **measured negative result**: a whole-statement reflow (join when it fits, run the penalty search when it does not) was implemented and made the differential worse — the spacing-only column went from 53 to 2 727 lines, because the search's model has no bracket alignment, no bin-packing and no first-parameter context. It is reverted, and the project is the next one: unwrapped lines, then a fitting algorithm that models those three |
 | `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
 | GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
 | `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
