@@ -674,12 +674,20 @@ pub(crate) fn as_a_range(type_of: &Type) -> &Type {
 /// The difference is what the two spellings ask: `for (auto x : map)` binds the `pair` itself, while
 /// `for (auto [key, value] : map)` binds its two halves.
 pub(crate) fn range_element_of(container: &Type) -> Option<String> {
-    let Type::Named { name, arguments } = container else {
+    // **A reference and a qualifier are the binding's business**, and this is where the rule is load-bearing:
+    // `const std::map<std::string, std::string, std::less<>>& configMap` is the ordinary spelling of a by-reference
+    // parameter, and a reader that matched `Type::Named` alone answered "this container has no element" for every
+    // one of them. Measured on `CodeFormatCore/src/Config/LuaStyle.cpp:20` — `auto it = configMap.find(key);` was
+    // typed `_Tree_const_iterator<_Scary_val>` (the class's own member, unsubstituted) instead of the element, and
+    // `it->second` answered "has no member `second`". [`Type::class_name`] and [`Type::arguments`] are the same two
+    // questions the member walk asks, and both see through `Reference` and `Qualified`.
+    let Some(name) = container.class_name() else {
         return match container {
             Type::Array { of, .. } => Some(of.to_string()),
             _ => None,
         };
     };
+    let arguments = container.arguments();
 
     let plain = name.rsplit("::").next().unwrap_or(name);
 

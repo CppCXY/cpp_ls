@@ -1344,7 +1344,19 @@ pub(crate) fn type_of_expression_inner(
                 .or_else(|| {
                     reached_by_an_arrow
                         .clone()
-                        .map(|(reached, _)| (reached, Vec::new()))
+                        .map(|(reached, followed_a_pointer)| {
+                            // **A class the arrow did not follow is the type's own class**, and its arguments are
+                            // still the ones the member's spelling is written in. Dropping them made `it->second` on
+                            // the element `std::pair<const std::string, std::string>` answer **`B`** — the letter
+                            // MSVC's `pair` uses for its second parameter — because the member walk was handed the
+                            // class with no arguments to pair with it. Measured on
+                            // `CodeFormatCore/src/Config/LuaStyle.cpp:20`.
+                            if followed_a_pointer {
+                                (reached, Vec::new())
+                            } else {
+                                (reached, arguments.clone())
+                            }
+                        })
                 })
                 .unwrap_or((class, arguments)),
             false => (class, arguments),
