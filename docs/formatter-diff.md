@@ -5,14 +5,16 @@ tokens and the **indentation** of a line are computed, but the **line breaks are
 re-lays-out lines that already exist (`lib.rs` says so out loud: *"Until then `format` keeps the input's line
 structure"*). This note is the measurement of that gap and the plan for closing it.
 
-The oracle is `clang-format 15.0.1`, the copy under
-`C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-format.exe` — the one Visual
-Studio's own "Format Document" runs.
+The oracle is **clang-format 23.1.5** — the newest release, installed with `pip install clang-format==23.1.5`, at
+`C:\Users\zc\AppData\Local\Programs\Python\Python314\Lib\site-packages\clang_format\data\bin\clang-format.exe`.
+Visual Studio's own copy is 15.0.1 and is **too old to measure against**: on this corpus the Google style alone moved
+from 1 to 3 identical files and from 2 to 9 spacing-only files between the two versions, so a baseline that does not
+name its oracle is a number about nothing. The harness prints the version it ran against for that reason.
 
 ## The measurement
 
 ```text
-$env:CPPLS_CLANG_FORMAT = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-format.exe"
+$env:CPPLS_CLANG_FORMAT = "C:\Users\zc\AppData\Local\Programs\Python\Python314\Lib\site-packages\clang_format\data\bin\clang-format.exe"
 $env:CPPLS_FMT_CORPUS  = "E:\EmmyLuaCodeStyle\CodeFormatCore\src"
 $env:CPPLS_FMT_STYLE   = "LLVM"           # or Microsoft, Google, or an inline `{BasedOnStyle: …, …}` object
 $env:CPPLS_FMT_LIMIT   = "40"
@@ -26,33 +28,32 @@ Two numbers, because two different defects produce them:
 | **identical files / differing lines** | the whole job: both formatters on the same source |
 | **files that match on text clang-format already laid out** | **spacing and indentation alone** — the corpus is first formatted by clang-format, then fed to `cppfmt`; a difference here is a token-level mistake, and a file that matches here but not above differs in *where the lines go* |
 
-### Baseline, 2026-11-20, `LLVM`, 29 files of `CodeFormatCore\src`
-
-| run | identical files | differing lines | spacing-only |
-| --- | --- | --- | --- |
-| before any fix | 2 / 29 | 5 610 / 6 895 | 8 / 29 match, 195 lines differ |
-| after `an empty block is {}` (`render`) | 3 / 29 | 4 931 / 6 882 | 8 / 29 match, 195 lines differ |
-| after the breaker stops treating a declarator `&`/`*` as a binary operator | 3 / 29 | 4 913 / 6 882 | 8 / 29 match, 195 lines differ |
-
-The first fix is the one defect present on nearly every file: an empty body written `{` newline `}` must come back
-`{}`. clang-format does that under **every** style — `AllowShortBlocksOnASingleLine: Never` governs a block with
-statements in it, not an empty one.
-
-### The same corpus in the other two styles the settings offer (same day)
+### The corpus, against clang-format 23.1.5 (2026-11-20)
 
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 3 / 29 | 4 913 / 6 882 | 8 / 29 match, 195 lines |
-| `Google` | 1 / 29 | 6 642 / 6 913 | 2 / 29 match, 498 lines |
-| `Microsoft` | 0 / 29 | 7 658 / 7 982 | 6 / 29 match, **5 565** lines |
+| `LLVM` | 3 / 29 | 4 611 / 6 882 | 8 / 29 match, 195 lines |
+| `Google` | 3 / 29 | 6 630 / 6 913 | 9 / 29 match, 176 lines |
+| `Microsoft` | 3 / 29 | 7 391 / 8 376 | 7 / 29 match, 6 323 lines |
 
-`Microsoft` is the one Visual Studio names as its default, and it is the worst on both numbers — for a reason that is
-not a defect in a rule but a **missing rule**: the style is `BreakBeforeBraces: Custom` plus a table of `BraceWrapping`
-sub-options (functions, classes, namespaces, `catch`, `else`, …), and this formatter only reads
-`BreakBeforeBraces == "Attach"`. Every brace that should open the next line is written attached, so the whole file is
-off by one line and every following line's diff is doubled. `BraceWrapping` is the single largest lever after the
-reflow itself.
+How `LLVM` moved, measured against 23.1.5 as each fix landed:
 
+| run | identical files | differing lines |
+| --- | --- | --- |
+| before any fix | 2 / 29 | 5 610 / 6 895 |
+| an empty block is `{}` | 3 / 29 | 4 931 / 6 882 |
+| the breaker stops treating a declarator `&`/`*` as a binary operator | 3 / 29 | 4 913 / 6 882 |
+| `BreakBeforeBraces` / `BraceWrapping` / `FixNamespaceComments` | 3 / 29 | 4 611 / 6 882 |
+
+**This round's brace work** is what moved `Microsoft` from 0 to 3 identical files: the style is
+`BreakBeforeBraces: Custom` plus a `BraceWrapping` table, and the table's five answers for five constructs (a
+function's brace wraps, a `union`'s attaches, a control statement's wraps, `else`/`catch` open a line, an empty record
+splits) are now read from the tree — the construct a brace opens is classified in `roles.rs`, and `wrapping.rs` asks
+the style. `FixNamespaceComments` writes `} // namespace ns` where the style asks for it.
+
+What is still wrong for `Microsoft` is not the brace *placement* but the **reflow around it**: a body written on one
+line stays there, an initializer list the author broke stays broken, and a short function clang-format would keep on
+one line is broken by our line structure. The 6 323 spacing-only lines are that plus the token-level remainder below.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:

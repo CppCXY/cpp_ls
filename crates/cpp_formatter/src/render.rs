@@ -92,17 +92,26 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **`// clang-format off` … `on`**: the gaps inside those spans are the user`s (`regions.rs`).
     let disabled = crate::regions::per_token(&stream, &crate::regions::disabled_spans(source));
 
+    // **The lines `BreakBeforeBraces` asks for**: a `{` (or an `else` after a `}`) that must start a line, one that
+    // must stay on the previous line, and an empty body the style splits. Kept three vectors rather than one enum
+    // because each answers a different branch of the loop below.
+    let (wrapped, attached, split, namespace_comments) = wrapping_lines(&stream, &roles, style);
+
     let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
         let forced = forced_breaks[index];
-        // **An empty block is `{}`, never `{` and `}` on two lines.** clang-format writes `void f() {}` for an empty
-        // body even when `AllowShortBlocksOnASingleLine` is `Never` — the option governs blocks with *statements* —
-        // and a record with nothing in it is `struct S {};` for the same reason. This is the pair being empty of
-        // **tokens and comments**: `{ /* nothing */ }` is a block with a comment and keeps its own lines.
+        let wrap = wrapped[index];
+        let attach = attached[index];
+        // **An empty block is `{}`** — unless the style *splits* it (`BraceWrapping.SplitEmpty*`, which Microsoft's
+        // style sets for functions, records and namespaces: `void f()\n{\n}` there). clang-format writes `void f() {}`
+        // for an empty body even when `AllowShortBlocksOnASingleLine` is `Never` — the option governs blocks with
+        // *statements* — and a record with nothing in it is `struct S {};` for the same reason. This is the pair being
+        // empty of **tokens and comments**: `{ /* nothing */ }` is a block with a comment and keeps its own lines.
         let empty_brace_pair = index > 0
             && gap.comments.is_empty()
+            && !split[index]
             && stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
             && stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
         // **Inside a `// clang-format off` span the gap is the source's**, byte for byte: no re-spacing, no re-indenting.
@@ -125,7 +134,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             out.push_str(line_ending);
             out.push_str(&" ".repeat(indent));
             column = indent;
-        } else if (gap.newlines == 0 || empty_brace_pair)
+        } else if ((gap.newlines == 0 && !wrap) || empty_brace_pair || attach)
             && gap.comments.is_empty()
             && !gap.at_end
             && index > 0
@@ -145,63 +154,73 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     .comments
                     .last()
                     .is_some_and(|comment| comment.own_line))
-            && gap.newlines > 0
+            && (gap.newlines > 0 || wrap)
             && index > 0
             && let Some((indent, is_block_line)) = {
-                // **A continuation line that starts with a binary operator aligns with the statement's first one**
-                // (`AlignOperands: Align`), and that column beats the block rules.
-                let aligned = operand_operator.filter(|_| {
-                    // **`= default;` / `= delete;` are continuations, not operand-aligned operators**: aligning the `=`
-                    // under a `==` in the `requires` clause above it produced a line indented 38 columns (measured on
-                    // a real file). Only the arithmetic and logical operators align.
-                    (stream.tokens[index].kind != cpp_parser::CppTokenKind::Assign)
-                        && style.text(StyleOption::AlignOperands) == "Align"
-                        && layout::is_a_binary_operator(stream.tokens[index].kind)
-                });
-                // **A conditional's continuation (`?` or `:` at a line start) keeps the source's column.** clang-format
-                // computes that column while breaking the line — in LuaLexer.cpp `? count + 2` sits at 19, which is
-                // not the continuation indent — so the rules cannot derive it, and preserving it is what makes an
-                // already-formatted file come back unchanged (the stability invariant I3).
-                let conditional = matches!(
-                    stream.tokens[index].kind,
-                    cpp_parser::CppTokenKind::Question | cpp_parser::CppTokenKind::Colon
-                )
-                .then(|| source_indent(source, gap))
-                .flatten();
-                conditional
-                    .map(|column| (column, false))
-                    .or_else(|| aligned.map(|column| (column, false)))
-                    .or_else(|| {
-                        let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
-                        planned_indent(
-                            index,
-                            &stream,
-                            &blocks,
-                            &stack,
-                            statement_indent,
-                            style,
-                            in_ctor_init,
-                            ctor_column,
-                            init_depths[index] > 0,
-                            angles
-                                .last()
-                                .copied()
-                                .filter(|column| *column != usize::MAX),
-                            enums
-                                .last()
-                                .map(|(_, column)| *column)
-                                .filter(|column| *column != usize::MAX),
-                        )
-                        .map(|(indent, is_block_line)| {
-                            let closing =
-                                stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace;
-                            match inside {
-                                Some((_, column)) if is_block_line && closing => (column, true),
-                                Some((_, column)) if is_block_line => (column + indent_width, true),
-                                _ => (indent, is_block_line),
-                            }
+                // **A line the style asks for** — a `{` the `BraceWrapping` table wraps, or an `else`/`catch`/`while`
+                // that stands on its own after a `}`. It starts at the level of the construct's own line (`blocks`),
+                // not at a continuation column: a wrapped function brace sits under the function's return type, and
+                // an `else` under the `if` it belongs to.
+                if wrap {
+                    Some((blocks[index].unwrap_or(statement_indent), true))
+                } else {
+                    // **A continuation line that starts with a binary operator aligns with the statement's first one**
+                    // (`AlignOperands: Align`), and that column beats the block rules.
+                    let aligned = operand_operator.filter(|_| {
+                        // **`= default;` / `= delete;` are continuations, not operand-aligned operators**: aligning the `=`
+                        // under a `==` in the `requires` clause above it produced a line indented 38 columns (measured on
+                        // a real file). Only the arithmetic and logical operators align.
+                        (stream.tokens[index].kind != cpp_parser::CppTokenKind::Assign)
+                            && style.text(StyleOption::AlignOperands) == "Align"
+                            && layout::is_a_binary_operator(stream.tokens[index].kind)
+                    });
+                    // **A conditional's continuation (`?` or `:` at a line start) keeps the source's column.** clang-format
+                    // computes that column while breaking the line — in LuaLexer.cpp `? count + 2` sits at 19, which is
+                    // not the continuation indent — so the rules cannot derive it, and preserving it is what makes an
+                    // already-formatted file come back unchanged (the stability invariant I3).
+                    let conditional = matches!(
+                        stream.tokens[index].kind,
+                        cpp_parser::CppTokenKind::Question | cpp_parser::CppTokenKind::Colon
+                    )
+                    .then(|| source_indent(source, gap))
+                    .flatten();
+                    conditional
+                        .map(|column| (column, false))
+                        .or_else(|| aligned.map(|column| (column, false)))
+                        .or_else(|| {
+                            let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
+                            planned_indent(
+                                index,
+                                &stream,
+                                &blocks,
+                                &stack,
+                                statement_indent,
+                                style,
+                                in_ctor_init,
+                                ctor_column,
+                                init_depths[index] > 0,
+                                angles
+                                    .last()
+                                    .copied()
+                                    .filter(|column| *column != usize::MAX),
+                                enums
+                                    .last()
+                                    .map(|(_, column)| *column)
+                                    .filter(|column| *column != usize::MAX),
+                            )
+                            .map(|(indent, is_block_line)| {
+                                let closing = stream.tokens[index].kind
+                                    == cpp_parser::CppTokenKind::RightBrace;
+                                match inside {
+                                    Some((_, column)) if is_block_line && closing => (column, true),
+                                    Some((_, column)) if is_block_line => {
+                                        (column + indent_width, true)
+                                    }
+                                    _ => (indent, is_block_line),
+                                }
+                            })
                         })
-                    })
+                }
             }
         {
             // **A line that starts here**, with nothing in the gap but whitespace: the break count collapses to
@@ -210,7 +229,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             line_was_bracket_placed =
                 !is_block_line && !stack.is_empty() && init_depths[index] == 0;
             line_column = indent;
-            let mut keep = gap.newlines.min(max_empty + 1);
+            // **A wrapped token needs a break even when the source has none** — `gap.newlines` is 0 for
+            // `y_(y) {` and `wrap` is what decides that the brace goes to the next line.
+            let mut keep = gap.newlines.max(usize::from(wrap)).min(max_empty + 1);
             // **A blank line right after `{` is not kept** unless the style asks (`KeepEmptyLinesAtStartOfBlock`,
             // false by default, and the corpus leaves it false): clang-format writes the first statement of a block
             // against the brace, and keeping the programmer's blank there is a whole-file difference on its own.
@@ -435,6 +456,21 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
         out.push_str(text);
         column = columns.advance(column, text);
+        // **`FixNamespaceComments`**: clang-format writes `} // namespace ns` after a namespace's closing brace — the
+        // name is the namespace's, and an existing comment is left alone (a file that already says it is not told
+        // twice). Measured against the oracle: Microsoft's style has the option on, and it is the only difference left
+        // on the `cases_wrapping` fixture before this.
+        if let Some(name) = &namespace_comments[index]
+            && style.flag(StyleOption::FixNamespaceComments)
+            && !stream
+                .gaps
+                .get(index + 1)
+                .is_some_and(|gap| gap.comments.iter().any(|comment| !comment.own_line))
+        {
+            let comment = format!(" // namespace {name}");
+            out.push_str(&comment);
+            column = columns.advance(column, &comment);
+        }
         if matches!(
             stream.tokens[index].kind,
             cpp_parser::CppTokenKind::LeftParen | cpp_parser::CppTokenKind::LeftBracket
@@ -636,6 +672,120 @@ fn planned_indent(
     ))
 }
 
+/// **The lines `BreakBeforeBraces` asks for**, as three per-token answers.
+///
+/// `wrapped` is a token that must start a line (a `{` the table wraps, an `else`/`catch` that stands after a `}`),
+/// `attached` is one that must stay on the previous line, and `split` marks the closing brace of an empty body the
+/// style keeps on its own line (`SplitEmpty*`). A `{` whose construct the tree could not name gets neither answer: it
+/// keeps the author's line, which is the same rule every role in this formatter follows.
+fn wrapping_lines(
+    stream: &crate::tokens::Stream<'_>,
+    roles: &crate::roles::Roles,
+    style: &crate::config::Style,
+) -> (Vec<bool>, Vec<bool>, Vec<bool>, Vec<Option<String>>) {
+    // **Qualified, not a glob**: `CppTokenKind` has a `None` variant, and a glob import shadows `Option::None` with
+    // it — which is a type error on every `let Some(…) = … else { closed = None; }` below.
+    use cpp_parser::CppTokenKind as K;
+    // **Joining is part of reflow, and `ColumnLimit: 0` means "do not reflow".** clang-format keeps an author's
+    // Allman brace under `Attach` when the limit is 0 and attaches it when there is a limit — measured, and it is the
+    // difference between this project's own corpus (limit 0) and a real file. A *break the style demands* still
+    // happens with limit 0 (Microsoft wraps a record body either way), so only the join is gated.
+    let reflows = style.count(crate::options::StyleOption::ColumnLimit) > 0;
+    let count = stream.tokens.len();
+    let mut wrapped = vec![false; count];
+    let mut attached = vec![false; count];
+    let mut split = vec![false; count];
+    // **`FixNamespaceComments`**: the name to write after the closing brace of a namespace, per closer.
+    let mut namespace_comments: Vec<Option<String>> = vec![None; count];
+
+    // One entry per `{` the stream opened, `Some` only when it is a **block** — a braced initializer is not one, and
+    // its `}` must not pop a block's entry.
+    let mut open: Vec<Option<(usize, crate::roles::BraceKind)>> = Vec::new();
+    // The block the last `}` closed, which is what tells a `do`'s `while` from a `while` statement that follows an
+    // unrelated block.
+    let mut closed: Option<(usize, crate::roles::BraceKind)> = None;
+
+    for index in 0..count {
+        let token = &stream.tokens[index];
+        match token.kind {
+            K::LeftBrace => {
+                let kind = roles.brace_kind.get(&token.start).copied();
+                if let Some(kind) = kind {
+                    if crate::wrapping::a_brace_starts_a_line(style, kind) {
+                        wrapped[index] = true;
+                    } else {
+                        if reflows {
+                            attached[index] = true;
+                        }
+                    }
+                }
+                open.push(kind.map(|kind| (index, kind)));
+            }
+            K::RightBrace => {
+                let Some(Some((open_index, kind))) = open.pop() else {
+                    closed = None;
+                    continue;
+                };
+                closed = Some((open_index, kind));
+                if kind == crate::roles::BraceKind::Namespace {
+                    namespace_comments[index] = roles
+                        .namespace_names
+                        .get(&stream.tokens[open_index].start)
+                        .cloned();
+                }
+                let empty = open_index + 1 == index;
+                if empty && crate::wrapping::split_empty_body(style, kind) {
+                    // **`{` and `}` on lines of their own** — Microsoft's `SplitEmptyFunction: true`: the pair is not
+                    // joined, and the closer starts its own line.
+                    split[index] = true;
+                    wrapped[index] = true;
+                }
+            }
+            K::ElseKeyword | K::CatchKeyword => {
+                if index > 0 && stream.tokens[index - 1].kind == K::RightBrace {
+                    let wraps = if token.kind == K::ElseKeyword {
+                        crate::wrapping::else_starts_a_line(style)
+                    } else {
+                        crate::wrapping::catch_starts_a_line(style)
+                    };
+                    if wraps {
+                        wrapped[index] = true;
+                    } else {
+                        if reflows {
+                            attached[index] = true;
+                        }
+                    }
+                }
+                closed = None;
+            }
+            K::WhileKeyword => {
+                // **Only a `do`'s `while`.** `if (x) { } while (y) { }` is a `while` statement after an unrelated
+                // block: attaching it to the `}` line (which `BeforeWhile: false` asks for) would be wrong there, and
+                // the opener's own token is what tells the two apart.
+                let is_a_do_while = index > 0
+                    && stream.tokens[index - 1].kind == K::RightBrace
+                    && closed.is_some_and(|(open_index, _)| {
+                        open_index > 0 && stream.tokens[open_index - 1].kind == K::DoKeyword
+                    });
+                if is_a_do_while {
+                    if crate::wrapping::while_starts_a_line(style) {
+                        wrapped[index] = true;
+                    } else {
+                        if reflows {
+                            attached[index] = true;
+                        }
+                    }
+                }
+                closed = None;
+            }
+            _ => {
+                closed = None;
+            }
+        }
+    }
+    (wrapped, attached, split, namespace_comments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,9 +834,12 @@ mod tests {
     #[test]
     fn a_continuation_that_starts_with_an_operator_aligns_with_the_first_one() {
         // LLVM's `IndentWidth` is 2, so the body sits at 2 and the statement's first `<<` at 12; the continuation's
-        // `<<` goes to the same column.
+        // `<<` goes to the same column. The brace is **attached** because LLVM is `BreakBeforeBraces: Attach` and this
+        // file has a column limit: clang-format joins an author's Allman brace under a limit (it keeps it only when
+        // `ColumnLimit: 0`, where nothing is reflowed) — this fixture used to spell the Allman form and asserted it
+        // came back, which was the old "keep the source's lines" behaviour.
         let source =
-            "void f()\n{\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
+            "void f() {\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
         let formatted = format(source, None, &llvm());
         assert_eq!(
             formatted, source,

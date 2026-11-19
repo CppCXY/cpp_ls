@@ -24,6 +24,30 @@ pub struct Roles {
     pub block_brace: HashSet<usize>,
     /// `{` that opens an **initializer list** (`T{1}`, `= {1, 2}`).
     pub init_brace: HashSet<usize>,
+    /// **What each block `{` opens** — a function body, a class, a namespace, a control statement — for the
+    /// `BreakBeforeBraces` table. Absent when the tree could not say, and then the brace keeps the author's line.
+    pub brace_kind: std::collections::HashMap<usize, BraceKind>,
+    /// **The name of a namespace, keyed by the offset of its opening brace** — what `FixNamespaceComments` writes
+    /// after the closing brace. An anonymous namespace has no name and is absent from this map.
+    pub namespace_names: std::collections::HashMap<usize, String>,
+}
+
+/// What a block brace opens, in the vocabulary `BraceWrapping` uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BraceKind {
+    Function,
+    Class,
+    Struct,
+    Union,
+    Enum,
+    Namespace,
+    /// `if`, `for`, `while`, `do` and `switch` bodies — one option (`BraceWrapping.AfterControlStatement`) governs
+    /// all of them in clang-format, and `Always`/`Never`/`MultiLine` is what it says.
+    Control,
+    Try,
+    Catch,
+    Lambda,
+    ExternBlock,
 }
 
 impl Roles {
@@ -80,6 +104,12 @@ pub fn of(source: &str) -> Roles {
             | CppSyntaxKind::NamespaceDecl => {
                 if let Some(brace) = first_brace(&node) {
                     roles.block_brace.insert(brace);
+                    // **The name, for `FixNamespaceComments`.** Read from the tokens the declaration holds: the word
+                    // after `namespace`, when it is an identifier. `namespace ns::inner {` records `inner`, which is
+                    // the name clang-format writes in the comment (`} // namespace inner`).
+                    if let Some(name) = namespace_name(&node) {
+                        roles.namespace_names.insert(brace, name);
+                    }
                 }
             }
             CppSyntaxKind::InitListExpr => {
@@ -91,7 +121,149 @@ pub fn of(source: &str) -> Roles {
         }
     }
 
+    // **What each block brace opens**, which is what `BreakBeforeBraces` and its `BraceWrapping` table are about:
+    // `AfterFunction` is not `AfterClass`, and Microsoft's style wraps one and attaches the other. Read from the
+    // tree, and from the **token's own ancestors**: the token before a `{` cannot tell a lambda's body (`]` or `)`)
+    // from a function's, `else`'s from an `if`'s, or a `switch`'s body — whose braces hang directly off `SwitchStat`,
+    // not off a `CompoundStat` — from any of them.
+    for element in root.descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        if CppTokenKind::from(token.kind()) != CppTokenKind::LeftBrace {
+            continue;
+        }
+        let brace = token_range_start(&token);
+        // **A braced initializer is not a block**, and the token before the brace is what tells the two apart where
+        // the tree cannot: `= {`, `return {`, `f({` and `{1, 2}` are values, while `) {` is a body — and a
+        // **constructor's initializer list** is the case that needs the exception, because the tree can name an
+        // `InitListExpr` that covers `: x_(x) { … }` and `first_brace` then points at the body's brace.
+        let previous = previous_non_trivia(&token);
+        let introduced = matches!(
+            previous,
+            Some(
+                CppTokenKind::Assign
+                    | CppTokenKind::ReturnKeyword
+                    | CppTokenKind::Comma
+                    | CppTokenKind::LeftParen
+                    | CppTokenKind::LeftBracket
+            )
+        );
+        let named_an_initializer = roles.init_brace.contains(&brace)
+            && !matches!(
+                previous,
+                Some(CppTokenKind::RightParen | CppTokenKind::RightBracket)
+            );
+        if introduced || named_an_initializer {
+            continue;
+        }
+        let Some(parent) = token.parent() else {
+            continue;
+        };
+        // **An out-of-line definition is not wrapped in a `FunctionDef`** — this grammar gives
+        // `A::A(int x) : x_(x) { … }` a `Declaration` whose child is the body, with no function node at all (the same
+        // shape `breaks.rs` documents for `int count() { }` at file scope). So when no construct owns the body, the
+        // token before the `{` decides: `)` is a function's parameter list (every control statement has its own
+        // ancestor and was answered above), `]` is a lambda's capture list.
+        let brace_kind = body_kind_of(&parent).or(match previous {
+            Some(CppTokenKind::RightParen) => Some(BraceKind::Function),
+            Some(CppTokenKind::RightBracket) => Some(BraceKind::Lambda),
+            _ => None,
+        });
+        if let Some(brace_kind) = brace_kind {
+            roles.brace_kind.insert(brace, brace_kind);
+        }
+    }
+
     roles
+}
+
+/// **What the `{` under this node opens** — the nearest enclosing construct the wrapping table names.
+///
+/// The walk climbs because the parser nests as the grammar does: a function's body brace sits in a `CompoundStat`
+/// whose ancestors reach the declaration, an `if`'s body's reaches the `IfStat`, a `switch`'s body brace is a direct
+/// child of `SwitchStat`, and a class's is a `ClassBody` inside `ClassDef`. The first construct on the list wins.
+///
+/// **A nested compound statement is not a function body**, and `compounds` is what says so: the body's own brace
+/// reaches the `FunctionDef` with one `CompoundStat` between them, a bare block inside that body with two — and the
+/// wrapping rule for a bare block is the control one (attach), not the function one (wrap in Microsoft's style).
+fn body_kind_of(open: &cpp_parser::CppSyntaxNode) -> Option<BraceKind> {
+    let mut compounds = 0usize;
+    for ancestor in open.ancestors() {
+        match CppSyntaxKind::from(ancestor.kind()) {
+            CppSyntaxKind::CompoundStat => compounds += 1,
+            CppSyntaxKind::FunctionDef => {
+                return Some(if compounds <= 1 {
+                    BraceKind::Function
+                } else {
+                    BraceKind::Control
+                });
+            }
+            CppSyntaxKind::LambdaExpr => return Some(BraceKind::Lambda),
+            CppSyntaxKind::IfStat
+            | CppSyntaxKind::ForStat
+            | CppSyntaxKind::WhileStat
+            | CppSyntaxKind::DoStat
+            | CppSyntaxKind::SwitchStat => return Some(BraceKind::Control),
+            CppSyntaxKind::TryStat => return Some(BraceKind::Try),
+            CppSyntaxKind::CatchStat | CppSyntaxKind::CatchHandler => {
+                return Some(BraceKind::Catch);
+            }
+            CppSyntaxKind::ExternSpec => return Some(BraceKind::ExternBlock),
+            CppSyntaxKind::NamespaceDecl => return Some(BraceKind::Namespace),
+            CppSyntaxKind::ClassBody => {
+                return match ancestor
+                    .parent()
+                    .map(|parent| CppSyntaxKind::from(parent.kind()))
+                {
+                    Some(CppSyntaxKind::ClassDef) => Some(BraceKind::Class),
+                    Some(CppSyntaxKind::StructDef) => Some(BraceKind::Struct),
+                    Some(CppSyntaxKind::UnionDef) => Some(BraceKind::Union),
+                    Some(CppSyntaxKind::EnumDef) => Some(BraceKind::Enum),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **The name a namespace declaration gives itself**, or `None` for an anonymous one.
+fn namespace_name(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let mut after_the_keyword = false;
+    for element in node.descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        let kind = CppTokenKind::from(token.kind());
+        if kind == CppTokenKind::NamespaceKeyword {
+            after_the_keyword = true;
+            continue;
+        }
+        if !after_the_keyword || cpp_parser::is_trivia(kind) {
+            continue;
+        }
+        return match kind {
+            CppTokenKind::Identifier => Some(token.text().to_string()),
+            CppTokenKind::LeftBrace => None,
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The kind of the token before this one that is not trivia — `)`, `=`, a name.
+fn previous_non_trivia(token: &cpp_parser::CppSyntaxToken) -> Option<CppTokenKind> {
+    let mut previous = token.prev_token();
+    while let Some(token) = previous {
+        let kind = CppTokenKind::from(token.kind());
+        if !cpp_parser::is_trivia(kind) {
+            return Some(kind);
+        }
+        previous = token.prev_token();
+    }
+    None
 }
 
 fn token_range_start(token: &cpp_parser::CppSyntaxToken) -> usize {
@@ -124,6 +296,21 @@ mod tests {
         assert!(!roles.is_template_angle(less));
     }
 
+    #[test]
+    fn a_namespace_brace_knows_its_name() {
+        let source = "namespace ns {\nint x;\n}\n";
+        let roles = of(source);
+        let brace = source.find('{').expect("the body is in the fixture");
+        assert_eq!(roles.brace_kind.get(&brace), Some(&BraceKind::Namespace));
+        assert_eq!(roles.namespace_names.get(&brace), Some(&"ns".to_string()));
+    }
+    #[test]
+    fn a_constructor_body_is_a_function_brace() {
+        let source = "A::A(int x) : x_(x) {\n}\n";
+        let roles = of(source);
+        let brace = source.find('{').expect("the body is in the fixture");
+        assert_eq!(roles.brace_kind.get(&brace), Some(&BraceKind::Function));
+    }
     #[test]
     fn a_declarator_star_is_marked_and_a_product_is_not() {
         let roles = of("int *p = a * b;\n");

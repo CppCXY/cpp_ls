@@ -35,6 +35,7 @@ pub mod rows;
 pub mod space;
 pub mod tokens;
 pub mod trailing;
+pub mod wrapping;
 
 pub use config::{ConfigError, Style};
 

@@ -185,6 +185,17 @@ fn the_diff_against_clang_format() {
     let style = style();
     let ours = PathBuf::from(env!("CARGO_BIN_EXE_cppfmt"));
 
+    // **Which oracle this run is against**, printed with the numbers: the difference between clang-format 15 and 23 on
+    // the Google style alone changed the identical-file count by two and the spacing-only count by seven, so a
+    // baseline that does not name its oracle is a number about nothing.
+    let version = Command::new(&clang)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown clang-format".to_string());
+    println!("[diff] oracle: {version}");
+
     let files = sources(&root);
     let mut matched = 0usize;
     let mut spacing_matched = 0usize;
