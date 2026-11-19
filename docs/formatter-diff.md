@@ -38,6 +38,21 @@ The first fix is the one defect present on nearly every file: an empty body writ
 `{}`. clang-format does that under **every** style — `AllowShortBlocksOnASingleLine: Never` governs a block with
 statements in it, not an empty one.
 
+### The same corpus in the other two styles the settings offer (same day)
+
+| style | identical files | differing lines | spacing-only |
+| --- | --- | --- | --- |
+| `LLVM` | 3 / 29 | 4 913 / 6 882 | 8 / 29 match, 195 lines |
+| `Google` | 1 / 29 | 6 642 / 6 913 | 2 / 29 match, 498 lines |
+| `Microsoft` | 0 / 29 | 7 658 / 7 982 | 6 / 29 match, **5 565** lines |
+
+`Microsoft` is the one Visual Studio names as its default, and it is the worst on both numbers — for a reason that is
+not a defect in a rule but a **missing rule**: the style is `BreakBeforeBraces: Custom` plus a table of `BraceWrapping`
+sub-options (functions, classes, namespaces, `catch`, `else`, …), and this formatter only reads
+`BreakBeforeBraces == "Attach"`. Every brace that should open the next line is written attached, so the whole file is
+off by one line and every following line's diff is doubled. `BraceWrapping` is the single largest lever after the
+reflow itself.
+
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:
