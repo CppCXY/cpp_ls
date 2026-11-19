@@ -2565,3 +2565,45 @@ mid-file), and the whole token stream of 13 expansion shapes (`#`, `##`, variadi
 `SELF → SELF`, redefinition and `#undef`). Both pass on GCC 15.1.0, and skip with a printed reason on a machine
 without a compiler (`CPPLS_TEST_CXX` names one). This is the gate for the evaluator the environment change leans
 on: `#if` decisions are now compared with a compiler rather than with this crate's own earlier behaviour.
+
+## `is_string` answers: the alias's operator, and the card's own reading
+
+The last mile of the report was one refusal in `operator_returns_of`: an object whose type is an **alias** was turned
+away because an alias's declaration carries a `type_of` and a class's does not — a cheap way to skip `std::size_t`
+operands, and the reason `json["data"]` was `UnknownType` while `members_of("nlohmann::json")` listed 242 members of
+`basic_json`. The function now follows **one step** of that `type_of` (the alias's own, so no file is read and no
+search is made) and asks the target class; a name that resolves to itself still ends the walk.
+
+```text
+json["data"].is_string   `bool`         (was: the type of `json["data"]` is not known here)
+the piece under the cursor `nlohmann::basic_json::is_string`, json.hpp:2754:20  — a card, with its doc comment
+```
+
+`tests/alias_members.rs` pins it (`an_aliass_operator_is_the_target_classs_operator`): the test fails without the
+change and passes with it.
+
+### The card's *type* is a second defect, measured and not fixed
+
+The card that now appears says
+
+```text
+constexpr @since version 1.0.0 is_string() const
+`nlohmann::basic_json::is_string` — a function returning `@since version 1.0.0`
+```
+
+while the fact the card was built from says `returns: Some("bool")` and `range 105741..105767` (measured in the probe:
+`session.definition` on the same cursor). The comment above the declaration is
+
+```cpp
+    @liveexample{The following code exemplifies `is_string()` for all JSON
+    types.,is_string}
+
+    @since version 1.0.0
+    */
+    constexpr bool is_string() const noexcept
+```
+
+and hovering the **same declaration inside `json.hpp`** is correct (`constexpr bool is_string() const`, "a function
+returning `bool`"). So the leak is specific to the **cross-file** card: the fact is right, the card's own reading of
+the declaration is not — the `@since` line of the `/*! … */` block is being taken as part of the declaration's
+specifiers/type. That is the next defect in the hover layer, and the measurement above is its witness.

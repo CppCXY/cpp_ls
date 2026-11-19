@@ -89,6 +89,63 @@ fn an_alias_templates_members_are_the_members_of_the_class_it_names() {
     }
 }
 
+/// **An alias's `operator[]` is the target class's operator** — the report's last mile.
+///
+/// `nlohmann::json` is `using json = basic_json<>;`, and `json["data"]` is a subscript on *the alias*. The member
+/// query `members_of` already followed the alias (242 members of `basic_json`), but the **operator** question did
+/// not: `operator_returns_of` looked the name `nlohmann::json` up, found the alias's declaration, saw that it has a
+/// `type_of` (an alias does; a class does not) and refused — so `json["data"]` was `UnknownType` while `.is_string()`
+/// on it had no card.
+///
+/// Measured on `EmmyLuaCodeStyle`'s `LSP/LSP.cpp:72` after the fix: `json["data"].is_string` is `bool` and the piece
+/// under the cursor answers `nlohmann::basic_json::is_string`, `json.hpp:2754:20`.
+#[test]
+fn an_aliass_operator_is_the_target_classs_operator() {
+    const SOURCE: &str = "\
+template <typename T>
+struct Box {
+    T held{};
+
+    T &operator[](int index) { (void)index; return held; }
+    const T &operator[](int index) const { (void)index; return held; }
+};
+
+using IntBox = Box<int>;
+
+int read(const IntBox &box) {
+    auto element = box[0];
+    return element;
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+    let view = session
+        .view_of_the_file("/p/a.cpp")
+        .expect("the file is readable");
+
+    let subscript = view
+        .root
+        .descendants()
+        .filter(|node| node.text() == "box[0]")
+        .max_by_key(|node| node.ancestors().count())
+        .expect("`box[0]` is in the tree");
+    let Known::Yes(found) = session.type_of_the_expression(&view, &subscript) else {
+        panic!("`box[0]` on an `IntBox` is the `Box<int>` operator's `T&`");
+    };
+    assert_eq!(
+        found.type_of, "int&",
+        "the alias names `Box<int>`, whose `operator[]` returns `T&` with `T = int`"
+    );
+}
+
 /// **A construction of an alias declared in an anonymous namespace is still a construction of a class.**
 ///
 /// The reported shape was `ContainerOf<std::vector, int>{}.size()` on `test_cpp`'s `templates.cpp`, where the alias is

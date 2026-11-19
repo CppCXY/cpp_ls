@@ -1933,7 +1933,40 @@ pub(crate) fn operator_returns_of_with_arguments(
     // **265 → 93 ms**.
     let declared = index.files_declaring(&class, path);
     let first = declared.first()?;
-    if first.fact.type_of.is_some() {
+    if let Some(target) = first.fact.type_of.as_deref() {
+        // **An alias is not a class, and its operator is the target's.** `nlohmann::json` is `using json =
+        // basic_json<>;`, and the eight `operator[]` overloads the report needs are `basic_json`'s — stopping here is
+        // what answered `UnknownType("json[\"data\"]")` while `members_of("nlohmann::json")`, which follows the alias,
+        // listed 242 members.
+        //
+        // **One step, read out of the declaration's own `type_of`** — no file is read and no search is made, which is
+        // the cost the note below was written for: what that measurement paid for was a *search* for `std::size_t`'s
+        // operators, not the one substitution that turns an alias into the class it names. The recursion ends at a
+        // class (its declaration carries no `type_of`), and a name that resolves to itself ends it here.
+        let alias_arguments: Vec<String> =
+            class_type.arguments().iter().map(Type::to_string).collect();
+        let target = crate::sema::types::substituted_spelling(
+            target,
+            first.fact.parameters(),
+            &alias_arguments,
+        );
+        let target_type = crate::sema::types::parse_type_spelling(&target);
+        if target_type
+            .class_name()
+            .is_some_and(|named| named != class.as_str())
+        {
+            return operator_returns_of_with_arguments(
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &target_type,
+                operator,
+                argument_types,
+                argument_count,
+            );
+        }
         return None;
     }
     let class_file = Some(first.file.clone());

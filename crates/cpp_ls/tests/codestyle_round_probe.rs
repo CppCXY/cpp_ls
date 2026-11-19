@@ -413,6 +413,19 @@ fn the_round_three_reports() {
                         let file = view.file_offset_of(reading).unwrap_or_else(|| {
                             cpp_code_analysis::file::coordinates::FileOffset::new(at)
                         });
+                        // **The fact the card is built from**, so a card whose type is not the fact's can be told
+                        // from a fact that is wrong.
+                        if cook_first {
+                            match session.definition(&view, reading) {
+                                cpp_code_analysis::Known::Yes(found) => println!(
+                                    "[ask] definition: returns {:?}, range {:?}, file {}",
+                                    found.fact.returns,
+                                    found.fact.range,
+                                    found.file.display()
+                                ),
+                                other => println!("[ask] definition: {other:?}"),
+                            }
+                        }
                         println!(
                             "--- hover on `is_string` {label} ---\n{}",
                             match cpp_ls::handlers::hover::hover(&session, &view, reading, file) {
