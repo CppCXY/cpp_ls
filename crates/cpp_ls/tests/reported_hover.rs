@@ -586,3 +586,86 @@ fn a_construction_of_an_alias_in_a_namespace_names_the_member() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A card is the declaration, not the documentation above it.**
+///
+/// `nlohmann/json.hpp` writes a `/*! … */` block over every member, and `is_string` — `constexpr bool is_string()
+/// const noexcept` — is preceded by one whose last line is `@since version 1.0.0`. The card's *"the type the macros
+/// leave"* correction reads the lines above the name when the return type's last word is a macro defined anywhere in
+/// the project (it exists for `WINBASEAPI WINBOOL WINAPI f()`), and `bool` is a macro in that project — so the walk
+/// crossed the comment and answered the comment's line as the return type:
+///
+/// ```text
+/// constexpr @since version 1.0.0 is_string() const
+/// ```
+///
+/// Measured on `EmmyLuaCodeStyle`'s `LSP/LSP.cpp:72` once `json["data"].is_string()` began to answer at all; the same
+/// declaration hovered **inside** `json.hpp` was correct, which is what showed the fault to be the card's own reading.
+#[test]
+fn a_card_is_the_declaration_and_not_the_documentation_above_it() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-doc-comment");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    // **A macro named `bool` somewhere in the project**, which is what arms the correction. It is in a header the
+    // fixture does not include, so the declaration the card reads is untouched by it — exactly the project-wide name
+    // the correction asks about.
+    std::fs::write(root.join("not_included.h"), "#define bool synthetic_bool\n")
+        .expect("the fixture writes");
+    let file = root.join("a.cpp");
+    let source = "\
+struct Thing {
+    /*!
+    @brief is the value a string
+
+    @since version 1.0.0
+    */
+    constexpr bool is_text() const noexcept { return true; }
+};
+
+int f() {
+    Thing thing{};
+    return thing.is_text();
+}
+";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone(), root.join("not_included.h")]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("thing.is_text()").expect("the use") + "thing.".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a member has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        !text.contains("constexpr @since"),
+        "the documentation is not part of the *declaration* — the card renders the doc block below it, and that is \
+         where `@since` belongs: {text}"
+    );
+    assert!(
+        text.contains("constexpr bool is_text() const"),
+        "the card is the declaration as written: {text}"
+    );
+    assert!(
+        text.contains("returning `bool`"),
+        "and its return type is the one the declaration wrote: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

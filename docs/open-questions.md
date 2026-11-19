@@ -2607,3 +2607,22 @@ and hovering the **same declaration inside `json.hpp`** is correct (`constexpr b
 returning `bool`"). So the leak is specific to the **cross-file** card: the fact is right, the card's own reading of
 the declaration is not — the `@since` line of the `/*! … */` block is being taken as part of the declaration's
 specifiers/type. That is the next defect in the hover layer, and the measurement above is its witness.
+### The card's type, fixed in the same round
+
+The second defect above is closed too. `the_type_the_macros_leave` — the correction that exists for
+`WINBASEAPI WINBOOL WINAPI f()` — reads the lines above the declaration's name when the return type's last word is a
+macro **defined anywhere in the project**, and `bool` is one in this project. The walk crossed the `/*! … */` block
+above `is_string` and answered the comment's last line as the return type:
+
+```text
+before   constexpr @since version 1.0.0 is_string() const      "a function returning `@since version 1.0.0`"
+after    constexpr bool is_string() const                     "a function returning `bool`"
+```
+
+Two guards, both measured by the fixture in `crates/cpp_ls/tests/reported_hover.rs`
+(`a_card_is_the_declaration_and_not_the_documentation_above_it`, which fails without either):
+
+* a line that is part of a comment — `//`, `/*`, `*/`, a `*` continuation, a `@param`-style line — **ends the walk**;
+  a declaration's specifiers are code, and no word of a comment can be part of a type;
+* what survives must still be a **type**: if removing the macro's word leaves only specifier keywords
+  (`constexpr bool` minus `bool` is `constexpr`), the correction answers nothing and the fact's own spelling stands.

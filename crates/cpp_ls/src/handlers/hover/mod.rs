@@ -1275,6 +1275,23 @@ fn the_type_the_macros_leave<F: cpp_code_analysis::FileProvider + Clone>(
     // The specifiers are what stands between the end of the previous declaration and this name: a `;`, `{`, `}`,
     // `#` or a blank line ends them. Read by line rather than by token, because the card is showing a spelling and
     // not parsing a declaration.
+    //
+    // **A documentation comment ends them too, and that is the whole of a defect this walk had.** `json.hpp` writes
+    // its own type over three doc paragraphs, and the walk that crossed the comment read
+    //
+    // ```cpp
+    //     @since version 1.0.0
+    //     */
+    //     constexpr bool is_string() const noexcept
+    // ```
+    //
+    // as the specifiers of `is_string`: every word that was not a macro was kept, so the card printed
+    // `constexpr @since version 1.0.0 is_string() const` — a type that is a comment line — for a declaration whose
+    // fact says `returns: bool` and whose own-file card is correct. Measured on `EmmyLuaCodeStyle`'s
+    // `LSP/LSP.cpp:72`: `json["data"].is_string()` had no hover at all, and once it did, this was what it said.
+    //
+    // **And a comment is not the only end**: a line that is part of a comment (a `*` continuation, a `@param`, a
+    // `*/`) says the walk has left the declaration, whatever it looks like.
     let mut specifiers = String::new();
     for line in before.lines().rev() {
         let line = line.trim();
@@ -1285,6 +1302,16 @@ fn the_type_the_macros_leave<F: cpp_code_analysis::FileProvider + Clone>(
             continue;
         }
         if line.ends_with('}') {
+            break;
+        }
+        // **A comment line ends the walk.** A declaration's specifiers are code; the text above one is a comment as
+        // often as it is another declaration, and none of the words in a comment can be part of a type.
+        if line.starts_with("//")
+            || line.starts_with("/*")
+            || line.ends_with("*/")
+            || line.starts_with('*')
+            || line.starts_with("@")
+        {
             break;
         }
         specifiers.insert_str(0, line);
@@ -1316,7 +1343,41 @@ fn the_type_the_macros_leave<F: cpp_code_analysis::FileProvider + Clone>(
 
     let spelling = kept.join(" ");
     let spelling = spelling.trim().to_string();
+    // **What survives must still be a type.** A macro name that was the *only* type word leaves the specifier
+    // keywords behind — `constexpr bool` minus the `bool` some header defines as a macro is `constexpr`, which is
+    // not a type and would be shown as one. The fact's own answer is better than that, so nothing is corrected.
+    if spelling.is_empty() || spelling.split_whitespace().all(is_a_specifier_word) {
+        return None;
+    }
     (!spelling.is_empty() && spelling != returns).then_some(spelling)
+}
+
+/// **A word that shapes a declaration but names no type** — `constexpr`, `static`, `inline`, and their family.
+///
+/// The set is closed and small, which is why it is a list rather than a question asked of the model: what it guards is
+/// "the correction left no type at all", and a word this list does not know simply falls through to the answer the
+/// walk has always given.
+fn is_a_specifier_word(word: &str) -> bool {
+    matches!(
+        word,
+        "static"
+            | "inline"
+            | "constexpr"
+            | "consteval"
+            | "constinit"
+            | "const"
+            | "volatile"
+            | "virtual"
+            | "explicit"
+            | "friend"
+            | "extern"
+            | "register"
+            | "mutable"
+            | "thread_local"
+            | "typename"
+            | "class"
+            | "struct"
+    )
 }
 /// **The declaration's line, rebuilt** — the renderer's single-line form, for a card or an overload list.
 ///
