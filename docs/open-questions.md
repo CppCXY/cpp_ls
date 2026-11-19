@@ -2786,3 +2786,48 @@ Measured: a warm diagnostics pull of `LuaParser/src/File/LuaSource.cpp` is **215
 **What is still not ranked**, and it is the next step rather than a defect: a candidate whose parameter needs a
 **user-defined conversion** is `Unranked` (a check must not invent one), and a template candidate is deduced rather than
 ranked. Both are documented at the top of `sema/overload.rs`.
+
+## Lua 5.5.0 again: five reports, three causes, and one answer
+
+Reported with screenshots on `lua-5.5.0/src`: the hover on `PF_VAHID` says "Expands to `PF_VAHID`"; `previous` is
+coloured as a type; the hover on the parameter `level` says `LUA_API int level`; `ci_func(ci)->p` has no type, so `p`
+cannot be resolved; `lua_State`'s layout is "not computed".
+
+**The question asked with the first one — "you compared against the compiler, so why is the expansion still bad?" —
+has a measured answer: the expansion is not what was wrong.** For these files the cook is right: `PF_VAHID` is `1` in
+the value and `1` in the rendering, and `ci_func(ci)` is expanded in the rendering of `ldebug.c` (0 occurrences of the
+name, the cast it stands for in its place). The defects were in the layers that decide *which reading answers*, and in
+one type rule that the rendering then needed.
+
+**Fixed, with measurements:**
+
+* the hover's expansion. `the_expansion_of_a_macro` builds a synthetic source and cooked it against an environment
+  keyed by **positions in the hovered file**; a definition from an included header sits at the `#include` (offset > 0)
+  and was therefore not in force at the synthetic source's offset 0, so the name came back as its own expansion.
+  `configuration_from_environment_as_of` reads the timeline at the moment of the use. `cast_byte(~PF_VAHID)` now
+  expands to `1` (`dcc74a06`);
+* the rendering after an eviction. The in-memory table holds eight renderings, and an index pass fills it, so
+  `the_rendering_offset` answered `None` for a file that had been rendered — the hover's rendering fallback could not
+  map a position at all. A miss now reads the persisted record, validated against the text (`dcc74a06`);
+* the comma operator. `a, b` had no type rule, and `check_exp(c, e)` is `(lua_assert(c), (e))` — so `ci_func(ci)`'s
+  expansion was typeless and `->p` had nothing to look the member up in. `(a, b)` is `int` for two `int`s and `double`
+  for an `int` and a `double` (`ff0e7143`).
+
+**Still open, each measured:**
+
+1. **A parameter's card takes the enclosing function's specifiers.** `level` at `ldebug.c:162` is a parameter of
+   `LUA_API int lua_getstack (lua_State *L, int level, lua_Debug *ar)`, and the card's code block reads
+   `extern int level` — `LUA_API` expanded to `extern`. The fact is right (`ldebug.c:162:45`); the *line* is built from
+   the declaration's leading specifiers, which are the function's, not the parameter's.
+2. **A position inside a macro invocation is answered by the file's own text.** `hover` asks `hover_of_the_program`
+   first, and that path returns the "type is not known" explanation for `p` in `ci_func(ci)->p` — a definitive answer,
+   so `hover_of_the_rendering` never runs. The rule wanted is "a position inside an invocation is a question only the
+   rendering can answer".
+3. **`RenderedSpan::written` is `None` for every token of an expansion**, argument tokens included — `written_at`
+   decides by the *invocation's* `written_in`, and an argument token was written in the file being cooked. So even
+   asking the rendering first, a file position inside `pcRel(a, ci_func(ci)->p)` maps to the expansion's **start**
+   rather than to the token under the cursor (measured: file offset 841 → rendering 215, whose `->p` is at 353).
+4. **Semantic tokens colour a member as a type.** `ci->previous` is `CallInfo::previous`, and the token type served is
+   `type` / `entity.name.type`.
+5. **`lua_State`'s layout is "not computed".** Its members are `StkIdRel`, a struct of the same header; the layout
+   writer refuses at the first member it cannot size and names all of them.
