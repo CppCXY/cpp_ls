@@ -420,6 +420,23 @@ fn the_round_three_reports() {
                                     member.fact.range
                                 );
                             }
+                            // **The `second` card's source**: what `members_of` answers for the pair `it` is.
+                            if let cpp_code_analysis::Known::Yes(listed) = session
+                                .members_of(&view, "std::pair<const std::string, std::string>")
+                            {
+                                for member in listed
+                                    .members
+                                    .iter()
+                                    .filter(|member| member.fact.name == "second")
+                                {
+                                    println!(
+                                        "[ask] pair second: type_of {:?}, scope {:?}, file {}",
+                                        member.fact.type_of,
+                                        member.fact.scope,
+                                        member.file.display()
+                                    );
+                                }
+                            }
                         }
                         let haystack = view.source.to_string();
                         let Some(at) = haystack.find("is_string") else {
