@@ -1167,10 +1167,9 @@ fn planned_indent(
     // **Inside a braced initializer the block rules do not apply**: the element is a continuation, indented by
     // `ContinuationIndentWidth` from the declaration (measured: clang-format writes 8 for a table declared at 0).
     if in_initializer && first != cpp_parser::CppTokenKind::RightBrace {
-        // **The base is the line that opened the list**, not whatever block line came last: a struct body`s members
-        // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
-        // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
-        let base = the_line_that_opened_the_list(stream, blocks, index, statement_indent);
+        // **The anchor is the line that opened the list**, carried by the bracket stack: a struct body`s members
+        // leave `statement_indent` at their level (4), while the table that follows belongs at the opening line`s
+        // column plus the continuation width (measured on LuaDefine.h: clang-format writes those rows at 8).
         return Some((layout::continuation(stack, anchor, first, style), false));
     }
     // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
