@@ -35,6 +35,12 @@ pub fn normalized<'a>(text: &'a str, style: &Style) -> Cow<'a, str> {
     let minimum = style.count(StyleOption::SpacesInLineCommentPrefixMinimum);
     let maximum = style.number(StyleOption::SpacesInLineCommentPrefixMaximum);
     let body = &text[after_prefix..];
+    // **A prefix with nothing after it is a comment with no text**: clang-format leaves `//` as `//`, and adding the
+    // minimum space turned every empty comment line into a trailing-space difference (nlohmann json: 2 198 lines in
+    // `lexer.hpp` alone).
+    if body.is_empty() {
+        return Cow::Borrowed(text);
+    }
     let spaces = body
         .chars()
         .take_while(|character| *character == ' ')
@@ -88,6 +94,12 @@ mod tests {
     fn existing_spacing_is_kept() {
         check("//  two spaces", "//  two spaces");
         check("// already spaced", "// already spaced");
+    }
+
+    #[test]
+    fn an_empty_comment_stays_empty() {
+        // `//` with nothing after it has no text to space: clang-format leaves it alone.
+        check("//", "//");
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
     let mut targets = vec![None; stream.gaps.len()];
 
     // The line each trailing comment sits on, and where its code ends.
-    let mut found: Vec<(usize, usize, usize)> = Vec::new(); // (line, gap index, code end column)
+    let mut found: Vec<(usize, usize, usize, usize)> = Vec::new(); // (line, gap, code end column, comment width)
     let mut line = 0usize;
     for (index, gap) in stream.gaps.iter().enumerate() {
         line += gap.newlines;
@@ -38,7 +38,12 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
         // The code before the comment: from the start of the line up to the comment, without trailing spaces.
         let start_of_line = source[..comment.start].rfind('\n').map_or(0, |at| at + 1);
         let code = source[start_of_line..comment.start].trim_end();
-        found.push((line, index, code.chars().count()));
+        found.push((
+            line,
+            index,
+            code.chars().count(),
+            comment.text.trim_end().chars().count(),
+        ));
     }
 
     // A group is a run of line numbers that touch: `line`, `line + 1`, … Each group shares one column.
@@ -48,13 +53,18 @@ pub fn columns(source: &str, stream: &Stream<'_>, style: &Style) -> Vec<Option<u
         while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
             end += 1;
         }
-        let widest = found[start..end]
+        // **A comment that cannot be aligned keeps its own start and splits the run** (`run_columns`).
+        let entries: Vec<(usize, usize, usize)> = found[start..end]
             .iter()
-            .map(|(_, _, code_end)| *code_end)
-            .max()
-            .unwrap_or(0);
-        for (_, index, _) in &found[start..end] {
-            targets[*index] = Some(widest + minimum);
+            .map(|(_, _, code_end, comment_width)| (*code_end, *comment_width, minimum))
+            .collect();
+        let limit = style.count(StyleOption::ColumnLimit);
+        let columns = run_columns(&entries, limit);
+        for (offset, (_, index, code_end, _)) in found[start..end].iter().enumerate() {
+            targets[*index] = Some(match columns[offset] {
+                Some(column) => column,
+                None => code_end + minimum,
+            });
         }
         start = end;
     }
@@ -104,14 +114,26 @@ pub fn align(output: &str, style: &Style) -> String {
         while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
             end += 1;
         }
-        // The column of the sequence: the furthest start any of its comments asks for.
-        let column = found[start..end]
+        // **The column of the sequence, or the comment's own start when it cannot be aligned** (`run_columns`):
+        // measured on nlohmann json's include block, where a 67-column comment would push every shorter line two
+        // columns right of what clang-format writes.
+        let limit = style.count(StyleOption::ColumnLimit);
+        let entries: Vec<(usize, usize, usize)> = found[start..end]
             .iter()
-            .map(|(_, code, comment)| width(code) + start_spaces(code, comment, minimum))
-            .max()
-            .unwrap_or(0);
-        for (index, code, comment) in &found[start..end] {
-            let spaces = column.saturating_sub(width(code));
+            .map(|(_, code, comment)| {
+                (
+                    width(code),
+                    width(comment.trim_end()),
+                    start_spaces(code, comment, minimum),
+                )
+            })
+            .collect();
+        let columns = run_columns(&entries, limit);
+        for (offset, (index, code, comment)) in found[start..end].iter().enumerate() {
+            let spaces = match columns[offset] {
+                Some(column) => column.saturating_sub(width(code)),
+                None => start_spaces(code, comment, minimum),
+            };
             rewritten[*index] = Some(format!("{code}{}{comment}", " ".repeat(spaces)));
         }
         start = end;
@@ -127,6 +149,47 @@ pub fn align(output: &str, style: &Style) -> String {
     out
 }
 
+/// **The column each trailing comment of one run starts at** — `None` when the comment cannot be aligned and keeps its
+/// own start.
+///
+/// `entries` are `(code width, comment width, the start the comment asks for on its own)`. A run is one sequence of
+/// consecutive lines that each end in a comment; its column is the furthest start any of them asks for — **unless that
+/// would push a comment past the column limit**. In that case the offending comment keeps its own start and the run is
+/// **split there**: measured on nlohmann json, where
+///
+/// ```text
+/// #include <algorithm>  // any_of
+/// #include <type_traits> // conditional, integral_constant, is_signed, true_type, false_type
+/// #include <utility>    // move
+/// ```
+///
+/// aligns the first two comments to the same column, gives `<type_traits>` its own one space (a column of 23 would push
+/// its 67-column comment past 80) and starts a new run after it, so `<utility>` comes back with a single space too.
+fn run_columns(entries: &[(usize, usize, usize)], limit: usize) -> Vec<Option<usize>> {
+    let mut columns = vec![None; entries.len()];
+    let mut pending: Vec<(usize, usize)> = vec![(0, entries.len())];
+    while let Some((start, end)) = pending.pop() {
+        if start >= end {
+            continue;
+        }
+        let column = (start..end)
+            .map(|at| entries[at].0 + entries[at].2)
+            .max()
+            .unwrap_or(0);
+        let too_long = (start..end).find(|at| limit > 0 && column + entries[*at].1 > limit);
+        match too_long {
+            Some(at) => {
+                // The offending comment keeps its own start (`None`), and the run continues **after** it.
+                pending.push((at + 1, end));
+                pending.push((start, at));
+            }
+            None => {
+                columns[start..end].fill(Some(column));
+            }
+        }
+    }
+    columns
+}
 /// The spaces a comment asks for before alignment: `SpacesBeforeTrailingComments`, and one more for a block comment
 /// (`spaceRequiredBefore` in clang-format: `;//` needs no space, `;/*` does).
 fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
