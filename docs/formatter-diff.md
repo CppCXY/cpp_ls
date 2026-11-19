@@ -32,7 +32,7 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 4 / 29 | 3 954 / 6 850 | **19 / 29 match, 53 lines** |
+| `LLVM` | 5 / 29 | 3 931 / 6 850 | **19 / 29 match, 53 lines** |
 | `Google` | 3 / 29 | 6 509 / 6 887 | **19 / 29 match, 65 lines** |
 | `Microsoft` | 5 / 29 | 4 468 / 8 041 | **26 / 29 match, 6 lines** |
 

@@ -244,7 +244,7 @@ pub fn break_line(
     // **The candidate positions**: the first token of the line, plus every token a break may precede.
     let mut positions: Vec<usize> = vec![line.start];
     for index in line.start + 1..line.end {
-        if is_breakable(stream, roles, index) {
+        if is_breakable(stream, roles, style, index) {
             positions.push(index);
         }
     }
@@ -381,30 +381,52 @@ pub fn laid_out(source: &str, style: &crate::config::Style) -> String {
 }
 
 /// May a break go before the token at `index`?
-pub fn is_breakable(stream: &Stream<'_>, roles: &crate::roles::Roles, index: usize) -> bool {
+pub fn is_breakable(
+    stream: &Stream<'_>,
+    roles: &crate::roles::Roles,
+    style: &crate::config::Style,
+    index: usize,
+) -> bool {
     use CppTokenKind::*;
     let previous = stream.tokens[index - 1].kind;
     let current = stream.tokens[index].kind;
     let start = stream.tokens[index].start;
+    let previous_start = stream.tokens[index - 1].start;
+    // After a comma: the classic argument break.
+    if previous == Comma {
+        return true;
+    }
+    // **`BreakBeforeBinaryOperators` decides which side of an operator the break goes on.** `All` breaks before it
+    // (`a + b` -> `a` / `+ b`); `None` — LLVM's and Google's value — breaks **after** it (`a +` / `b`), which is the
+    // shape clang-format's own output has everywhere. Reading only "before a binary operator" put our breaks on the
+    // wrong side of every operator: measured on `AlignAnalyzer.cpp`, clang-format writes
+    // `… align_continuous_assign_statement !=` then `ContinuousAlign::None) {`.
+    let break_before = match style.text(crate::options::StyleOption::BreakBeforeBinaryOperators) {
+        "All" => true,
+        "NonAssignment" => crate::layout::is_a_binary_operator(current) && current == Assign,
+        _ => false,
+    };
+    if crate::layout::is_a_binary_operator(current) && break_before {
+        return !roles.is_declarator(start) && !roles.is_template_angle(start);
+    }
+    if crate::layout::is_a_binary_operator(previous)
+        && !break_before
+        && !roles.is_declarator(previous_start)
+        && !roles.is_template_angle(previous_start)
+    {
+        return true;
+    }
+    // **Before a declarator's `*`/`&` or a template's angle is never a break**: `LuaStyle &style` is a type and its
+    // declarator, and `std::vector<int>` is one name (both measured: the alternative broke inside a name).
+    if roles.is_declarator(start) || roles.is_template_angle(start) {
+        return false;
+    }
     match current {
-        // After a comma: the classic argument break.
-        _ if previous == Comma => true,
-        // **A declarator's `*`/`&` is not a binary operator.** `LuaStyle &style` is a type and its declarator;
-        // clang-format never breaks between them, and a breaker that read the `&` as a `+` did: measured on
-        // `DiagnosticBuilder::DiagnosticBuilder(LuaStyle &style, …)`, an over-long signature came out
-        // `…(LuaStyle` newline `&style, …` where clang-format breaks **after the comma**. The same holds for the
-        // `&&` of an rvalue reference, which the lexer spells as `LogicalAnd`.
-        Star | Ampersand | LogicalAnd if roles.is_declarator(start) => false,
-        // **A template's `<`/`>` is not a comparison.** `std::vector<int>` is one name, and a break before its `>`
-        // would be a break inside a name.
-        Less | Greater if roles.is_template_angle(start) => false,
-        // Before a binary operator (`a + b` broken before the `+`).
-        Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater
-        | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | LeftShift
-        | RightShift | Question => true,
         // Before a member access and after an opening bracket.
         Dot | Arrow => true,
         _ if matches!(previous, LeftParen | LeftBracket) => true,
+        // A conditional's `?`/`:` still breaks before itself.
+        Question => true,
         _ => false,
     }
 }
@@ -462,6 +484,11 @@ mod break_tests {
     fn broken(source: &str, limit: &str) -> Option<Vec<String>> {
         let mut style = Style::default_style();
         style.set_from_text("ColumnLimit", limit);
+        broken_with(style, source)
+    }
+
+    /// The same with the style spelled by the case — an option the break side depends on.
+    fn broken_with(style: Style, source: &str) -> Option<Vec<String>> {
         let stream = crate::tokens::stream(source);
         let roles = crate::roles::of(source);
         let lines = logical_lines(&stream);
@@ -499,10 +526,36 @@ mod break_tests {
     }
 
     #[test]
-    fn a_long_sum_breaks_before_the_operator() {
+    fn a_long_sum_breaks_after_the_operator_under_none() {
+        // **`BreakBeforeBinaryOperators: None` is LLVM's and Google's value**: the break goes after the operator
+        // (`aaaaaaaaaa +` / `bbbbbbbbbb +`), which is the shape clang-format's own output has. The old expectation
+        // here was the `All` shape, and reading only "before a binary operator" put every break on the wrong side.
         let pieces = broken("int x = aaaaaaaaaa + bbbbbbbbbb + cccccccccc;", "25").expect("broken");
         assert!(
-            pieces.iter().any(|piece| piece.starts_with('+')),
+            pieces.iter().any(|piece| piece.trim_end().ends_with('+')),
+            "{pieces:?}"
+        );
+        assert!(
+            pieces
+                .iter()
+                .skip(1)
+                .all(|piece| !piece.trim_start().starts_with('+')),
+            "{pieces:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_sum_breaks_before_the_operator_under_all() {
+        let mut style = Style::default_style();
+        style.set_from_text("BreakBeforeBinaryOperators", "All");
+        style.set_from_text("ColumnLimit", "25");
+        let pieces =
+            broken_with(style, "int x = aaaaaaaaaa + bbbbbbbbbb + cccccccccc;").expect("broken");
+        assert!(
+            pieces
+                .iter()
+                .skip(1)
+                .any(|piece| piece.trim_start().starts_with('+')),
             "{pieces:?}"
         );
     }
