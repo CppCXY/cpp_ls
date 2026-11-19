@@ -233,6 +233,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             }) {
                 continue;
             }
+            // **A template head is a line of its own**: `template <typename T>` then `class lexer_base {` is what
+            // clang-format writes, and joining them (`template <typename T> class lexer_base {`) is a line clang-format
+            // never produces (measured on nlohmann json).
+            if stream.tokens[first].kind == cpp_parser::CppTokenKind::TemplateKeyword {
+                continue;
+            }
             if (first + 1..line.end).all(|index| stream.gaps[index].newlines == 0) {
                 continue;
             }

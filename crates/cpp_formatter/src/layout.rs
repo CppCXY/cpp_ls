@@ -585,7 +585,22 @@ fn is_a_goto_label(stream: &Stream<'_>, index: usize) -> bool {
 /// `case` / `default` — labels of the switch body rather than statements inside it.
 fn is_a_case_label(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
-    matches!(stream.tokens[index].kind, CaseKeyword | DefaultKeyword)
+    if !matches!(stream.tokens[index].kind, CaseKeyword | DefaultKeyword) {
+        return false;
+    }
+    // **A label is the keyword followed by a `:` before the statement ends.** `= default;` is not a label: it raised
+    // the level of every following member line, because `case_extra` stayed set (measured under `Google`, where the
+    // two styles' `AccessModifierOffset`/`IndentWidth` made the line come out at four columns instead of two; under
+    // `LLVM` the wrong answer happened to equal the right one).
+    let mut cursor = index + 1;
+    while let Some(token) = stream.tokens.get(cursor) {
+        match token.kind {
+            Colon => return true,
+            Semicolon | LeftBrace | RightBrace | Assign | Comma => return false,
+            _ => cursor += 1,
+        }
+    }
+    false
 }
 
 /// **How many braced initializer lists are open at each token**, which is what tells the block rules to keep out:

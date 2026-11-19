@@ -134,3 +134,20 @@ public:
 };"#,
     );
 }
+
+/// **`= default` is not a `default:` label, and a template head is a line of its own** — both measured on the
+/// nlohmann json corpus under `Google` (where the two styles' `AccessModifierOffset`/`IndentWidth` made the label
+/// mistake visible: every member after `C() = default;` came out two columns too deep).
+#[test]
+fn classes_20_an_equality_default_is_not_a_label() {
+    let mut google = Style::preset("Google").expect("Google is a preset");
+    google.set_from_text("ColumnLimit", "80");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "class C {\n public:\n  C(int p) : x_(p) {}\n  C() = default;\n  int x_;\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &google), input);
+    let template = "template <typename T>\nclass lexer_base {\n public:\n  int x;\n};\n";
+    assert_eq!(
+        cpp_formatter::format_file(path, template, &google),
+        template
+    );
+}
