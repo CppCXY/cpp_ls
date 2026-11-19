@@ -1756,20 +1756,19 @@ fn file_what_was_found(
         }
     }
 
-    for error in tree.get_errors() {
-        let range = cpp_parser::source_range(error.range);
-        match stream.written_span(range) {
-            Some((file, range)) => {
-                if let Some((_, cooked)) = files.get_mut(file as usize) {
-                    cooked.diagnostics.push(crate::CookedDiagnostic {
-                        range,
-                        message: error.message.clone(),
-                    });
-                }
-            }
-            None => *unplaced += 1,
-        }
-    }
+    // **A stream's parse error is the program's, not a file's — so it is counted, not placed.**
+    //
+    // The loop that stood here asked `stream.written_span(range)` and pushed the answer into the file the error's
+    // *start* landed in. That mapping is by token, and a range that covers tokens from two files is attributed to the
+    // first of them with a one-token span, while a range that begins in a gap covers **trivia**: measured on Lua
+    // 5.5.0's `ldebug.c`, opened in an editor as "large-scale syntax errors", a program read filed **15** errors
+    // against that file at positions inside its doc comments (`** during a signal, under "reasonable"`), none of
+    // which is a place the reader can look at.
+    //
+    // The count is not lost: [`crate::IndexedUnit::errors`] is the stream's own count, and a consumer that wants to
+    // say "this program did not parse" has it. What is *not* published is a place for it, because the place the
+    // stream gives does not name one.
+    let _ = (tree, files, unplaced);
 }
 
 /// Give `#include "local.h"` the token the parser gives it: a header name — **the shared implementation lives in

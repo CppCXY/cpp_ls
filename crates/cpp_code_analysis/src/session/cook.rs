@@ -273,6 +273,28 @@ impl<F: FileProvider + Clone> Session<F> {
         // file no walk covers. Converting both to a `Configuration` was tried and is *not* equivalent: the two
         // `semantic.rs` tests about a directive-split return type failed with it, because a materialised table is the
         // state a file starts with rather than the state at each line.
+        // **A closure the index has not finished reading is not a closure a composition may answer from.**
+        //
+        // The composition reads *summaries*, and a summary that has not been built yet is not an empty header — it
+        // is a header whose macros are unknown, so the renderer leaves their invocations in the text and the parser
+        // reports what that text is: a `.c` file opened on a cold index came out with **15** syntax errors, the
+        // first of them where a doc comment's line had been pulled into a declaration by a macro that was never
+        // expanded (reported from an editor: "large-scale syntax errors, at positions in comments").
+        //
+        // The walk is not the answer either — it is what the pump's queue is for, and `is_closure_ready` is the
+        // question the checks already gate on. A refusal here is a **claim on the queue**: the file is re-asked
+        // (`refuse_the_cooks_that_built_nothing`) and cooked once, later, from a closure that is current, rather
+        // than cooked now from half of one and *stored* — a stored reading is keyed by its closure, so the wrong
+        // answer outlives the moment that produced it.
+        if held.is_none() && !self.is_locally_ready(&path) {
+            if crate::probes::cooking() {
+                eprintln!(
+                    "cooking: {} refused | its closure is not indexed yet",
+                    path.display()
+                );
+            }
+            return None;
+        }
         let (unit, configuration) = match held {
             Some(unit) => (Some(unit), None),
             // **The index must be current before a composition answers.** A header that was just edited has its

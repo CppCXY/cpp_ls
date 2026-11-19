@@ -96,9 +96,18 @@
 /// ```
 const PREPARE_INDEX_SLICE: usize = 24;
 
+/// **How long a pull keeps reading the queue for a file's closure** before it admits it cannot answer.
+///
+/// A cook needs the closure **indexed**: composed from half a summary set, a rendering keeps the macro calls it could
+/// not expand, and the parse errors of that text are not about the file. Measured on Lua 5.5.0's `ldebug.c`: the first
+/// pull of a window answered **18** syntax errors at positions inside its doc comments, and a cook of the same file
+/// with its closure read is clean. So the pull reads the queue until `is_closure_ready` says yes — a few hundred
+/// milliseconds on a local project — and this is the bound on that wait.
+const PREPARE_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 use tokio::sync::{Mutex, Notify, Semaphore};
@@ -832,6 +841,27 @@ impl AnalysisState {
             return true;
         }
         let checked_for = stage.elapsed() - sliced_for;
+
+        // **The closure, before the cook.** See [`PREPARE_READY_TIMEOUT`]: a composition from a closure that is not
+        // indexed is a rendering of text no compiler sees, and its errors are placed where the reader cannot look.
+        let deadline = Instant::now() + PREPARE_READY_TIMEOUT;
+        while Instant::now() < deadline {
+            let asked = to_prepare.clone();
+            let ready = self
+                .run_blocking("closure ready", move |session| {
+                    Some(session.is_locally_ready(&asked))
+                })
+                .await
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            let Some(next) = self.next_file_for_catch_up(&to_prepare).await else {
+                break;
+            };
+            self.read_queued_file(&next).await;
+            sliced += 1;
+        }
 
         let target = to_prepare.clone();
         let Some(materials) = self
