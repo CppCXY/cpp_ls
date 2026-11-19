@@ -138,11 +138,14 @@ int read(const IntBox &box) {
         .max_by_key(|node| node.ancestors().count())
         .expect("`box[0]` is in the tree");
     let Known::Yes(found) = session.type_of_the_expression(&view, &subscript) else {
-        panic!("`box[0]` on an `IntBox` is the `Box<int>` operator's `T&`");
+        panic!("`box[0]` on a `const IntBox` is the `Box<int>` const operator's `const T&`");
     };
+    // **`const int&`, because the object is a `const IntBox&`** — `int read(const IntBox &box)` below. The
+    // expectation used to be `int&`: the alias step resolved `IntBox` to `Box<int>` and dropped the qualifier on the
+    // way, so the non-const overload was the one chosen. See `subscript_qualifiers.rs` for the choice itself.
     assert_eq!(
-        found.type_of, "int&",
-        "the alias names `Box<int>`, whose `operator[]` returns `T&` with `T = int`"
+        found.type_of, "const int&",
+        "the alias names `Box<int>`, whose `const operator[]` returns `const T&` with `T = int`"
     );
 }
 

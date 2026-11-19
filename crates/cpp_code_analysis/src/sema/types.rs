@@ -247,6 +247,24 @@ impl Type {
         }
     }
 
+    /// **Is the object this type describes `const`** — the question an overload choice asks.
+    ///
+    /// A qualifier and a reference are both looked through, and a pointer is not: `const Widget&` is a const object,
+    /// `Widget&` is not, `const Widget*` is a *pointer* (which can be reassigned) to a const `Widget`. That is the
+    /// same rule [`Type::class_name`] states for the class, and for the same reason: the qualifier belongs to the
+    /// type it was written on.
+    ///
+    /// Measured on the type layer's own answers: `const std::string& s; s[0]` was answered `char&` where a compiler
+    /// answers `const char&`, because the member list holds both `reference operator[]` and
+    /// `const_reference operator[] const` and the choice was by name and arity only.
+    pub fn is_const(&self) -> bool {
+        match self {
+            Type::Qualified { .. } => true,
+            Type::Reference { to, .. } => to.is_const(),
+            _ => false,
+        }
+    }
+
     /// **What an expression of this type is when it is *used*** — the two conversions C++ applies before almost
     /// every operator.
     ///

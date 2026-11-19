@@ -1951,6 +1951,17 @@ pub(crate) fn operator_returns_of_with_arguments(
             &alias_arguments,
         );
         let target_type = crate::sema::types::parse_type_spelling(&target);
+        // **The alias's target does not carry the object's qualifier, and the recursion needs it.** `const
+        // std::string& s` resolved to `basic_string<char, …>` — unqualified — so the recursive call saw a non-const
+        // object and chose the non-const `operator[]`: `s[0]` answered `char&` where the compiler answers
+        // `const char&`. A qualifier is written on the *use*, so it is put back on the target.
+        let target_type = if class_type.is_const() && !target_type.is_const() {
+            crate::sema::types::Type::Qualified {
+                of: std::sync::Arc::new(target_type),
+            }
+        } else {
+            target_type
+        };
         if target_type
             .class_name()
             .is_some_and(|named| named != class.as_str())
@@ -2037,7 +2048,10 @@ pub(crate) fn operator_returns_of_with_arguments(
     // the one whose count agrees. A call whose arity matches nothing keeps the first fact, which is the answer this
     // arm gave before.
     let arity = argument_count.or((!argument_types.is_empty()).then_some(argument_types.len()));
-    let matching = match arity {
+    // **The qualifier the object has**, for the choice among overloads of one name — see
+    // [`a_member_with_that_arity`] and [`Type::is_const`].
+    let object_is_const = class_type.is_const();
+    let mut matching = match arity {
         Some(wanted_arity) => a_member_with_that_arity(
             &mut *declaring,
             index,
@@ -2048,10 +2062,39 @@ pub(crate) fn operator_returns_of_with_arguments(
             &class_spelling,
             &wanted,
             symbol,
-            wanted_arity,
+            Some(wanted_arity),
+            object_is_const,
         ),
         None => None,
     };
+    // **A `const` object cannot call a non-const overload**, and the cheap query ([`member_fact`]) answers the first
+    // declaration without saying what its qualifier is — so when the object is const and the declaration found is not,
+    // the member list is asked for the one that fits. This is the only direction that needs the list: a non-const
+    // object may call a `const` member too, so an answer found for it is never wrong.
+    //
+    // Measured: `const std::string& s; s[0]` answered `char&` where a compiler answers `const char&`. The subscript
+    // passes no argument count, so `arity` is `None` and the two declarations — `reference operator[]` and
+    // `const_reference operator[] const` — can only be told apart by the qualifier.
+    if object_is_const
+        && matching
+            .as_ref()
+            .is_none_or(|(fact, _)| !fact.modifiers.contains(crate::DeclModifiers::CONST))
+    {
+        matching = a_member_with_that_arity(
+            &mut *declaring,
+            index,
+            scopes,
+            root,
+            path,
+            class_file.as_deref(),
+            &class_spelling,
+            &wanted,
+            symbol,
+            arity,
+            true,
+        )
+        .or(matching);
+    }
     for spelling in [wanted.as_str(), symbol] {
         if let Some((fact, member_file)) = matching.clone()
             && let Some(answer) = the_members_return(
@@ -2138,15 +2181,24 @@ pub(crate) fn operator_returns_of_with_arguments(
     // `operator *` and `operator*` are the same operator with a space in it. Comparing without whitespace makes the
     // two spellings one question, and the bare symbol is accepted as well because a reader that recorded only the
     // operator's own token answered `*`.
-    let found = list.members.iter().find(|member| {
-        let name: String = member
-            .fact
-            .name
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        name == wanted || name == symbol
-    })?;
+    //
+    // **And the qualifier picks among them**, the same way [`a_member_with_that_arity`] does: a `const` object can
+    // only call the `const` one, and C++ prefers it even when it could call both.
+    let found = list
+        .members
+        .iter()
+        .filter(|member| {
+            let name: String = member
+                .fact
+                .name
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            name == wanted || name == symbol
+        })
+        .min_by_key(|member| {
+            member.fact.modifiers.contains(crate::DeclModifiers::CONST) != object_is_const
+        })?;
     let returns = found
         .fact
         .returns
@@ -2259,7 +2311,14 @@ fn a_member_with_that_arity(
     class_spelling: &str,
     wanted: &str,
     symbol: &str,
-    arity: usize,
+    // **How many arguments the use wrote**, when it is known. `None` picks by qualifier alone, which is what a
+    // subscript asks: its argument count is not in doubt and no overload's arity is either.
+    arity: Option<usize>,
+    // **Whether the object this operator is called on is `const`.** `const std::string& s; s[0]` answers
+    // `const char&`, and both declarations are in the list (`reference operator[]` and `const_reference operator[]
+    // const`) — so among the ones whose arity fits, the qualifier picks. A non-const object prefers the non-const
+    // overload for the same reason C++ does, and a class with only one of the two still answers that one.
+    object_is_const: bool,
 ) -> Option<(crate::DeclFact, String)> {
     let view = class_file.and_then(declaring);
     let (class_scopes, class_root, class_path) = match &view {
@@ -2270,15 +2329,24 @@ fn a_member_with_that_arity(
     else {
         return None;
     };
-    let found = list.members.iter().find(|member| {
-        let name: String = member
-            .fact
-            .name
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        (name == wanted || name == symbol) && a_facts_parameter_count(&member.fact) == Some(arity)
-    })?;
+    let found = list
+        .members
+        .iter()
+        .filter(|member| {
+            let name: String = member
+                .fact
+                .name
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            (name == wanted || name == symbol)
+                && arity.is_none_or(|wanted| a_facts_parameter_count(&member.fact) == Some(wanted))
+        })
+        // **The one whose qualifier agrees, and the first one when none does** — `false` sorts before `true`, so an
+        // agreeing declaration wins and a class with only the other qualifier keeps the answer it had.
+        .min_by_key(|member| {
+            member.fact.modifiers.contains(crate::DeclModifiers::CONST) != object_is_const
+        })?;
     Some((found.fact.clone(), found.declared_in.clone()))
 }
 

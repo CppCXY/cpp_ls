@@ -1775,10 +1775,19 @@ pub(crate) fn a_members_answer_as_a_type(
             .iter()
             .map(|argument| argument.to_string())
             .collect();
-        class_type = crate::sema::types::parse_type_spelling(&match arguments.is_empty() {
+        // **The qualifier is written on the use, so it is put back on the target** — see the same step in
+        // [`operator_returns_of_with_arguments`]: a `const std::string&` resolved to `basic_string<char, …>`
+        // unqualified and the member choice then treated the object as non-const.
+        let resolved = crate::sema::types::parse_type_spelling(&match arguments.is_empty() {
             true => qualified,
             false => format!("{qualified}<{}>", arguments.join(", ")),
         });
+        class_type = match class_type.is_const() && !resolved.is_const() {
+            true => crate::sema::types::Type::Qualified {
+                of: std::sync::Arc::new(resolved),
+            },
+            false => resolved,
+        };
     }
     let Some(class) = class_type.class_name() else {
         return returns.to_string();
