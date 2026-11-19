@@ -2831,3 +2831,21 @@ one type rule that the rendering then needed.
    `type` / `entity.name.type`.
 5. **`lua_State`'s layout is "not computed".** Its members are `StkIdRel`, a struct of the same header; the layout
    writer refuses at the first member it cannot size and names all of them.
+
+**Two more of the five, fixed in the same round:**
+
+* **A field declared with an elaborated-type-specifier is a field, not a type** (`a4ba8c4c`). `struct CallInfo
+  *previous;` is `DeclSpecifierSeq [struct, NamedType(CallInfo)]` plus a declarator; the walker looked for the tag
+  *inside* the keyword node, found nothing, and bound the declarator's name as the class. Measured: `inspect facts` on
+  `lstate.h` answered `190:20 previous type in CallInfo`, and `CallInfo`'s member list held a member named after the
+  tag. Now `variable in CallInfo type `CallInfo*``, the tag is bound in the nearest enclosing **namespace**
+  ([basic.lookup.elab], not into the class), and only when that scope does not declare it already. `class Widget w;`
+  gains its other half too: `w` is bound as a variable. The semantic-token colour follows the fix —
+  `a_structs_field_is_a_property` (properties, not types, on a fixture of the shape). `FORMAT_VERSION` 40 → 41.
+* **A local's card is not its enclosing declaration's annotations** (`7903cf1b`). `the_attributes_before_a_declaration`
+  starts at the declaration the fact's offset is in, which for a parameter is the function — so `LUA_API`
+  (`#define LUA_API extern`) became the parameter's annotation and `level` was drawn `extern int level`. A local gets
+  none; the sentence beside the block already says "declared in a function body". Measured: `int level`.
+
+**What is left of the five:** the `ci_func(ci)->p` chain (hover asks the file's own text first; the mapping into a
+rendering cannot name a token written inside an invocation's argument list) and `lua_State`'s layout.
