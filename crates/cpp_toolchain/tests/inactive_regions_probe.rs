@@ -42,7 +42,7 @@ fn how_many_inactive_regions_a_real_project_has() {
         let bytes: usize = cooked
             .inactive
             .iter()
-            .map(|span| span.length as usize)
+            .map(|span| span.length)
             .sum();
         total_bytes += bytes;
         worst.push((
@@ -62,11 +62,7 @@ fn how_many_inactive_regions_a_real_project_has() {
     println!(
         "[inactive] about {} byte(s) of JSON per project, {} per file",
         total_regions * 90,
-        if files == 0 {
-            0
-        } else {
-            total_regions * 90 / files
-        }
+        total_regions * 90 / files.max(1)
     );
     for (regions, bytes, name) in worst.into_iter().take(6) {
         println!("[inactive] {name}: {regions} region(s), {bytes} byte(s)");
