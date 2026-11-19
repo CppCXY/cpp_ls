@@ -2411,3 +2411,93 @@ wrong and is corrected in `crates/cpp_ls/tests/lsp_hover_probe.rs`.
 full `cargo test --release -p cpp_ls --tests` batch (**32 test binaries, 0 failed**) once nothing killed the spawn in
 flight. The lesson for the gate itself: a server-flow test that is being watched by a killed job looks exactly like a
 deadlock.
+## The next reports from the same project: four defects, three closed and one measured to its cause
+
+Reported from `EmmyLuaCodeStyle` after the preprocessor work, with screenshots: `is_string` has no hover and no
+completion; `auto it = configMap.find(key)` hovers as an odd expanded iterator; `it->second` cannot be inferred; and
+`macro-parentheses` reports a macro that is not an expression at all.
+
+### 1. `macro-parentheses` on `#define LUA_COPYRIGHT LUA_RELEASE " … 1994-2021 …"` — fixed
+
+The check scans a replacement list as text for an operator outside parentheses, and it scanned the **inside of a
+string literal** too. The `-` of `1994-2021` was read as a subtraction at depth zero, so an **object-like** macro
+whose body is a name and a literal was reported as *"a caller's expression is spliced in without its precedence"* —
+advice about a parameter that does not exist. Reproduced hermetically (`inspect --fixture a.cpp=@…  --cook
+diagnostics`: 1 finding before, 0 after) and through the real server on `3rd/lua-5.4.3/src/lua.h` (1 finding at
+28:22 before, 0 after).
+
+The fix is in `the_code_of`: a literal is copied as its two quotes and nothing else, which is what the lexer hands a
+body judge — one token, no operators, no brackets, no `##`. The module's own note said the contents were kept so that
+a format string's `%d` would not land at depth zero, which is where it already was: keeping the contents did not
+protect them from being scanned. `#define FORMAT "%d\n"` and a literal containing `(` were the same false positive,
+and both are now silent (`an_operator_inside_a_string_literal_is_not_an_operator`).
+
+### 2 and 3. The iterator's type and `it->second` — fixed
+
+```text
+it            `_Tree_const_iterator<_Scary_val>`      →  `std::pair<const std::string, std::string>`
+it->second    `has no member `second``                →  `std::string`
+```
+
+Two defects, both measured on `CodeFormatCore/src/Config/LuaStyle.cpp:20`:
+
+1. **A reference hid the container from the element rule.** `range_element_of` matched `Type::Named` alone, and a
+   by-reference parameter's type is `Qualified`/`Reference` around it — `const std::map<std::string, std::string,
+   std::less<>>& configMap`. The call layer's rule ("an iterator-producing member — `begin`, `find` — is a view of
+   the element the iterator ranges over") therefore never fired, and the answer fell back to the member's declared
+   return type. Its answer was `_Tree_const_iterator<_Scary_val>`: MSVC's `const_iterator` alias, substituted one
+   level and not the second. `Type::class_name` and `Type::arguments` see through both wrappers, and the function
+   now asks them.
+2. **The arrow dropped the type's arguments.** `it->second` goes through the arrow path, and where the arrow
+   followed no pointer (`the_class_after_the_operator` answers the class itself for a plain class) the object's
+   arguments were thrown away — so `std::pair<…>::second`, declared `_Ty2 second`, was never paired with
+   `std::string`, and the type query answered `_Ty2`. A class the arrow did not follow is the type's own class, and
+   its arguments still apply; only a followed pointer replaces them.
+
+`tests/iterator_element_of_a_const_container.rs` pins both halves with the standard library's own names, because the
+element rule keys on the container's name.
+
+**Still open in this area, and separate:** the *member list* still spells a base's dependent return type with a
+prefix it should not have — `typename _Tree<…>::typename _Tree<…>::typename _Mybase::const_iterator`, measured on
+`members --class 'std::map<std::string, std::string, int>'`. The alias pass replaces a name inside the spelling it
+just produced, so `const_iterator` → `typename _Mybase::const_iterator` is replaced again, and `Mybase` with it, once
+per pass. The hover on such a member shows that spelling. The rule the pass needs is the language's: a name after
+`::` is a member name, not a type this pass expands.
+
+### 4. `is_string` — the chain is measured, and the cause is the composed environment
+
+```text
+json["data"].is_string()          "The type of `json["data"]` is not known here"
+members of `nlohmann::basic_json` 123, `is_string` present, **no `operator[]`**
+cooked json.hpp                   761 declarations, `operator[]` filed with scope `(none)`
+```
+
+The class body is lost from `at` (json.hpp:3486) onward, so every later member — `operator[]` among them — is
+filed **without its class scope** and a member lookup cannot find it. Measured on the reading the index actually
+holds (the cook served from the disk, 79 665 bytes): 6 parse errors, `basic_json`'s `ClassBody` 151 children,
+`operator[]` 8 facts all `(none)`, `at` 1 scoped and 5 without.
+
+The rendering is what is wrong, and the cause is named: a cook of `json.hpp` has **no translation unit**
+(`cooking_materials`: `unit false, composed configuration true`), so it renders from the environment composed out of
+the index, and that composition ignores every **conditional** `#define`
+(`the_indexed_environment`: *"a definition is evidence only when it is unconditional"*). `JSON_TRY`/`JSON_CATCH` are
+defined in `detail/macro_scope.hpp` under `#if (defined(__cpp_exceptions) || …) … #elif …`, so they are not in the
+environment, the cook leaves `JSON_CATCH (std::out_of_range&) { … }` as text, and the parser cannot read a
+parenthesised *type* where a call's argument goes. The same file rendered through a held unit is 74 382 bytes, has
+**0 errors**, and its `basic_json` `ClassBody` has 295 children — with `operator[]` filed under
+`nlohmann::basic_json`.
+
+So the next change is in `the_indexed_environment`: evaluate each fact's stored guard question in reading order
+against the table built so far (the summary already stores the questions — `SummaryGuards::conditionals` — and the
+evaluator is `cpp_toolchain::preprocess::condition`), instead of skipping every conditional definition. The seed the
+conditions need (`_CPPUNWIND`, `__cpp_exceptions`) is the compile command's, which the cook already has as
+`CookingMaterials::seed`; the composition does not receive it yet. That is the one piece of plumbing the change
+needs, and it is what would make a header cook without a unit stop producing text no parser can read.
+
+The alternative — refusing to answer from a reading that has parse errors — was rejected here: the reading with
+errors is the only one there is, and refusing would turn a wrong answer into no answer on every such file.
+
+**One display issue survives, and it is not the type:** a hover *on the member name* shows the declaration's own
+spelling — `std::pair::second`, *a variable of type `_Ty2`* — because the card is built from the fact and does not
+carry the object's arguments; the member list and the expression's type both answer `std::string`. A card that shows
+the instantiation needs the receiver's type at the hover layer, which is where that change belongs.

@@ -82,7 +82,7 @@ fn the_two_reported_hovers() {
     while session.pending_work() > 0 && slices < 4000 {
         session.advance(64);
         slices += 1;
-        if slices % 400 == 0 {
+        if slices.is_multiple_of(400) {
             let (pending, open, rest) = session.queue_sizes();
             println!(
                 "[pump] {slices}: queue {pending} ({open} open / {rest} rest), cooking {}, refinements {}, re-read {}",
@@ -101,7 +101,7 @@ fn the_two_reported_hovers() {
     while session.pending_work() > 0 && demand_slices < 2000 {
         session.advance(64);
         demand_slices += 1;
-        if demand_slices % 500 == 0 {
+        if demand_slices.is_multiple_of(500) {
             println!(
                 "[demand] {demand_slices}: queue {}, cooking {}, refinements {}, re-read {}",
                 session.pending(),
