@@ -1736,6 +1736,50 @@ pub(crate) fn a_members_answer_as_a_type(
     class_type: &Type,
     returns: &str,
 ) -> String {
+    // **An alias has no parameters of its own; its target has them.** `std::string` is
+    // `using string = basic_string<char, char_traits<char>, allocator<char>>`, so `template_parameters_for("std::string")`
+    // answers `[]` — and the members whose spellings this resolves are `basic_string`'s (`reference` is `value_type&`,
+    // `value_type` is `_Elem`). Measured on the server: `s[0]` on a `std::string&` answered **`_Elem&`**, and the trace
+    // showed the two alias steps with `(class "std::string", parameters [], arguments [])`. One step to the target is
+    // enough — the recursion ends at a class, whose declaration carries no `type_of` — and it is the same step
+    // [`operator_returns_of_with_arguments`] takes for an alias's operators.
+    let mut class_type = class_type.clone();
+    for _ in 0..4 {
+        let Some(name) = class_type.class_name().map(str::to_string) else {
+            return returns.to_string();
+        };
+        let Some(target) = index
+            .files_declaring(&name, path)
+            .into_iter()
+            .find(|declared| {
+                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+            })
+            .and_then(|declared| declared.fact.type_of.clone())
+        else {
+            break;
+        };
+        let resolved = crate::sema::types::parse_type_spelling(&target);
+        let Some(resolved_name) = resolved.class_name() else {
+            break;
+        };
+        // **The target is written unqualified**, and the class it names is looked up by the index's own spelling:
+        // `basic_string` in `<string>` is `std::basic_string`, and asking a member question about the bare name found
+        // no class at all — the substitution then answered `reference`, the alias's *name*, which is no type either.
+        let qualified = crate::index::project::qualified_from_the_index(index, path, resolved_name)
+            .unwrap_or_else(|| resolved_name.to_string());
+        if qualified == name {
+            break;
+        }
+        let arguments: Vec<String> = resolved
+            .arguments()
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
+        class_type = crate::sema::types::parse_type_spelling(&match arguments.is_empty() {
+            true => qualified,
+            false => format!("{qualified}<{}>", arguments.join(", ")),
+        });
+    }
     let Some(class) = class_type.class_name() else {
         return returns.to_string();
     };
@@ -1774,7 +1818,7 @@ pub(crate) fn a_members_answer_as_a_type(
         scopes,
         root,
         path,
-        &the_class_spelling(class_type),
+        &the_class_spelling(&class_type),
         &core,
         None,
     ) else {
@@ -1797,10 +1841,21 @@ pub(crate) fn a_members_answer_as_a_type(
         scopes,
         root,
         path,
-        class_type,
+        &class_type,
         &[],
         &target,
         MAX_ALIAS_HOPS,
+    );
+    // **The substitution runs again, because the aliases put parameter names back.** `std::string`'s `operator[]`
+    // returns `reference`, which is `value_type&`, and `value_type` is `_Elem` — so the first substitution cannot
+    // reach it (no parameter is written in `reference`) and the alias walk hands back `_Elem&`: a spelling no reader
+    // can use. Measured through the server, `s[0]` on a `std::string&` answered **`_Elem&`** where a compiler answers
+    // `char&`; the second pass is one call and turns it into `char&`.
+    let target = crate::sema::types::substituted_spelling_with_defaults(
+        &target,
+        &parameters,
+        &defaults,
+        &arguments,
     );
     format!("{leading}{target}{trailing}")
 }

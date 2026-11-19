@@ -160,7 +160,22 @@ pub fn substituted_members(
     let Known::Yes(mut list) = listed else {
         return listed;
     };
-    let Some((base, arguments)) = split_template_arguments(class) else {
+    // **An alias carries its arguments in its own declaration.** `std::string` writes no `<…>` at the use: it is
+    // `using string = basic_string<char, char_traits<char>, allocator<char>>`, and the members this list holds are
+    // `basic_string`'s — whose spellings say `_Elem`. Without this the substitution was skipped for every alias of a
+    // template, and the type layer answered the parameter: measured through the server, `s[0]` on a `std::string&`
+    // was **`_Elem&`** where a compiler answers `char&`, while the same class spelled `std::basic_string<char>`
+    // answered correctly (`value_type: char`, `reference: char&`).
+    let Some((base, arguments)) = split_template_arguments(class).or_else(|| {
+        let target = index
+            .files_declaring(class, from)
+            .into_iter()
+            .find(|declared| {
+                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+            })
+            .and_then(|declared| declared.fact.type_of.clone())?;
+        split_template_arguments(&target)
+    }) else {
         return Known::Yes(list);
     };
     let Some(declared) = index
