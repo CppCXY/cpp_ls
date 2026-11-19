@@ -35,7 +35,7 @@ Two numbers, because two different defects produce them:
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
 | `LLVM` | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
-| `Google` | 3 / 29 | 1 616 / 6 887 | 19 / 29 match, 130 lines |
+| `Google` | 3 / 29 | 1 616 / 6 887 | 21 / 29 match, 102 lines |
 | `Microsoft` | 5 / 29 | **494** / 8 032 | 27 / 29 match, **10 lines** |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
 | `LLVM, ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
@@ -128,4 +128,5 @@ Every one of these is a known gap with a reason, not a skipped comparison:
 | `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
 | GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
 | `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
+| **a long braced initializer list laid out as a column table** | clang-format 23 packs the elements of a braced list that does not fit into **columns whose widths are the widest element of each column** — for `static const int n[] = {111, 2222, …}` it produces nine aligned columns, and the same for a `std::set<std::string>` of operator names (27–43 lines per style on the EmmyLua corpus). This formatter cannot reproduce it yet: the packing is a fixed point between the column widths and the row filling, and it changes the line structure of an initializer list, which this formatter does not reflow. Recorded with the measured example rather than approximated |
 | `FixNamespaceComments` on an anonymous namespace | clang-format writes `} // namespace` with no name; this formatter knows only named ones |

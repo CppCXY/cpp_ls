@@ -329,9 +329,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 // **The breaking half**: clang-format decides where a statement that does not fit is cut, and its
                 // answer is the penalty search. The search's positions become forced breaks and everything else in
                 // the statement is joined; a statement the search finds nothing to gain on keeps the author's lines.
-                for index in first + 1..line.end {
+                for (index, slot) in joined.iter_mut().enumerate().take(line.end).skip(first + 1) {
                     if !breaks.contains(&index) {
-                        joined[index] = true;
+                        *slot = true;
                     }
                 }
                 for at in breaks {

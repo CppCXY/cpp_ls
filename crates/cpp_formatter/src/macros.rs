@@ -61,7 +61,10 @@ pub fn align_escaped_newlines(output: &str, style: &Style) -> String {
         let limit = style.count(StyleOption::ColumnLimit);
         for line in lines[start..end].iter_mut() {
             let target = match policy {
-                "Left" => code_width(line) + 1,
+                // **`Left` aligns the run to its longest line** (one space, then the backslash), not each line to
+                // itself: measured, clang-format gives every `\` in a run the same column under `Left` too — only the
+                // target differs from `Right` (the run`s width instead of the column limit).
+                "Left" => width + 1,
                 "Right" if limit > 0 => (limit - 1).max(width + 1),
                 _ => width + 1,
             };
