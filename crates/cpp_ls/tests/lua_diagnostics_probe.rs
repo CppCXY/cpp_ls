@@ -353,3 +353,71 @@ fn what_the_rendering_looks_like_where_the_errors_are() {
         }
     }
 }
+
+/// **An `#include` behind a condition, the region recorded for it, and whether the index can decide it.**
+///
+/// Lua 5.5.0's `lua.c` writes `<readline/readline.h>` under `#if defined(LUA_USE_READLINE)` and `<dlfcn.h>` under
+/// `#if defined(LUA_USE_DLOPEN) && defined(LUA_READLINELIB)`; a Windows build reads neither, and the rule asked
+/// `the_guard_is_taken` — which answered **true** ("keep the finding") while the environment was incomplete.
+///
+/// The output here is the whole chain: the region *is* the right `#if`, the verdict is the environment's answer, and
+/// the toolchain's macro count is why. Measured with a `cl.exe` database on this machine: 88 macros, none of them the
+/// compiler's **own dump**, so `the_compilation_is_known` is false and every condition is `Unknown` — the rule keeps
+/// its finding, as documented. With a `gcc` database (a compiler the analysis can actually run) the same three
+/// includes answer `Inactive` and the findings are gone; see `what_every_file_says`.
+#[test]
+#[ignore = "a probe: prints one include's guard, the index's verdict and the toolchain's macro count"]
+fn why_the_readline_includes_are_reported() {
+    let root = project();
+    let file = root.join("src/lua.c");
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files(project_files(&root));
+    let text = std::fs::read_to_string(&file).expect("lua.c is in the project");
+    session.did_open(&file, &text);
+    let mut slices = 0usize;
+    while session.pending_work() > 0 && slices < 600 {
+        session.advance(32);
+        slices += 1;
+    }
+    let _ = session.cook(&file);
+    println!(
+        "[guard] toolchain present {} macro(s) {}",
+        session.toolchain().is_some(),
+        session
+            .toolchain()
+            .map(|tool| tool.macros().len())
+            .unwrap_or(0)
+    );
+    let Some(summary) = session.index().summary(&file) else {
+        println!("[guard] no summary");
+        return;
+    };
+    for include in &summary.includes {
+        if !include.spelling.contains("readline") && !include.spelling.contains("dlfcn") {
+            continue;
+        }
+        if let cpp_code_analysis::FactGuard::Region(index) = include.guard
+            && let Some(region) = summary.guards.regions.get(index as usize)
+        {
+            let start = region.start_offset;
+            let end = region.end_offset().min(text.len());
+            println!(
+                "[guard] region {index} = {:?}",
+                text[start..end].lines().next().unwrap_or_default()
+            );
+        }
+        println!(
+            "[guard] {:?} guard {:?} taken {} resolved {}",
+            include.spelling,
+            include.guard,
+            session
+                .index()
+                .the_guard_is_taken(&file, include.guard, include.range.start_offset),
+            include.resolved.is_some()
+        );
+    }
+}

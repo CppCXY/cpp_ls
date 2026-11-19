@@ -97,3 +97,71 @@ fn a_header_is_not_a_source_file() {
     );
     assert_silent_about(&codes, DiagnosticCode::Unused, "the file is a header");
 }
+
+/// **A use written as a macro argument is a use.**
+///
+/// Lua 5.5.0''s `lbaselib.c` declares `int res = lua_gc(L, o, cast_sizet(n));`, then writes
+/// `checkvalres(res);` and `lua_pushboolean(L, res);` — and the rule reported `res` as "declared here and never
+/// used". `checkvalres` is a **macro** (`#define checkvalres(res) { if (res == -1) break; }`), so the argument is a
+/// token inside an invocation that the rendering replaces; the question is whether this rule still sees it.
+#[test]
+fn a_use_written_as_a_macro_argument_counts() {
+    let source = "\
+#define checkvalres(res) { if (res == -1) break; }
+static int f (int o) {
+  switch (o) {
+    case 1: {
+      int res = 0;
+      checkvalres(res);
+      return res;
+    }
+  }
+  return 0;
+}
+";
+    let codes = codes_of(source);
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::Unused,
+        "`res` is read by the macro invocation and by the return",
+    );
+}
+/// **A use written inside a header's macro is a use.**
+///
+/// Lua 5.5.0's `lbaselib.c` writes `int res = lua_gc(L, o, cast_sizet(n));`, then `checkvalres(res);` and
+/// `lua_pushboolean(L, res);` — and the rule reported `res` as "declared here and never used". Both uses were
+/// invisible to it: `cast_sizet` and `checkvalres` are macros, and a declaration whose body holds a **header's**
+/// expansion was pruned whole by `own_top_level_nodes`, so the spelling count never saw the argument. The count is a
+/// token-level question and now has a token-level answer — `own_tokens` filters per token over the whole tree.
+///
+/// The fixture is the shape without the file: one local, one use as a header macro's argument, one plain use.
+#[test]
+fn a_use_inside_a_header_macro_counts() {
+    let files = [
+        (
+            "/p/limits.h",
+            "#define cast_sizet(x) ((size_t)(x))\n\
+             #define CHECK(x) { if ((x) == -1) break; }\n",
+        ),
+        (
+            "/p/a.c",
+            "#include \"limits.h\"\n\
+             int f (int o, long n) {\n\
+               switch (o) {\n\
+                 case 1: {\n\
+                   int res = g(o, cast_sizet(n));\n\
+                   CHECK(res);\n\
+                   return res;\n\
+                 }\n\
+               }\n\
+               return 0;\n\
+             }\n",
+        ),
+    ];
+    let codes = codes_in(&files, "/p/a.c");
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::Unused,
+        "`res` is read by the header macro's argument and by the return",
+    );
+}

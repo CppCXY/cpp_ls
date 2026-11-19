@@ -561,7 +561,8 @@ impl<'a> CheckContext<'a> {
     ///
     /// (A child that is only *partly* this file's — a declaration whose first tokens come from a macro defined
     /// elsewhere — is pruned whole, which is the safe direction: not reporting is a missed finding, reporting on
-    /// another file's text is a wrong one.)
+    /// another file's text is a wrong one. The direction is why [`CheckContext::own_tokens`] does its own filtering
+    /// per token instead: a *count* of spellings may see the uses inside a pruned child without acting on its text.)
     /// **The top-level pieces of this file's own text** — what the two iterators below are built on.
     ///
     /// Kept separate because a token walk has to start here and not from every node: taking
@@ -686,13 +687,23 @@ impl<'a> CheckContext<'a> {
     /// **Every token of this file's own text, once each** — for the checks that count spellings rather than read
     /// structure.
     ///
-    /// Pruned the same way as [`CheckContext::own_syntax_nodes`] and for the same reason: a token inside an inlined
-    /// header is another file's spelling, and counting it would make `unused` answer about a name in `<string>`.
+    /// The filtering is **per token and over the whole tree**, not through [`CheckContext::own_top_level_nodes`],
+    /// and that is a measured correction: a top-level declaration is pruned whole when *any* token in it was not
+    /// written here, and almost every real function body calls a header's macro (`cast_sizet`, `luaL_checkany`, an
+    /// `assert`). Measured on Lua 5.5.0's `lbaselib.c`, **4** of ~50 top-level declarations survived that pruning,
+    /// this walk counted **41** tokens for a 20 KB file, and `unused` reported `res` as "declared here and never
+    /// used" although the file writes it three times — the first use being `checkvalres(res)`, a macro invocation
+    /// whose argument the pruning had dropped with its declaration. A token-level question has a token-level answer:
+    /// a token came from this file exactly when its `written` span exists.
     pub fn own_tokens(&self) -> impl Iterator<Item = cpp_parser::CppTokenData> + '_ {
-        self.own_top_level_nodes()
-            .into_iter()
+        let root = self.tree().clone();
+        root.children()
             .flat_map(|child| child.descendants_with_tokens().collect::<Vec<_>>())
             .filter_map(|element| element.into_token())
+            .filter(|token| {
+                self.view
+                    .was_written_here(cpp_parser::source_range(token.text_range()))
+            })
             .map(|token| cpp_parser::CppTokenData {
                 kind: token.kind().into(),
                 range: cpp_parser::source_range(token.text_range()),
