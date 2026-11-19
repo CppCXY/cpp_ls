@@ -27,9 +27,12 @@ pub fn normalized<'a>(text: &'a str, style: &Style) -> Cow<'a, str> {
         // spacing rules'.
         return Cow::Borrowed(text);
     };
+    // **The prefix is the run of marker characters after `//`**: `/` and `!` (doc comments), `:` (reference
+    // markers) and `<` (`///<`, the doc comment that documents the *preceding* member — clang-format writes
+    // `///< doc` and `///<tight` -> `///< tight`, measured).
     let decorators = rest
         .chars()
-        .take_while(|character| matches!(character, '/' | '!' | ':'))
+        .take_while(|character| matches!(character, '/' | '!' | ':' | '<'))
         .count();
     let after_prefix = 2 + decorators;
     let minimum = style.count(StyleOption::SpacesInLineCommentPrefixMinimum);

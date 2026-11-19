@@ -119,3 +119,13 @@ fn spacing_15_logical_and_in_a_condition() {
         "void f() {\n    const auto &style = g();\n    (void)style;\n}\n",
     );
 }
+
+/// **A template argument list's `>` glues to the name it closes over**: `std::numeric_limits<size_t>::max` is one
+/// name. The operator rule ("a space before `::` after an operator") put one in it.
+#[test]
+fn spacing_16_scope_after_a_template_argument_list() {
+    check(
+        "void f() {\n    (std::numeric_limits<std::size_t>::max)();\n    auto x = std::vector<int>::size_type{};\n}\n",
+        "void f() {\n    (std::numeric_limits<std::size_t>::max)();\n    auto x = std::vector<int>::size_type{};\n}\n",
+    );
+}

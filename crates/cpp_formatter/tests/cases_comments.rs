@@ -103,3 +103,14 @@ fn comments_13_prefix_spacing() {
         "// using enum X;\n/// doc\n// NOLINT\nvoid f() {\n    int x = 1; // trailing\n}\n",
     );
 }
+
+/// **A trailing line comment ends its line, and the line after it is placed by the layout** — an enumeration item
+/// written `A, // one` must not keep the source's indentation. Also: `///<` is a doc marker (the doc comment for the
+/// *preceding* member), so the space goes **after** it, not inside it.
+#[test]
+fn comments_14_trailing_comment_then_an_enum_item() {
+    check(
+        "enum E {\n    A, // one\n    B, ///<two\n};\n",
+        "enum E {\n    A, // one\n    B, ///< two\n};\n",
+    );
+}

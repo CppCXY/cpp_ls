@@ -441,10 +441,15 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 // lines up with its elements (measured: `/* ORDER OPR */` belongs at the elements' column), and outside
                 // a list the same rule is what fixes the *source's* indentation of the line after a comment
                 // (`      return 0;` came out at six spaces because the gap was copied verbatim).
-                || gap
-                    .comments
-                    .last()
-                    .is_some_and(|comment| comment.own_line))
+                || gap.comments.last().is_some_and(|comment| {
+                    // **A trailing comment that ends its line** (`A, // one` then `B,`) leaves the next line's column
+                    // to this pass when that line is a **block line** — an enumeration item, a statement. Copying the
+                    // gap verbatim kept the *source's* indent, which made the second enumeration item sit two columns
+                    // further in than clang-format's (measured). A continuation line keeps the source's column: its
+                    // indent is the nested-continuation question this formatter still answers one level short, and
+                    // recomputing it made the `Lua 5.5` spacing column worse, not better.
+                    comment.own_line || (comment.ends_line && !enums.is_empty())
+                }))
             && (gap.newlines > 0 || wrap)
             && index > 0
             && let Some((indent, is_block_line)) = {
@@ -631,6 +636,21 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // indentation of the line after the comment (`      return 0;` stayed at six spaces when clang-format
             // writes four). The comment's own text still comes from the source; only the column is decided here.
             let own_line_comment = gap.comments.last().filter(|comment| comment.own_line);
+            // **A trailing comment that ends its line is written first, then the break it ends**: the branch used to
+            // be entered only for an own-line comment, so a line comment after code left the whole gap to the
+            // verbatim copy — including the next line's indent (measured on `enum E { A, // one`).
+            let trailing = gap
+                .comments
+                .last()
+                .filter(|comment| !comment.own_line && comment.ends_line);
+            if let Some(comment) = trailing {
+                let prefix = source.get(gap.start..comment.start).unwrap_or("");
+                let comment_text = crate::comments::normalized(comment.text, style);
+                out.push_str(prefix);
+                out.push_str(&comment_text);
+                // The column is reassigned by the break and indent below, so only the text is written here.
+                let _ = columns.advance(columns.advance(column, prefix), &comment_text);
+            }
             let breaks_to_emit = if own_line_comment.is_some() { 0 } else { keep };
             for _ in 0..breaks_to_emit {
                 out.push_str(line_ending);

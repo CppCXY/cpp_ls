@@ -142,6 +142,11 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         // clang-format writes `::islower(ch) || ::isdigit(ch)` and `f(1, ::tolower(c))`, and a blanket "no space before
         // `::`" glued both (`||::isdigit`, `,::tolower`).
         Scope => {
+            // **A template argument list`s `>` glues to the name it closes over**: `std::numeric_limits<size_t>::max`
+            // is one name, and the operator rule above put a space in it (`size_t> ::max`, measured).
+            if previous.kind == Greater && roles.is_template_angle(previous.start) {
+                return 0;
+            }
             return usize::from(
                 is_operator_punctuation(previous.kind)
                     || matches!(previous.kind, Comma | Semicolon),

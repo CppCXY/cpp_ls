@@ -131,8 +131,8 @@ and this repository's two C++ fixtures.
 | Lua 5.5 | `Google` | 0 / 40 | 10 842 / 20 268 | 5 / 40 files, 6 241 lines |
 | Lua 5.5 | `Microsoft` | 0 / 40 | 11 362 / 22 010 | 13 / 40 files, 1 486 lines |
 | nlohmann json | `LLVM` | 0 / 40 | 28 262 / 27 337 | 1 / 40 files, 2 558 lines |
-| nlohmann json | `Google` | 0 / 40 | 33 298 / 27 360 | 1 / 40 files, 8 444 lines |
-| nlohmann json | `Microsoft` | 1 / 40 | 10 329 / 27 328 | 2 / 40 files, 1 650 lines |
+| nlohmann json | `Google` | 4 / 40 | 32 960 / 27 360 | 7 / 40 files, 8 062 lines |
+| nlohmann json | `Microsoft` | 7 / 40 | 9 820 / 27 327 | 12 / 40 files, 1 056 lines |
 | cpp_ls fixtures | `LLVM` | 0 / 2 | 108 / 145 | 0 / 2 files, 28 lines |
 | cpp_ls fixtures | `Google` | 0 / 2 | 121 / 146 | 0 / 2 files, 41 lines |
 | cpp_ls fixtures | `Microsoft` | 0 / 2 | 30 / 170 | 0 / 2 files, 20 lines |
@@ -199,5 +199,6 @@ Every one of these is a known gap with a reason, not a skipped comparison:
 | `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
 | GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
 | `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
+| **the indent of a line that follows a trailing comment** | the line **after** a trailing comment (`A, // one` then `B,`) is recomputed by the layout only **inside an enum body**: recomputing it everywhere was measured to regress the Lua 5.5 spacing column from 1 677 to 2 291 lines, because the indent this formatter computes for a continuation line is one nesting level short (see the entry above). The enum case is the one where the computed indent is measurably right, and it is fixed |
 | **`AlignAfterOpenBracket` inside a nested bracket opened on a continued line** | the anchor is the line the bracket was written on, and a second nesting level still comes out one `ContinuationIndentWidth` short on a few lines (`IndentWidth: 4`: 148 spacing lines); the accumulated-indent model clang-format uses is not reproduced yet |
 | `FixNamespaceComments` on an anonymous namespace | clang-format writes `} // namespace` with no name; this formatter knows only named ones |
