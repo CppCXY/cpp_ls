@@ -497,9 +497,10 @@ impl<F: FileProvider + Clone> Session<F> {
                         fact.range.start_offset,
                         type_of,
                     )?;
-                    (expanded != type_of).then(|| ()).and_then(|()| {
-                        self.the_size_of_a_type_in(view, &expanded, depth, Some(&instantiation))
-                    })
+                    if expanded == type_of {
+                        return None;
+                    }
+                    self.the_size_of_a_type_in(view, &expanded, depth, Some(&instantiation))
                 });
             match measured {
                 Some((size, alignment)) => sized.push((fact.name.to_string(), size, alignment)),
