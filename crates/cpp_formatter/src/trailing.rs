@@ -101,8 +101,11 @@ pub fn align(output: &str, style: &Style) -> String {
     }
 
     let mut found: Vec<(usize, &str, &str)> = Vec::new();
+    // **The scan carries the block-comment state across lines**: a `//` inside `/* … */` is comment text, not a
+    // trailing comment (see `split_trailing_comment`).
+    let mut in_block = false;
     for (index, line) in lines.iter().enumerate() {
-        if let Some((code, comment)) = split_trailing_comment(line) {
+        if let Some((code, comment)) = split_trailing_comment(line, &mut in_block) {
             found.push((index, code.trim_end(), comment));
         }
     }
@@ -218,13 +221,25 @@ fn start_spaces(code: &str, comment: &str, minimum: usize) -> usize {
 ///
 /// The scan skips string and character literals so that `const char *s = "// not a comment";` stays code, and a line
 /// whose first non-space characters are the comment is not a trailing one (it is an own-line comment).
-fn split_trailing_comment(line: &str) -> Option<(&str, &str)> {
+fn split_trailing_comment<'a>(line: &'a str, in_block: &mut bool) -> Option<(&'a str, &'a str)> {
     let bytes = line.as_bytes();
     let mut index = 0usize;
     let mut quote: Option<u8> = None;
     let mut seen_code = false;
     while index < bytes.len() {
         let byte = bytes[index];
+        // **A line that starts inside a block comment is comment text**, not code: `http://x` inside `/* … */` is not
+        // a trailing comment, and splitting it inserted a space after the scheme (`http: //x`, measured on
+        // nlohmann json's `to_chars.hpp`, whose doc comment carries a URL).
+        if *in_block {
+            if byte == b'*' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
+                *in_block = false;
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
         if let Some(open) = quote {
             if byte == b'\\' {
                 index += 2;
@@ -241,6 +256,28 @@ fn split_trailing_comment(line: &str) -> Option<(&str, &str)> {
                 quote = Some(byte);
                 seen_code = true;
                 index += 1;
+            }
+            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => {
+                // A block comment that opens here. When it closes on this line and only whitespace follows, it **is**
+                // the trailing comment; when it does not close, the line ends inside it and the next line starts in
+                // the block (`*in_block`), where a `//` is text rather than a comment.
+                match line[index + 2..].find("*/") {
+                    Some(close) => {
+                        let after = index + 2 + close + 2;
+                        if line[after..].trim().is_empty() {
+                            if !seen_code {
+                                return None;
+                            }
+                            return Some((&line[..index], &line[index..]));
+                        }
+                        index = after;
+                        seen_code = true;
+                    }
+                    None => {
+                        *in_block = true;
+                        return None;
+                    }
+                }
             }
             b'/' if index + 1 < bytes.len()
                 && (bytes[index + 1] == b'/' || bytes[index + 1] == b'*') =>
@@ -327,6 +364,15 @@ mod tests {
 #include <utility> // move
 ";
         assert_eq!(align(source, &style), expected);
+    }
+
+    #[test]
+    fn a_url_inside_a_block_comment_is_not_a_trailing_comment() {
+        // clang-format 23.1.5 leaves a doc comment's URL alone; splitting it inserted a space after the scheme
+        // (`http: //x`, measured on nlohmann json's `to_chars.hpp`).
+        let source = "/*!\n@brief x\nhttp://example.com/a (b).\n*/\nint x;\n";
+        let style = Style::default_style();
+        assert_eq!(align(source, &style), source);
     }
 
     #[test]
