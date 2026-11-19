@@ -1992,10 +1992,10 @@ mod tests {
             ..crate::RenderedUnit::default()
         };
         // The rendering is a flat line of tokens —a different text, with different offsets, on purpose.
-        unit.push("int", 0, SourceRange::new(1, 3));
-        unit.push("a", 0, SourceRange::new(5, 1));
-        unit.push("int", 0, SourceRange::new(8, 3));
-        unit.push("c", 0, SourceRange::new(19, 1));
+        unit.push("int", 0, SourceRange::new(1, 3), None);
+        unit.push("a", 0, SourceRange::new(5, 1), None);
+        unit.push("int", 0, SourceRange::new(8, 3), None);
+        unit.push("c", 0, SourceRange::new(19, 1), None);
 
         let texts: std::collections::HashMap<PathBuf, String> =
             [(PathBuf::from(file), text.to_string())]
@@ -2033,7 +2033,7 @@ mod tests {
             file_lengths: vec![0],
             ..crate::RenderedUnit::default()
         };
-        unit.push("x", 0, SourceRange::new(0, 1));
+        unit.push("x", 0, SourceRange::new(0, 1), None);
 
         let tokens = unit_tokens(&unit, &std::collections::HashMap::<PathBuf, String>::new());
 

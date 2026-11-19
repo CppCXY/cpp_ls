@@ -375,7 +375,15 @@ use std::path::{Path, PathBuf};
 /// made that way is keyed by a closure and an environment that did not change, so nothing but a version reaches it —
 /// measured on Lua 5.5.0's `ldebug.c` with a cache from before the fix: **30** syntax errors still published, against
 /// 0 with the same binary and an empty cache.
-pub const FORMAT_VERSION: u32 = 39;
+///
+/// # Why this moved to 40
+///
+/// **A program stream's spelling is part of the reading.** `RenderedUnit`'s writer spaced every token of a macro
+/// expansion apart (it compared *written* ranges, and one expansion's tokens all carry the invocation), so `>=` came
+/// out as `> =` and the program read of a C file reported `expected primary expression` — 15 of them on Lua 5.5.0's
+/// `ldebug.c`. A stored program reading made that way is keyed by the closure it was read from, which did not change,
+/// so only the version reaches it.
+pub const FORMAT_VERSION: u32 = 40;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

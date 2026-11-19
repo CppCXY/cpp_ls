@@ -29,6 +29,43 @@ use cpp_code_analysis::{
 };
 use cpp_parser::MacroFacts;
 
+/// **The significant spellings of a stream** — what a claim about a *program* should be made of.
+///
+/// A spacing claim is a claim about the renderer, and the renderer's rule is the one this suite exists to have
+/// remeasured: it separates two tokens only where the source did or where joining them would merge (`CleanStream`'s
+/// `RenderedUnit::push`). Asserting `"= 4"` therefore went red the day the separator rule improved — twice. The tokens
+/// are the part that a change of spacing cannot move.
+fn the_spellings_of(text: &str) -> Vec<String> {
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    tokens
+        .iter()
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                cpp_parser::CppTokenKind::None
+                    | cpp_parser::CppTokenKind::Whitespace
+                    | cpp_parser::CppTokenKind::Newline
+                    | cpp_parser::CppTokenKind::LineComment
+                    | cpp_parser::CppTokenKind::BlockComment
+                    | cpp_parser::CppTokenKind::LineContinuation
+                    | cpp_parser::CppTokenKind::DocTrivia
+                    | cpp_parser::CppTokenKind::Eof
+            )
+        })
+        .map(|token| text[token.range.start_offset..token.range.end_offset()].to_string())
+        .collect()
+}
+
+/// Does `spellings` hold `expected` as consecutive tokens?
+fn the_stream_says(spellings: &[String], expected: &[&str]) -> bool {
+    spellings.windows(expected.len()).any(|window| {
+        window
+            .iter()
+            .zip(expected)
+            .all(|(held, wanted)| held == wanted)
+    })
+}
+
 /// A file set in memory, indexed once, with the two ways of asking for a file's environment.
 struct Unit {
     summaries: HashMap<PathBuf, FileSummary>,
@@ -691,13 +728,13 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
         tree.get_errors(),
         stitched.text
     );
-    // **The expansion, asserted as a fact about names rather than about spaces.** This used to look for `"= 4 ;"`,
-    // which is a claim about where the renderer puts a semicolon — the stream spells `int main_use = 4;`, so the
-    // test was red while `API` had in fact expanded two files away, exactly as its own message says. Naming both
-    // halves is strictly more than the spacing check was: the value is there **and** neither macro's name survived
-    // into the program, which is what an unexpanded invocation would look like.
+    // **The expansion, asserted as a fact about tokens rather than about spaces.** This used to look for `"= 4 ;"`,
+    // and then for `"= 4"` — both are claims about where the renderer puts a space, and both went red when the rule
+    // they were measuring got better (see [`the_spellings_of`]). The declaration's tokens say the same thing and
+    // cannot: `main_use` is initialised with the value `WIDTH` stood for.
+    let spellings = the_spellings_of(&stitched.text);
     assert!(
-        stitched.text.contains("= 4"),
+        the_stream_says(&spellings, &["main_use", "=", "4"]),
         "`API` expanded to `WIDTH`'s value, which is defined two files away: {}",
         stitched.text
     );
@@ -788,9 +825,15 @@ fn a_declaration_starts_in_the_file_it_stands_in() {
     let shared = timeline.definitions();
     let stream = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
 
-    // The stream has the expansion, not the invocation: `decl.h` wrote a name, the stream has a struct.
+    // The stream has the expansion, not the invocation: `decl.h` wrote a name, the stream has a struct. **As tokens**,
+    // for the reason [`the_spellings_of`] gives: the separator rule is not this test's subject, and a stream whose
+    // tokens are `struct Widget { int size ; } ;` is the same program whichever spaces it was written with.
+    let spellings = the_spellings_of(&stream.text);
     assert!(
-        stream.text.contains("struct Widget { int size ; } ;"),
+        the_stream_says(
+            &spellings,
+            &["struct", "Widget", "{", "int", "size", ";", "}", ";"]
+        ),
         "the macro expanded into the stream: {}",
         stream.text
     );

@@ -2588,7 +2588,7 @@ impl UnitCook<'_> {
             let here = cpp_parser::SourceRange::new(0, 0);
             out.break_line_before_next();
             for spelling in ["#", "pragma", "once"] {
-                out.push(spelling, frame, here);
+                out.push(spelling, frame, here, None);
             }
             out.break_line_before_next();
         }
@@ -2626,12 +2626,19 @@ impl UnitCook<'_> {
             // **Where the token stands in this file** — the call site for an expansion, the token's own range for text
             // the file wrote. Both are positions in *this* file; see `ExpandedToken::diagnostic_range`.
             let at = token.diagnostic_range();
+            // **What decides the separator**: for the file's own text, byte adjacency in that file (the range test in
+            // [`RenderedUnit::push`]); for what the cook produced, the expander's own answer — its ranges are the call
+            // site's, so every token of one expansion would answer "not adjacent" and be spelled apart.
+            let space_before = match token.origin {
+                crate::preprocess::expand::Origin::Source => None,
+                _ => Some(token.space_before),
+            };
             while lines.next_if(|line| line.end <= index).is_some() {}
             // A `#pragma` is a line of its own — see [`crate::CookedStream::pragma_lines`].
             if lines.peek().is_some_and(|line| line.start == index) {
                 out.break_line_before_next();
             }
-            out.push(token.text(), frame, at);
+            out.push(token.text(), frame, at, space_before);
             if lines.peek().is_some_and(|line| line.end == index + 1) {
                 out.break_line_before_next();
             }
@@ -3685,14 +3692,33 @@ impl RenderedUnit {
     /// Measured on the cooked `<vector>` stream: **0 diagnostics → 77**, the first at byte 4127, where the file
     /// writes `is_same_v<_Ty1, _Ty2>>` and the rendering wrote `_Ty2 > >`.
     ///
-    /// `written` is what makes the test cheap and correct: a token the file wrote literally carries its own range,
-    /// while one out of a macro body carries the **invocation** — which is not adjacent to anything around it, so
-    /// those keep their space. Same rule as `CookedStream::render`, asked of the field this map already keeps.
-    pub(crate) fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
+    /// # `space_before`, and why a macro expansion cannot be spaced by ranges
+    ///
+    /// `written` answers "did these two touch" for a token the file wrote literally: it carries its own range. One out
+    /// of a macro body carries the **invocation** instead, and *every* token of one expansion carries the same
+    /// invocation — so `previous.end_offset() == written.start_offset` is false for each pair, and the rule above
+    /// spelled an expansion with a space between every token. That is the same failure the note above is about, one
+    /// layer down: `#define strisshr(ts) ((ts)->shrlen >= 0)` in Lua 5.5.0's `lobject.h:420` came out as
+    /// `( ( s ) -> shrlen > = 0 )` in the program reading of `ldebug.c`, the parser reported `expected primary
+    /// expression` against the `=`, and 15 errors followed it.
+    ///
+    /// The expander already answers the question — [`crate::ExpandedToken::space_before`] compares the two tokens in
+    /// whatever coordinate system they share and falls back to "would joining them merge" (`>` `=` does not) — so this
+    /// takes it as `space_before: Some(…)` and falls back to the range test only for text the file wrote (`None`).
+    pub(crate) fn push(
+        &mut self,
+        text: &str,
+        file: u32,
+        written: cpp_parser::SourceRange,
+        space_before: Option<bool>,
+    ) {
         if !self.text.is_empty() {
-            let touching = self.previous.is_some_and(|(previous_file, previous)| {
-                previous_file == file && previous.end_offset() == written.start_offset
-            });
+            let touching = match space_before {
+                Some(space) => !space,
+                None => self.previous.is_some_and(|(previous_file, previous)| {
+                    previous_file == file && previous.end_offset() == written.start_offset
+                }),
+            };
 
             if self.pending_break {
                 self.text.push('\n');
@@ -3803,10 +3829,15 @@ impl RenderedUnit {
                 {
                     out.break_line_before_next();
                 }
+                // **The spacing this stream already has**, which is the only answer available here: the tokens are
+                // copied out of `self.text`, and whether two of them touched is spelled in that text.
+                let touching = span.cooked.start_offset > 0
+                    && !self.text[..span.cooked.start_offset].ends_with(' ');
                 out.push(
                     &self.text[span.cooked.start_offset..span.cooked.end_offset()],
                     span.file,
                     span.written,
+                    Some(!touching),
                 );
             }
         }
