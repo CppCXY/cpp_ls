@@ -404,6 +404,22 @@ fn the_round_three_reports() {
                                     .index()
                                     .definition("nlohmann::basic_json::operator[]", &path)
                             );
+                            // **The fact the *card* would use** when it comes from the member list, and the two
+                            // spellings a function's return type has.
+                            if let cpp_code_analysis::Known::Yes(listed) =
+                                session.members_of(&view, "nlohmann::basic_json")
+                                && let Some(member) = listed
+                                    .members
+                                    .iter()
+                                    .find(|member| member.fact.name == "is_string")
+                            {
+                                println!(
+                                    "[ask] member is_string: returns {:?}, returns_in_the_class {:?}, range {:?}",
+                                    member.fact.returns,
+                                    member.fact.returns_in_the_class(),
+                                    member.fact.range
+                                );
+                            }
                         }
                         let haystack = view.source.to_string();
                         let Some(at) = haystack.find("is_string") else {
