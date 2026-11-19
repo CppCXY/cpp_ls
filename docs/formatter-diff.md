@@ -107,6 +107,53 @@ The rules, each derived from a fixture and pinned in `tests/cases_tables.rs` and
 Twelve fixtures match the oracle byte for byte — the integer array, the 25 operator names, 8/10/20-element string
 lists at two widths, and the same names behind three different declaration prefixes — and the corpus's
 `NameStyleChecker.cpp` table now matches too.
+### Every corpus, every style — and the command that prints it
+
+`scripts/formatter-diff.ps1` is the rerunnable form of this document's tables:
+
+```text
+$env:CPPLS_CLANG_FORMAT = "…\clang-format.exe"     # 23.1.5 is what the numbers below were measured with
+pwsh -File scripts/formatter-diff.ps1              # every corpus, the three naming styles
+pwsh -File scripts/formatter-diff.ps1 -Options     # plus one option at a time
+pwsh -File scripts/formatter-diff.ps1 -Corpus "Lua 5.5"
+```
+
+It runs the differential harness once per cell and prints markdown, so the table below is reproducible rather than
+transcribed. Four corpora: the EmmyLua formatter's own sources, Lua 5.5's C sources, the nlohmann json include tree,
+and this repository's two C++ fixtures.
+
+| corpus | style | identical files | changed lines | spacing-only |
+| --- | --- | --- | --- | --- |
+| EmmyLua | `LLVM` | 5 / 29 | 1 441 / 6 850 | 19 / 29 files, 64 lines |
+| EmmyLua | `Google` | 3 / 29 | 1 605 / 6 887 | 21 / 29 files, 58 lines |
+| EmmyLua | `Microsoft` | 5 / 29 | 485 / 8 031 | **28 / 29 files, 2 lines** |
+| Lua 5.5 | `LLVM` | 0 / 40 | 7 309 / 20 302 | 10 / 40 files, 1 875 lines |
+| Lua 5.5 | `Google` | 0 / 40 | 10 842 / 20 268 | 5 / 40 files, 6 241 lines |
+| Lua 5.5 | `Microsoft` | 0 / 40 | 11 362 / 22 010 | 13 / 40 files, 1 486 lines |
+| nlohmann json | `LLVM` | 0 / 40 | 28 262 / 27 337 | 1 / 40 files, 2 558 lines |
+| nlohmann json | `Google` | 0 / 40 | 33 298 / 27 360 | 1 / 40 files, 8 444 lines |
+| nlohmann json | `Microsoft` | 1 / 40 | 10 329 / 27 328 | 2 / 40 files, 1 650 lines |
+| cpp_ls fixtures | `LLVM` | 0 / 2 | 108 / 145 | 0 / 2 files, 28 lines |
+| cpp_ls fixtures | `Google` | 0 / 2 | 121 / 146 | 0 / 2 files, 41 lines |
+| cpp_ls fixtures | `Microsoft` | 0 / 2 | 30 / 170 | 0 / 2 files, 20 lines |
+
+One option at a time (EmmyLua, `LLVM` base):
+
+| option | identical files | changed lines | spacing-only |
+| --- | --- | --- | --- |
+| `LLVM` (base) | 5 / 29 | 1 441 / 6 850 | 19 / 29 files, 64 lines |
+| `IndentWidth: 4` | 5 / 29 | 1 726 / 7 015 | 15 / 29 files, 138 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 441 / 6 850 | 18 / 29 files, 94 lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 files, 57 lines |
+| `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 413 / 6 906 | 19 / 29 files, 64 lines |
+| `ColumnLimit: 0` | **11 / 29** | **224** / 6 510 | **27 / 29 files, 8 lines** |
+
+**How to read the two corpora that are not written for these styles.** nlohmann json and Lua 5.5 are formatted for
+their own conventions (nlohmann's 120-column house style, Lua's hand-wrapped C), so clang-format's 80-column answer
+re-wraps most of their lines: their `changed lines` column measures the **break half** of the reflow, which this
+formatter implements only for statements that already overflow. Their **spacing-only** column — the same text
+clang-format laid out, fed back through `cppfmt` — is the comparable one, and it is where the remaining work is
+named: 1 875 lines on Lua 5.5, 2 558 on nlohmann json with `LLVM`.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:

@@ -1143,7 +1143,7 @@ fn planned_indent(
     blocks: &[Option<usize>],
     stack: &[usize],
     statement_indent: usize,
-    line_column: usize,
+    anchor: usize,
     style: &Style,
     in_ctor_init: bool,
     ctor_column: Option<usize>,
@@ -1171,10 +1171,7 @@ fn planned_indent(
         // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
         // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
         let base = the_line_that_opened_the_list(stream, blocks, index, statement_indent);
-        return Some((
-            layout::continuation(stack, line_column.max(base), first, style),
-            false,
-        ));
+        return Some((layout::continuation(stack, anchor, first, style), false));
     }
     // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
     // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
@@ -1273,10 +1270,7 @@ fn planned_indent(
     {
         return Some((column, false));
     }
-    Some((
-        layout::continuation(stack, line_column, first, style),
-        false,
-    ))
+    Some((layout::continuation(stack, anchor, first, style), false))
 }
 
 /// **Does the line that ends at `index` start with the `template` keyword?** — the difference between a complete
