@@ -861,6 +861,27 @@ pub(crate) fn type_of_expression_inner(
     //   would then have to keep right for every platform's widths; a wrong type shown for an `auto` is worse than
     //   `auto`, because the second says the file did not spell it and the first says it did.
     if let Some((operator, left, right)) = binary_operands_of(expression) {
+        // **The comma operator is its right operand's type**, and it is C++'s own answer rather than an inference: the
+        // standard says the value of `a, b` is the value of `b`. It is not an arithmetic question and it is not the
+        // left operand's type, so both rules below would answer it wrongly — which is what happened on a *rendering*:
+        // Lua's `check_exp(c, e)` is `(lua_assert(c), (e))`, so `ci_func(ci)` expands to a comma expression whose type
+        // is the right operand's, and without this the whole expansion had no type: measured on `ldebug.c:101`,
+        // hovering `p` in `ci_func(ci)->p` said the type of the parenthesis was "not known here".
+        if operator == ","
+            && let Known::Yes(answer) = type_of_expression_memoed(
+                memo,
+                shapes,
+                index,
+                declaring,
+                scopes,
+                root,
+                path,
+                &right,
+                depth + 1,
+            )
+        {
+            return Known::Yes(answer);
+        }
         // **A pipeline names a view, and the standard spells it.** `numbers | std::views::filter(pred)` is
         // `filter_view<all_t<decltype(numbers)>, Pred>`, and the standard fixes every one of those pieces: which
         // view class an adaptor produces, that the range is passed through `views::all_t`, and that a predicate
