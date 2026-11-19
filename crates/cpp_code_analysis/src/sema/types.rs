@@ -2500,6 +2500,19 @@ fn substituted_spelling_from(written: &str, names: &[String], replacements: &[St
             return;
         }
 
+        // **A name after `::` is a member, not a parameter and not an alias.** `typename _Mybase::const_iterator`
+        // names a member of `_Mybase`, and the *alias* named in that spelling is `_Mybase` — the word after the `::`
+        // is a name the class on the left declares, and replacing it is a different question with a wrong answer.
+        //
+        // Measured on `std::map`: the alias pass expands `const_iterator` into `typename _Mybase::const_iterator` and
+        // then replaces *that* spelling's own tail again on the next pass, so a base's dependent return type came out
+        // as `typename Tree<…>::typename Tree<…>::typename _Mybase::const_iterator` — a spelling no compiler reads.
+        if out.ends_with("::") {
+            out.push_str(word);
+            word.clear();
+            return;
+        }
+
         // **A parameter with no replacement keeps the declaration's own spelling.** The pairing is by position, and a
         // use may write fewer arguments than the declaration has parameters (`std::vector<_Ty, _Alloc>` used as
         // `std::vector<int>`), so the lookup must not assume the two lists are the same length — indexing with the
@@ -2753,6 +2766,33 @@ mod tests {
         };
         assert!(parameter.depends_on_a_parameter());
         assert!(!Type::named("Widget").depends_on_a_parameter());
+    }
+
+    /// **A name after `::` is a member, not a parameter and not an alias.**
+    ///
+    /// The alias pass expands a name into the spelling its declaration wrote, and the spelling it produces can end in
+    /// a member name — `using const_iterator = typename _Mybase::const_iterator;`. Replacing that tail again on the
+    /// next pass is what made a base's dependent return type come out as
+    /// `typename _Tree<…>::typename _Tree<…>::typename _Mybase::const_iterator`, measured on `std::map`'s `find`.
+    #[test]
+    fn a_name_after_a_scope_operator_is_not_substituted() {
+        let names = vec!["const_iterator".to_string(), "_Mybase".to_string()];
+        let replacements = vec![
+            "typename _Mybase::const_iterator".to_string(),
+            "Tree<int>".to_string(),
+        ];
+        assert_eq!(
+            substituted_spelling("typename _Mybase::const_iterator", &names, &replacements),
+            "typename Tree<int>::const_iterator",
+            "the `const_iterator` after the `::` is the member the qualifier declares, and the qualifier is the \
+             alias that gets substituted"
+        );
+        // **…and the qualifier itself is still substituted**, which is the half the pass exists for.
+        assert_eq!(
+            substituted_spelling("_Mybase::value_type", &names, &replacements),
+            "Tree<int>::value_type",
+            "the alias in front of the `::` is what the pass expands"
+        );
     }
 
     /// **Substitution is by name and by position** — the operation that makes a member of `std::vector<T>`
