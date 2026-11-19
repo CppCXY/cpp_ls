@@ -2501,3 +2501,67 @@ errors is the only one there is, and refusing would turn a wrong answer into no 
 spelling — `std::pair::second`, *a variable of type `_Ty2`* — because the card is built from the fact and does not
 carry the object's arguments; the member list and the expression's type both answer `std::string`. A card that shows
 the instantiation needs the receiver's type at the hover layer, which is where that change belongs.
+
+## The composed environment: a timeline, and the conditionals it stores
+
+The `is_string` report was diagnosed last round to `the_indexed_environment` skipping every **conditional**
+`#define`. The fix here is that walk, and the measurement found a second defect in the same place before it worked.
+
+### What the environment now is
+
+```text
+per fact     evaluate the stored guard (SummaryGuards::conditionals) against the table built so far
+             region answers are cached per (region, branch): `#ifndef X / #define X` must not be re-decided after
+             its own `#define`
+per file     one decision per name — its `#define`s and `#undef`s net out — at **the offset in the rendered file
+             where its `#include` sits**
+```
+
+The second half is the one that mattered for the report, and it is a *model* change rather than an evaluation:
+`nlohmann/json.hpp` includes `detail/macro_scope.hpp` at the top (where `JSON_TRY` is defined) and
+`detail/macro_unscope.hpp` at the bottom (where it is `#undef`ed). A flat table has one answer per name, so the
+`#undef` — the later one — was the whole answer, and the class body rendered with `JSON_CATCH (std::out_of_range&)
+{ … }` in it. The environment therefore carries each include's contribution at the include's own offset
+(`IncludedMacro::from_offset`, which the renderer already reads positionally), and an `#undef` is a decision like a
+definition: `MacroFacts::for_each_undefinition` is the channel that was missing, and `configuration_from_environment_and`
+now inserts definitions and undefs in one order by offset.
+
+### Measured, on the report
+
+```text
+                                    before                  after
+json.hpp's cooked reading           79 665 bytes            73 169 bytes
+parse errors                        6                       0
+basic_json ClassBody children       151                     295
+members of nlohmann::basic_json     123                     242   (`operator[]` ×8 among them)
+declarations with no scope          612                     483   (the rest are function-body locals)
+```
+
+`FORMAT_VERSION` is **38**: a stored rendering was made from the old environment and is keyed by it, so it is
+discarded rather than migrated.
+
+### What still does not answer, and it is a different layer
+
+`json["data"].is_string()` still reports *"the type of `json["data"]` is not known here"*, with the class now
+complete:
+
+```text
+members_of("nlohmann::basic_json")                    242, `operator[]` 8
+definition("nlohmann::basic_json::operator[]")         Unknown(Ambiguous(…))
+type of `json["data"]`                                 UnknownType('json["data"]')
+```
+
+Eight `operator[]` overloads are visible and the subscript cannot choose one: `"data"` is a `const char*`, so the
+candidates are the `T*` template, the `const object_t::key_type&` (a `std::string`) and the `size_type` one, and the
+member walk's pattern rule answers `Ambiguous` rather than picking by argument conversion. That is the next defect,
+and it is in the *type* layer — the reading it needs is now there.
+
+### The preprocessor, verified against the compiler
+
+`crates/cpp_toolchain/tests/preprocessor_against_the_compiler.rs` runs the same file through `g++ -E` and through
+`cook_with` and compares the answers: the set of branch markers that survive (14 conditional shapes, including
+`#elif` after a taken `#if`, a function-like macro as a condition, an empty `#define`, a nested `#if` and an `#undef`
+mid-file), and the whole token stream of 13 expansion shapes (`#`, `##`, variadic, nested, self-referential
+`SELF → SELF`, redefinition and `#undef`). Both pass on GCC 15.1.0, and skip with a printed reason on a machine
+without a compiler (`CPPLS_TEST_CXX` names one). This is the gate for the evaluator the environment change leans
+on: `#if` decisions are now compared with a compiler rather than with this crate's own earlier behaviour.

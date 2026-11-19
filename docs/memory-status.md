@@ -95,3 +95,22 @@ The analysis treats **"what a compiler sees for one file"** as the unit of memor
 for the session. The design bought zero-lock, zero-copy queries by making the index immutable during a query, and an
 immutable index cannot be evicted. Every optimisation so far — the allocator, the inlay path, the fact width, the
 `DeclDetail` box — has cut a constant under that ceiling. The working-set change is what lifts it.
+
+## The 5.1 GB seen by a probe, attributed
+
+A probe that indexes this project's whole include closure in **one process** and pumps without a bound was measured
+at **5.1 GB** of working set — the same ceiling as the 4.8 GB editor scenario above, reproduced by a different
+route. The attribution comes from `Session::memory_report`, printed every ten slices and after the pump:
+
+```text
+pumped 36 slice(s)   (the queue drains in 36)   266 MB held
+  summaries  119 MB   vfs   83 MB   index tables  40 MB   cooked 7 MB   units 1 MB
+```
+
+So the bound is not one bucket: it is the **steady state of the closure** (summaries + the texts read + the tables),
+held for every file the session may still be asked about — exactly what the plan A–D above is for. What the number
+also says is that the *incremental* cost of a request is small: 266 MB is the whole index of this project's
+closure, and the probe's growth after that point is the pump cooking files it will not be asked about again.
+
+The probe is bounded now (`CPPLS_PROBE_SLICES`, default 400) and prints the report, so the next measurement of this
+kind costs one slice-length rather than a machine.

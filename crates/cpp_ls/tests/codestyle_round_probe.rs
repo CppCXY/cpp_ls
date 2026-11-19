@@ -70,17 +70,53 @@ fn the_round_three_reports() {
     println!("{} project file(s)", files.len());
     session.add_project_files(files);
     session.did_open(&path, &text);
+    // **The pump is bounded by an environment variable, and it reports what it holds.** This probe indexes the
+    // project's whole include closure — the standard library and the Windows SDK — and the session keeps the
+    // summaries, the read texts and every rendering it makes; run unbounded on a cold cache it was measured at
+    // **5.1 GB** of working set in one process, which is a fact about the pump rather than about this report (see
+    // `docs/memory-status.md`). `CPPLS_PROBE_SLICES` is the bound, and the report after each tenth slice says
+    // which bucket is growing.
+    let limit = std::env::var("CPPLS_PROBE_SLICES")
+        .ok()
+        .and_then(|written| written.parse::<usize>().ok())
+        .unwrap_or(400);
     let started = Instant::now();
     let mut slices = 0usize;
-    while session.pending_work() > 0 && slices < 6000 {
+    while session.pending_work() > 0 && slices < limit {
         session.advance(64);
         slices += 1;
+        if slices.is_multiple_of(10) {
+            let report = session.memory_report();
+            println!(
+                "[memory] {slices}: {:.0} MB held (summaries {:.0}, vfs {:.0}, cooked {:.0}, units {:.0})",
+                report.total() as f64 / 1e6,
+                report.summary_bytes as f64 / 1e6,
+                report.vfs_text_bytes as f64 / 1e6,
+                report.cooked_bytes as f64 / 1e6,
+                report.unit_bytes as f64 / 1e6
+            );
+        }
     }
     println!(
         "pumped {slices} slice(s) in {:?}, {} work item(s) left",
         started.elapsed(),
         session.pending_work()
     );
+    {
+        let report = session.memory_report();
+        println!(
+            "[memory] after the pump: {:.0} MB held (summaries {:.0}, vfs {:.0}, cooked {:.0}, units {:.0}, \
+             renderings {:.0}, views {:.0}, index tables {:.0})",
+            report.total() as f64 / 1e6,
+            report.summary_bytes as f64 / 1e6,
+            report.vfs_text_bytes as f64 / 1e6,
+            report.cooked_bytes as f64 / 1e6,
+            report.unit_bytes as f64 / 1e6,
+            report.rendering_bytes as f64 / 1e6,
+            report.view_bytes as f64 / 1e6,
+            report.index_table_bytes() as f64 / 1e6
+        );
+    }
 
     // **1. The cooked text of json.hpp**, so the parse of *it* can be inspected with `inspect`.
     let json = root.join("3rd/nlohmann_json/include/nlohmann/json.hpp");
@@ -294,11 +330,116 @@ fn the_round_three_reports() {
     // environment composed from the index (the fallback, which is what left `JSON_TRY` unexpanded in the stored
     // rendering).
     match session.cooking_materials(&json) {
-        Some(materials) => println!(
-            "[materials] json.hpp: unit {}, composed configuration {}",
-            materials.unit.is_some(),
-            materials.configuration.is_some()
-        ),
+        Some(materials) => {
+            println!(
+                "[materials] json.hpp: unit {}, composed configuration {}",
+                materials.unit.is_some(),
+                materials.configuration.is_some()
+            );
+            // **What the composed table holds**, and what a fresh render of it makes of the two macros the class
+            // body's tail depends on.
+            if let Some(configuration) = &materials.configuration {
+                println!(
+                    "[materials] composed table: {} name(s); JSON_TRY {}, JSON_CATCH {}; seed {} name(s)",
+                    configuration.table.len(),
+                    configuration.table.get("JSON_TRY").is_some(),
+                    configuration.table.get("JSON_CATCH").is_some(),
+                    materials.seed.len()
+                );
+            }
+            if let Some(rendered) = session.render_a_cooked(&materials) {
+                println!(
+                    "[render] composed now: {} declaration(s), {} diagnostic(s), {} unplaced",
+                    rendered.reading.declarations,
+                    rendered.reading.diagnostics,
+                    rendered.reading.unplaced
+                );
+                // **What the class's members look like in that reading** — the report is that `operator[]` is not
+                // among them, and that the members after `at` have no scope.
+                let facts = &rendered.indexed.summary.declarations;
+                let members: Vec<&str> = facts
+                    .iter()
+                    .filter(|fact| fact.scope.as_deref() == Some("nlohmann::basic_json"))
+                    .map(|fact| fact.name.as_str())
+                    .collect();
+                println!(
+                    "[render] basic_json: {} member(s); operator[] {}, is_string {}, unscoped {}",
+                    members.len(),
+                    members.iter().filter(|name| **name == "operator[]").count(),
+                    members.iter().filter(|name| **name == "is_string").count(),
+                    facts.iter().filter(|fact| fact.scope.is_none()).count()
+                );
+                // **File that reading and ask the reported question** — the point of the whole measurement: does
+                // `json["data"].is_string()` answer once the class body is read whole? `commit_a_cooked` is the same
+                // insert the pump makes; the hover is the handler's own.
+                if std::env::var_os("CPPLS_PROBE_ASK").is_some() {
+                    let committed = session.commit_a_cooked(rendered);
+                    println!("[commit] {committed:?}");
+                    for (label, cook_first) in [("after the commit", false), ("after a cook", true)]
+                    {
+                        if cook_first {
+                            let _ = session.cook(&json);
+                        }
+                        let view = session.view_of_the_file(&path).expect("LSP.cpp has a view");
+                        if cook_first {
+                            // **What the index answers after the reading is filed**: the member count, and whether
+                            // the subscript is among the members — the two things the hover's chain needs.
+                            let listed = session.members_of(&view, "nlohmann::basic_json");
+                            let listed: Vec<String> = match &listed {
+                                cpp_code_analysis::Known::Yes(list) => list
+                                    .members
+                                    .iter()
+                                    .map(|member| member.fact.name.to_string())
+                                    .collect(),
+                                other => vec![format!("{other:?}")],
+                            };
+                            println!(
+                                "[ask] members_of(basic_json) = {} member(s); operator[] {}",
+                                listed.len(),
+                                listed.iter().filter(|name| *name == "operator[]").count()
+                            );
+                            println!(
+                                "[ask] definition(basic_json::operator[]) = {:?}",
+                                session
+                                    .index()
+                                    .definition("nlohmann::basic_json::operator[]", &path)
+                            );
+                        }
+                        let haystack = view.source.to_string();
+                        let Some(at) = haystack.find("is_string") else {
+                            continue;
+                        };
+                        let reading = cpp_code_analysis::file::coordinates::ReadingOffset::new(at);
+                        let file = view.file_offset_of(reading).unwrap_or_else(|| {
+                            cpp_code_analysis::file::coordinates::FileOffset::new(at)
+                        });
+                        println!(
+                            "--- hover on `is_string` {label} ---\n{}",
+                            match cpp_ls::handlers::hover::hover(&session, &view, reading, file) {
+                                None => "NO CARD".to_string(),
+                                Some(hover) => match hover.contents {
+                                    lsp_types::HoverContents::Markup(markup) => markup.value,
+                                    other => format!("{other:?}"),
+                                },
+                            }
+                        );
+                    }
+                }
+            }
+            // **The memory question this probe had to answer for itself**: an unbounded pump on this project's
+            // closure was measured at 5.1 GB, and it is the pump, not this composition.
+            let report = session.memory_report();
+            println!(
+                "[memory] after the composition: {:.0} MB held (summaries {:.0}, vfs {:.0})",
+                report.total() as f64 / 1e6,
+                report.summary_bytes as f64 / 1e6,
+                report.vfs_text_bytes as f64 / 1e6
+            );
+            if std::env::var_os("CPPLS_PROBE_ONLY_MATERIALS").is_some() {
+                println!("[probe] stopping after the materials section, as asked");
+                return;
+            }
+        }
         None => println!("[materials] json.hpp: no materials"),
     }
     // **And the state an editor is in**: the open file's own unit is what a header included by it is cooked
@@ -311,6 +452,51 @@ fn the_round_three_reports() {
             materials.configuration.is_some()
         ),
         None => println!("[materials] after cooking the open file: no materials"),
+    }
+
+    // **The file the two macros come from**: does its summary hold them, and behind which guard?
+    {
+        let scope = root.join("3rd/nlohmann_json/include/nlohmann/detail/macro_scope.hpp");
+        match session.index().summary(&scope) {
+            Some(summary) => {
+                println!(
+                    "[scope] {} macro fact(s), {} region(s), own guard {:?}",
+                    summary.macros.len(),
+                    summary.guards.regions.len(),
+                    summary.guards.own_guard
+                );
+                for fact in summary.macros.iter().filter(|fact| {
+                    fact.name.starts_with("JSON_TRY") || fact.name.starts_with("JSON_CATCH")
+                }) {
+                    println!(
+                        "[scope] `{}` guard {:?}, body {:?}, at {}",
+                        fact.name,
+                        fact.guard,
+                        fact.body_range.is_some(),
+                        fact.range.start_offset
+                    );
+                }
+                // Is the file in the closure the walk would take, at all?
+                let mut found = false;
+                let mut pending = vec![json.clone()];
+                while let Some(next) = pending.pop() {
+                    if next == scope {
+                        found = true;
+                        break;
+                    }
+                    if let Some(summary) = session.index().summary(&next) {
+                        pending.extend(
+                            summary
+                                .includes
+                                .iter()
+                                .filter_map(|include| include.resolved.clone()),
+                        );
+                    }
+                }
+                println!("[scope] reachable from json.hpp by includes: {found}");
+            }
+            None => println!("[scope] no summary for macro_scope.hpp"),
+        }
     }
 
     // **2. What the cooked reading filed for the class**, by the line it is written on.
