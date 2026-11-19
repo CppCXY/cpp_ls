@@ -161,7 +161,26 @@ pub async fn on_hover(
         if let Known::Yes(header) = session.header_at(&view, in_the_file) {
             return Some(markdown(header_markdown(&header)));
         }
-        hover(session, &view, offset, in_the_file)
+
+        // **A hover inside a region this configuration does not compile says so.**
+        //
+        // The dimming raises the question, and a card that answers a name in dead code without mentioning it is a
+        // confident answer about text the compiler never saw. Both gates are the ones the notification uses:
+        // `is_exact` (every branch was decided from a definition the cook held) and the cursor being inside a span —
+        // an inexact reading is not a claim, so it gets no note rather than a wrong one.
+        let inside_inactive_code = session.inactive_regions(&path).is_some_and(|answer| {
+            answer.is_exact()
+                && answer.spans.iter().any(|span| {
+                    span.start_offset <= in_the_file.get() && in_the_file.get() < span.end_offset()
+                })
+        });
+
+        let card = hover(session, &view, offset, in_the_file);
+        match (card, inside_inactive_code) {
+            (Some(card), true) => Some(with_the_inactive_note(card)),
+            (None, true) => Some(markdown(INACTIVE_NOTE.to_string())),
+            (card, false) => card,
+        }
     })
     .await
 }
@@ -1402,6 +1421,35 @@ pub(crate) fn markdown(value: String) -> Hover {
             value,
         }),
         range: None,
+    }
+}
+
+/// **What a hover says when the cursor is inside a region this configuration does not compile**, and what every card
+/// inside one is prefixed with.
+///
+/// One line, not a card of its own: the dimming raises the question ("why is this grey?"), and the answer belongs
+/// beside the answer the reader actually asked for — a name in a dead branch still has a declaration, and hiding it
+/// behind "this is dead" would be trading one missing answer for another.
+const INACTIVE_NOTE: &str = "**Inactive region** — the configuration this project is analysed with does not compile \
+                               this code; the analysis reads it anyway, so the card below describes text a compiler \
+                               would not see.";
+
+/// [`INACTIVE_NOTE`] in front of a card, for the one shape [`markdown`] produces.
+fn with_the_inactive_note(card: Hover) -> Hover {
+    match card.contents {
+        HoverContents::Markup(mut markup) => {
+            markup.value = format!("{INACTIVE_NOTE}\n\n{}", markup.value);
+            Hover {
+                contents: HoverContents::Markup(markup),
+                range: card.range,
+            }
+        }
+        // Every card this server builds is markdown (`markdown` is its only door), so the other shapes are a value
+        // this function does not have to know how to prepend to: leaving one alone is better than mangling it.
+        other => Hover {
+            contents: other,
+            range: card.range,
+        },
     }
 }
 

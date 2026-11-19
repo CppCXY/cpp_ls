@@ -7372,3 +7372,93 @@ int dead;
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }
+
+/// **A hover inside code this configuration does not compile says so, and a hover beside it does not.**
+///
+/// The dimming raises the question ("why is this grey?"), and a card that answers a name in dead code without
+/// mentioning it is a confident answer about text the compiler never saw. Both gates are the notification's: the
+/// reading must be exact, and the cursor must be inside a span.
+#[test]
+fn a_hover_inside_inactive_code_says_that_it_is_inactive() {
+    const SOURCE: &str = "\
+#define OFF 0
+#if OFF
+int dead_name = 1;
+#else
+int live_name = 2;
+#endif
+";
+    let project = Project::new("inactive-hover");
+    project.write("a.cpp", SOURCE);
+    let mut server = Server::start(project.root());
+    let a_uri = uri_of(&project.root().join("a.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": a_uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    // **Inside the dead branch**: the note is expected, and the first requests may arrive before the rendering that
+    // knows the spans exists — so ask until it appears, which is what a client does when it asks again later.
+    let dead = server.ask_until_it(
+        200,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": a_uri },
+                    "position": { "line": 2, "character": 6 },
+                },
+            })
+        },
+        |response| {
+            response["result"]["contents"]["value"]
+                .as_str()
+                .is_some_and(|markdown| markdown.contains("Inactive region"))
+        },
+    );
+    let markdown = dead["result"]["contents"]["value"]
+        .as_str()
+        .expect("the hover is markdown");
+    assert!(
+        markdown.contains("dead_name"),
+        "and the card it prefixes is the name's own: {markdown}"
+    );
+
+    // **Beside it, in the live branch**: no note, because nothing there is inactive.
+    let live = server.request(
+        400,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": a_uri },
+            "position": { "line": 4, "character": 6 },
+        }),
+    );
+    let markdown = live["result"]["contents"]["value"]
+        .as_str()
+        .expect("the live name has a hover too");
+    assert!(
+        !markdown.contains("Inactive region"),
+        "code the configuration compiles is not called inactive: {markdown}"
+    );
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
