@@ -60,6 +60,29 @@ the style. `FixNamespaceComments` writes `} // namespace ns` where the style ask
 What is still wrong for `Microsoft` is not the brace *placement* but the **reflow around it**: a body written on one
 line stays there, an initializer list the author broke stays broken, and a short function clang-format would keep on
 one line is broken by our line structure. The 6 323 spacing-only lines are that plus the token-level remainder below.
+### Per-option rates (same corpus, clang-format 23.1.5, `LLVM` base with one option changed)
+
+| style / option | identical files | differing lines | spacing-only |
+| --- | --- | --- | --- |
+| `LLVM` (base) | 3 / 29 | 4 611 / 6 882 | 11 / 29 match, 172 lines |
+| `IndentWidth: 4` | 3 / 29 | 5 475 / 7 048 | 7 / 29 match, 232 lines |
+| `UseTab: ForIndentation` | 3 / 29 | 5 110 / 6 882 | 6 / 29 match, **1 688** lines |
+| `BreakBeforeBraces: Allman` | 2 / 29 | 6 649 / 8 704 | 4 / 29 match, **3 282** lines |
+| `AllowShortFunctionsOnASingleLine: None` | 2 / 29 | 5 370 / 6 903 | 4 / 29 match, **4 917** lines |
+| `ColumnLimit: 0` | **6 / 29** | 4 433 / 6 506 | 10 / 29 match, 4 524 lines |
+
+What each row says, in the order the fixes will come:
+
+* **`UseTab` is not implemented at all** (the option is declared and never read): every indented line is spaces where
+  clang-format writes tabs, which is why the spacing-only column jumps to 1 688.
+* **`Allman`'s 3 282** are mostly `AlignEscapedNewlines`: clang-format pads a macro's `\` to the column limit
+  (`AlignEscapedNewlines: Right`), this formatter pads to the longest line of the macro. Measured on
+  `LuaDiagnosticStyle.cpp`: the same `#define`, two different `\` columns.
+* **`AllowShortFunctionsOnASingleLine: None`'s 4 917** are the reflow layer: clang-format breaks every one-line
+  function body, and this formatter never moves a line the author wrote. This is the single largest remaining item and
+  the next round's work.
+* **`ColumnLimit: 0` scores best on identical files (6 / 29)** because that is the one setting where clang-format
+  itself stops reflowing — and the remaining spacing lines there are the same macro continuations.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:
