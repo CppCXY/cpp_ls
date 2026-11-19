@@ -190,6 +190,15 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
 
     // **Which `{` on the bracket stack is an initializer`s** — so its `}` pops the bracket again.
     let mut init_braces: Vec<bool> = Vec::new();
+    // **What kind each bracket on `stack` is**: a break inside a parenthesis or a subscript indents from the line it
+    // continues, and a break inside a braced initializer indents from the statement — measured on a nested call
+    // (content at the bracket line + four) and on a table after a struct body (rows at the statement + eight).
+    let mut stack_kinds: Vec<cpp_parser::CppTokenKind> = Vec::new();
+    // **The indent of the line each open bracket was written on**: a break that follows a bracket which ended its
+    // line indents one `ContinuationIndentWidth` past *that* line — measured on `AddIndenter(` / `IndentData(`
+    // (32 = the `IndentData` line`s 28 plus four) and on a braced table after a struct body (8 = the
+    // `} priority[] = {` line`s 0 plus eight).
+    let mut bracket_lines: Vec<usize> = Vec::new();
     // **The join half of the reflow: a statement that fits on one line is one line.** clang-format re-lays-out every
     // logical line, and a statement whose whole text fits is written on one line however the author broke it. This
     // formatter keeps the author's breaks, which is why a file written by another formatter differed on every wrapped
@@ -503,6 +512,26 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                                 &blocks,
                                 &stack,
                                 statement_indent,
+                                // **The anchor a continuation is measured from**: inside a parenthesis or a
+                                // subscript it is the line being continued, so `AddIndenter(` / `IndentData(` puts the
+                                // content at 32 (the `IndentData` line's 28 plus four); inside a braced initializer it
+                                // is the statement, so a table after a struct body keeps its rows at 8.
+                                match stack_kinds.last() {
+                                    Some(
+                                        cpp_parser::CppTokenKind::LeftParen
+                                        | cpp_parser::CppTokenKind::LeftBracket,
+                                    ) => line_column,
+                                    // **A braced list indents from the line that opened it**: the table after a struct
+                                    // body keeps its rows at the `} priority[] = {` line`s column plus a continuation,
+                                    // where the *statement*`s first line is four columns off (measured).
+                                    Some(_) => the_line_that_opened_the_list(
+                                        &stream,
+                                        &blocks,
+                                        index,
+                                        statement_indent,
+                                    ),
+                                    None => statement_indent,
+                                },
                                 style,
                                 in_ctor_init,
                                 ctor_column,
@@ -799,6 +828,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             cpp_parser::CppTokenKind::RightParen | cpp_parser::CppTokenKind::RightBracket
         ) {
             stack.pop();
+            stack_kinds.pop();
+            bracket_lines.pop();
         }
         // **A braced initializer is a bracket for the layout too** (`AlignAfterOpenBracket`): its elements align after
         // the `{` when one was written on that line, and fall back to a continuation indent when the `{` ended the
@@ -807,6 +838,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             && init_braces.pop().unwrap_or(false)
         {
             stack.pop();
+            stack_kinds.pop();
+            bracket_lines.pop();
         }
         // The template closer pops its own stack, so a line after the list is not pulled to its column.
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater
@@ -886,6 +919,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             // `usize::MAX` = "the token after this bracket has not been written yet".
             stack.push(usize::MAX);
+            stack_kinds.push(stream.tokens[index].kind);
+            bracket_lines.push(line_column);
         }
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::LeftBrace {
             let an_initializer = roles.init_brace.contains(&stream.tokens[index].start)
@@ -893,6 +928,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             init_braces.push(an_initializer);
             if an_initializer {
                 stack.push(usize::MAX);
+                stack_kinds.push(cpp_parser::CppTokenKind::LeftBrace);
+                bracket_lines.push(line_column);
             }
         }
         // The template opener pushes its own "column not yet known" marker, so a continuation line inside the list
@@ -979,12 +1016,29 @@ fn source_indent(source: &str, gap: &tokens::Gap) -> Option<usize> {
     }
 }
 
+/// **The column of the line that opened the bracket this `index` is inside**, for a braced list: the last line
+/// start with a known block indent. The statement`s own first line is not that line when a struct body precedes the
+/// list (measured: the table`s rows came out four columns too far right).
+fn the_line_that_opened_the_list(
+    stream: &tokens::Stream<'_>,
+    blocks: &[Option<usize>],
+    index: usize,
+    statement_indent: usize,
+) -> usize {
+    (0..index)
+        .rev()
+        .find(|earlier| !stream.gaps[*earlier].newlines.eq(&0) && blocks[*earlier].is_some())
+        .and_then(|earlier| blocks[earlier])
+        .unwrap_or(statement_indent)
+}
+
 fn planned_indent(
     index: usize,
     stream: &tokens::Stream<'_>,
     blocks: &[Option<usize>],
     stack: &[usize],
     statement_indent: usize,
+    line_column: usize,
     style: &Style,
     in_ctor_init: bool,
     ctor_column: Option<usize>,
@@ -1011,12 +1065,11 @@ fn planned_indent(
         // **The base is the line that opened the list**, not whatever block line came last: a struct body`s members
         // leave `statement_indent` at their level (4), while the table that follows belongs at 0 + the continuation
         // width (measured on LuaDefine.h: clang-format writes those rows and their comment at 8).
-        let base = (0..index)
-            .rev()
-            .find(|earlier| !stream.gaps[*earlier].newlines.eq(&0) && blocks[*earlier].is_some())
-            .and_then(|earlier| blocks[earlier])
-            .unwrap_or(statement_indent);
-        return Some((layout::continuation(stack, base, first, style), false));
+        let base = the_line_that_opened_the_list(stream, blocks, index, statement_indent);
+        return Some((
+            layout::continuation(stack, line_column.max(base), first, style),
+            false,
+        ));
     }
     // **A line that continues a template argument list aligns after its `<`**, even where the block rules have an
     // answer: at file scope the block answer for `using S2 = Scenario<` gives 0, which is where those lines came out.
@@ -1116,7 +1169,7 @@ fn planned_indent(
         return Some((column, false));
     }
     Some((
-        layout::continuation(stack, statement_indent, first, style),
+        layout::continuation(stack, line_column, first, style),
         false,
     ))
 }

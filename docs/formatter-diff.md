@@ -34,10 +34,10 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
-| `Google` | 3 / 29 | 1 616 / 6 887 | 21 / 29 match, 102 lines |
+| `LLVM` | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
+| `Google` | 3 / 29 | 1 616 / 6 887 | 21 / 29 match, 70 lines |
 | `Microsoft` | 5 / 29 | **494** / 8 032 | 27 / 29 match, **10 lines** |
-| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 69 lines |
 | `LLVM, ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
 
 The last row is the corpus's own style. It scores best for a reason that is also the best evidence the formatter
@@ -48,9 +48,9 @@ are the token-level ones — ten lines in three files.
 
 | style / option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
-| `IndentWidth: 4` | 5 / 29 | 1 737 / 7 015 | 15 / 29 match, 216 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 452 / 6 850 | 18 / 29 match, 136 lines |
+| `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
+| `IndentWidth: 4` | 5 / 29 | 1 737 / 7 015 | 15 / 29 match, 150 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 452 / 6 850 | 18 / 29 match, 106 lines |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
 | `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
 | `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
