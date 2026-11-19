@@ -750,6 +750,44 @@ pub fn configuration_from_environment_and(
     use_in_force_bodies: bool,
     parsed: &mut ParsedDefinitions,
 ) -> Configuration {
+    the_configuration(environment, None, use_in_force_bodies, parsed)
+}
+
+/// **What a compiler's macro table holds at one moment of a file** — the environment as of `at`, with every binding
+/// usable from the caller's first byte.
+///
+/// The difference from [`configuration_from_environment_and`] is the `at` and where the bindings land, and the two are
+/// one question: a file's cook starts from a table keyed by **positions in that file**, which is right for a rendering
+/// of it — and wrong for a caller whose source is a *synthetic* line. `Session::the_expansion_of_a_macro` builds
+/// exactly that: the file's own `#define`s, then the invocation, and asks what the invocation becomes.
+///
+/// Measured on Lua 5.5.0's `lcode.c:1933`, `cast_byte(~PF_VAHID)`: the card said "a macro whose value is `1`" and
+/// "**Expands to** `PF_VAHID`" — the name itself. `PF_VAHID` is defined in `lobject.h`, whose binding in the
+/// environment is at the offset of the `#include` that reached it, while the synthetic source looks the name up at
+/// offset 0: a binding at `at > 0` is not in force yet there, so the name stayed a name.
+///
+/// So the timeline is **read at the moment of the use**: a binding not yet reached is dropped, and what is in force is
+/// placed at offset 0. `#undef`s are the same question the other way round — one written after the use must not take
+/// the name away before it.
+pub fn configuration_from_environment_as_of(
+    environment: &dyn cpp_parser::MacroFacts,
+    at: usize,
+    use_in_force_bodies: bool,
+    parsed: &mut ParsedDefinitions,
+) -> Configuration {
+    the_configuration(environment, Some(at), use_in_force_bodies, parsed)
+}
+
+/// [`configuration_from_environment_and`] and [`configuration_from_environment_as_of`], once.
+///
+/// `as_of` is `None` for "every binding, at the offset it is in force from" — the reading a file's own cook wants —
+/// and `Some(at)` for "the bindings in force at `at`, all of them at offset 0", the reading a synthetic source wants.
+fn the_configuration(
+    environment: &dyn cpp_parser::MacroFacts,
+    as_of: Option<usize>,
+    use_in_force_bodies: bool,
+    parsed: &mut ParsedDefinitions,
+) -> Configuration {
     // A body in force is used **only when the caller said the macro is object-like** — and only when this
     // function was asked for it. One whose parameters are unknown cannot be substituted into (`None` is not
     // "object-like"), and one the caller says takes parameters must not be pasted. Everything left is counted:
@@ -810,10 +848,17 @@ pub fn configuration_from_environment_and(
     }
     let mut in_order: Vec<(usize, BindingAt<'_>)> = Vec::new();
     environment.for_each_definition(&mut |facts| {
-        in_order.push((facts.at, BindingAt::Defined(facts)));
+        // **A binding the asked-for moment has not reached is not in force there** — see
+        // [`configuration_from_environment_as_of`]. An `#undef` after it is dropped the same way, which is the half
+        // that would otherwise take a name away from text written before the `#undef`.
+        if as_of.is_none_or(|at| facts.at <= at) {
+            in_order.push((facts.at, BindingAt::Defined(facts)));
+        }
     });
     environment.for_each_undefinition(&mut |name, at| {
-        in_order.push((at, BindingAt::Undefined(name)));
+        if as_of.is_none_or(|moment| at <= moment) {
+            in_order.push((at, BindingAt::Undefined(name)));
+        }
     });
     // Stable, so two bindings at the same offset keep the order their channel gave them — definitions of different
     // names at one offset do not interact.
@@ -822,7 +867,7 @@ pub fn configuration_from_environment_and(
     for (at, binding) in in_order {
         let facts = match binding {
             BindingAt::Undefined(name) => {
-                out.table.undefine(name, at);
+                out.table.undefine(name, as_of.map_or(at, |_| 0));
                 continue;
             }
             BindingAt::Defined(facts) => facts,
@@ -842,8 +887,11 @@ pub fn configuration_from_environment_and(
         };
 
         match parsed.definition(facts.name, facts.parameters, body) {
-            // The **binding's** offset, not the definition's: see `MacroTable::define_shared_at`.
-            Some(definition) => out.table.define_shared_at(definition, facts.at),
+            // The **binding's** offset, not the definition's: see `MacroTable::define_shared_at`. A caller asking for
+            // one moment in the file gets every binding at offset 0 — see [`configuration_from_environment_as_of`].
+            Some(definition) => out
+                .table
+                .define_shared_at(definition, as_of.map_or(facts.at, |_| 0)),
             None => out.unreadable += 1,
         }
     }

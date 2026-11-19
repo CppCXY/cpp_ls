@@ -815,7 +815,11 @@ impl<F: FileProvider + Clone> Session<F> {
         source.push_str(invocation);
 
         // **The environment underneath**: the closure's unconditional definitions, and the compiler's own — the same
-        // two layers a file's cook starts from.
+        // two layers a file's cook starts from. **Read at the invocation's offset**, because `source` is a synthetic
+        // line whose own offsets start at zero: a binding the timeline places at the `#include` that reached it (three
+        // digits in this file) is not yet in force at offset 0. Measured on Lua 5.5.0's `lcode.c:1933`,
+        // `cast_byte(~PF_VAHID)`: the card said "a macro whose value is `1`" and "Expands to `PF_VAHID`" — the name,
+        // because the binding from `lobject.h` sat past the synthetic source's end.
         let environment = self.store.the_indexed_environment(&view.path)?;
         let seed = crate::preprocess::macros::MacroTable::from_marked(self.store.index().macros());
         let configuration = {
@@ -823,8 +827,9 @@ impl<F: FileProvider + Clone> Session<F> {
                 .parsed_definitions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            crate::preprocess::cooked::configuration_from_environment_and(
+            crate::preprocess::cooked::configuration_from_environment_as_of(
                 &environment,
+                offset.get(),
                 true,
                 &mut parsed,
             )

@@ -200,7 +200,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// that could not tell them apart cooked the same header once per drain — the measured shape of a server that
     /// never goes idle. A file whose text moves forgets its ask ([`Session::buffer_changed`]), because the rendering
     /// the cache lost may be of a text nobody has any more.
-    fn ask_for_a_rendering(&self, path: &Path, text: &str) {
+    pub(crate) fn ask_for_a_rendering(&self, path: &Path, text: &str) {
         // **A file the index cannot describe is still asked for**, because the ask is also the signal that something
         // wants it read — `Session::view`'s contract for a file nobody has indexed. It is only *remembered* when the
         // cook can be served; otherwise a later query, after the index has read it, must be free to ask again.
@@ -397,8 +397,36 @@ impl<F: FileProvider + Clone> Session<F> {
         text: &str,
     ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
         let key = a_rendering_key(path, crate::cache::content_hash(text));
+        if let Some(found) = self.renderings.lock().ok()?.get(&key).cloned() {
+            return Some(found);
+        }
 
-        self.renderings.lock().ok()?.get(&key).cloned()
+        // **The disk is the second table, and the one that does not evict.** A rendering is persisted with the cooked
+        // reading — it is exactly what `cook` serves a warm start from — while the in-memory table holds
+        // [`crate::cache::cache_lru::RENDERING_ENTRIES`] of them, which a pass over a project's closure fills at once.
+        // So a hover that arrives after an index pass found its file's rendering **evicted** and answered as if the
+        // file had never been rendered: measured on Lua 5.5.0's `ldebug.c`, hovering `p` in `ci_func(ci)->p` said "the
+        // type of `ci_func(ci)` is not known here", because the mapping from the file's offsets into the rendering had
+        // nothing to map with ([`Session::the_rendering_offset`] was `None`).
+        //
+        // Read back only on a miss, and the miss is the case where the alternative is no answer at all. A record is
+        // validated against the text it is asked for (its key carries the content hash), so a stale row is a miss
+        // rather than a wrong rendering, and a session with no database answers `None` exactly as before.
+        let spelling = self
+            .store
+            .index()
+            .summary(path)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| path.to_path_buf());
+        let (_, rendered) = self
+            .store
+            .the_stored_cooked_reading_with_rendering(&spelling)?;
+        let rendered = std::sync::Arc::new(rendered);
+        if let Ok(mut known) = self.renderings.lock() {
+            let weight = rendered.weight();
+            known.insert(key, std::sync::Arc::clone(&rendered), weight);
+        }
+        Some(rendered)
     }
 
     /// **Remember a rendering under the key [`Session::known_rendering_of`] reads** — the normalized spelling, not

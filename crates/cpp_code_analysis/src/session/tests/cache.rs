@@ -239,24 +239,28 @@ fn a_rendering_is_asked_for_once_per_text() {
 
     let asks = |session: &crate::session::Session<MemoryFiles>| asks_of(session);
 
-    // **What eviction looks like.** The rendering the index had built is dropped, and the next query cannot answer:
-    // it asks, once.
+    // **What eviction looks like now.** The rendering the index had built is dropped from the in-memory table — and
+    // the *stored* record answers instead, because a rendering is persisted with the cooked reading (that is what a
+    // warm start serves). No cook is asked for at all, which is the point: the table is a budget, not the truth.
+    //
+    // Measured before the store was consulted: after an index pass over a project's closure the table holds the last
+    // eight renderings, so a hover on a file cooked earlier had none and answered as if the file had never been
+    // rendered — Lua 5.5.0's `ldebug.c`, where hovering `p` in `ci_func(ci)->p` said the macro's type was unknown
+    // because the mapping into the rendering had nothing to map with.
     session.forget_the_renderings();
     assert!(
-        session.view(Path::new("/p/a.cpp")).is_none(),
-        "nothing has a rendering after the cache was dropped"
+        session.view(Path::new("/p/a.cpp")).is_some(),
+        "the store answers what the table forgot"
     );
-    assert_eq!(asks(&session), 1, "the miss asks once");
+    assert_eq!(asks(&session), 0, "and nothing has to be cooked again");
 
-    // The ask is taken and served, and the cache loses the rendering again.
-    session.advance(8);
-    session.forget_the_renderings();
-    assert!(session.view(Path::new("/p/a.cpp")).is_none());
-    assert_eq!(
-        asks(&session),
-        1,
-        "an evicted reading is not asked for a second time by the same text"
-    );
+    // **The ask itself is once per text**, which is the property this test exists for: a look-up that misses must not
+    // become a cook per query. It is asked directly because the state it guards — a text the index can describe and no
+    // rendering of it anywhere — is otherwise reachable only by eviction, and an eviction is now answered by the store.
+    session.ask_for_a_rendering(Path::new("/p/a.cpp"), source);
+    assert_eq!(asks(&session), 1, "the miss asks once");
+    session.ask_for_a_rendering(Path::new("/p/a.cpp"), source);
+    assert_eq!(asks(&session), 1, "one ask per text, not per query");
 }
 
 /// How many renderings a query has asked for, for a session of any provider.
