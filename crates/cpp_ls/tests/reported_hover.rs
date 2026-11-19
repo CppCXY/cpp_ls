@@ -669,3 +669,90 @@ int f() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A member card speaks in the instance's letters, including through an arrow.**
+///
+/// `CodeFormatCore/src/Config/LuaStyle.cpp:20` is
+///
+/// ```cpp
+/// auto it = configMap.find(key);
+/// …
+/// return it->second;
+/// ```
+///
+/// and the card said `` `std::pair::second` — a variable of type `_Ty2` ``: the letter MSVC's `pair` declares it
+/// with. `members_of("std::pair<const std::string, std::string>")` answers `std::string` (measured), so the card was
+/// asking about the **class template** rather than the instantiation — `the_class_after_the_operator` answers a bare
+/// class name for an arrow, and it was asked first. The object's own type is asked first now, and the arrow's class
+/// is the fallback for a member the handle does not have.
+#[test]
+fn a_member_card_through_an_arrow_keeps_the_instances_arguments() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-arrow-arguments");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let file = root.join("a.cpp");
+    let source = "\
+template <class A, class B>
+struct Duo {
+    A first;
+    B second;
+};
+
+template <class Traits>
+struct Cursor {
+    using value_type = typename Traits::value_type;
+
+    const value_type *operator->() const;
+};
+
+template <class A, class B>
+struct Map {
+    Cursor<Duo<A, B>> find(int key) const;
+};
+
+struct User {
+    Map<int, double> numbers;
+
+    double read() {
+        auto it = numbers.find(1);
+        return it->second;
+    }
+};
+";
+    std::fs::write(&file, source).expect("the fixture writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("it->second").expect("the use") + "it->".len();
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("a member has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        !text.contains("`B`"),
+        "the card is about the instantiation, not the class template's letter: {text}"
+    );
+    assert!(
+        text.contains("`double`"),
+        "`Duo<int, double>::second` is a `double`: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

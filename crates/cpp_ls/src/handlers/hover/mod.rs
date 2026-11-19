@@ -839,11 +839,19 @@ fn member_markdown(
     // pointee is asked first, then the type as written. The two readers stay one — the first step is
     // `the_class_after_the_operator`, the second is the class the type names.
     let reached = match access.arrow {
-        true => session.the_class_after_the_operator(view, &written, true),
+        true => session.the_type_after_the_operator(view, &written, true),
         false => None,
     };
     let mut list = None;
-    for class in reached.iter().chain(std::iter::once(&written)) {
+    // **The object's own type first, the arrow's class second, and the order is the fix for a card that answered in
+    // the class's own letters.** `the_class_after_the_operator` answers a **bare class name** — it follows a handle
+    // to a pointee and has no arguments to carry — so asking it first replaced `std::pair<const std::string,
+    // std::string>` with `std::pair`, and the member list of *that* is the class template: `second` came back as
+    // `_Ty2`, the letter MSVC's `pair` declares it with, while `members_of` of the instantiation answers
+    // `std::string` (measured). The written type is the one whose arguments are known, and `members_of` substitutes
+    // them; the arrow's class is the fallback for a member the handle does not have (`ptr->twin` on a
+    // `shared_ptr<Node>`), which is why it is still asked.
+    for class in std::iter::once(&written).chain(reached.iter()) {
         if let cpp_code_analysis::Known::Yes(candidates) = session.members_of(view, class) {
             if candidates
                 .members

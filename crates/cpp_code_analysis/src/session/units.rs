@@ -1532,6 +1532,33 @@ impl<F: FileProvider + Clone> Session<F> {
         written: &str,
         arrow: bool,
     ) -> Option<String> {
+        let reached = self.the_type_after_the_operator(view, written, arrow)?;
+        let reached = crate::sema::types::parse_type_spelling(&reached);
+        let bare = reached.class_name().map(str::to_string)?;
+        // **The class as the index files it.** A member is recorded under the class's qualified name, and a type
+        // deduced from a `std::` function is spelled without the namespace: `make_shared` answers
+        // `shared_ptr<Node>` while the class is `std::shared_ptr`, whose `element_type` is the member being read.
+        if bare.contains("::") {
+            return Some(bare);
+        }
+        Some(
+            crate::index::project::qualified_from_the_index(self.store.index(), &view.path, &bare)
+                .unwrap_or(bare),
+        )
+    }
+
+    /// **[`Session::the_class_after_the_operator`], as the type the operator reaches** — arguments and all.
+    ///
+    /// The class is what a member list is *keyed* by; the type is what a card needs when the class is a template.
+    /// `Cursor<Duo<int, double>>::operator->` returns `const value_type*`, so what an arrow on it reaches is
+    /// `Duo<int, double>` — and a member list of the bare `Duo` substitutes nothing, so the card for `it->second`
+    /// showed the class template's letter (`B second`) while `members_of("Duo<int, double>")` answered `double`.
+    pub fn the_type_after_the_operator(
+        &self,
+        view: &crate::FileView,
+        written: &str,
+        arrow: bool,
+    ) -> Option<String> {
         let written = crate::sema::types::parse_type_spelling(written);
         // **The pointee, by `element_type` with the type's own arguments substituted** — `shared_ptr<Node>` reaches
         // `Node`, where the completion's resolver answered `std::shared_ptr` because `element_type` is written `_Tp`. See
@@ -1561,7 +1588,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 return Some(pointee);
             }
         }
-        crate::completion::the_class_after_the_operator(
+        crate::completion::the_type_after_the_operator(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -1569,7 +1596,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &written,
             arrow,
         )
-        .map(|(class, _)| class)
+        .map(|(reached, _)| reached.to_string())
     }
 
     /// **Read one queued module unit as a program, now** — the compiler's reading of a module, for a caller that is

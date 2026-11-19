@@ -733,6 +733,31 @@ pub(crate) fn the_class_after_the_operator(
     written: &crate::sema::types::Type,
     arrow: bool,
 ) -> Option<(String, bool)> {
+    let (reached, followed_a_pointer) =
+        the_type_after_the_operator(index, scopes, root, path, written, arrow)?;
+    let bare = reached.class_name().map(str::to_string)?;
+    let class = if bare.contains("::") {
+        bare
+    } else {
+        crate::index::project::qualified_from_the_index(index, path, &bare).unwrap_or(bare)
+    };
+    Some((class, followed_a_pointer))
+}
+
+/// **[`the_class_after_the_operator`], as the type the operator reaches** — arguments and all.
+///
+/// The two answers are one walk: the class is what a member list is *keyed* by, and the type is what a reader needs
+/// when the class is a template — `Cursor<Duo<int, double>>::operator->` returns `const value_type*`, so what the
+/// arrow reaches is `Duo<int, double>`, and a card built from the bare `Duo` shows the class template's letters
+/// (`B second`). Measured on the card for `it->second` in `CodeFormatServer/src/LSP/LSP.cpp`'s file.
+pub(crate) fn the_type_after_the_operator(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    written: &crate::sema::types::Type,
+    arrow: bool,
+) -> Option<(crate::sema::types::Type, bool)> {
     // **Whether a pointer was followed to find the class**, which is what says a `.` should have been a `->`.
     let mut followed_a_pointer = false;
     let mut current = written.clone();
@@ -816,7 +841,7 @@ pub(crate) fn the_class_after_the_operator(
             let Some(returns) = returns else {
                 // **3. Where the arrow stops.** A plain `struct` on the left of `->` is ill-formed, and its members
                 // are the honest answer for a reader who typed one by mistake.
-                return Some((class, followed_a_pointer));
+                return Some((current, followed_a_pointer));
             };
             current = crate::sema::types::parse_type_spelling(&returns);
             if !arrow {
@@ -830,15 +855,8 @@ pub(crate) fn the_class_after_the_operator(
             current = (*pointee).clone();
         }
     }
-    current.class_name().map(str::to_string).map(|bare| {
-        let class = if bare.contains("::") {
-            bare.clone()
-        } else {
-            crate::index::project::qualified_from_the_index(index, path, &bare)
-                .unwrap_or_else(|| bare.clone())
-        };
-        (class, followed_a_pointer)
-    })
+    let names_a_class = current.class_name().is_some();
+    names_a_class.then_some((current, followed_a_pointer))
 }
 
 /// **What a pointer-like class's arrow reaches**, asked of the index's own walk — see
