@@ -48,12 +48,14 @@ are the token-level ones — ten lines in three files.
 
 | style / option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
-| `IndentWidth: 4` | 5 / 29 | 1 726 / 7 015 | 15 / 29 match, 138 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 441 / 6 850 | 18 / 29 match, 94 lines |
-| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
-| `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
-| `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
+| `LLVM` (base) | 4 / 29 | 1 445 / 6 850 | 18 / 29 match, 68 lines |
+| `IndentWidth: 4` | 4 / 29 | 1 730 / 7 015 | 14 / 29 match, 142 lines |
+| `UseTab: ForIndentation` | 4 / 29 | 1 445 / 6 850 | 17 / 29 match, 98 lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 451 / 8 657 | 15 / 29 match, 61 lines |
+| `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 1 417 / 6 906 | 18 / 29 match, 68 lines |
+| `PointerAlignment: Left` | 4 / 29 | 1 444 / 6 850 | 18 / 29 match, 68 lines |
+| `BreakConstructorInitializers: BeforeComma` | 4 / 29 | 1 464 / 6 852 | 16 / 29 match, 92 lines |
+| `ColumnLimit: 0` | **10 / 29** | **228** / 6 510 | **26 / 29 match, 12 lines** |
 
 What each row says:
 
@@ -141,12 +143,14 @@ One option at a time (EmmyLua, `LLVM` base):
 
 | option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` (base) | 5 / 29 | 1 441 / 6 850 | 19 / 29 files, 64 lines |
-| `IndentWidth: 4` | 5 / 29 | 1 726 / 7 015 | 15 / 29 files, 138 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 441 / 6 850 | 18 / 29 files, 94 lines |
-| `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 files, 57 lines |
-| `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 413 / 6 906 | 19 / 29 files, 64 lines |
-| `ColumnLimit: 0` | **11 / 29** | **224** / 6 510 | **27 / 29 files, 8 lines** |
+| `LLVM` (base) | 4 / 29 | 1 445 / 6 850 | 18 / 29 files, 68 lines |
+| `IndentWidth: 4` | 4 / 29 | 1 730 / 7 015 | 14 / 29 files, 142 lines |
+| `UseTab: ForIndentation` | 4 / 29 | 1 445 / 6 850 | 17 / 29 files, 98 lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 451 / 8 657 | 15 / 29 files, 61 lines |
+| `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 1 417 / 6 906 | 18 / 29 files, 68 lines |
+| `PointerAlignment: Left` | 4 / 29 | 1 444 / 6 850 | 18 / 29 files, 68 lines |
+| `BreakConstructorInitializers: BeforeComma` | 4 / 29 | 1 464 / 6 852 | 16 / 29 files, 92 lines |
+| `ColumnLimit: 0` | **10 / 29** | **228** / 6 510 | **26 / 29 files, 12 lines** |
 
 **How to read the two corpora that are not written for these styles.** nlohmann json and Lua 5.5 are formatted for
 their own conventions (nlohmann's 120-column house style, Lua's hand-wrapped C), so clang-format's 80-column answer
@@ -199,6 +203,7 @@ Every one of these is a known gap with a reason, not a skipped comparison:
 | `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
 | GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
 | `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
+| **`>>` followed by `(`** | `bits >> (kPrecision - 1)` is a shift and needs a space, while `static_cast<long>(x)` and `f<int>(x)` glue. The lexer spells `>>` as two `>` tokens and the call rule reads a `>` before `(` as a template close, so the shift glues. A lexical fix (a space when the token before the `>` is an operand) was **implemented and reverted**: it also spaced `std::function<void(int)> (x)`, and the corpus said so — nlohmann json's `LLVM` spacing column went 2 029 → **2 581**, EmmyLua's 68 → **110**. The distinction needs the tree's answer, not the token's |
 | **the exact column of a trailing-comment run near the column limit** | clang-format`s `alignTrailingComments` splits a run when a comment would pass the column limit, and the split points in a long enumerated block (`nlohmann json` gives columns 20, 20, 21, 20 for four consecutive runs) come from an iteration order this formatter approximates; the run/continuation rules match the fixtures and the block`s own lines differ by one or two columns in about six of them. Recorded rather than tuned to one file |
 | **the indent of a line that follows a trailing comment** | the line **after** a trailing comment (`A, // one` then `B,`) is recomputed by the layout only **inside an enum body**: recomputing it everywhere was measured to regress the Lua 5.5 spacing column from 1 677 to 2 291 lines, because the indent this formatter computes for a continuation line is one nesting level short (see the entry above). The enum case is the one where the computed indent is measurably right, and it is fixed |
 | **`AlignAfterOpenBracket` inside a nested bracket opened on a continued line** | the anchor is the line the bracket was written on, and a second nesting level still comes out one `ContinuationIndentWidth` short on a few lines (`IndentWidth: 4`: 148 spacing lines); the accumulated-indent model clang-format uses is not reproduced yet |
