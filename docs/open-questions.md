@@ -2647,3 +2647,37 @@ object's own type first and the arrow's class second. Measured: `std::string sec
 answers `basic_json&` because every `operator[]` of `basic_json` returns `reference`, and the list's first member is
 taken once `member_fact` refuses with `Ambiguous`. A class whose overloads return *different* types needs a choice by
 argument conversion, which is the next step for the type layer.
+## Lua's own sources: syntax errors at positions in comments
+
+Reported from an editor: opening `lua-5.5.0/src/ldebug.c` showed "large-scale syntax errors", with the squiggles
+inside doc comments (`** during a signal, under "reasonable"`, `** temporarily broken while inserting…`).
+
+Reproduced through the server as **18–30** `syntax-error` findings, while three measurements disagreed with them:
+
+```text
+the file's own text                        0 parse errors     cpp_dump --errors-only
+its composed cook, closure ready         294 declarations, 0 diagnostics, 0 unplaced
+the program read (its translation unit)   15 parse errors     ldebug.c.parsed, 84 382 bytes
+```
+
+Two causes, both in the layer that decides *which* reading answers:
+
+1. **A program's parse errors were filed per file.** `index_unit_rendering` parses the stitched stream and placed each
+   error through `written_span` — a token-to-token map — into the file its **start** landed in. A range whose ends are
+   in two files is attributed to the first with a one-token span, and a range that begins in a gap covers **trivia**;
+   that is how a diagnostic comes to underline a sentence of a comment. The loop is gone: a stream's error is the
+   program's, `IndexedUnit::errors` still counts it, and a file's own cook is the reading that can name a position.
+2. **A cook could start before its closure was indexed.** `cooking_materials` composed an environment from whatever
+   summaries existed, the renderer left every macro call it could not expand in the text (`getstr(...)`, `cast(...)`),
+   and the reading was filed under its closure's key — so a wrong answer made in a moment of an unfinished index
+   outlived it. It now refuses until `is_locally_ready`, and `prepare_for_a_diagnostic` reads the queue until that
+   holds (`PREPARE_READY_TIMEOUT`, 5 s).
+
+Measured after, cold cache, through the server: pull 0 answers **0** syntax errors and pulls 1–2 answer the three
+findings that are real checks on Lua's own C (`braces-around-statements` ×2, `else-after-return`).
+
+**Still open, and it is the parser's**: the *program* read of this translation unit has **15** genuine parse errors —
+the first inside MSVC's `string.h` C++ overloads (`template < size_t _Size > inline errno_t __cdecl strcat_s ( char
+( & _Destination ) [ _Size ], … ) throw ( ) { … }`), and the rest a cascade after it that reaches `lua.h`'s
+`extern void *(lua_touserdata) (…)` declarations. The individual shapes parse on their own (measured with
+`cpp_dump`), so the next instrument is the stream's first error's surroundings, not the shapes.
