@@ -39,11 +39,7 @@ fn how_many_inactive_regions_a_real_project_has() {
         let cooked = cook_with(&text, &tokens, &nothing_defined);
         files += 1;
         total_regions += cooked.inactive.len();
-        let bytes: usize = cooked
-            .inactive
-            .iter()
-            .map(|span| span.length)
-            .sum();
+        let bytes: usize = cooked.inactive.iter().map(|span| span.length).sum();
         total_bytes += bytes;
         worst.push((
             cooked.inactive.len(),
