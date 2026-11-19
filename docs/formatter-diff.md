@@ -86,6 +86,18 @@ What each row says, in the order the fixes will come:
   empty ones included (`void z() {` then `}`). The option matrix is the record of what each setting costs.
 * **`ColumnLimit: 0` scores best on identical files (6 / 29)** because that is the one setting where clang-format
   itself stops reflowing — and the remaining spacing lines there are the same macro continuations.
+### The second corpus: Lua 5.5 (`C:\Users\zc\Desktop\lua-5.5.0\src`, 40 files)
+
+| style | identical files | differing lines | spacing-only |
+| --- | --- | --- | --- |
+| `LLVM` | 0 / 40 | 18 443 / 20 375 | 9 / 40 match, **5 449** lines |
+| `Microsoft` | 0 / 40 | 20 200 / 22 090 | 12 / 40 match, 3 268 lines |
+
+This is the corpus that says the **break half** is the remaining project, not a candidate for one: Lua's source is
+hand-formatted with its own wrapping, and clang-format's 80-column answer re-wraps most of it. The token-level rules
+still hold on it (the `::`-after-comma and string-concatenation cuts in this round were found here), but the layout
+cannot match until a statement is re-broken the way clang-format re-breaks it — the same negative result recorded
+above.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:

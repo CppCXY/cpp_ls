@@ -138,7 +138,15 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         }
         // **The scope operator glues to the name it qualifies — unless an operator precedes it**: clang-format writes
         // `::islower(ch) || ::isdigit(ch)`, and a blanket "no space before `::`" glued the two (`||::isdigit`).
-        Scope => return usize::from(is_operator_punctuation(previous.kind)),
+        // **The scope operator glues to the name it qualifies — unless an operator or a comma precedes it**:
+        // clang-format writes `::islower(ch) || ::isdigit(ch)` and `f(1, ::tolower(c))`, and a blanket "no space before
+        // `::`" glued both (`||::isdigit`, `,::tolower`).
+        Scope => {
+            return usize::from(
+                is_operator_punctuation(previous.kind)
+                    || matches!(previous.kind, Comma | Semicolon),
+            );
+        }
         _ => {}
     }
     match previous.kind {

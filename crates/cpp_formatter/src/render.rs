@@ -64,6 +64,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **Where the current statement's first operand starts** — the column a continuation after a trailing binary
     // operator aligns with (`AlignOperands: Align`).
     let mut operand_column: Option<usize> = None;
+    // **The column of the first string of an implicit concatenation** — the anchor clang-format aligns the rest of
+    // the strings with (`const char x[] = "a"` then `"b"` under the first one). Set when the string that follows an
+    // assignment is written, and forgotten at the end of the statement.
+    let mut first_string: Option<usize> = None;
+    let mut awaiting_first_string = false;
     let indent_width = style.count(StyleOption::IndentWidth);
     // **A body opened on a line the bracket rules placed** (a lambda inside `f(...)`): the closer sits at that line
     // column and the body one indent in. Only bracket-placed lines count, so constructor lists and initializer rows
@@ -185,6 +190,120 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
 
     // **Which `{` on the bracket stack is an initializer`s** — so its `}` pops the bracket again.
     let mut init_braces: Vec<bool> = Vec::new();
+    // **The join half of the reflow: a statement that fits on one line is one line.** clang-format re-lays-out every
+    // logical line, and a statement whose whole text fits is written on one line however the author broke it. This
+    // formatter keeps the author's breaks, which is why a file written by another formatter differed on every wrapped
+    // expression even once the answer to produce was known.
+    //
+    // What is **not** joined, each measured or documented:
+    // * a directive (`#define`'s body is the author's);
+    // * a statement with a comment in it (a comment is a line of its own);
+    // * a statement with **any brace**: `BinPackLongBracedList: false` keeps a long braced initializer broken even
+    //   when it fits, and a block body never joins — the first version of this pass joined both and took the
+    //   spacing-only column from 53 lines to 2 727;
+    // * a statement that does not fit (the breaker owns it, and the fitting model it uses is not complete yet);
+    // * a statement already on one line.
+    if style.count(StyleOption::ColumnLimit) > 0 {
+        for line in crate::breaks::logical_lines(&stream) {
+            if line.end <= line.start + 1 {
+                continue;
+            }
+            let first = line.start;
+            if stream.tokens[first].kind == cpp_parser::CppTokenKind::Hash {
+                continue;
+            }
+            if (first + 1..line.end).any(|index| !stream.gaps[index].comments.is_empty()) {
+                continue;
+            }
+            if (first..line.end).any(|index| {
+                matches!(
+                    stream.tokens[index].kind,
+                    cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
+                )
+            }) {
+                continue;
+            }
+            if (first + 1..line.end).all(|index| stream.gaps[index].newlines == 0) {
+                continue;
+            }
+            // **Only a real statement is reflowed**: `NUMBER_OPTION(indent_size)` lines and the values of an enum body
+            // have no terminator, and joining them put two statements on one line (measured, 354 lines on
+            // `LuaStyle.cpp`). A statement ends with `;`, or with the **signature** that a block brace follows — and a
+            // signature has one parenthesised group; a run of macro invocations has several.
+            let next = stream.tokens.get(line.end);
+            let ends_with_a_semicolon =
+                stream.tokens[line.end - 1].kind == cpp_parser::CppTokenKind::Semicolon;
+            let is_a_signature = next
+                .is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftBrace)
+                && (first..line.end)
+                    .filter(|index| {
+                        stream.tokens[*index].kind == cpp_parser::CppTokenKind::RightParen
+                    })
+                    .count()
+                    <= 1;
+            if !ends_with_a_semicolon && !is_a_signature {
+                continue;
+            }
+            // **A label owns the rest of its statement**: `endLoop:` then `return words;` are two lines even when
+            // they fit on one (measured: joining them made `endLoop: return words;`). A `Colon` at depth 0 in the
+            // range is the evidence — a ternary`s is inside parentheses or after a `?`.
+            if (first..line.end).any(|index| {
+                stream.tokens[index].kind == cpp_parser::CppTokenKind::Colon
+                    && stream
+                        .gaps
+                        .get(index + 1)
+                        .is_some_and(|gap| gap.newlines > 0)
+            }) {
+                continue;
+            }
+            // **A line that continues a `}`** (`} else if (…)`) has its first columns on the previous line: the join
+            // would be judged by a width that does not include them (measured: an 84-column `else if` was joined as
+            // 80). The `else`/`catch`/`while` itself is placed by the brace rules, not by this pass.
+            if matches!(
+                stream.tokens[first].kind,
+                cpp_parser::CppTokenKind::ElseKeyword
+                    | cpp_parser::CppTokenKind::CatchKeyword
+                    | cpp_parser::CppTokenKind::WhileKeyword
+            ) {
+                continue;
+            }
+            let indent = blocks[first].unwrap_or(0);
+            let mut width = indent;
+            for index in first..line.end {
+                if index > first {
+                    width += space::between(&stream, index, &roles, style);
+                }
+                width += stream.tokens[index].text.chars().count();
+            }
+            // **The `{` that follows a signature is on the same line when the style attaches it**, and its columns
+            // count: a signature of exactly 80 that would be 82 with `{` is broken by clang-format (measured on
+            // `void FormatState::AddRelativeIndent(…, std::size_t indent) {`).
+            if line.end < stream.tokens.len()
+                && stream.tokens[line.end].kind == cpp_parser::CppTokenKind::LeftBrace
+                && roles
+                    .brace_kind
+                    .get(&stream.tokens[line.end].start)
+                    .is_none_or(|kind| !crate::wrapping::a_brace_starts_a_line(style, *kind))
+            {
+                width += 2;
+            }
+            // **A trailing comment is part of the line`s width**: clang-format breaks to leave room for it
+            // (measured: `if (::islower(ch) || ::isdigit(ch)) { // after the first underscore, …` stays broken).
+            let mut trailing = 0usize;
+            if next.is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftBrace)
+                && let Some(gap) = stream.gaps.get(line.end + 1)
+                && let Some(comment) = gap.comments.last().filter(|comment| !comment.own_line)
+            {
+                trailing = comment.text.chars().count() + 1;
+            }
+            if width + trailing <= style.count(StyleOption::ColumnLimit) {
+                for slot in &mut joined[first + 1..line.end] {
+                    *slot = true;
+                }
+            }
+        }
+    }
+
     // **The lambda body being joined**, once its `{` was printed and the width was known to fit.
     let mut join_until: Option<usize> = None;
     let mut in_directive = false;
@@ -326,10 +445,19 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                         && a_continuing_operator(index - 1))
                     .then_some(operand_column)
                     .flatten();
+                    // **An implicit string concatenation continues under its first string**: clang-format
+                    // writes `const char x[] = "a" "b"` then `"c"` aligned with the first string (measured on Lua
+                    // 5.5`s `lua_ident`), which is the assignment`s right-hand-side column — the same anchor the
+                    // operand continuation uses.
+                    let string_continuation = (stream.tokens[index - 1].kind
+                        == cpp_parser::CppTokenKind::StringLiteral)
+                        .then_some(first_string)
+                        .flatten();
                     conditional
                         .map(|column| (column, false))
                         .or_else(|| aligned.map(|column| (column, false)))
                         .or_else(|| operand_continuation.map(|column| (column, false)))
+                        .or_else(|| string_continuation.map(|column| (column, false)))
                         .or_else(|| {
                             let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
                             planned_indent(
@@ -567,6 +695,15 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 operand_column = Some(column);
             }
         }
+        if is_an_assignment(stream.tokens[index].kind) {
+            awaiting_first_string = true;
+        }
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::StringLiteral
+            && awaiting_first_string
+        {
+            first_string = Some(column);
+            awaiting_first_string = false;
+        }
         if matches!(
             stream.tokens[index].kind,
             cpp_parser::CppTokenKind::ReturnKeyword
@@ -593,6 +730,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             operand_operator = None;
             operand_column = None;
+            first_string = None;
+            awaiting_first_string = false;
         }
 
         // **The bracket a token closes leaves the stack before the token is written**, and one it opens is pushed
@@ -1243,8 +1382,12 @@ mod tests {
         // `<<` goes to the same column. **Two statements**, because a one-statement body is joined onto the signature
         // by `AllowShortFunctionsOnASingleLine: All` (the oracle joins it, and `functions.rs` pins that) — the
         // operator alignment is what this test is about.
+        // **No column limit, so nothing is reflowed**: with a limit the statement fits and clang-format joins it
+        // (the join pass here does too), and the alignment rule is only observable on a line that stays broken.
+        let mut style = Style::default_style();
+        style.set_from_text("ColumnLimit", "0");
         let source = "void f() {\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n  g();\n}\n";
-        let formatted = format(source, None, &llvm());
+        let formatted = format(source, None, &style);
         assert_eq!(
             formatted, source,
             "the `<<` of the continuation lines up with the statement's first `<<`"

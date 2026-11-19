@@ -136,23 +136,47 @@ fn single_statement(stream: &Stream<'_>, open: usize, close: usize) -> bool {
     use cpp_parser::CppTokenKind as K;
     let mut depth = 0usize;
     let mut statements = 0usize;
-    for token in &stream.tokens[open + 1..close] {
+    let mut tokens_at_the_top = 0usize;
+    let mut index = open + 1;
+    while index < close {
+        let token = &stream.tokens[index];
         match token.kind {
             K::LeftParen | K::LeftBracket | K::LeftBrace => {
-                if depth == 0 && token.kind == K::LeftBrace {
-                    statements += 1;
+                if depth == 0 {
+                    tokens_at_the_top += 1;
+                    if token.kind == K::LeftBrace {
+                        statements += 1;
+                    }
                 }
                 depth += 1;
             }
             K::RightParen | K::RightBracket | K::RightBrace => depth = depth.saturating_sub(1),
             K::Semicolon if depth == 0 => statements += 1,
-            _ => {}
+            // **A label is not a statement clang-format will put on one line**: `endLoop:` then `return words;`
+            // stays two lines, and a body holding a label is not a short function (measured).
+            K::Colon
+                if depth == 0
+                    && stream
+                        .gaps
+                        .get(index + 1)
+                        .is_some_and(|gap| gap.newlines > 0) =>
+            {
+                return false;
+            }
+            _ => {
+                if depth == 0 {
+                    tokens_at_the_top += 1;
+                }
+            }
         }
         if statements > 1 {
             return false;
         }
+        index += 1;
     }
-    true
+    // **A body of macro invocations has no statement at all**: `NUMBER_OPTION(a)` on one line and `NUMBER_OPTION(b)`
+    // on the next is not one short statement, and joining them made `{ NUMBER_OPTION(a) NUMBER_OPTION(b)}` (measured).
+    statements == 1 || (statements == 0 && tokens_at_the_top == 0)
 }
 
 /// **The width of the body alone**, `{ … }` included, as it would be printed on one line: what a lambda's join needs,
