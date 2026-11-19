@@ -32,9 +32,9 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 4 / 29 | 3 963 / 6 850 | **17 / 29 match, 90 lines** |
-| `Google` | 3 / 29 | 6 508 / 6 887 | **17 / 29 match, 86 lines** |
-| `Microsoft` | 5 / 29 | 4 474 / 8 041 | **22 / 29 match, 38 lines** |
+| `LLVM` | 4 / 29 | 3 954 / 6 850 | **19 / 29 match, 53 lines** |
+| `Google` | 3 / 29 | 6 509 / 6 887 | **19 / 29 match, 65 lines** |
+| `Microsoft` | 5 / 29 | 4 468 / 8 041 | **26 / 29 match, 6 lines** |
 
 The `Microsoft` spacing-only column collapsed from 6 323 lines to **42** in one step, and two rules did it: a `case`
 body`s brace is the **label`s** option (`AfterCaseLabel` — Microsoft attaches `case 1: {`, and this formatter was

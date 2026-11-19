@@ -136,7 +136,9 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         Comma | Semicolon | RightParen | RightBracket | Dot | Arrow | DotStar | ArrowStar => {
             return 0;
         }
-        Scope => return 0,
+        // **The scope operator glues to the name it qualifies — unless an operator precedes it**: clang-format writes
+        // `::islower(ch) || ::isdigit(ch)`, and a blanket "no space before `::`" glued the two (`||::isdigit`).
+        Scope => return usize::from(is_operator_punctuation(previous.kind)),
         _ => {}
     }
     match previous.kind {

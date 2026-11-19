@@ -94,3 +94,19 @@ fn preprocessor_05_pragma() {
 fn preprocessor_06_undef() {
     check(r#"#undef FOO"#, r#"#undef FOO"#);
 }
+
+/// `07_define_alignment` — **`AlignEscapedNewlines: Right`**: every escaped line of a macro ends at the column limit,
+/// which is clang-format 23.1.5's answer for `LLVM` (the style here has `ColumnLimit: 0`, where `Right` falls back to
+/// `Left` — so this case uses a style with a limit).
+#[test]
+fn preprocessor_07_define_alignment() {
+    let mut styled = style();
+    styled.set_from_text("ColumnLimit", "80");
+    let input = "#define BOOL_OPTION(op) \\\n  if (auto n = root.GetValue(#op); n.IsBool()) \\\n  { \\\n    op = n.AsBool(); \\\n  }\n";
+    let expected = "#define BOOL_OPTION(op)                                                        \\\n  if (auto n = root.GetValue(#op); n.IsBool())                                 \\\n  {                                                                            \\\n    op = n.AsBool();                                                           \\\n  }\n";
+    let path = std::path::Path::new("snippet.cpp");
+    let actual = cpp_formatter::format_file(path, input, &styled);
+    assert_eq!(actual, expected, "the backslashes end at column 80");
+    let again = cpp_formatter::format_file(path, expected, &styled);
+    assert_eq!(again, expected, "the expected text is not a fixed point");
+}

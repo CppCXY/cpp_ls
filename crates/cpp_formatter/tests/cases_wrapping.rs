@@ -233,3 +233,35 @@ fn attach_joins_only_when_the_style_has_a_column_limit() {
     limited.set_from_text("AllowShortFunctionsOnASingleLine", "None");
     check(limited, input, "void f() {\n  g();\n}\n");
 }
+
+/// **A braced `case` body under `Allman`**: the `{` and the `}` stand at the **label's** column (`  {` under `case`),
+/// not one level in — the `IndentCaseBlocks` rule applied to the brace itself. Taken from clang-format 23.1.5.
+#[test]
+fn a_case_body_brace_stands_at_the_label_under_allman() {
+    let input = "\
+void f(int v) {
+  switch (v) {
+    case 1: {
+      g();
+      break;
+    }
+  }
+}
+";
+    let expected = "\
+void f(int v)
+{
+  switch (v)
+  {
+  case 1:
+  {
+    g();
+    break;
+  }
+  }
+}
+";
+    let mut allman = Style::preset("LLVM").expect("LLVM is a preset");
+    allman.set_from_text("BreakBeforeBraces", "Allman");
+    check(allman, input, expected);
+}

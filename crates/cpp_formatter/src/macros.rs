@@ -54,9 +54,15 @@ pub fn align_escaped_newlines(output: &str, style: &Style) -> String {
             .map(|line| code_width(&lines[line]))
             .max()
             .unwrap_or(0);
+        // **`Right` aligns the backslashes to the column limit**, not to the longest line — measured on a
+        // `#define BOOL_OPTION(op)` chain: clang-format writes every `\` at the limit of an 80-column style, and this
+        // pass used to line the run up at its longest line instead (which is `Left`'s answer). A line whose code
+        // already reaches the limit keeps one space before its `\`, and `ColumnLimit: 0` falls back to `Left`.
+        let limit = style.count(StyleOption::ColumnLimit);
         for line in lines[start..end].iter_mut() {
             let target = match policy {
                 "Left" => code_width(line) + 1,
+                "Right" if limit > 0 => (limit - 1).max(width + 1),
                 _ => width + 1,
             };
             *line = aligned(line, target);
@@ -143,8 +149,24 @@ mod tests {
 
     #[test]
     fn a_line_without_a_backslash_ends_the_run() {
+        // **One line per macro here**: `Left` is what this case is about (the run's boundary), because `Right` pads
+        // every escaped line to the column limit — the oracle's answer, checked by the next case.
         let input = "#define A \\\n    one\n#define B \\\n    two\n";
-        let output = align_escaped_newlines(input, &style_with("Right"));
+        let output = align_escaped_newlines(input, &style_with("Left"));
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn right_pads_every_escaped_line_to_the_column_limit() {
+        // clang-format 23.1.5, `LLVM` (ColumnLimit 80): the `\` of an escaped line is the line's 80th character.
+        let input = "#define A \\\n    one \\\n    two\n";
+        let output = align_escaped_newlines(input, &style_with("Right"));
+        for line in output.lines().filter(|line| line.ends_with('\\')) {
+            assert_eq!(
+                line.chars().count(),
+                80,
+                "every escaped line ends at the limit: {output:?}"
+            );
+        }
     }
 }

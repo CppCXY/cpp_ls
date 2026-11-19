@@ -98,7 +98,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **The lines `BreakBeforeBraces` asks for**: a `{` (or an `else` after a `}`) that must start a line, one that
     // must stay on the previous line, and an empty body the style splits. Kept three vectors rather than one enum
     // because each answers a different branch of the loop below.
-    let (mut wrapped, attached, split, namespace_comments) = wrapping_lines(&stream, &roles, style);
+    let WrappingLines {
+        mut wrapped,
+        mut attached,
+        mut split,
+        namespace_comments,
+        closers,
+    } = wrapping_lines(&stream, &roles, style);
 
     // **`AllowShortFunctionsOnASingleLine`**: a definition whose body holds one statement and whose whole text fits
     // the column limit becomes one line under `All` (a class method only under `Inline`, never under `None`). The
@@ -151,9 +157,34 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 wrapped[definition.open + 1] = true;
                 wrapped[definition.close] = true;
             }
+            // **An empty body whose definition is spread over lines and does not fit** is placed by the brace rule,
+            // and then split: under `Allman`, clang-format writes
+            //
+            //     FormatState::FormatState(Mode mode)
+            //         : _currentWidth(0), _mode(mode), _foreachContinue(true)
+            //     {
+            //     }
+            //
+            // — the joined form would be 88 columns — while a definition that fits joins into `{}` and a definition
+            // already written on one line is left over-long rather than broken for no gain (all three measured).
+            let kind = roles.brace_kind.get(&stream.tokens[definition.open].start);
+            let spans_lines = line_start(&stream, definition.open) != definition.start;
+            if definition.open + 1 == definition.close
+                && spans_lines
+                && !fits
+                && kind.is_some_and(|kind| crate::wrapping::a_brace_starts_a_line(style, *kind))
+            {
+                wrapped[definition.open] = true;
+                wrapped[definition.close] = true;
+                split[definition.close] = true;
+                attached[definition.open] = false;
+                attached[definition.close] = false;
+            }
         }
     }
 
+    // **Which `{` on the bracket stack is an initializer`s** — so its `}` pops the bracket again.
+    let mut init_braces: Vec<bool> = Vec::new();
     // **The lambda body being joined**, once its `{` was printed and the width was known to fit.
     let mut join_until: Option<usize> = None;
     let mut in_directive = false;
@@ -161,9 +192,20 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
         let forced = forced_breaks[index];
-        let wrap = wrapped[index];
-        let attach = attached[index];
+        let mut wrap = wrapped[index];
+        let mut attach = attached[index];
         let join = joined[index] || join_until.is_some_and(|end| index <= end);
+        // **A lambda body that is about to be joined keeps its `{` on the signature's line**, whatever the brace
+        // table says: clang-format writes `f([](int v) { return v; });` under `Allman` too, where
+        // `BeforeLambdaBody: true` would otherwise wrap the brace (measured). This is the same width test the join
+        // uses, taken one token early — the `{` is not printed yet, so the column plus one is where the body starts.
+        if wrap
+            && let Some((_, width)) = lambda_body[index]
+            && column + 1 + width <= style.count(StyleOption::ColumnLimit)
+        {
+            wrap = false;
+            attach = true;
+        }
         // **An empty block is `{}`** — unless the style *splits* it (`BraceWrapping.SplitEmpty*`, which Microsoft's
         // style sets for functions, records and namespaces: `void f()\n{\n}` there). clang-format writes `void f() {}`
         // for an empty body even when `AllowShortBlocksOnASingleLine` is `Never` — the option governs blocks with
@@ -222,7 +264,21 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 // not at a continuation column: a wrapped function brace sits under the function's return type, and
                 // an `else` under the `if` it belongs to.
                 if wrap {
-                    Some((blocks[index].unwrap_or(statement_indent), true))
+                    // **A `case` body`s brace stands at the label`s column**, not one level in: under `Allman`
+                    // clang-format writes `case X:` then `{` under the `case` and the body one indent further
+                    // (measured on `FormatState.cpp`), which is the `IndentCaseBlocks` rule applied to the brace.
+                    let indent = case_label_indent(&stream, &blocks, index)
+                        .or_else(|| blocks[index])
+                        .unwrap_or(statement_indent);
+                    Some((indent, true))
+                } else if let Some(open) = closers[index]
+                    && roles.brace_kind.get(&stream.tokens[open].start)
+                        == Some(&crate::roles::BraceKind::CaseLabel)
+                {
+                    // **The closer of a braced `case` body goes back to the label`s column** too.
+                    let indent =
+                        case_label_indent(&stream, &blocks, open).unwrap_or(statement_indent);
+                    Some((indent, true))
                 } else {
                     // **A continuation line that starts with a binary operator aligns with the statement's first one**
                     // (`AlignOperands: Align`), and that column beats the block rules.
@@ -544,6 +600,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             stack.pop();
         }
+        // **A braced initializer is a bracket for the layout too** (`AlignAfterOpenBracket`): its elements align after
+        // the `{` when one was written on that line, and fall back to a continuation indent when the `{` ended the
+        // line. Only an *initializer* brace is pushed — a block`s brace is placed by the block rules.
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
+            && init_braces.pop().unwrap_or(false)
+        {
+            stack.pop();
+        }
         // The template closer pops its own stack, so a line after the list is not pulled to its column.
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater
         {
@@ -622,6 +686,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         ) {
             // `usize::MAX` = "the token after this bracket has not been written yet".
             stack.push(usize::MAX);
+        }
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::LeftBrace {
+            let an_initializer = roles.init_brace.contains(&stream.tokens[index].start)
+                && !roles.brace_kind.contains_key(&stream.tokens[index].start);
+            init_braces.push(an_initializer);
+            if an_initializer {
+                stack.push(usize::MAX);
+            }
         }
         // The template opener pushes its own "column not yet known" marker, so a continuation line inside the list
         // can align after the `<` (the parentheses`s stack would otherwise be the only one consulted).
@@ -800,6 +872,26 @@ fn planned_indent(
     {
         return Some((column, false));
     }
+    // **A declaration whose type runs onto the next line continues the declaration**: clang-format writes
+    // `std::vector<std::pair<…>>` then `name_styles = …` one `ContinuationIndentWidth` in (measured), while the line
+    // after a complete `template <typename T>` is a new declaration at the block level — so the line that ended with
+    // the template closer decides, unless that line *started* with `template`.
+    if index > 0
+        && matches!(
+            stream.tokens[index - 1].kind,
+            cpp_parser::CppTokenKind::Greater | cpp_parser::CppTokenKind::RightShift
+        )
+        && stream.gaps[index].newlines > 0
+        && !line_starts_with_template(stream, index - 1)
+        // **An include ends with `>` too**: without this, the line after `#include <vector>` was treated as a
+        // continuation of it and came out four columns in (measured: `class FunctionOption {` at 4 instead of 0).
+        && !the_line_starts_with_a_directive(stream, index - 1)
+    {
+        return Some((
+            statement_indent + style.count(StyleOption::ContinuationIndentWidth),
+            false,
+        ));
+    }
     // **A line that continues an assignment sits `ContinuationIndentWidth` past the statement**, not at the block`s
     // own level: clang-format writes `_state.CurrentWidth() +=` and the call on the next line at 8 + 4 (measured);
     // the block answer for that line is 8, which is the statement`s own column.
@@ -827,6 +919,53 @@ fn planned_indent(
         layout::continuation(stack, statement_indent, first, style),
         false,
     ))
+}
+
+/// **Does the line that ends at `index` start with the `template` keyword?** — the difference between a complete
+/// template header (the next line is a declaration at the block level) and a type that continues onto the next line
+/// (`std::vector<std::pair<…>>`, whose next line is a continuation indent).
+fn line_starts_with_template(stream: &tokens::Stream<'_>, index: usize) -> bool {
+    let start = line_start(stream, index);
+    stream.tokens[start].kind == cpp_parser::CppTokenKind::TemplateKeyword
+}
+
+/// **The column of the `case`/`default` label a braced body belongs to**, when `index` is that body`s `{`.
+fn case_label_indent(
+    stream: &tokens::Stream<'_>,
+    blocks: &[Option<usize>],
+    index: usize,
+) -> Option<usize> {
+    let mut earlier = index;
+    while earlier > 0 {
+        earlier -= 1;
+        match stream.tokens[earlier].kind {
+            cpp_parser::CppTokenKind::CaseKeyword | cpp_parser::CppTokenKind::DefaultKeyword => {
+                return blocks[earlier];
+            }
+            cpp_parser::CppTokenKind::Semicolon
+            | cpp_parser::CppTokenKind::LeftBrace
+            | cpp_parser::CppTokenKind::RightBrace => return None,
+            // **The label`s own `:` is on the way**: `case X:` then `{` — the walk continues through it.
+            cpp_parser::CppTokenKind::Colon => {}
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **Does the line that ends at `index` start with a `#`?** — an include's `>` is not a template continuation.
+fn the_line_starts_with_a_directive(stream: &tokens::Stream<'_>, index: usize) -> bool {
+    let start = line_start(stream, index);
+    stream.tokens[start].kind == cpp_parser::CppTokenKind::Hash
+}
+
+/// The index of the first token of the line that holds `index`.
+fn line_start(stream: &tokens::Stream<'_>, index: usize) -> usize {
+    let mut start = index;
+    while start > 0 && stream.gaps[start].newlines == 0 {
+        start -= 1;
+    }
+    start
 }
 
 /// **An assignment operator** — the break-after context of `PenaltyBreakAssignment`, whose continuation is a
@@ -866,6 +1005,16 @@ fn verbatim_gap(source: &str, gap: &crate::tokens::Gap, style: &Style) -> String
     out
 }
 
+/// The answers [`wrapping_lines`] computes: which tokens must start a line, which must stay on the previous one, the
+/// empty bodies the style splits, the namespace comment to write after a closer, and the `}` → `{` pairing.
+struct WrappingLines {
+    wrapped: Vec<bool>,
+    attached: Vec<bool>,
+    split: Vec<bool>,
+    namespace_comments: Vec<Option<String>>,
+    closers: Vec<Option<usize>>,
+}
+
 /// **The lines `BreakBeforeBraces` asks for**, as three per-token answers.
 ///
 /// `wrapped` is a token that must start a line (a `{` the table wraps, an `else`/`catch` that stands after a `}`),
@@ -876,7 +1025,7 @@ fn wrapping_lines(
     stream: &crate::tokens::Stream<'_>,
     roles: &crate::roles::Roles,
     style: &crate::config::Style,
-) -> (Vec<bool>, Vec<bool>, Vec<bool>, Vec<Option<String>>) {
+) -> WrappingLines {
     // **Qualified, not a glob**: `CppTokenKind` has a `None` variant, and a glob import shadows `Option::None` with
     // it — which is a type error on every `let Some(…) = … else { closed = None; }` below.
     use cpp_parser::CppTokenKind as K;
@@ -903,6 +1052,9 @@ fn wrapping_lines(
     // and `Attach`; only `SplitEmpty*` splits it) — measured on `AlignAnalyzer::AlignAnalyzer() {}`, which clang-format
     // writes on one line even though `Allman` wraps every non-empty function body.
     let mut pairs: Vec<Option<usize>> = vec![None; count];
+    // **Which `{` each `}` closes** — a braced `case` body`s closer sits at the label`s column, which the block
+    // layout alone cannot say.
+    let mut closers: Vec<Option<usize>> = vec![None; count];
 
     for index in 0..count {
         let token = &stream.tokens[index];
@@ -918,6 +1070,7 @@ fn wrapping_lines(
                 };
                 closed = Some((open_index, kind));
                 pairs[open_index] = Some(index);
+                closers[index] = Some(open_index);
                 // **An empty namespace gets no comment**: clang-format writes `namespace n {}`, measured; the
                 // comment is for a body whose closing brace a reader might otherwise have to search for.
                 if kind == crate::roles::BraceKind::Namespace && open_index + 1 != index {
@@ -1027,7 +1180,13 @@ fn wrapping_lines(
         }
     }
 
-    (wrapped, attached, split, namespace_comments)
+    WrappingLines {
+        wrapped,
+        attached,
+        split,
+        namespace_comments,
+        closers,
+    }
 }
 
 #[cfg(test)]
