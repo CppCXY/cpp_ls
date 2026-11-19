@@ -160,17 +160,22 @@ pub fn of(source: &str) -> Roles {
         if introduced || named_an_initializer {
             continue;
         }
-        let Some(parent) = token.parent() else {
+        if token.parent().is_none() {
             continue;
-        };
+        }
         // **An out-of-line definition is not wrapped in a `FunctionDef`** — this grammar gives
         // `A::A(int x) : x_(x) { … }` a `Declaration` whose child is the body, with no function node at all (the same
         // shape `breaks.rs` documents for `int count() { }` at file scope). So when no construct owns the body, the
         // token before the `{` decides: `)` is a function's parameter list (every control statement has its own
         // ancestor and was answered above), `]` is a lambda's capture list.
+        // **A control keyword before the brace wins over the tree**, because the tree does not always name the
+        // statement: a range-for `for (auto &a : v) { … }` was classified as a *function* body here (measured: the
+        // loop body then joined as if it were a short function, which clang-format never does). `if (...)`, `for
+        // (...)`, `while (...)`, `switch (...)` and `catch (...)` are unambiguous at the token level.
         let brace_kind = opens_a_case_body(&token)
             .then_some(BraceKind::CaseLabel)
-            .or_else(|| body_kind_of(&parent))
+            .or_else(|| control_keyword_before(&token))
+            .or_else(|| body_kind_of(&token))
             .or(match previous {
                 Some(CppTokenKind::RightParen) => Some(BraceKind::Function),
                 Some(CppTokenKind::RightBracket) => Some(BraceKind::Lambda),
@@ -193,9 +198,13 @@ pub fn of(source: &str) -> Roles {
 /// **A nested compound statement is not a function body**, and `compounds` is what says so: the body's own brace
 /// reaches the `FunctionDef` with one `CompoundStat` between them, a bare block inside that body with two — and the
 /// wrapping rule for a bare block is the control one (attach), not the function one (wrap in Microsoft's style).
-fn body_kind_of(open: &cpp_parser::CppSyntaxNode) -> Option<BraceKind> {
+fn body_kind_of(open: &cpp_parser::CppSyntaxToken) -> Option<BraceKind> {
+    // **The brace this call is about**, which is what `first_brace` must be compared with: a namespace whose body is
+    // itself a `CompoundStat` would otherwise look like a function's body.
+    let this_brace = token_range_start(open);
+    let parent = open.parent()?;
     let mut compounds = 0usize;
-    for ancestor in open.ancestors() {
+    for ancestor in parent.ancestors() {
         match CppSyntaxKind::from(ancestor.kind()) {
             CppSyntaxKind::CompoundStat => compounds += 1,
             CppSyntaxKind::FunctionDef => {
@@ -215,9 +224,36 @@ fn body_kind_of(open: &cpp_parser::CppSyntaxNode) -> Option<BraceKind> {
             CppSyntaxKind::CatchStat | CppSyntaxKind::CatchHandler => {
                 return Some(BraceKind::Catch);
             }
-            CppSyntaxKind::ExternSpec => return Some(BraceKind::ExternBlock),
-            CppSyntaxKind::NamespaceDecl => return Some(BraceKind::Namespace),
+            // **A compound statement inside an `extern` block is a function's body**, not the block's own brace: the
+            // block's brace is the one with no `CompoundStat` between it and the `ExternSpec`.
+            CppSyntaxKind::ExternSpec => {
+                return Some(if first_brace(&ancestor) == Some(this_brace) {
+                    BraceKind::ExternBlock
+                } else {
+                    BraceKind::Function
+                });
+            }
+            CppSyntaxKind::NamespaceDecl => {
+                return Some(if first_brace(&ancestor) == Some(this_brace) {
+                    BraceKind::Namespace
+                } else {
+                    BraceKind::Function
+                });
+            }
+            // **A member function's body sits inside the class body, with no `FunctionDef` in between** — measured on
+            // `class C { void m() { g(); } };`, whose method brace reached this arm and was classified as the class's
+            // own brace, so the method was never a function (no short-function join, no `AfterFunction` wrap). The
+            // `CompoundStat` count is what tells the two apart: the class body's brace has none between it and the
+            // `ClassBody`, a method's has one (and a nested block inside a method has two).
             CppSyntaxKind::ClassBody => {
+                if first_brace(&ancestor) != Some(this_brace) {
+                    // **A body inside the class**: a member function (or a nested block in one).
+                    return Some(if compounds == 1 {
+                        BraceKind::Function
+                    } else {
+                        BraceKind::Control
+                    });
+                }
                 return match ancestor
                     .parent()
                     .map(|parent| CppSyntaxKind::from(parent.kind()))
@@ -231,6 +267,65 @@ fn body_kind_of(open: &cpp_parser::CppSyntaxNode) -> Option<BraceKind> {
             }
             _ => {}
         }
+    }
+    None
+}
+
+/// **The control keyword whose body this `{` opens**, read from the tokens before it.
+///
+/// ```text
+/// if (x) {          for (...) {        while (x) {        switch (x) {
+/// } else {          do {              try {              catch (...) {
+/// ```
+///
+/// The matching parenthesis is walked so that `if (f(x))` and `for (auto &a : v)` both reach their own keyword.
+fn control_keyword_before(open: &cpp_parser::CppSyntaxToken) -> Option<BraceKind> {
+    let mut previous = open.prev_token();
+    let mut seen = Vec::new();
+    while let Some(token) = previous {
+        let kind = CppTokenKind::from(token.kind());
+        if cpp_parser::is_trivia(kind) {
+            previous = token.prev_token();
+            continue;
+        }
+        if seen.is_empty() {
+            match kind {
+                CppTokenKind::RightParen => {}
+                CppTokenKind::ElseKeyword | CppTokenKind::DoKeyword => {
+                    return Some(BraceKind::Control);
+                }
+                CppTokenKind::TryKeyword => return Some(BraceKind::Try),
+                _ => return None,
+            }
+        }
+        match kind {
+            CppTokenKind::RightParen => seen.push(CppTokenKind::RightParen),
+            CppTokenKind::LeftParen => {
+                seen.pop();
+                if seen.is_empty() {
+                    // The keyword that owns the parenthesis.
+                    let mut before = token.prev_token();
+                    while let Some(token) = before {
+                        let kind = CppTokenKind::from(token.kind());
+                        if cpp_parser::is_trivia(kind) {
+                            before = token.prev_token();
+                            continue;
+                        }
+                        return match kind {
+                            CppTokenKind::IfKeyword
+                            | CppTokenKind::ForKeyword
+                            | CppTokenKind::WhileKeyword
+                            | CppTokenKind::SwitchKeyword => Some(BraceKind::Control),
+                            CppTokenKind::CatchKeyword => Some(BraceKind::Catch),
+                            _ => None,
+                        };
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        previous = token.prev_token();
     }
     None
 }
@@ -328,6 +423,46 @@ mod tests {
         assert!(!roles.is_template_angle(less));
     }
 
+    #[test]
+    fn a_lambda_body_inside_a_call_is_a_lambda_brace() {
+        let source = "void f() {\n  g([this](int a) {\n    h(a);\n  });\n}\n";
+        let roles = of(source);
+        let lambda_brace = source
+            .find("int a) {")
+            .expect("the lambda is in the fixture")
+            + 7;
+        assert_eq!(
+            roles.brace_kind.get(&lambda_brace),
+            Some(&BraceKind::Lambda)
+        );
+    }
+    #[test]
+    fn a_range_for_body_is_a_control_brace() {
+        let source = "void f() {\n  for (auto &a : v) {\n    g();\n  }\n}\n";
+        let roles = of(source);
+        let function_brace = source.find("() {").expect("the function is in the fixture") + 3;
+        let for_brace = source.find("v) {").expect("the loop is in the fixture") + 3;
+        assert_eq!(
+            roles.brace_kind.get(&function_brace),
+            Some(&BraceKind::Function)
+        );
+        assert_eq!(roles.brace_kind.get(&for_brace), Some(&BraceKind::Control));
+    }
+    #[test]
+    fn a_class_method_body_is_a_function_brace() {
+        let source = "class C {\n  void m() {\n    g();\n  }\n};\n";
+        let roles = of(source);
+        let method_brace = source.find("() {").expect("the method is in the fixture") + 3;
+        eprintln!(
+            "kind at method brace: {:?}",
+            roles.brace_kind.get(&method_brace)
+        );
+        eprintln!("all: {:?}", roles.brace_kind);
+        assert_eq!(
+            roles.brace_kind.get(&method_brace),
+            Some(&BraceKind::Function)
+        );
+    }
     #[test]
     fn a_namespace_brace_knows_its_name() {
         let source = "namespace ns {\nint x;\n}\n";

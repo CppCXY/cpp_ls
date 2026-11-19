@@ -221,11 +221,15 @@ fn the_files_own_header_sorts_first() {
 fn attach_joins_only_when_the_style_has_a_column_limit() {
     let input = "void f()\n{\n  g();\n}\n";
 
+    // **The short-function join is turned off here** so that the only rule under test is the brace's: with `All`
+    // (LLVM's default) the whole body would join and the brace question would not be observable.
     let mut unlimited = Style::preset("LLVM").expect("LLVM is a preset");
     unlimited.set_from_text("ColumnLimit", "0");
+    unlimited.set_from_text("AllowShortFunctionsOnASingleLine", "None");
     check(unlimited, input, input);
 
     let mut limited = Style::preset("LLVM").expect("LLVM is a preset");
     limited.set_from_text("ColumnLimit", "80");
+    limited.set_from_text("AllowShortFunctionsOnASingleLine", "None");
     check(limited, input, "void f() {\n  g();\n}\n");
 }

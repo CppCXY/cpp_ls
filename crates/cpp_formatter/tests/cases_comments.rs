@@ -92,3 +92,14 @@ fn comments_06_string() {
         r#"const char *s = "// not a comment";"#,
     );
 }
+
+/// **`SpacesInLineCommentPrefix`**: one space after the `//` prefix (and after a doc marker), wherever the comment is
+/// — a line of its own, a trailing comment, the first line of the file. Taken from clang-format 23.1.5 with this
+/// file's style.
+#[test]
+fn comments_13_prefix_spacing() {
+    check(
+        "//using enum X;\n///doc\n//NOLINT\nvoid f() {\n    int x = 1; //trailing\n}\n",
+        "// using enum X;\n/// doc\n// NOLINT\nvoid f() {\n    int x = 1; // trailing\n}\n",
+    );
+}

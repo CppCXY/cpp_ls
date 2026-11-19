@@ -61,6 +61,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // continuation line that starts with one belongs (measured: `std::cerr << …` puts the first `<<` at 14 and the
     // next line's `<<` at 14 too).
     let mut operand_operator: Option<usize> = None;
+    // **Where the current statement's first operand starts** — the column a continuation after a trailing binary
+    // operator aligns with (`AlignOperands: Align`).
+    let mut operand_column: Option<usize> = None;
     let indent_width = style.count(StyleOption::IndentWidth);
     // **A body opened on a line the bracket rules placed** (a lambda inside `f(...)`): the closer sits at that line
     // column and the body one indent in. Only bracket-placed lines count, so constructor lists and initializer rows
@@ -95,8 +98,64 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **The lines `BreakBeforeBraces` asks for**: a `{` (or an `else` after a `}`) that must start a line, one that
     // must stay on the previous line, and an empty body the style splits. Kept three vectors rather than one enum
     // because each answers a different branch of the loop below.
-    let (wrapped, attached, split, namespace_comments) = wrapping_lines(&stream, &roles, style);
+    let (mut wrapped, attached, split, namespace_comments) = wrapping_lines(&stream, &roles, style);
 
+    // **`AllowShortFunctionsOnASingleLine`**: a definition whose body holds one statement and whose whole text fits
+    // the column limit becomes one line under `All` (a class method only under `Inline`, never under `None`). The
+    // oracle's two shapes, measured — `void a() { g(); }` joins, `void b() { g(); h(); }` does not. A body the style
+    // refuses to join is **broken**, which is why a one-line function under `None` comes back as three lines.
+    let mut joined = vec![false; stream.tokens.len()];
+    // **A lambda body joins at render time**: its width depends on the column its `{` lands in, which is only known
+    // while printing (a signature that spans lines still gets `{ … }` on its last line — measured). Keyed by the `{`
+    // token: `(closing brace, width of the body after the brace)`.
+    let mut lambda_body: Vec<Option<(usize, usize)>> = vec![None; stream.tokens.len()];
+    if style.count(StyleOption::ColumnLimit) > 0 {
+        let option = style.text(StyleOption::AllowShortFunctionsOnASingleLine);
+        for definition in crate::functions::definitions(&stream, &roles) {
+            let allowed = match option {
+                "All" => true,
+                "Inline" | "InlineOnly" => definition.inside_a_record,
+                "Empty" => definition.open + 1 == definition.close,
+                _ => false,
+            };
+            let indent = blocks[definition.start].unwrap_or(0);
+            let fits =
+                crate::functions::one_line_width(&stream, &roles, style, &definition, indent)
+                    <= style.count(StyleOption::ColumnLimit);
+            // **A comment in the body keeps its own line**, so the join is refused rather than moved around it.
+            let commented = (definition.start + 1..=definition.close)
+                .any(|index| !stream.gaps[index].comments.is_empty());
+            // **A lambda's body is joined from its own `{`**, not as part of the whole definition: clang-format writes
+            // `[this](…, FormatResolve &resolve) { DoResolve(…); }` even when the lambda's signature already spans
+            // several lines (measured). The width is checked while printing, where the `{`'s column is known.
+            let is_a_lambda = roles.brace_kind.get(&stream.tokens[definition.open].start)
+                == Some(&crate::roles::BraceKind::Lambda);
+            if is_a_lambda && definition.single_statement && !definition.nested_block && !commented
+            {
+                lambda_body[definition.open] = Some((
+                    definition.close,
+                    crate::functions::body_width(&stream, &roles, style, &definition) - 1,
+                ));
+            } else if allowed
+                && fits
+                && definition.single_statement
+                && !definition.nested_block
+                && !commented
+            {
+                for slot in &mut joined[definition.start + 1..=definition.close] {
+                    *slot = true;
+                }
+            } else if definition.open + 1 < definition.close {
+                // **Broken at the body's own level**, not at a continuation column: a function body is a block, and
+                // the line after `{` sits one indent in (`blocks`), not `ContinuationIndentWidth` past the signature.
+                wrapped[definition.open + 1] = true;
+                wrapped[definition.close] = true;
+            }
+        }
+    }
+
+    // **The lambda body being joined**, once its `{` was printed and the width was known to fit.
+    let mut join_until: Option<usize> = None;
     let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
@@ -104,6 +163,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         let forced = forced_breaks[index];
         let wrap = wrapped[index];
         let attach = attached[index];
+        let join = joined[index] || join_until.is_some_and(|end| index <= end);
         // **An empty block is `{}`** — unless the style *splits* it (`BraceWrapping.SplitEmpty*`, which Microsoft's
         // style sets for functions, records and namespaces: `void f()\n{\n}` there). clang-format writes `void f() {}`
         // for an empty body even when `AllowShortBlocksOnASingleLine` is `Never` — the option governs blocks with
@@ -134,7 +194,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             out.push_str(line_ending);
             out.push_str(&" ".repeat(indent));
             column = indent;
-        } else if ((gap.newlines == 0 && !wrap) || empty_brace_pair || attach)
+        } else if ((gap.newlines == 0 && !wrap) || empty_brace_pair || attach || join)
             && gap.comments.is_empty()
             && !gap.at_end
             && index > 0
@@ -173,6 +233,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                         (stream.tokens[index].kind != cpp_parser::CppTokenKind::Assign)
                             && style.text(StyleOption::AlignOperands) == "Align"
                             && layout::is_a_binary_operator(stream.tokens[index].kind)
+                            && !roles.is_template_angle(stream.tokens[index].start)
+                            && !roles.is_declarator(stream.tokens[index].start)
                     });
                     // **A conditional's continuation (`?` or `:` at a line start) keeps the source's column.** clang-format
                     // computes that column while breaking the line — in LuaLexer.cpp `? count + 2` sits at 19, which is
@@ -184,9 +246,31 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     )
                     .then(|| source_indent(source, gap))
                     .flatten();
+                    // **A continuation after a trailing binary operator aligns with the first operand**, and only
+                    // when the statement did not start with an operator (that case is `aligned` above).
+                    // **Only outside brackets**: inside `if (…)` the continuation belongs to the bracket
+                    // (`AlignAfterOpenBracket`), and the operand column put it four columns too far right (measured).
+                    // **A template's `>` is not an operator that continues a statement**: without the roles check,
+                    // the line after `template <typename T>` aligned with the `template` keyword instead of the
+                    // block's indent (measured: `void f(T v);` came out at 2 instead of 4).
+                    let a_continuing_operator = |at: usize| {
+                        // **An assignment is not an operand continuation**: clang-format breaks *after* `=`/`+=` and
+                        // indents the next line by `ContinuationIndentWidth` (measured: `_state.CurrentWidth() +=`
+                        // then 12 = 8 + 4), where aligning with the statement's first operand gave 8.
+                        !is_an_assignment(stream.tokens[at].kind)
+                            && layout::is_a_binary_operator(stream.tokens[at].kind)
+                            && !roles.is_template_angle(stream.tokens[at].start)
+                            && !roles.is_declarator(stream.tokens[at].start)
+                    };
+                    let operand_continuation = (style.text(StyleOption::AlignOperands) == "Align"
+                        && stack.is_empty()
+                        && a_continuing_operator(index - 1))
+                    .then_some(operand_column)
+                    .flatten();
                     conditional
                         .map(|column| (column, false))
                         .or_else(|| aligned.map(|column| (column, false)))
+                        .or_else(|| operand_continuation.map(|column| (column, false)))
                         .or_else(|| {
                             let inside = bracket_body.filter(|(depth, _)| *depth == brace_depth);
                             planned_indent(
@@ -312,8 +396,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
             // come from the source, written once, after the column this pass decided.
             if let Some(comment) = own_line_comment {
+                let comment_text = crate::comments::normalized(comment.text, style);
                 if in_list {
-                    out.push_str(comment.text);
+                    out.push_str(&comment_text);
                 }
                 // What follows the comment is a break to the token's own line: its newlines are kept (capped) and its
                 // indentation is replaced by the column.
@@ -337,7 +422,21 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     }
                     column = indent;
                 } else {
-                    column = columns.advance(column, comment.text);
+                    // **A block comment with code after it on the same line keeps one space**: `/*block*/ int y;` —
+                    // clang-format writes the separator even though the gap`'`s own bytes had none, and a line comment
+                    // can never have code after it on the same line.
+                    let separates = !matches!(
+                        stream.tokens[index].kind,
+                        cpp_parser::CppTokenKind::Semicolon
+                            | cpp_parser::CppTokenKind::Comma
+                            | cpp_parser::CppTokenKind::RightParen
+                            | cpp_parser::CppTokenKind::RightBracket
+                            | cpp_parser::CppTokenKind::RightBrace
+                    ) && comment.kind != cpp_parser::CppTokenKind::LineComment;
+                    if separates {
+                        out.push(' ');
+                    }
+                    column = columns.advance(column, comment.text) + usize::from(separates);
                 }
             }
             if is_block_line {
@@ -367,27 +466,65 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     | cpp_parser::CppTokenKind::RightBracket
                     | cpp_parser::CppTokenKind::Comma
             );
+            let comment_text = crate::comments::normalized(comment.text, style);
             out.push_str(&" ".repeat(usize::from(before)));
-            out.push_str(comment.text);
+            out.push_str(&comment_text);
             out.push_str(&" ".repeat(usize::from(after)));
             column =
-                columns.advance(column + usize::from(before), comment.text) + usize::from(after);
+                columns.advance(column + usize::from(before), &comment_text) + usize::from(after);
         } else {
-            // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass.
-            let gap_text = source.get(gap.start..gap.end).unwrap_or("");
-            out.push_str(gap_text);
+            // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass —
+            // except the one thing every path owes a comment, its prefix spacing (`//using` is `// using`).
+            let gap_text = verbatim_gap(source, gap, style);
             column = match gap_text.rfind('\n') {
                 Some(at) => columns.advance(0, &gap_text[at + 1..]),
-                None => columns.advance(column, gap_text),
+                None => columns.advance(column, &gap_text),
             };
+            out.push_str(&gap_text);
         }
 
-        // **The first binary operator of a statement records its column**, and the end of a statement forgets it.
+        // **The first binary operator of a statement records its column**, and so does the **first operand** — a
+        // continuation after a trailing `||` aligns with the operand, not with the operator:
+        //
+        //     return prev.IsNull(t) ||
+        //            n.GetPrevToken(t).GetEndLine(t) != n.GetStartLine(t);
+        //
+        // (measured; `AlignOperands: Align`). The operand column is set by the statement's first token, or by the token
+        // after a leading `return`/`throw`, and forgotten at the end of the statement with the operator's.
         if operand_operator.is_none()
             && stream.gaps[index].newlines == 0
             && layout::is_a_binary_operator(stream.tokens[index].kind)
         {
             operand_operator = Some(column);
+        }
+        if operand_column.is_none() && !stream.gaps[index].at_end && index > 0 {
+            let a_statement_start = matches!(
+                stream.tokens[index - 1].kind,
+                cpp_parser::CppTokenKind::Semicolon
+                    | cpp_parser::CppTokenKind::LeftBrace
+                    | cpp_parser::CppTokenKind::RightBrace
+            );
+            if a_statement_start {
+                operand_column = Some(column);
+            }
+        }
+        if matches!(
+            stream.tokens[index].kind,
+            cpp_parser::CppTokenKind::ReturnKeyword
+                | cpp_parser::CppTokenKind::ThrowKeyword
+                | cpp_parser::CppTokenKind::CoReturnKeyword
+        ) {
+            operand_column = Some(column + stream.tokens[index].text.chars().count() + 1);
+        }
+        // **The first operand of an assignment is on the right of the `=`**: clang-format aligns a continuation of
+        // `auto pos = relativePos + indentState.SpaceSize +` under `relativePos`, not under `auto` (measured). When
+        // the right-hand side starts on the next line, the assignment rule above already gives it a
+        // `ContinuationIndentWidth` indent, and this does not fire.
+        if index > 0
+            && is_an_assignment(stream.tokens[index - 1].kind)
+            && stream.gaps[index].newlines == 0
+        {
+            operand_column = Some(column);
         }
         if matches!(
             stream.tokens[index].kind,
@@ -396,6 +533,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 | cpp_parser::CppTokenKind::RightBrace
         ) {
             operand_operator = None;
+            operand_column = None;
         }
 
         // **The bracket a token closes leaves the stack before the token is written**, and one it opens is pushed
@@ -456,6 +594,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
         out.push_str(text);
         column = columns.advance(column, text);
+        // **A lambda body keeps its braces on the signature's line when the body fits from here** — the column is
+        // known only now, which is why this decision lives in the printing loop.
+        if let Some((close, width)) = lambda_body[index]
+            && column + width <= style.count(StyleOption::ColumnLimit)
+        {
+            join_until = Some(close);
+        }
         // **`FixNamespaceComments`**: clang-format writes `} // namespace ns` after a namespace's closing brace — the
         // name is the namespace's, and an existing comment is left alone (a file that already says it is not told
         // twice). Measured against the oracle: Microsoft's style has the option on, and it is the only difference left
@@ -655,6 +800,18 @@ fn planned_indent(
     {
         return Some((column, false));
     }
+    // **A line that continues an assignment sits `ContinuationIndentWidth` past the statement**, not at the block`s
+    // own level: clang-format writes `_state.CurrentWidth() +=` and the call on the next line at 8 + 4 (measured);
+    // the block answer for that line is 8, which is the statement`s own column.
+    if index > 0
+        && is_an_assignment(stream.tokens[index - 1].kind)
+        && stream.gaps[index].newlines > 0
+    {
+        return Some((
+            statement_indent + style.count(StyleOption::ContinuationIndentWidth),
+            false,
+        ));
+    }
     if let Some(indent) = blocks[index] {
         return Some((indent, true));
     }
@@ -670,6 +827,43 @@ fn planned_indent(
         layout::continuation(stack, statement_indent, first, style),
         false,
     ))
+}
+
+/// **An assignment operator** — the break-after context of `PenaltyBreakAssignment`, whose continuation is a
+/// `ContinuationIndentWidth` indent rather than an operand alignment.
+fn is_an_assignment(kind: cpp_parser::CppTokenKind) -> bool {
+    matches!(
+        kind,
+        cpp_parser::CppTokenKind::Assign
+            | cpp_parser::CppTokenKind::PlusAssign
+            | cpp_parser::CppTokenKind::MinusAssign
+            | cpp_parser::CppTokenKind::StarAssign
+            | cpp_parser::CppTokenKind::SlashAssign
+            | cpp_parser::CppTokenKind::PercentAssign
+            | cpp_parser::CppTokenKind::AmpersandAssign
+            | cpp_parser::CppTokenKind::PipeAssign
+            | cpp_parser::CppTokenKind::CaretAssign
+            | cpp_parser::CppTokenKind::LeftShiftAssign
+            | cpp_parser::CppTokenKind::RightShiftAssign
+    )
+}
+
+/// **A gap copied verbatim, except for its comments' prefix spacing.** The bytes of a gap are the author's (a
+/// directive's alignment, a macro body's spacing), but `SpacesInLineCommentPrefix` applies everywhere clang-format
+/// prints a comment — and these gaps are how a file's first line and a directive's comments are printed.
+fn verbatim_gap(source: &str, gap: &crate::tokens::Gap, style: &Style) -> String {
+    if gap.comments.is_empty() {
+        return source.get(gap.start..gap.end).unwrap_or("").to_string();
+    }
+    let mut out = String::with_capacity(gap.end - gap.start + 2);
+    let mut cursor = gap.start;
+    for comment in &gap.comments {
+        out.push_str(source.get(cursor..comment.start).unwrap_or(""));
+        out.push_str(&crate::comments::normalized(comment.text, style));
+        cursor = comment.end;
+    }
+    out.push_str(source.get(cursor..gap.end).unwrap_or(""));
+    out
 }
 
 /// **The lines `BreakBeforeBraces` asks for**, as three per-token answers.
@@ -796,7 +990,20 @@ fn wrapping_lines(
                     | crate::roles::BraceKind::Catch
                     | crate::roles::BraceKind::CaseLabel
             );
-            if a_block || (wraps && crate::wrapping::split_empty_body(style, kind)) {
+            // **`AllowShortFunctionsOnASingleLine: None` splits an empty function body too**: the oracle writes
+            // `void z() {` then `}` — the option means "a function body is never on one line", not "a non-empty one
+            // is not". With `All` the same body is `{}` under `Attach`, and `SplitEmpty*` still governs the styles
+            // that split records and namespaces.
+            let never_one_line = matches!(
+                kind,
+                crate::roles::BraceKind::Function | crate::roles::BraceKind::Lambda
+            ) && style.text(StyleOption::AllowShortFunctionsOnASingleLine)
+                == "None"
+                && reflows;
+            if a_block
+                || never_one_line
+                || (wraps && crate::wrapping::split_empty_body(style, kind))
+            {
                 split[index + 1] = true;
                 wrapped[index + 1] = true;
                 if wraps {
@@ -845,16 +1052,13 @@ mod tests {
 
     #[test]
     fn a_constructor_initializer_list_and_the_class_body_after_it() {
-        // **The empty body is `{}`** — the text clang-format writes for `T(const T &t) : a(t.a), b(t.b) {\n}`,
-        // where the fixture used to keep the two lines and this test claimed they were already formatted. The
-        // option that governs a *short* body is `AllowShortFunctionsOnASingleLine`; an **empty** one is `{}` under
-        // every style, which `render` now enforces for the `{`/`}` pair (see `empty_brace_pair`).
-        let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {}\n\nprivate:\n  int a;\n  int b;\n};\n";
+        // **A short constructor joins, and the class body still follows it.** The oracle (clang-format 23.1.5, LLVM)
+        // turns the author's three-line signature and initializer list into one line — it fits and the body is empty,
+        // so `AllowShortFunctionsOnASingleLine: All` applies — and the `private:` section keeps its blank line and its
+        // level. This fixture used to assert that the *unjoined* text came back.
+        let source = "class T {\npublic:\n  T(const T &t) : a(t.a), b(t.b) {}\n\nprivate:\n  int a;\n  int b;\n};\n";
         let formatted = format(source, None, &llvm());
-        assert_eq!(
-            formatted, source,
-            "already formatted input must come back unchanged"
-        );
+        assert_eq!(formatted, source, "the joined form is a fixed point");
     }
 
     #[test]
@@ -871,12 +1075,10 @@ mod tests {
     #[test]
     fn a_continuation_that_starts_with_an_operator_aligns_with_the_first_one() {
         // LLVM's `IndentWidth` is 2, so the body sits at 2 and the statement's first `<<` at 12; the continuation's
-        // `<<` goes to the same column. The brace is **attached** because LLVM is `BreakBeforeBraces: Attach` and this
-        // file has a column limit: clang-format joins an author's Allman brace under a limit (it keeps it only when
-        // `ColumnLimit: 0`, where nothing is reflowed) — this fixture used to spell the Allman form and asserted it
-        // came back, which was the old "keep the source's lines" behaviour.
-        let source =
-            "void f() {\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n}\n";
+        // `<<` goes to the same column. **Two statements**, because a one-statement body is joined onto the signature
+        // by `AllowShortFunctionsOnASingleLine: All` (the oracle joins it, and `functions.rs` pins that) — the
+        // operator alignment is what this test is about.
+        let source = "void f() {\n  std::cerr << util::format(\"x\", y)\n            << std::endl;\n  g();\n}\n";
         let formatted = format(source, None, &llvm());
         assert_eq!(
             formatted, source,
@@ -915,12 +1117,15 @@ mod tests {
     }
 
     #[test]
-    fn the_line_structure_is_kept_and_the_indentation_is_the_layout_s() {
-        // **The line breaks stay the input's; the column is now decided** (P0b): `IndentWidth: 2` puts the body at 2,
-        // and the spacing rules still apply inside the line.
+    fn a_body_the_style_does_not_join_keeps_its_lines() {
+        // **`AllowShortFunctionsOnASingleLine: None` is where the old contract still holds**: the line breaks stay the
+        // input's and the column is decided. With `All` — LLVM's default — the same body comes back as one line,
+        // because that is the oracle's answer (`void f() { int x = 1; }`).
+        let mut style = llvm();
+        style.set_from_text("AllowShortFunctionsOnASingleLine", "None");
         let source = "void f() {\n      int  x = 1;\n}\n";
         assert_eq!(
-            format(source, None, &llvm()),
+            format(source, None, &style),
             "void f() {\n  int x = 1;\n}\n"
         );
     }

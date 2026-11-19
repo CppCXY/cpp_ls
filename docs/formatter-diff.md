@@ -32,9 +32,9 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 3 / 29 | 4 611 / 6 882 | 11 / 29 match, 172 lines |
-| `Google` | 3 / 29 | 6 630 / 6 913 | 9 / 29 match, 176 lines |
-| `Microsoft` | 4 / 29 | 4 605 / 8 041 | **20 / 29 match, 42 lines** |
+| `LLVM` | 4 / 29 | 3 963 / 6 850 | **17 / 29 match, 90 lines** |
+| `Google` | 3 / 29 | 6 508 / 6 887 | **17 / 29 match, 86 lines** |
+| `Microsoft` | 5 / 29 | 4 474 / 8 041 | **22 / 29 match, 38 lines** |
 
 The `Microsoft` spacing-only column collapsed from 6 323 lines to **42** in one step, and two rules did it: a `case`
 body`s brace is the **label`s** option (`AfterCaseLabel` — Microsoft attaches `case 1: {`, and this formatter was
@@ -64,11 +64,11 @@ one line is broken by our line structure. The 6 323 spacing-only lines are that 
 
 | style / option | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` (base) | 3 / 29 | 4 611 / 6 882 | 11 / 29 match, 172 lines |
-| `IndentWidth: 4` | 3 / 29 | 5 475 / 7 048 | 7 / 29 match, 232 lines |
-| `UseTab: ForIndentation` | 3 / 29 | 5 110 / 6 882 | 6 / 29 match, **1 688** lines |
-| `BreakBeforeBraces: Allman` | 2 / 29 | 6 649 / 8 704 | 4 / 29 match, **3 282** lines |
-| `AllowShortFunctionsOnASingleLine: None` | 2 / 29 | 5 370 / 6 903 | 4 / 29 match, **4 917** lines |
+| `LLVM` (base) | 4 / 29 | 3 963 / 6 850 | 17 / 29 match, 90 lines |
+| `IndentWidth: 4` | 3 / 29 | 4 945 / 7 015 | 14 / 29 match, 136 lines |
+| `UseTab: ForIndentation` | 3 / 29 | 4 589 / 6 850 | 7 / 29 match, **1 649** lines |
+| `BreakBeforeBraces: Allman` | 2 / 29 | 6 651 / 8 655 | 6 / 29 match, **2 344** lines |
+| `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 4 040 / 6 906 | 17 / 29 match, 90 lines |
 | `ColumnLimit: 0` | **6 / 29** | 4 433 / 6 506 | 10 / 29 match, 4 524 lines |
 
 What each row says, in the order the fixes will come:
@@ -78,9 +78,9 @@ What each row says, in the order the fixes will come:
 * **`Allman`'s 3 282** are mostly `AlignEscapedNewlines`: clang-format pads a macro's `\` to the column limit
   (`AlignEscapedNewlines: Right`), this formatter pads to the longest line of the macro. Measured on
   `LuaDiagnosticStyle.cpp`: the same `#define`, two different `\` columns.
-* **`AllowShortFunctionsOnASingleLine: None`'s 4 917** are the reflow layer: clang-format breaks every one-line
-  function body, and this formatter never moves a line the author wrote. This is the single largest remaining item and
-  the next round's work.
+* **`AllowShortFunctionsOnASingleLine: None` is now implemented** — 4 of 29 identical, 90 spacing-only lines — by
+  the same rule as `All`: a body is joined only when the option allows it, and a body the option refuses is *broken*,
+  empty ones included (`void z() {` then `}`). The option matrix is the record of what each setting costs.
 * **`ColumnLimit: 0` scores best on identical files (6 / 29)** because that is the one setting where clang-format
   itself stops reflowing — and the remaining spacing lines there are the same macro continuations.
 ## What the remaining difference is

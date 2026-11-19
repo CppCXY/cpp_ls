@@ -21,7 +21,9 @@
 
 pub mod breaks;
 pub mod columns;
+pub mod comments;
 pub mod config;
+pub mod functions;
 pub mod includes;
 pub mod layout;
 pub mod macros;
