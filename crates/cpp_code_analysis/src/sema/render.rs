@@ -1121,7 +1121,12 @@ mod tests {
             a_type("std::vector<std::string> &"),
             "std::vector<std::string>&"
         );
-        assert_eq!(a_type("const char * const"), "const char*");
+        // **The pointer's own `const` is part of the type.** It used to be printed as `const char*` — the word
+        // dropped — and that is the same drop that made `const char*` and `char const*` two types and turned eight
+        // correct calls in Lua 5.5.0 into findings (see `parse_type_spelling`). A `const`-qualified pointer is
+        // spelled where it is written.
+        assert_eq!(a_type("const char * const"), "const char* const");
+        assert_eq!(a_type("char const*"), "const char*");
         assert_eq!(a_type("typename Alloc::value_type"), "Alloc::value_type");
     }
 

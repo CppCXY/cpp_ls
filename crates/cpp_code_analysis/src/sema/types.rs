@@ -943,6 +943,27 @@ impl TypeBindings {
 /// parser splits differently from how it was written still answers the same class — see the tests, which pin the
 /// round trip for the shapes a fact actually records.
 pub fn parse_type_spelling(written: &str) -> Type {
+    // **The qualifiers written last come off first, and they are kept.** `Widget* const` is a pointer with a
+    // `const` *after* the operator, so peeling the `*` before the `const` would look for one at a position where it
+    // is not — the spelling would end in `const` and the operator would end up inside the name.
+    //
+    // They are **wrapped, not dropped**, and that is a measured correction: `char const*` is how MSVC's CRT headers
+    // spell a pointer to a const `char` (`strspn(_In_z_ char const* _Str, …)`), and dropping the word made it a
+    // pointer to a **non-const** `char` — so `const char *strfrmt` did not convert to `char const*` and every
+    // `strcmp`/`strspn`/`strlen` call in Lua 5.5.0 was reported as a `param-type-check` finding, plus one
+    // `assign-type-check` for `const char *sep = luaL_optlstring(…)` (8 false positives, 2026-11-20).
+    let (trailing, rest) = strip_trailing_qualifiers(written.trim());
+    let parsed = parse_type_spelling_without_a_trailing_qualifier(rest);
+    match trailing {
+        Some(_) => Type::Qualified {
+            of: Arc::new(parsed),
+        },
+        None => parsed,
+    }
+}
+
+/// [`parse_type_spelling`] with the trailing qualifiers already peeled — the body that reads the operators.
+fn parse_type_spelling_without_a_trailing_qualifier(written: &str) -> Type {
     let trimmed = written.trim();
 
     // **A compiler builtin is not a class with an odd name.**
@@ -980,12 +1001,6 @@ pub fn parse_type_spelling(written: &str) -> Type {
         .strip_prefix("typename ")
         .map(str::trim_start)
         .unwrap_or(trimmed);
-
-    // **The qualifiers written last come off first.** `Widget* const` is a pointer with a `const` *after* the
-    // operator, so peeling the `*` before the `const` would look for one at a position where it is not — the
-    // spelling would end in `const` and the operator would end up inside the name. A qualifier on either side of a
-    // type changes what may be assigned to it and not which class it names, and this layer models no assignment.
-    let trimmed = strip_trailing_qualifiers(trimmed);
 
     // **Array extents, from the right.** `int[4]` is an array of four; `int[2][3]` is an array of two arrays of
     // three, and the *last* bracket pair belongs to the innermost array — so peeling from the right builds the
@@ -1191,16 +1206,23 @@ fn is_a_builtin(spelling: &str) -> bool {
 /// Trailing only, because the leading ones are handled where the base is read ([`without_qualifiers`]) and doing
 /// both in one place would have to know whether the qualifier it is looking at belongs to the type or to the
 /// pointer — which is the question the *position* answers and nothing else does.
-fn strip_trailing_qualifiers(written: &str) -> &str {
+/// **A spelling split into the qualifier it ends with and the type under it** — `Widget* const` → `(Some("const"),
+/// "Widget*")`, `char const` → `(Some("const"), "char")`, `Widget` → `(None, "Widget")`.
+///
+/// The qualifier is *returned* rather than dropped: a trailing `const` on a pointee is the difference between a
+/// pointer to a `const char` and a pointer to a `char`, and [`parse_type_spelling`] is what decides conversions.
+fn strip_trailing_qualifiers(written: &str) -> (Option<&str>, &str) {
     let mut end = written.trim_end();
+    let mut stripped: Option<&str> = None;
 
     loop {
         let Some(word) = end.split_whitespace().next_back() else {
-            return end;
+            return (stripped, end);
         };
         if !matches!(word, "const" | "volatile") || word.len() == end.len() {
-            return end;
+            return (stripped, end);
         }
+        stripped = Some(word);
         end = end[..end.len() - word.len()].trim_end();
     }
 }
@@ -3160,6 +3182,27 @@ mod tests {
                 Known::Unknown(_)
             ),
             "the `void*` rules are their own"
+        );
+    }
+
+    /// **A pointer to a const builtin converts to a pointee written `char const`** — the MSVC spelling the CRT
+    /// headers use (`char const* _Str`) against a project's `const char *` (`lstrlib.c`'s `strfrmt`).
+    ///
+    /// Reported from a real project: seven `param-type-check` findings in Lua 5.5.0 (`strcmp`, `strspn`, `strlen`)
+    /// and one `assign-type-check` (`const char *sep = luaL_optlstring(...)`), every one of them a pair a compiler
+    /// accepts. The declaration reader and `parse_type_spelling` must agree about where the `const` is.
+    #[test]
+    fn a_pointer_to_const_converts_to_a_char_const_pointer() {
+        let source = "static const char *getformat(const char *strfrmt) { return strfrmt; }";
+        let from = type_of(source, "strfrmt");
+        let to = parse_type_spelling("char const*");
+        assert_eq!(
+            from, to,
+            "`const char*` and `char const*` are one type: {from:?} vs {to:?}"
+        );
+        assert!(
+            matches!(from.convertible_to(&to), Known::Yes(())),
+            "and it converts to itself: {from:?} -> {to:?}"
         );
     }
 }
