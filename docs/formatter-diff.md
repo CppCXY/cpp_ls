@@ -32,6 +32,7 @@ Two numbers, because two different defects produce them:
 | --- | --- | --- | --- |
 | before any fix | 2 / 29 | 5 610 / 6 895 | 8 / 29 match, 195 lines differ |
 | after `an empty block is {}` (`render`) | 3 / 29 | 4 931 / 6 882 | 8 / 29 match, 195 lines differ |
+| after the breaker stops treating a declarator `&`/`*` as a binary operator | 3 / 29 | 4 913 / 6 882 | 8 / 29 match, 195 lines differ |
 
 The first fix is the one defect present on nearly every file: an empty body written `{` newline `}` must come back
 `{}`. clang-format does that under **every** style — `AllowShortBlocksOnASingleLine: Never` governs a block with

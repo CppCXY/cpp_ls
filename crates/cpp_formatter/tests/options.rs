@@ -86,8 +86,7 @@ const SINK_SPACING: &str = r##"void f() {
     int t = 1;
     int u = -t;
     auto g = [&](int v) -> int { return v; };
-    struct S {
-    };
+    struct S {};
     if (b) {
         g(t);
     }
@@ -213,8 +212,7 @@ fn option_pointeralignment() {
     int t = 1;
     int u = -t;
     auto g = [&](int v) -> int { return v; };
-    struct S {
-    };
+    struct S {};
     if (b) {
         g(t);
     }
@@ -313,8 +311,7 @@ fn option_spacebeforeparens() {
     int t = 1;
     int u = -t;
     auto g = [&] (int v) -> int { return v; };
-    struct S {
-    };
+    struct S {};
     if (b) {
         g (t);
     }

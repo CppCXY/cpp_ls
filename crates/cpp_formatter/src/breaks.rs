@@ -244,7 +244,7 @@ pub fn break_line(
     // **The candidate positions**: the first token of the line, plus every token a break may precede.
     let mut positions: Vec<usize> = vec![line.start];
     for index in line.start + 1..line.end {
-        if is_breakable(stream, index) {
+        if is_breakable(stream, roles, index) {
             positions.push(index);
         }
     }
@@ -381,13 +381,23 @@ pub fn laid_out(source: &str, style: &crate::config::Style) -> String {
 }
 
 /// May a break go before the token at `index`?
-pub fn is_breakable(stream: &Stream<'_>, index: usize) -> bool {
+pub fn is_breakable(stream: &Stream<'_>, roles: &crate::roles::Roles, index: usize) -> bool {
     use CppTokenKind::*;
     let previous = stream.tokens[index - 1].kind;
     let current = stream.tokens[index].kind;
+    let start = stream.tokens[index].start;
     match current {
         // After a comma: the classic argument break.
         _ if previous == Comma => true,
+        // **A declarator's `*`/`&` is not a binary operator.** `LuaStyle &style` is a type and its declarator;
+        // clang-format never breaks between them, and a breaker that read the `&` as a `+` did: measured on
+        // `DiagnosticBuilder::DiagnosticBuilder(LuaStyle &style, …)`, an over-long signature came out
+        // `…(LuaStyle` newline `&style, …` where clang-format breaks **after the comma**. The same holds for the
+        // `&&` of an rvalue reference, which the lexer spells as `LogicalAnd`.
+        Star | Ampersand | LogicalAnd if roles.is_declarator(start) => false,
+        // **A template's `<`/`>` is not a comparison.** `std::vector<int>` is one name, and a break before its `>`
+        // would be a break inside a name.
+        Less | Greater if roles.is_template_angle(start) => false,
         // Before a binary operator (`a + b` broken before the `+`).
         Plus | Minus | Star | Slash | Percent | Ampersand | Pipe | Caret | Less | Greater
         | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd | LogicalOr | LeftShift
