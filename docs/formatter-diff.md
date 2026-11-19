@@ -65,16 +65,18 @@ one line is broken by our line structure. The 6 323 spacing-only lines are that 
 | style / option | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
 | `LLVM` (base) | 4 / 29 | 3 963 / 6 850 | 17 / 29 match, 90 lines |
-| `IndentWidth: 4` | 3 / 29 | 4 945 / 7 015 | 14 / 29 match, 136 lines |
-| `UseTab: ForIndentation` | 3 / 29 | 4 589 / 6 850 | 7 / 29 match, **1 649** lines |
-| `BreakBeforeBraces: Allman` | 2 / 29 | 6 651 / 8 655 | 6 / 29 match, **2 344** lines |
+| `IndentWidth: 4` | 3 / 29 | 4 935 / 7 015 | 15 / 29 match, 108 lines |
+| `UseTab: ForIndentation` | 4 / 29 | 3 954 / 6 850 | 11 / 29 match, **231** lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 6 331 / 8 657 | 15 / 29 match, **132** lines |
 | `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 4 040 / 6 906 | 17 / 29 match, 90 lines |
 | `ColumnLimit: 0` | **6 / 29** | 4 433 / 6 506 | 10 / 29 match, 4 524 lines |
 
 What each row says, in the order the fixes will come:
 
-* **`UseTab` is not implemented at all** (the option is declared and never read): every indented line is spaces where
-  clang-format writes tabs, which is why the spacing-only column jumps to 1 688.
+* **`UseTab` is implemented now** — `Columns::indent` writes `indent / TabWidth` tabs and the remainder as spaces, the
+  oracle's split at every width (measured at `TabWidth` 8 and 4). What remains in its 231 lines are continuation
+  lines: `ForIndentation` keeps alignment as spaces, and this formatter cannot yet tell the indentation part of a
+  continuation from its alignment part.
 * **`Allman`'s 3 282** are mostly `AlignEscapedNewlines`: clang-format pads a macro's `\` to the column limit
   (`AlignEscapedNewlines: Right`), this formatter pads to the longest line of the macro. Measured on
   `LuaDiagnosticStyle.cpp`: the same `#define`, two different `\` columns.

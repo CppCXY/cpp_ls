@@ -11,15 +11,18 @@ use crate::config::Style;
 use crate::options::StyleOption;
 
 /// The column model of one style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Columns {
     tab_width: usize,
+    /// `UseTab`: `Never`, `ForIndentation`, `ForContinuationAndIndentation` or `Always`.
+    use_tab: String,
 }
 
 impl Columns {
     pub fn new(style: &Style) -> Self {
         Self {
             tab_width: style.count(StyleOption::TabWidth).max(1),
+            use_tab: style.text(StyleOption::UseTab).to_string(),
         }
     }
 
@@ -49,6 +52,27 @@ impl Columns {
     /// The width of `text` on its own line.
     pub fn width(&self, text: &str) -> usize {
         self.advance(0, text)
+    }
+
+    /// **The whitespace that puts a line at `indent`** — `UseTab`, measured: clang-format 23.1.5 writes an indentation
+    /// of ten columns at `TabWidth: 8` as one tab and two spaces, and at `TabWidth: 4` as two tabs and two spaces, for
+    /// every `UseTab` value. `ForIndentation` keeps *alignment* (a continuation line) as spaces; the two other values
+    /// tab every leading column a tab can cover.
+    pub fn indent(&self, indent: usize, is_block_line: bool) -> String {
+        let tabs = match self.use_tab.as_str() {
+            "Never" => false,
+            "ForIndentation" => is_block_line,
+            _ => true,
+        };
+        if tabs {
+            format!(
+                "{}{}",
+                "\t".repeat(indent / self.tab_width),
+                " ".repeat(indent % self.tab_width)
+            )
+        } else {
+            " ".repeat(indent)
+        }
     }
 }
 
