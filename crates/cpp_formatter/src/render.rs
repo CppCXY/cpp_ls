@@ -29,7 +29,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // at `ContinuationIndentWidth`, which the block rules have no way to know.
     let init_depths = layout::init_depths(&stream, &roles);
     // **The rows of a braced table**, which `AlignArrayOfStructures: Left` pads into columns.
-    let row_paddings = crate::rows::paddings(&stream, &roles, style);
+    let mut row_paddings = crate::rows::paddings(&stream, &roles, style);
     let columns = Columns::new(style);
     let max_empty = style.count(StyleOption::MaxEmptyLinesToKeep);
     let line_ending = tokens::line_ending(source);
@@ -109,6 +109,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         mut split,
         namespace_comments,
         closers,
+        pairs,
     } = wrapping_lines(&stream, &roles, style);
 
     // **`AllowShortFunctionsOnASingleLine`**: a definition whose body holds one statement and whose whole text fits
@@ -350,13 +351,26 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
     }
 
+    // **A flat initializer list that does not fit is a table** (`tables.rs`): its rows are computed from the column
+    // its `{` lands in, which is only known while printing, so the decision is made there and recorded in these two
+    // vectors — the indent of each row start, and how many spaces to pad before each cell.
+    let mut table_starts: Vec<Option<usize>> = vec![None; stream.tokens.len()];
+    // **How far the table that owns the current list reaches** — its `}`.
+    let mut table_until: Option<usize> = None;
     // **The lambda body being joined**, once its `{` was printed and the width was known to fit.
     let mut join_until: Option<usize> = None;
     let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
-        let forced = forced_breaks[index];
+        // **A table owns the layout of its list**: the column-limit search's breaks inside it are dropped, or the
+        // two layouts fight (measured: rows of 2, 8, 8 elements instead of 5, 5, 5, 5, 5).
+        let mut forced = forced_breaks[index];
+        if table_until.is_some_and(|end| index <= end) {
+            forced = false;
+        }
+        // **A table row starts a line at the first cell's column.**
+        let table_start = table_starts[index];
         let mut wrap = wrapped[index];
         let mut attach = attached[index];
         let join = joined[index] || join_until.is_some_and(|end| index <= end);
@@ -393,6 +407,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 Some(at) => columns.advance(0, &gap_text[at + 1..]),
                 None => columns.advance(column, gap_text),
             };
+        } else if let Some(indent) = table_start
+            && index > 0
+            && !in_directive
+        {
+            out.push_str(line_ending);
+            out.push_str(&columns.indent(indent, indent));
+            column = indent;
         } else if forced && index > 0 && !in_directive {
             // **A break the column limit asked for**: the line continues `ContinuationIndentWidth` past the statement,
             // which is the column `breaks::break_line` assumed when it chose the break. Aligning to the open bracket
@@ -891,7 +912,91 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
         out.push_str(text);
         column = columns.advance(column, text);
-        // **A lambda body keeps its braces on the signature's line when the body fits from here** — the column is
+        // **A flat initializer list becomes a table** when it does not fit: the rows, their widths and the padding
+        // before each cell are computed here, where the column after the `{` is known.
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::LeftBrace
+            && let Some(close) = pairs[index]
+            && crate::tables::is_an_initializer_list(&roles, &stream, index)
+            && let Some(cells) = crate::tables::cells_of(&stream, index, close)
+        {
+            let first = cells[0][0];
+            let widths: Vec<usize> = cells
+                .iter()
+                .enumerate()
+                .map(|(at, cell)| {
+                    crate::tables::cell_width(&stream, &roles, style, cell, at + 1 == cells.len())
+                })
+                .collect();
+            let limit = style.count(StyleOption::ColumnLimit);
+            // **Two placements, and the one with fewer rows wins**: the first row can start after the `{` (clang-format
+            // does when it fits, `static const int n[] = {111, …`), or on the next line one continuation in
+            // (`static const char *n[] = {` then four spaces and the table, measured). The placement that needs fewer
+            // rows is the answer; a tie keeps the first row on the `{` line.
+            let after_the_brace = column + space::between(&stream, first, &roles, style);
+            let continued = statement_indent + style.count(StyleOption::ContinuationIndentWidth);
+            let candidates: Vec<(usize, bool, crate::tables::Table)> =
+                [(after_the_brace, true), (continued, false)]
+                    .into_iter()
+                    .filter_map(|(first_column, on_the_brace_line)| {
+                        crate::tables::layout(&widths, first_column, limit)
+                            .map(|table| (first_column, on_the_brace_line, table))
+                    })
+                    .collect();
+            // **The placement rule, measured on eight fixtures**: the first row stays on the `{` line unless starting
+            // it there would cost **at least two rows** — a tall, narrow table. For the 25 operator names the
+            // after-brace table is 7 rows of 4 and the oracle moves the table to the next line for 5 rows of 5; for
+            // the integer array, the five-name list and the twenty-string list (one row's difference) it keeps the
+            // first row on the `{` line. The exact tie-break inside clang-format is not documented anywhere this
+            // formatter can read, so this is a rule that reproduces every measured case.
+            let rows_of =
+                |table: &crate::tables::Table| widths.len().div_ceil(table.columns.max(1));
+            let after = candidates
+                .iter()
+                .find(|(_, on_the_brace_line, _)| *on_the_brace_line);
+            let continued = candidates
+                .iter()
+                .find(|(_, on_the_brace_line, _)| !*on_the_brace_line);
+            let chosen = match (after, continued) {
+                (Some(after), Some(continued)) => {
+                    if rows_of(&after.2) <= rows_of(&continued.2) + 1 {
+                        Some(after.clone())
+                    } else {
+                        Some(continued.clone())
+                    }
+                }
+                (Some(after), None) => Some(after.clone()),
+                (None, Some(continued)) => Some(continued.clone()),
+                (None, None) => None,
+            };
+            if let Some((first_column, on_the_brace_line, table)) = chosen {
+                for (at, cell) in cells.iter().enumerate() {
+                    let start = cell[0];
+                    let column_of_the_cell = at % table.columns;
+                    if column_of_the_cell == 0 && at > 0 {
+                        table_starts[start] = Some(first_column);
+                    } else if column_of_the_cell == 0 {
+                        // The first cell of the first row: after the `{`, or on the continued line.
+                        if on_the_brace_line {
+                            joined[start] = true;
+                        } else {
+                            table_starts[start] = Some(first_column);
+                        }
+                    } else {
+                        joined[start] = true;
+                    }
+                    // **The padding belongs before the next cell of the same row**, because it makes up the
+                    // difference between this cell and the widest one of its column.
+                    if let Some(next) = cells.get(at + 1)
+                        && (at + 1) % table.columns != 0
+                    {
+                        row_paddings[next[0]] = table.paddings[at];
+                    }
+                }
+                // The `}` follows the last cell on its line, and the list''s own line ends there.
+                joined[close] = true;
+                table_until = Some(close);
+            }
+        } // **A lambda body keeps its braces on the signature's line when the body fits from here** — the column is
         // known only now, which is why this decision lives in the printing loop.
         if let Some((close, width)) = lambda_body[index]
             && column + width <= style.count(StyleOption::ColumnLimit)
@@ -1266,6 +1371,8 @@ struct WrappingLines {
     split: Vec<bool>,
     namespace_comments: Vec<Option<String>>,
     closers: Vec<Option<usize>>,
+    /// **Which `}` each `{` closes** — a flat initializer list needs its extent to be laid out as a table.
+    pairs: Vec<Option<usize>>,
 }
 
 /// **The lines `BreakBeforeBraces` asks for**, as three per-token answers.
@@ -1296,7 +1403,7 @@ fn wrapping_lines(
 
     // One entry per `{` the stream opened, `Some` only when it is a **block** — a braced initializer is not one, and
     // its `}` must not pop a block's entry.
-    let mut open: Vec<Option<(usize, crate::roles::BraceKind)>> = Vec::new();
+    let mut open: Vec<(usize, Option<crate::roles::BraceKind>)> = Vec::new();
     // The block the last `}` closed, which is what tells a `do`'s `while` from a `while` statement that follows an
     // unrelated block.
     let mut closed: Option<(usize, crate::roles::BraceKind)> = None;
@@ -1314,16 +1421,22 @@ fn wrapping_lines(
         match token.kind {
             K::LeftBrace => {
                 let kind = roles.brace_kind.get(&token.start).copied();
-                open.push(kind.map(|kind| (index, kind)));
+                open.push((index, kind));
             }
             K::RightBrace => {
-                let Some(Some((open_index, kind))) = open.pop() else {
+                // **Every `{` is paired with its `}`**, block or braced initializer: the table layout needs the extent
+                // of a list, and the block rules below only apply when the tree named the construct.
+                let Some((open_index, kind)) = open.pop() else {
+                    closed = None;
+                    continue;
+                };
+                pairs[open_index] = Some(index);
+                closers[index] = Some(open_index);
+                let Some(kind) = kind else {
                     closed = None;
                     continue;
                 };
                 closed = Some((open_index, kind));
-                pairs[open_index] = Some(index);
-                closers[index] = Some(open_index);
                 // **An empty namespace gets no comment**: clang-format writes `namespace n {}`, measured; the
                 // comment is for a body whose closing brace a reader might otherwise have to search for.
                 if kind == crate::roles::BraceKind::Namespace && open_index + 1 != index {
@@ -1442,6 +1555,7 @@ fn wrapping_lines(
         split,
         namespace_comments,
         closers,
+        pairs,
     }
 }
 

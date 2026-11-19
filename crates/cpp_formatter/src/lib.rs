@@ -35,6 +35,7 @@ pub mod render;
 pub mod roles;
 pub mod rows;
 pub mod space;
+pub mod tables;
 pub mod tokens;
 pub mod trailing;
 pub mod wrapping;

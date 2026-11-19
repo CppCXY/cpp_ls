@@ -34,9 +34,9 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
-| `Google` | 3 / 29 | 1 616 / 6 887 | 21 / 29 match, 70 lines |
-| `Microsoft` | 5 / 29 | **494** / 8 032 | 27 / 29 match, **10 lines** |
+| `LLVM` | 5 / 29 | 1 443 / 6 850 | 19 / 29 match, 74 lines |
+| `Google` | 3 / 29 | 1 607 / 6 887 | 21 / 29 match, 68 lines |
+| `Microsoft` | 5 / 29 | **487** / 8 031 | 27 / 29 match, **4 lines** |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 69 lines |
 | `LLVM, ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
 
@@ -49,8 +49,8 @@ are the token-level ones — ten lines in three files.
 | style / option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
 | `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 76 lines |
-| `IndentWidth: 4` | 5 / 29 | 1 737 / 7 015 | 15 / 29 match, 150 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 452 / 6 850 | 18 / 29 match, 106 lines |
+| `IndentWidth: 4` | 5 / 29 | 1 729 / 7 015 | 15 / 29 match, 148 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 443 / 6 850 | 18 / 29 match, 104 lines |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
 | `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
 | `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
@@ -73,9 +73,9 @@ What each row says:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 0 / 40 | 7 458 / 20 377 | 9 / 40 match, 1 921 lines |
+| `LLVM` | 0 / 40 | 7 309 / 20 302 | 10 / 40 match, 1 875 lines |
 | `Google` | 0 / 40 | 10 991 / 20 343 | 3 / 40 match, 6 641 lines |
-| `Microsoft` | 0 / 40 | 11 491 / 22 090 | 12 / 40 match, 1 524 lines |
+| `Microsoft` | 0 / 40 | 11 362 / 22 010 | 13 / 40 match, 1 486 lines |
 | `BreakBeforeBraces: Allman` | 0 / 40 | 7 429 / 22 462 | 9 / 40 match, 1 850 lines |
 | `LLVM, ColumnLimit: 0` | 0 / 40 | 6 983 / 20 578 | 12 / 40 match, 1 662 lines |
 
@@ -83,6 +83,30 @@ This corpus is hand-formatted with its own wrapping, and clang-format's 80-colum
 whole-file column measures the **break half** of the reflow, which is the next project. The token-level rules still
 hold on it — the `::`-after-comma and string-concatenation cuts were found here — and its spacing-only column is
 where the gains from here are.
+### The braced list as a table (implemented this round)
+
+clang-format 23 lays a braced initializer list that does not fit on one line out as a **column table**, and the layout is
+not an option (`AlignArrayOfStructures` is `None`, and changing it does not change the output):
+
+```text
+static const int n[] = {111, 2222, 33, 44444, 5,  666, 7777, 88, 999,
+                        10,  11,   12, 13,    14, 15,  16,   17, 18,
+                        19,  20,   21, 22,    23, 24,  25};
+```
+
+The rules, each derived from a fixture and pinned in `tests/cases_tables.rs` and `tables.rs`:
+
+* a column is as wide as its **widest** cell (comma included), and every row is padded to it;
+* the row count starts from the list's **total width** over the room a line has, rounded up, and grows until the
+  aligned rows fit (`25` integers: total 108 over 56 room is 2 rows, which gives 13 columns and does not fit, so one
+  more row gives the **nine** the oracle writes);
+* the first row stays on the `{` line unless starting it there costs **at least two rows** (the 25 operator names:
+  seven rows of four after the brace, five rows of five one line down);
+* the `}` follows the last cell, and a list with a comment is not a table.
+
+Twelve fixtures match the oracle byte for byte — the integer array, the 25 operator names, 8/10/20-element string
+lists at two widths, and the same names behind three different declaration prefixes — and the corpus's
+`NameStyleChecker.cpp` table now matches too.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:
@@ -128,5 +152,5 @@ Every one of these is a known gap with a reason, not a skipped comparison:
 | `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
 | GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
 | `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
-| **a long braced initializer list laid out as a column table** | clang-format 23 packs the elements of a braced list that does not fit into **columns whose widths are the widest element of each column** — for `static const int n[] = {111, 2222, …}` it produces nine aligned columns, and the same for a `std::set<std::string>` of operator names (27–43 lines per style on the EmmyLua corpus). This formatter cannot reproduce it yet: the packing is a fixed point between the column widths and the row filling, and it changes the line structure of an initializer list, which this formatter does not reflow. Recorded with the measured example rather than approximated |
+| **`AlignAfterOpenBracket` inside a nested bracket opened on a continued line** | the anchor is the line the bracket was written on, and a second nesting level still comes out one `ContinuationIndentWidth` short on a few lines (`IndentWidth: 4`: 148 spacing lines); the accumulated-indent model clang-format uses is not reproduced yet |
 | `FixNamespaceComments` on an anonymous namespace | clang-format writes `} // namespace` with no name; this formatter knows only named ones |
