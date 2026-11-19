@@ -1,10 +1,14 @@
-//! **Category: blocks and empty bodies** — the shapes every file has, taken from clang-format 15.0.1 (the copy Visual
-//! Studio ships) and re-checked against it with `tests/against_clang_format.rs`.
+//! **Category: blocks and empty bodies** — the shapes every file has, taken from clang-format 23.1.5 and re-checked
+//! against it with `tests/against_clang_format.rs`.
 //!
-//! The rule under test is small and universal: **an empty block is `{}`**, on one line, under every style. clang-format
-//! writes `void f() {}` for an empty body even when `AllowShortBlocksOnASingleLine` is `Never` — that option governs a
-//! block with *statements* in it — and `struct S {};` for a record with nothing in it. Before this case existed the
-//! formatter kept the programmer's two lines, which is the first difference on almost every file.
+//! Two rules, and they are not the same rule:
+//!
+//! * an empty **function, lambda, record or namespace** body is `{}` — `void f() {}`, `struct S {};` — unless the
+//!   style splits it (`SplitEmptyFunction`/`Record`/`Namespace`: Microsoft's `void f()\n{\n}`, `Allman`'s
+//!   `struct S\n{\n};`);
+//! * an empty **control** body is `{\n}` in every style — `if (x) {` and a closing brace on its own line even under
+//!   `Attach`, because `AllowShortBlocksOnASingleLine: Never` splits the block. Before these cases existed the
+//!   formatter kept the programmer's two lines everywhere, which was the first difference on almost every file.
 
 use cpp_formatter::config::Style;
 
@@ -46,13 +50,19 @@ fn an_empty_constructor_body_is_one_pair_of_braces() {
     );
 }
 
-/// An empty control-statement body: `AllowShortBlocksOnASingleLine: Never` does **not** apply to a block with nothing
-/// in it.
+/// **An empty control-statement body is `{\n}`, not `{}`** — measured against clang-format 23.1.5: LLVM writes
+/// `if (x) {` with the closing brace on its own line, because `AllowShortBlocksOnASingleLine: Never` splits the block,
+/// while an empty *function* body in the same style is `void f() {}`. The two families are decided separately (the
+/// function one by `SplitEmptyFunction`).
 #[test]
-fn an_empty_if_body_is_one_pair_of_braces() {
+fn an_empty_if_body_is_a_brace_pair_on_two_lines() {
     check(
         "void f() {\n  if (x) {\n  }\n}\n",
+        "void f() {\n  if (x) {\n  }\n}\n",
+    );
+    check(
         "void f() {\n  if (x) {}\n}\n",
+        "void f() {\n  if (x) {\n  }\n}\n",
     );
 }
 

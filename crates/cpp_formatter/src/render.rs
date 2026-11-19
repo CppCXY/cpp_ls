@@ -704,21 +704,17 @@ fn wrapping_lines(
     // The block the last `}` closed, which is what tells a `do`'s `while` from a `while` statement that follows an
     // unrelated block.
     let mut closed: Option<(usize, crate::roles::BraceKind)> = None;
+    // **First pass: what closes what.** The placement of an opener cannot be decided until its closer is known,
+    // because an **empty** body is not placed by its construct's rule at all (`{}` stays on one line under `Allman`
+    // and `Attach`; only `SplitEmpty*` splits it) — measured on `AlignAnalyzer::AlignAnalyzer() {}`, which clang-format
+    // writes on one line even though `Allman` wraps every non-empty function body.
+    let mut pairs: Vec<Option<usize>> = vec![None; count];
 
     for index in 0..count {
         let token = &stream.tokens[index];
         match token.kind {
             K::LeftBrace => {
                 let kind = roles.brace_kind.get(&token.start).copied();
-                if let Some(kind) = kind {
-                    if crate::wrapping::a_brace_starts_a_line(style, kind) {
-                        wrapped[index] = true;
-                    } else {
-                        if reflows {
-                            attached[index] = true;
-                        }
-                    }
-                }
                 open.push(kind.map(|kind| (index, kind)));
             }
             K::RightBrace => {
@@ -727,18 +723,14 @@ fn wrapping_lines(
                     continue;
                 };
                 closed = Some((open_index, kind));
-                if kind == crate::roles::BraceKind::Namespace {
+                pairs[open_index] = Some(index);
+                // **An empty namespace gets no comment**: clang-format writes `namespace n {}`, measured; the
+                // comment is for a body whose closing brace a reader might otherwise have to search for.
+                if kind == crate::roles::BraceKind::Namespace && open_index + 1 != index {
                     namespace_comments[index] = roles
                         .namespace_names
                         .get(&stream.tokens[open_index].start)
                         .cloned();
-                }
-                let empty = open_index + 1 == index;
-                if empty && crate::wrapping::split_empty_body(style, kind) {
-                    // **`{` and `}` on lines of their own** — Microsoft's `SplitEmptyFunction: true`: the pair is not
-                    // joined, and the closer starts its own line.
-                    split[index] = true;
-                    wrapped[index] = true;
                 }
             }
             K::ElseKeyword | K::CatchKeyword => {
@@ -750,10 +742,8 @@ fn wrapping_lines(
                     };
                     if wraps {
                         wrapped[index] = true;
-                    } else {
-                        if reflows {
-                            attached[index] = true;
-                        }
+                    } else if reflows {
+                        attached[index] = true;
                     }
                 }
                 closed = None;
@@ -770,10 +760,8 @@ fn wrapping_lines(
                 if is_a_do_while {
                     if crate::wrapping::while_starts_a_line(style) {
                         wrapped[index] = true;
-                    } else {
-                        if reflows {
-                            attached[index] = true;
-                        }
+                    } else if reflows {
+                        attached[index] = true;
                     }
                 }
                 closed = None;
@@ -783,6 +771,55 @@ fn wrapping_lines(
             }
         }
     }
+
+    // **Second pass: where each block brace goes**, now that emptiness is known.
+    for index in 0..count {
+        let Some(kind) = roles.brace_kind.get(&stream.tokens[index].start).copied() else {
+            continue;
+        };
+        let closer = pairs[index];
+        let wraps = crate::wrapping::a_brace_starts_a_line(style, kind);
+        if closer == Some(index + 1) {
+            // **An empty body's placement is its own decision**, and there are two families, both measured:
+            //
+            // * a **control** body (`if`, `for`, `while`, `do`, `switch`, `try`, `catch`, `case`) is `{\n}` in every
+            //   style — LLVM writes `if (x) {` / `}` with `Attach`, so `AllowShortBlocksOnASingleLine: Never` splits
+            //   the empty block; the brace still follows its own placement rule.
+            // * a **function, lambda, record or namespace** body is `{}` unless the style splits it — and it splits
+            //   only when the construct wraps *and* `SplitEmpty*` says so (Microsoft splits a function's and a
+            //   record's but attaches an empty `union`'s, because `AfterUnion` is off; `Allman` writes
+            //   `void f() {}` and `struct S\n{\n};`).
+            let a_block = matches!(
+                kind,
+                crate::roles::BraceKind::Control
+                    | crate::roles::BraceKind::Try
+                    | crate::roles::BraceKind::Catch
+                    | crate::roles::BraceKind::CaseLabel
+            );
+            if a_block || (wraps && crate::wrapping::split_empty_body(style, kind)) {
+                split[index + 1] = true;
+                wrapped[index + 1] = true;
+                if wraps {
+                    wrapped[index] = true;
+                } else if reflows {
+                    attached[index] = true;
+                }
+            } else {
+                // **`{}` on one line, even under `Allman`**: `AlignAnalyzer::AlignAnalyzer() {}` is the oracle's
+                // answer, and the author's own break before the brace is joined when the file is being reflowed.
+                wrapped[index] = false;
+                if reflows {
+                    attached[index] = true;
+                }
+                attached[index + 1] = true;
+            }
+        } else if wraps {
+            wrapped[index] = true;
+        } else if reflows {
+            attached[index] = true;
+        }
+    }
+
     (wrapped, attached, split, namespace_comments)
 }
 

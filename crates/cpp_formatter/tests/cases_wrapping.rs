@@ -127,6 +127,82 @@ void f()
     );
 }
 
+/// **An empty body''s placement is its own decision.** `Attach` writes `{}` for everything; Microsoft splits a
+/// function''s and a record''s but attaches a `union`''s (`AfterUnion: false`); `Allman` writes `{}` for a function and
+/// splits a record. The rule that produces all three: **split only when the construct wraps *and* the style splits
+/// it**.
+#[test]
+fn an_empty_body_is_placed_by_its_style() {
+    let input = "void f() {}\nstruct S {};\nunion U {};\n";
+
+    check(
+        Style::preset("LLVM").expect("LLVM is a preset"),
+        input,
+        input,
+    );
+
+    check(
+        Style::preset("Microsoft").expect("Microsoft is a preset"),
+        input,
+        "void f()\n{\n}\nstruct S\n{\n};\nunion U {};\n",
+    );
+
+    let mut allman = Style::preset("LLVM").expect("LLVM is a preset");
+    allman.set_from_text("BreakBeforeBraces", "Allman");
+    check(
+        allman,
+        input,
+        "void f() {}\nstruct S\n{\n};\nunion U\n{\n};\n",
+    );
+}
+/// **An empty control body is `{\n}` in every style** — `AllowShortBlocksOnASingleLine: Never` splits it even under
+/// `Attach` — while an empty function, lambda or record body is `{}` (measured: LLVM writes `if (x) {` / `}` but
+/// `void f() {}` and `struct T {};` in the same file).
+#[test]
+fn an_empty_control_body_is_split_in_every_style() {
+    let input = "void f() {\n  if (x) {}\n  try {} catch (...) {}\n  auto g = []() {};\n  struct T {};\n}\n";
+
+    let llvm = "\
+void f() {
+  if (x) {
+  }
+  try {
+  } catch (...) {
+  }
+  auto g = []() {};
+  struct T {};
+}
+";
+    check(
+        Style::preset("LLVM").expect("LLVM is a preset"),
+        input,
+        llvm,
+    );
+
+    let microsoft = "\
+void f()
+{
+    if (x)
+    {
+    }
+    try
+    {
+    }
+    catch (...)
+    {
+    }
+    auto g = []() {};
+    struct T
+    {
+    };
+}
+";
+    check(
+        Style::preset("Microsoft").expect("Microsoft is a preset"),
+        input,
+        microsoft,
+    );
+}
 /// **A file's own header is promoted above the rest of its block** — `IncludeIsMainRegex`, decided by the name.
 #[test]
 fn the_files_own_header_sorts_first() {

@@ -47,7 +47,7 @@ How `LLVM` moved, measured against 23.1.5 as each fix landed:
 | run | identical files | differing lines |
 | --- | --- | --- |
 | before any fix | 2 / 29 | 5 610 / 6 895 |
-| an empty block is `{}` | 3 / 29 | 4 931 / 6 882 |
+| an empty body: `{}` for a function/record, `{\n}` for a control block | 3 / 29 | 4 931 / 6 882 |
 | the breaker stops treating a declarator `&`/`*` as a binary operator | 3 / 29 | 4 913 / 6 882 |
 | `BreakBeforeBraces` / `BraceWrapping` / `FixNamespaceComments` | 3 / 29 | 4 611 / 6 882 |
 

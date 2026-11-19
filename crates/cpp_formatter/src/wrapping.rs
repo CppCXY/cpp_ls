@@ -79,8 +79,23 @@ pub fn while_starts_a_line(style: &Style) -> bool {
 /// Only a `Custom` style asks: under `Attach` an empty body is `{}`, and clang-format's own presets pair the split
 /// with a wrapping table that puts the braces on their own lines. Microsoft's style splits all three.
 pub fn split_empty_body(style: &Style, kind: BraceKind) -> bool {
-    if style.text(StyleOption::BreakBeforeBraces) != "Custom" {
-        return false;
+    // **The two presets that are more than `Attach` have their own answers**, measured: `Allman` writes
+    // `void f() {}` for an empty function but `struct S\n{\n};` for an empty record, and `GNU` splits all three
+    // (`void` / `f ()` / `{` / `}`).
+    match style.text(StyleOption::BreakBeforeBraces) {
+        "Allman" | "Whitesmiths" => {
+            return matches!(
+                kind,
+                BraceKind::Class
+                    | BraceKind::Struct
+                    | BraceKind::Union
+                    | BraceKind::Enum
+                    | BraceKind::Namespace
+            );
+        }
+        "GNU" => return true,
+        "Custom" => {}
+        _ => return false,
     }
     match kind {
         BraceKind::Function | BraceKind::Lambda => {
