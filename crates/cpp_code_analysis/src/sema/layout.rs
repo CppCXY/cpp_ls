@@ -191,10 +191,25 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
     if words.iter().filter(|word| **word == "long").count() >= 2 {
         return Some((8, 8));
     }
-    // **`unsigned` and `signed` on their own are `unsigned int` and `signed int`** — the spelling a typedef or a
-    // struct member very often uses, and the one this table did not have: measured on a CUDA project,
-    // `struct dim3 { unsigned x, y, z; };` could not be laid out at all, so its card named every member as unsized.
-    // The branches above take the combinations (`unsigned char`, `unsigned short`, `unsigned long`) first.
+    // **MSVC's sized integer keywords**, which are how its own headers spell the standard typedefs:
+    // `typedef __int64 ptrdiff_t;` in `vcruntime.h`, and `typedef unsigned __int64 size_t;` in `vadefs.h`. Without
+    // these a C project on MSVC has no layout at all — `__int64` matched nothing and `unsigned __int64` matched the
+    // `unsigned` branch below and came out **4 bytes**, which is a wrong number rather than a missing one.
+    //
+    // Measured on Lua 5.5.0's `lstate.h`: `StkIdRel` is `typedef union { StkId p; ptrdiff_t offset; } StkIdRel;`, its
+    // `offset` is `ptrdiff_t` = `__int64`, and every `StkIdRel` member of `lua_State` was withheld — so the class
+    // whose layout a reader most wants answered "not computed" naming six members.
+    for (spelled, bytes) in [
+        ("__int128", 16usize),
+        ("__int64", 8),
+        ("__int32", 4),
+        ("__int16", 2),
+        ("__int8", 1),
+    ] {
+        if has(spelled) {
+            return Some((bytes, bytes.min(8)));
+        }
+    }
     if has("long") || has("int") || has("unsigned") || has("signed") {
         return Some((4, 4));
     }
@@ -243,6 +258,24 @@ mod tests {
         let layout = ClassLayout::of(&[], false, Vec::new());
         assert_eq!(layout.size, 1);
         assert_eq!(layout.alignment, 1);
+    }
+
+    /// **MSVC's sized integer keywords are how its own headers spell the standard typedefs**, and a C project on
+    /// MSVC had no layout without them: `typedef __int64 ptrdiff_t;` matched nothing, and `typedef unsigned __int64
+    /// size_t;` matched the `unsigned` branch and came out **4 bytes** — wrong rather than missing.
+    ///
+    /// Measured on Lua 5.5.0's `lstate.h`: `StkIdRel` is `typedef union { StkId p; ptrdiff_t offset; } StkIdRel;`,
+    /// and every `StkIdRel` member of `lua_State` was withheld.
+    #[test]
+    fn the_sized_integer_keywords_are_sized() {
+        assert_eq!(a_builtin_in_memory("__int64"), Some((8, 8)));
+        assert_eq!(a_builtin_in_memory("unsigned __int64"), Some((8, 8)));
+        assert_eq!(a_builtin_in_memory("__int32"), Some((4, 4)));
+        assert_eq!(a_builtin_in_memory("__int16"), Some((2, 2)));
+        assert_eq!(a_builtin_in_memory("__int8"), Some((1, 1)));
+        // The words around it still do not stop it, and a pointer to one is still a pointer.
+        assert_eq!(a_builtin_in_memory("const __int64"), Some((8, 8)));
+        assert_eq!(a_builtin_in_memory("__int64*"), Some((8, 8)));
     }
 
     #[test]

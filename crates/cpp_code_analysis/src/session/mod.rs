@@ -326,7 +326,7 @@ const COOK_ONE_LEVEL_FURTHER: usize = 64;
 ///
 /// See the note in [`Session::the_layout_of`]: a layout is a visibility walk per member, and a header's registry
 /// struct (neovim's `file_buffer` has eighty members) cost **7.2 s** of hover with no bound.
-const LAYOUT_MEMBER_BUDGET: usize = 24;
+const LAYOUT_MEMBER_BUDGET: usize = 64;
 /// How many files a project scan will list before it stops.
 ///
 /// A bound on a directory walk whose size is a fact about a machine rather than about the project: a checkout with

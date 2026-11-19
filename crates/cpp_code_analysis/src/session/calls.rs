@@ -4,6 +4,72 @@
 
 use super::*;
 
+/// **A member's written type with the macros in it expanded** — `const l_signalT` is `const sig_atomic_t` where
+/// `#define l_signalT sig_atomic_t` is in force at the member.
+///
+/// Every word of the spelling is asked, because a macro may be the whole type (`l_signalT`) or part of a templated
+/// one; a word that is not a macro at that offset is kept as written. The expansion is asked **at the member's own
+/// position**, so a header whose `#define` depends on a branch above the member is read the way the compiler read it.
+impl<F: FileProvider + Clone> Session<F> {
+    fn the_type_with_its_macros_expanded(
+        &self,
+        file: &Path,
+        offset: usize,
+        written: &str,
+    ) -> Option<String> {
+        let mut out = String::with_capacity(written.len());
+        let mut changed = false;
+        for (at, word) in written
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .enumerate()
+        {
+            if at > 0 {
+                out.push(' ');
+            }
+            if word.is_empty() {
+                continue;
+            }
+            match self.macro_body_at(file, offset, word) {
+                Some(body) => {
+                    out.push_str(body.trim());
+                    changed = true;
+                }
+                None => out.push_str(word),
+            }
+        }
+        changed.then_some(out)
+    }
+}
+/// **A spelling without the qualifier words in front of its type** — `const volatile Widget` is `Widget`.
+///
+/// The words are stripped as *words* (each must be followed by a space), so a type called `constant` keeps its name,
+/// and only the front of the spelling is looked at: `Widget* const` qualifies the pointer, not the type named here.
+/// The layout's steps are lookups by name, and a qualified spelling is a different name to every one of them.
+fn spelled_without_its_qualifiers(spelled: &str) -> &str {
+    let mut word = spelled.trim();
+    loop {
+        let before = word;
+        for qualifier in [
+            "const",
+            "volatile",
+            "static",
+            "extern",
+            "mutable",
+            "thread_local",
+            "restrict",
+            "__restrict",
+        ] {
+            if let Some(rest) = word.strip_prefix(qualifier)
+                && rest.starts_with(char::is_whitespace)
+            {
+                word = rest.trim_start();
+            }
+        }
+        if word == before {
+            return word;
+        }
+    }
+}
 impl<F: FileProvider + Clone> Session<F> {
     /// **The declarations a call at this offset can reach** — indices into `parameter_lists`.
     ///
@@ -336,6 +402,12 @@ impl<F: FileProvider + Clone> Session<F> {
                     && !member.fact.modifiers.contains(crate::DeclModifiers::STATIC)
             })
             .count();
+        if crate::probes::layout() {
+            eprintln!(
+                "[layout] data-members {data_members} of {}, budget {LAYOUT_MEMBER_BUDGET}",
+                list.members.len()
+            );
+        }
         if data_members > LAYOUT_MEMBER_BUDGET {
             return Known::No;
         }
@@ -411,7 +483,25 @@ impl<F: FileProvider + Clone> Session<F> {
                 unknown.push(fact.name.to_string());
                 continue;
             }
-            match self.the_size_of_a_type_in(view, type_of, depth, Some(&instantiation)) {
+            // **A type spelled through a macro.** `volatile l_signalT trap;` with `#define l_signalT sig_atomic_t`:
+            // the fact records what was *written*, and only expanding it reaches a name the index can size. The
+            // expansion is asked at the member's own offset in its own file, which is where the `#define` in force
+            // is the one a compiler had. Measured on Lua 5.5.0's `lstate.h`: `trap` and `hookmask` are both spelled
+            // `const l_signalT`, and with them unsized `CallInfo`, `lua_State::transferinfo`'s parents and finally
+            // `lua_State` itself all withheld their layout.
+            let measured = self
+                .the_size_of_a_type_in(view, type_of, depth, Some(&instantiation))
+                .or_else(|| {
+                    let expanded = self.the_type_with_its_macros_expanded(
+                        &member.file,
+                        fact.range.start_offset,
+                        type_of,
+                    )?;
+                    (expanded != type_of).then(|| ()).and_then(|()| {
+                        self.the_size_of_a_type_in(view, &expanded, depth, Some(&instantiation))
+                    })
+                });
+            match measured {
                 Some((size, alignment)) => sized.push((fact.name.to_string(), size, alignment)),
                 None => unknown.push(fact.name.to_string()),
             }
@@ -548,6 +638,13 @@ impl<F: FileProvider + Clone> Session<F> {
             None => spelling.to_string(),
         };
         let spelled = spelled.trim();
+        // **A qualifier is not part of what the type *is*, and every step below is a lookup by name.** `const
+        // l_signalT` — Lua's `#define l_signalT sig_atomic_t` used as `volatile l_signalT trap;` — is not a class the
+        // index has, not a typedef and not a builtin, so the member was "cannot be sized" and every class containing
+        // it withheld its layout. Measured on `lua_State`: `hookmask` and `CallInfo::u::l::trap` are both spelled
+        // `const l_signalT`, and with them unsized the card said "not computed" naming `base_ci` and `hookmask`.
+        // `a_builtin_in_memory` strips qualifiers itself; this is the same stripping for the steps that ask the index.
+        let spelled = spelled_without_its_qualifiers(spelled);
         if crate::probes::layout() {
             eprintln!("[layout] depth {depth} size of {spelled:?}");
         }
@@ -662,6 +759,23 @@ impl<F: FileProvider + Clone> Session<F> {
             alias.fact.parameter_defaults(),
             arguments,
         );
+        // **A member whose type *is itself* declares an anonymous class in place.** `struct CallInfo { union { struct
+        // { … } l; … } u; };` files the union under the member's name (`CallInfo::u`, which `members_of` answers), and
+        // its fact's `type_of` is that same spelling — so following the target walked in a circle until the depth
+        // bound, and the member was "cannot be sized". The class is real and the member list is what prices it, which
+        // is the step below. Measured on Lua 5.5.0's `lstate.h`: `CallInfo::u`, `lua_State::transferinfo` and the
+        // `CallInfo` that `lua_State::base_ci` is decided the class's whole layout.
+        let itself = format!("{owner}::{member}");
+        if target == itself {
+            let Known::Yes(nested) = self.the_layout_of_a_class_with(view, &itself, &[], depth + 1)
+            else {
+                return None;
+            };
+            return nested
+                .unknown
+                .is_empty()
+                .then_some((nested.size, nested.alignment));
+        }
         self.the_size_of_a_type_in(view, &target, depth + 1, None)
     }
 

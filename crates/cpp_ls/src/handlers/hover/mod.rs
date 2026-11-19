@@ -2053,6 +2053,16 @@ fn declaration_markdown(
     // decline. Measured: `std::vector<widget::Widget>` reported "not computed" while the arguments were right there
     // in `subject`.
     if matches!(fact.kind, DeclKind::Type)
+        && {
+            if crate::probes::hover() {
+                eprintln!(
+                    "[layout] asking for {:?} (subject {:?})",
+                    fact.name.as_str(),
+                    subject
+                );
+            }
+            true
+        }
         && let Known::Yes(layout) = session.the_layout_of(
             view,
             if subject.is_empty() {
