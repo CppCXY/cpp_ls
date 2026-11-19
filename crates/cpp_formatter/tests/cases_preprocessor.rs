@@ -120,3 +120,14 @@ fn preprocessor_08_a_bare_macro_line() {
         "NLOHMANN_JSON_NAMESPACE_BEGIN\nnamespace detail {\nvoid f();\n}\n",
     );
 }
+
+/// **A directive is never a continuation of the line above**: `#include <cstdlib>` ends with a `>` that reads as a
+/// binary operator, and the `#define` after it was aligned 23 columns in (measured on nlohmann json's
+/// `macro_scope.hpp`, where `IndentPPDirectives: None` wants column 0).
+#[test]
+fn preprocessor_09_a_define_after_an_include() {
+    check(
+        "#if defined(A)\n#define THROW(e) throw e\n#else\n#include <cstdlib>\n#define THROW(e) std::abort()\n#endif\n",
+        "#if defined(A)\n#define THROW(e) throw e\n#else\n#include <cstdlib>\n#define THROW(e) std::abort()\n#endif\n",
+    );
+}

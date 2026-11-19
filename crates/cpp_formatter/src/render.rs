@@ -520,6 +520,10 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     };
                     let operand_continuation = (style.text(StyleOption::AlignOperands) == "Align"
                         && stack.is_empty()
+                        // **A directive is never a continuation of the line above**: `#include <cstdlib>` ends with
+                        // a `>` that reads as a binary operator, and the `#define` after it aligned to a column of 23
+                        // (measured on nlohmann json's `macro_scope.hpp`; `IndentPPDirectives: None` wants column 0).
+                        && stream.tokens[index].kind != cpp_parser::CppTokenKind::Hash
                         && a_continuing_operator(index - 1))
                     .then_some(operand_column)
                     .flatten();
@@ -580,6 +584,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                             .map(|(indent, is_block_line)| {
                                 let closing = stream.tokens[index].kind
                                     == cpp_parser::CppTokenKind::RightBrace;
+                                // **A directive is never `inside` a bracket**, though the `#include <…>` line that
+                                // precedes it leaves a `<` on the bracket stack: the extra `indent_width` put
+                                // `#define JSON_THROW(…) std::abort()` 23 columns in (measured on nlohmann json`s
+                                // `macro_scope.hpp`, where only the `#define` after an `#include` was affected).
+                                if stream.tokens[index].kind == cpp_parser::CppTokenKind::Hash {
+                                    return (indent, true);
+                                }
                                 match inside {
                                     Some((_, column)) if is_block_line && closing => (column, true),
                                     Some((_, column)) if is_block_line => {
