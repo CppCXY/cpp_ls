@@ -587,6 +587,10 @@ pub use aliases::*;
 
 mod member_facts;
 
+/// **[member_candidates] — one member name's whole overload set.**
+mod member_candidates;
+
+pub(crate) use member_candidates::member_candidates;
 pub(crate) use member_facts::*;
 
 mod bases;

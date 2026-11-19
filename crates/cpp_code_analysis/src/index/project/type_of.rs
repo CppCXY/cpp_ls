@@ -1218,35 +1218,63 @@ pub(crate) fn type_of_expression_inner(
                 // **The class case**: a `std::vector<int>`'s `operator[]` returns `T&`, and `members_of` has already
                 // substituted the argument — so the answer is the member's own return type rather than a guess from
                 // the first template argument (which would be right for a `vector` and wrong for a `map`).
-                _ => match operator_returns_of(
-                    index,
-                    declaring,
-                    scopes,
-                    root,
-                    path,
-                    &type_of,
-                    "operator[]",
-                ) {
-                    Some(returns) => {
-                        // **The answer is a *type*, not the spelling the member wrote.** `reference` is the class's own
-                        // alias for `T&`, and both halves — the alias and the parameter — are what this reads; see
-                        // [`a_members_answer_as_a_type`] for the measurement.
-                        let written = a_members_answer_as_a_type(
-                            index, scopes, root, path, &type_of, &returns,
-                        );
-                        if crate::probes::inference() {
-                            eprintln!(
-                                "[inference] subscript on {:?}: the member wrote {:?}, the type is {:?}",
-                                type_of.to_string(),
-                                returns,
-                                written
+                //
+                // **The index's type is what chooses between overloads**: on a class declaring both
+                // `int& operator[](int)` and `double& operator[](const char*)`, `s["z"]` is the second, and asking
+                // without the argument answered the first (`int&` — measured). The type of the index expression is
+                // this expression's own question, one step down, and the memo makes it one.
+                _ => {
+                    let argument_types: Vec<Type> = subscript_index(expression)
+                        .map(|argument| {
+                            type_of_expression_memoed(
+                                memo,
+                                shapes,
+                                index,
+                                declaring,
+                                scopes,
+                                root,
+                                path,
+                                &argument,
+                                depth + 1,
+                            )
+                        })
+                        .and_then(|argument| match argument {
+                            Known::Yes((type_of, _)) => Some(vec![type_of]),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    match operator_returns_of_with_arguments(
+                        index,
+                        declaring,
+                        scopes,
+                        root,
+                        path,
+                        &type_of,
+                        "operator[]",
+                        &argument_types,
+                        (!argument_types.is_empty()).then_some(1),
+                    ) {
+                        Some(returns) => {
+                            // **The answer is a *type*, not the spelling the member wrote.** `reference` is the class's
+                            // own alias for `T&`, and both halves — the alias and the parameter — are what this reads;
+                            // see [`a_members_answer_as_a_type`] for the measurement.
+                            let written = a_members_answer_as_a_type(
+                                index, scopes, root, path, &type_of, &returns,
                             );
+                            if crate::probes::inference() {
+                                eprintln!(
+                                    "[inference] subscript on {:?}: the member wrote {:?}, the type is {:?}",
+                                    type_of.to_string(),
+                                    returns,
+                                    written
+                                );
+                            }
+                            Known::Yes((crate::sema::types::parse_type_spelling(&written), file))
                         }
-                        Known::Yes((crate::sema::types::parse_type_spelling(&written), file))
+                        // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
+                        None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
                     }
-                    // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
-                    None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-                },
+                }
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -2051,8 +2079,54 @@ pub(crate) fn operator_returns_of_with_arguments(
     // **The qualifier the object has**, for the choice among overloads of one name — see
     // [`a_member_with_that_arity`] and [`Type::is_const`].
     let object_is_const = class_type.is_const();
-    let mut matching = match arity {
-        Some(wanted_arity) => a_member_with_that_arity(
+    // **The arguments choose among overloads, and the ranking that does it already exists.**
+    //
+    // `struct S { int get(int); double get(const char*); };` — `s.get("z")` answered `int` and `s["z"]` answered
+    // `int&`, both the *first* declaration, because a member lookup's rule is "a jump takes the first, a list takes
+    // them all" and a call is neither. `the_one_the_arguments_select` ranks free functions exactly this way
+    // (`crate::sema::overload`); what it was missing is the candidate list, which is `member_candidates` — one posting
+    // query for the name, not the member-list walk of every base.
+    //
+    // **Asked before the arity choice, not after it.** The arity choice builds a member list (`members_of`), so
+    // asking it first and then overriding the answer would pay for both. It is also what makes this a *saving* on the
+    // shape that used to pay the list: the ranking is facts, and the list is only asked when nothing was ranked.
+    let ranked = (!argument_types.is_empty())
+        .then(|| {
+            let declared = crate::index::project::member_candidates(
+                &crate::sema::declarations::ShapeTable::new(),
+                index,
+                scopes,
+                root,
+                path,
+                &class_spelling,
+                &wanted,
+                Some(&written_arguments),
+            );
+            // **A `const` object can only call a `const` member**, which is the same rule the arity preference below
+            // applies — a candidate it could not call is not a candidate. A non-const object may call both.
+            let callable: Vec<(crate::DeclFact, std::path::PathBuf)> = declared
+                .into_iter()
+                .filter(|(fact, _)| {
+                    !object_is_const || fact.modifiers.contains(crate::DeclModifiers::CONST)
+                })
+                .collect();
+            if callable.len() < 2 {
+                return None;
+            }
+            let types: Vec<Known<String>> = argument_types
+                .iter()
+                .map(|argument| Known::Yes(argument.to_string()))
+                .collect();
+            let at = the_one_the_arguments_select(&types, &callable, &[])?;
+            // The shape the rest of this function uses: the fact, and where its body is as a **spelling** — the
+            // declaration found by name carries the class it was declared in there, while a candidate carries the file.
+            let (fact, file) = callable.get(at)?;
+            Some((fact.clone(), file.display().to_string()))
+        })
+        .flatten();
+    let mut matching = match (ranked, arity) {
+        (Some(decided), _) => Some(decided),
+        (None, Some(wanted_arity)) => a_member_with_that_arity(
             &mut *declaring,
             index,
             scopes,
@@ -2065,7 +2139,7 @@ pub(crate) fn operator_returns_of_with_arguments(
             Some(wanted_arity),
             object_is_const,
         ),
-        None => None,
+        (None, None) => None,
     };
     // **A `const` object cannot call a non-const overload**, and the cheap query ([`member_fact`]) answers the first
     // declaration without saying what its qualifier is — so when the object is const and the declaration found is not,
@@ -2679,6 +2753,19 @@ pub(crate) fn subscript_base(
     node.children().next()
 }
 
+/// **What stands between the brackets** — the argument an `operator[]` overload is chosen by.
+///
+/// [`subscript_base`] answers the object; this answers the index, and the two are the halves of one expression: on a
+/// class with both `operator[](int)` and `operator[](const char*)`, `s["z"]` is the second — while a lookup that takes
+/// the first declaration answers the first. See [`member_candidates`] and [`operator_returns_of_with_arguments`].
+pub(crate) fn subscript_index(
+    node: &cpp_parser::CppSyntaxNode,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::IndexExpr {
+        return None;
+    }
+    node.children().nth(1)
+}
 /// What a `*` on this spelling gives: `Widget*` → `Widget`, `Widget&` → `Widget`, `Widget**` → `Widget*`.
 ///
 /// The operators written after the type are removed, and so is a cv-qualifier written after *them* — `Widget *

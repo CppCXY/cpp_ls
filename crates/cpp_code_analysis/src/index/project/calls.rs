@@ -1038,6 +1038,51 @@ pub(crate) fn declaration_of_a_callee(
             .iter()
             .map(|argument| argument.to_string())
             .collect();
+        // **The arguments choose among a member's overloads**, the same ranking a free function's call goes through
+        // below. `struct S { int get(int); double get(const char*); };` — `s.get("z")` answered `int`, the first
+        // declaration, because a member lookup's rule is "a jump takes the first" and a call is not a jump. The
+        // candidates come from [`member_candidates`] (one posting query for the name), and the ranking is
+        // [`the_one_the_arguments_select`], which is the one `std::format`'s overloads already go through.
+        //
+        // **The overload count is asked first, and the argument types second.** Typing the arguments is a walk of
+        // each of them, and a name with one declaration — most names — has nothing to rank: the query is over as soon
+        // as the postings say so.
+        let declared = member_candidates(
+            shapes,
+            index,
+            scopes,
+            root,
+            path,
+            &class,
+            &access.member,
+            Some(&written_arguments),
+        );
+        // **A `const` object can only call a `const` member**: a candidate it could not call is not a candidate.
+        let callable: Vec<(DeclFact, PathBuf)> = declared
+            .into_iter()
+            .filter(|(fact, _)| {
+                !object.is_const() || fact.modifiers.contains(crate::DeclModifiers::CONST)
+            })
+            .collect();
+        if callable.len() > 1
+            && let Some(call) = the_call_around(callee)
+            && let Some(types) =
+                the_types_of_the_arguments(memo, index, declaring, scopes, root, path, &call)
+            && let Some(chosen) = the_one_the_arguments_select(&types, &callable, &[])
+            && let Some((fact, file)) = callable.get(chosen)
+        {
+            if crate::probes::inference() {
+                eprintln!(
+                    "[inference] callee: {} candidate(s), the arguments chose {chosen}",
+                    callable.len()
+                );
+            }
+            return Known::Yes(NamedDeclaration::Indexed(
+                fact.clone(),
+                file.clone(),
+                bindings,
+            ));
+        }
         return match member_fact(
             shapes,
             index,
