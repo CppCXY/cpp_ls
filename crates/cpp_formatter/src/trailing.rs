@@ -310,6 +310,26 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_past_the_column_limit_keeps_its_own_start_and_splits_the_run() {
+        // clang-format 23.1.5, `LLVM` (ColumnLimit 80): the includes below align to 21, `<type_traits>` (22 columns
+        // of code plus a 67-column comment) keeps one space, and `<utility>` starts a new run.
+        let source = "\
+#include <algorithm> // any_of
+#include <array> // array
+#include <type_traits> // conditional, integral_constant, is_signed, true_type, false_type
+#include <utility> // move
+";
+        let style = Style::default_style();
+        let expected = "\
+#include <algorithm> // any_of
+#include <array>     // array
+#include <type_traits> // conditional, integral_constant, is_signed, true_type, false_type
+#include <utility> // move
+";
+        assert_eq!(align(source, &style), expected);
+    }
+
+    #[test]
     fn the_minimum_is_added_once() {
         let found = targets("int solo; // alone\n", "2");
         assert_eq!(found, vec![Some(11)]);
