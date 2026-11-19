@@ -300,6 +300,43 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 for slot in &mut joined[first + 1..line.end] {
                     *slot = true;
                 }
+            } else if {
+                // **Only a statement that actually overflows is re-cut.** If every source line of the statement fits,
+                // the author's layout is one clang-format could have produced (its own output does), and re-cutting it
+                // is how reflow became a regression: the search`s model is not clang-format`s, so it cut clang-format`s
+                // own lines differently (measured: spacing-only 53 -> 2 269 lines).
+                let limit = style.count(StyleOption::ColumnLimit);
+                let mut piece = 0usize;
+                let mut overflows = false;
+                for index in first..line.end {
+                    if index > first {
+                        if stream.gaps[index].newlines > 0 {
+                            if indent + piece > limit {
+                                overflows = true;
+                                break;
+                            }
+                            piece = 0;
+                        } else {
+                            piece += space::between(&stream, index, &roles, style);
+                        }
+                    }
+                    piece += stream.tokens[index].text.chars().count();
+                }
+                overflows || indent + piece > limit
+            } && let Some(breaks) =
+                crate::breaks::break_line(&stream, &roles, style, &line, indent)
+            {
+                // **The breaking half**: clang-format decides where a statement that does not fit is cut, and its
+                // answer is the penalty search. The search's positions become forced breaks and everything else in
+                // the statement is joined; a statement the search finds nothing to gain on keeps the author's lines.
+                for index in first + 1..line.end {
+                    if !breaks.contains(&index) {
+                        joined[index] = true;
+                    }
+                }
+                for at in breaks {
+                    forced_breaks[at] = true;
+                }
             }
         }
     }

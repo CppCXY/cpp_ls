@@ -253,6 +253,50 @@ pub fn break_line(
         return None;
     }
 
+    // **The bracket each token sits in, and the column it would have in the joined line.** `AlignAfterOpenBracket:
+    // Align` puts a continuation inside a bracket under the bracket`s content — the column only the joined layout can
+    // say — and a break immediately after the bracket falls back to a continuation indent. Without this the search
+    // only knew one continuation column, which is why its breaks did not look like clang-format`s (measured on
+    // `AlignAnalyzer.cpp`: clang breaks after `!=` and aligns the operand, the search broke elsewhere).
+    let mut enclosing: Vec<Option<usize>> = vec![None; stream.tokens.len()];
+    let mut joined_column: Vec<usize> = vec![0; stream.tokens.len()];
+    {
+        let mut open: Vec<usize> = Vec::new();
+        let mut column = start_column;
+        for index in line.start..line.end {
+            if index > line.start {
+                column += crate::space::between(stream, index, roles, style);
+            }
+            joined_column[index] = column;
+            enclosing[index] = open.last().copied();
+            match stream.tokens[index].kind {
+                CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                    open.push(index)
+                }
+                CppTokenKind::RightParen
+                | CppTokenKind::RightBracket
+                | CppTokenKind::RightBrace => {
+                    open.pop();
+                }
+                _ => {}
+            }
+            column += stream.tokens[index].text.chars().count();
+        }
+    }
+    let aligns = matches!(
+        style.text(crate::options::StyleOption::AlignAfterOpenBracket),
+        "Align" | "AlwaysBreak"
+    ) || style.flag(crate::options::StyleOption::AlignAfterOpenBracket);
+    // The column a piece starting at `position` gets.
+    let indent_at = |position: usize, first: bool| -> usize {
+        match enclosing[position] {
+            Some(open) if aligns && open + 1 < position => joined_column[open + 1],
+            Some(_) => start_column + continuation,
+            None if first => start_column,
+            None => start_column + continuation,
+        }
+    };
+
     // The width of a piece `a..b` when printed after the previous piece's end.
     let width = |a: usize, b: usize, indent: usize| -> usize {
         let mut column = indent;
@@ -275,13 +319,10 @@ pub fn break_line(
             if best[start] == i64::MAX {
                 continue;
             }
-            // **A piece after the first one starts at the continuation column**, not at the statement`s: charging the
-            // statement column made the search believe pieces fitted when they did not.
-            let indent = if start == 0 {
-                start_column
-            } else {
-                start_column + continuation
-            };
+            // **A piece after the first one starts at its bracket`s content column** when the style aligns inside
+            // brackets, and at the continuation column otherwise — charging the statement column made the search
+            // believe pieces fitted when they did not.
+            let indent = indent_at(positions[start], start == 0);
             let piece = width(positions[start], positions[end], indent);
             let excess = piece.saturating_sub(limit) as i64 * penalties.excess_character;
             let break_cost = if start == 0 {

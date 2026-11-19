@@ -25,79 +25,64 @@ Two numbers, because two different defects produce them:
 
 | number | what it isolates |
 | --- | --- |
-| **identical files / differing lines** | the whole job: both formatters on the same source |
+| **identical files / changed lines** | the whole job: both formatters on the same source. The line count is a **longest-common-subsequence diff**: a formatter that breaks one line into two shifts every line after it, and a positional count calls all of them different — that number measures line offsets, not mistakes. A file is "identical" when nothing differs at all |
 | **files that match on text clang-format already laid out** | **spacing and indentation alone** — the corpus is first formatted by clang-format, then fed to `cppfmt`; a difference here is a token-level mistake, and a file that matches here but not above differs in *where the lines go* |
 
 ### The corpus, against clang-format 23.1.5 (2026-11-20)
 
-| style | identical files | differing lines | spacing-only |
+`E:\EmmyLuaCodeStyle\CodeFormatCore\src`, 29 files:
+
+| style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 5 / 29 | 3 931 / 6 850 | **19 / 29 match, 53 lines** |
-| `Google` | 3 / 29 | 6 512 / 6 887 | **19 / 29 match, 65 lines** |
-| `Google` | 3 / 29 | 6 509 / 6 887 | **19 / 29 match, 65 lines** |
-| `Microsoft` | 5 / 29 | 4 468 / 8 041 | **26 / 29 match, 6 lines** |
+| `LLVM` | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
+| `Google` | 3 / 29 | 1 616 / 6 887 | 19 / 29 match, 130 lines |
+| `Microsoft` | 5 / 29 | **494** / 8 032 | 27 / 29 match, **10 lines** |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
+| `LLVM, ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
 
-The `Microsoft` spacing-only column collapsed from 6 323 lines to **42** in one step, and two rules did it: a `case`
-body`s brace is the **label`s** option (`AfterCaseLabel` — Microsoft attaches `case 1: {`, and this formatter was
-wrapping every case body), and a file`s own header must be promoted out of its block by **name** — the CLI`s stdin
-path never passed the `-assume-filename` stem through, so `#include "SpaceAnalyzer.h"` was sorted as text while
-clang-format promoted it. Both are pinned in `tests/cases_wrapping.rs`.
+The last row is the corpus's own style. It scores best for a reason that is also the best evidence the formatter
+works: `ColumnLimit: 0` is the one setting where clang-format itself does not reflow, so the only differences left
+are the token-level ones — ten lines in three files.
 
-How `LLVM` moved, measured against 23.1.5 as each fix landed:
+### Per-option rates (same corpus, `LLVM` base with one option changed)
 
-| run | identical files | differing lines |
-| --- | --- | --- |
-| before any fix | 2 / 29 | 5 610 / 6 895 |
-| an empty body: `{}` for a function/record, `{\n}` for a control block | 3 / 29 | 4 931 / 6 882 |
-| the breaker stops treating a declarator `&`/`*` as a binary operator | 3 / 29 | 4 913 / 6 882 |
-| `BreakBeforeBraces` / `BraceWrapping` / `FixNamespaceComments` | 3 / 29 | 4 611 / 6 882 |
-
-**This round's brace work** is what moved `Microsoft` from 0 to 3 identical files: the style is
-`BreakBeforeBraces: Custom` plus a `BraceWrapping` table, and the table's five answers for five constructs (a
-function's brace wraps, a `union`'s attaches, a control statement's wraps, `else`/`catch` open a line, an empty record
-splits) are now read from the tree — the construct a brace opens is classified in `roles.rs`, and `wrapping.rs` asks
-the style. `FixNamespaceComments` writes `} // namespace ns` where the style asks for it.
-
-What is still wrong for `Microsoft` is not the brace *placement* but the **reflow around it**: a body written on one
-line stays there, an initializer list the author broke stays broken, and a short function clang-format would keep on
-one line is broken by our line structure. The 6 323 spacing-only lines are that plus the token-level remainder below.
-### Per-option rates (same corpus, clang-format 23.1.5, `LLVM` base with one option changed)
-
-| style / option | identical files | differing lines | spacing-only |
+| style / option | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` (base) | 4 / 29 | 3 963 / 6 850 | 17 / 29 match, 90 lines |
-| `IndentWidth: 4` | 3 / 29 | 4 935 / 7 015 | 15 / 29 match, 108 lines |
-| `UseTab: ForIndentation` | 4 / 29 | 3 954 / 6 850 | 11 / 29 match, **231** lines |
-| `BreakBeforeBraces: Allman` | 3 / 29 | 6 331 / 8 657 | 15 / 29 match, **132** lines |
-| `AllowShortFunctionsOnASingleLine: None` | 4 / 29 | 4 040 / 6 906 | 17 / 29 match, 90 lines |
-| `ColumnLimit: 0` | **11 / 29** | **609** / 6 510 | **25 / 29 match, 6 lines** |
+| `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
+| `IndentWidth: 4` | 5 / 29 | 1 737 / 7 015 | 15 / 29 match, 216 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 556 / 6 850 | 11 / 29 match, 462 lines |
+| `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
+| `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
+| `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
 
-What each row says, in the order the fixes will come:
+What each row says:
 
-* **`UseTab` is implemented now** — `Columns::indent` writes `indent / TabWidth` tabs and the remainder as spaces, the
-  oracle's split at every width (measured at `TabWidth` 8 and 4). What remains in its 231 lines are continuation
-  lines: `ForIndentation` keeps alignment as spaces, and this formatter cannot yet tell the indentation part of a
-  continuation from its alignment part.
-* **`Allman`'s 3 282** are mostly `AlignEscapedNewlines`: clang-format pads a macro's `\` to the column limit
-  (`AlignEscapedNewlines: Right`), this formatter pads to the longest line of the macro. Measured on
-  `LuaDiagnosticStyle.cpp`: the same `#define`, two different `\` columns.
-* **`AllowShortFunctionsOnASingleLine: None` is now implemented** — 4 of 29 identical, 90 spacing-only lines — by
-  the same rule as `All`: a body is joined only when the option allows it, and a body the option refuses is *broken*,
-  empty ones included (`void z() {` then `}`). The option matrix is the record of what each setting costs.
-* **`ColumnLimit: 0` scores best on identical files (6 / 29)** because that is the one setting where clang-format
-  itself stops reflowing — and the remaining spacing lines there are the same macro continuations.
+* **`UseTab`** is implemented (`Columns::indent` writes `indent / TabWidth` tabs and the remainder as spaces — the
+  oracle's split at `TabWidth` 8 and 4). Its remaining 462 lines are continuation lines: `ForIndentation` keeps
+  *alignment* as spaces, and this formatter cannot yet tell the indentation part of a continuation from its alignment
+  part.
+* **`Allman`'s 99 spacing lines** are the case-body column, the empty-constructor split and `AlignEscapedNewlines`,
+  all implemented this round; the remaining whole-file difference is the reflow, as for every style.
+* **`AllowShortFunctionsOnASingleLine: None`** costs nothing in spacing (106 lines, the base's number) and is
+  implemented by the same rule as `All`: a body is joined only when the option allows it, and a body the option
+  refuses is **broken** — empty ones included (`void z() {` then `}`).
+* **`ColumnLimit: 0`** is the corpus's own style and the one the formatter reproduces most closely: 226 changed lines
+  in 29 files, 26 of them matching clang-format's layout exactly.
+
 ### The second corpus: Lua 5.5 (`C:\Users\zc\Desktop\lua-5.5.0\src`, 40 files)
 
-| style | identical files | differing lines | spacing-only |
+| style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 0 / 40 | 18 443 / 20 375 | 9 / 40 match, **5 449** lines |
-| `Microsoft` | 0 / 40 | 20 200 / 22 090 | 12 / 40 match, 3 268 lines |
+| `LLVM` | 0 / 40 | 7 458 / 20 377 | 9 / 40 match, 1 921 lines |
+| `Google` | 0 / 40 | 10 991 / 20 343 | 3 / 40 match, 6 641 lines |
+| `Microsoft` | 0 / 40 | 11 491 / 22 090 | 12 / 40 match, 1 524 lines |
+| `BreakBeforeBraces: Allman` | 0 / 40 | 7 429 / 22 462 | 9 / 40 match, 1 850 lines |
+| `LLVM, ColumnLimit: 0` | 0 / 40 | 6 983 / 20 578 | 12 / 40 match, 1 662 lines |
 
-This is the corpus that says the **break half** is the remaining project, not a candidate for one: Lua's source is
-hand-formatted with its own wrapping, and clang-format's 80-column answer re-wraps most of it. The token-level rules
-still hold on it (the `::`-after-comma and string-concatenation cuts in this round were found here), but the layout
-cannot match until a statement is re-broken the way clang-format re-breaks it — the same negative result recorded
-above.
+This corpus is hand-formatted with its own wrapping, and clang-format's 80-column answer re-wraps most of it: the
+whole-file column measures the **break half** of the reflow, which is the next project. The token-level rules still
+hold on it — the `::`-after-comma and string-concatenation cuts were found here — and its spacing-only column is
+where the gains from here are.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:

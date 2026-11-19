@@ -145,41 +145,55 @@ fn format_text_with(
 fn compare(path: &Path, theirs: &str, ours: &str) -> Compared {
     let their_lines: Vec<&str> = theirs.lines().collect();
     let our_lines: Vec<&str> = ours.lines().collect();
-    let mut first = None;
-    let mut differing = 0usize;
-    for (index, (theirs, ours)) in their_lines.iter().zip(our_lines.iter()).enumerate() {
-        if theirs != ours {
-            differing += 1;
-            if first.is_none() {
-                first = Some((index + 1, theirs.to_string(), ours.to_string()));
-            }
+    let (n, m) = (their_lines.len(), our_lines.len());
+    // **The diff is a longest-common-subsequence one, not a positional zip.** A formatter that breaks a line in two
+    // shifts every line after it, and a positional count calls all of them different: the number then measures line
+    // offsets rather than the formatter's mistakes. `differing_lines` is the number of lines that change when one
+    // text is turned into the other — deleted plus inserted.
+    let mut table = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            table[i][j] = if their_lines[i] == our_lines[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
         }
     }
-    let longest = their_lines.len().max(our_lines.len());
-    if their_lines.len() != our_lines.len() {
-        differing += longest - their_lines.len().min(our_lines.len());
-        if first.is_none() {
-            let at = their_lines.len().min(our_lines.len());
-            first = Some((
-                at + 1,
-                their_lines
-                    .get(at)
-                    .copied()
-                    .unwrap_or("<end of file>")
-                    .to_string(),
-                our_lines
-                    .get(at)
-                    .copied()
-                    .unwrap_or("<end of file>")
-                    .to_string(),
-            ));
+    let common = table[0][0] as usize;
+    let differing = (n - common) + (m - common);
+    let mut first = None;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if their_lines[i] == our_lines[j] {
+            i += 1;
+            j += 1;
+        } else {
+            first = Some((i + 1, their_lines[i].to_string(), our_lines[j].to_string()));
+            break;
         }
+    }
+    if first.is_none() && n != m {
+        let at = i.min(n).min(m);
+        first = Some((
+            at + 1,
+            their_lines
+                .get(at)
+                .copied()
+                .unwrap_or("<end of file>")
+                .to_string(),
+            our_lines
+                .get(at)
+                .copied()
+                .unwrap_or("<end of file>")
+                .to_string(),
+        ));
     }
     Compared {
         path: path.to_path_buf(),
         first,
         differing_lines: differing,
-        lines: longest,
+        lines: n.max(m),
     }
 }
 
