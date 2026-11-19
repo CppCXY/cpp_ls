@@ -32,9 +32,15 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | differing lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 3 / 29 | 4 611 / 6 882 | 8 / 29 match, 195 lines |
+| `LLVM` | 3 / 29 | 4 611 / 6 882 | 11 / 29 match, 172 lines |
 | `Google` | 3 / 29 | 6 630 / 6 913 | 9 / 29 match, 176 lines |
-| `Microsoft` | 3 / 29 | 7 391 / 8 376 | 7 / 29 match, 6 323 lines |
+| `Microsoft` | 4 / 29 | 4 605 / 8 041 | **20 / 29 match, 42 lines** |
+
+The `Microsoft` spacing-only column collapsed from 6 323 lines to **42** in one step, and two rules did it: a `case`
+body`s brace is the **label`s** option (`AfterCaseLabel` — Microsoft attaches `case 1: {`, and this formatter was
+wrapping every case body), and a file`s own header must be promoted out of its block by **name** — the CLI`s stdin
+path never passed the `-assume-filename` stem through, so `#include "SpaceAnalyzer.h"` was sorted as text while
+clang-format promoted it. Both are pinned in `tests/cases_wrapping.rs`.
 
 How `LLVM` moved, measured against 23.1.5 as each fix landed:
 
@@ -88,3 +94,15 @@ Three kinds, in the order they cost lines on the corpus:
 
 Each step is measured with the command above before and after, and each fix carries a hermetic case in
 `tests/cases_*.rs` — the oracle's answer, not this implementation's.
+
+## Differences that are **not** going to be fixed silently
+
+Every one of these is a known gap with a reason, not a skipped comparison:
+
+| gap | why it is still open |
+| --- | --- |
+| the line **breaks** are the source's | the reflow layer is the next step (the table above); every corpus number is dominated by it |
+| `Stroustrup`, `WebKit`, `Mozilla`, `Linux` brace wrapping | each is a style definition of its own, not a `BraceWrapping` table; `wrapping.rs` attaches them and says so, rather than guessing |
+| GNU `IndentBraces` and `BreakAfterReturnType: TopLevel` | GNU's answer (`void` newline `f ()`) is two features, measured in `cases_wrapping.rs` as a note instead of an assertion |
+| `BraceWrapping.AfterControlStatement: MultiLine` | treated as `Never` (attach): sound only when the header fits on one line, and the header's width is a reflow question |
+| `FixNamespaceComments` on an anonymous namespace | clang-format writes `} // namespace` with no name; this formatter knows only named ones |

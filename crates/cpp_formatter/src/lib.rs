@@ -41,11 +41,20 @@ pub use config::{ConfigError, Style};
 
 /// Format `source` with `style`, keeping the source's line structure.
 pub fn format(source: &str, style: &Style) -> String {
+    format_named(source, None, style)
+}
+
+/// **Format text that belongs to a named file**, which is what the main-header promotion needs: clang-format sorts a
+/// file's own header (`#include "SpaceAnalyzer.h"` in `SpaceAnalyzer.cpp`) above the rest of its block
+/// (`IncludeIsMainRegex`), and it knows the name from the path. `format` cannot answer that question and
+/// `format_file` can; a caller that has the name but not a path — the CLI reading stdin with `-assume-filename` —
+/// uses this.
+pub fn format_named(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **`DisableFormat: true` is the whole file being off**: the bytes go back out unchanged.
     if regions::is_fully_disabled(style) {
         return source.to_string();
     }
-    finish(render::format(source, None, style), style)
+    finish(render::format(source, stem, style), style)
 }
 
 /// **The passes that run over the finished text**, in order: the trailing comments, then the escaped newlines.

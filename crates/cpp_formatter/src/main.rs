@@ -82,7 +82,14 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let formatted = cpp_formatter::format(&source, &style);
+        // **The name the text belongs to**, when the caller gave one: `#include "Own.h"` is promoted to the top of
+        // its block by the name (measured: without it a file that already sorted its own header first came back
+        // sorted differently).
+        let stem = assume_filename
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str());
+        let formatted = cpp_formatter::format_named(&source, stem, &style);
         if replacements_xml {
             print!(
                 "{}",

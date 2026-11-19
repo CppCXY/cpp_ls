@@ -108,10 +108,22 @@ fn format_with(program: &Path, style: &str, file: &Path) -> Option<String> {
 /// output back to `cppfmt`: a defect in the two formatters' line breaks and a defect in the spacing between tokens
 /// are different questions, and only the second one is answerable on text that is already laid out the way
 /// clang-format lays it out.
-fn format_text_with(program: &Path, style: &str, text: &str) -> Option<String> {
+/// Format `text` with `program`, **telling it which file the text belongs to**: `clang-format` promotes a file's
+/// own header out of its category (`IncludeIsMainRegex`), so a comparison that pipes stdin without a name loses that
+/// promotion on one side only — measured as a two-line include swap that was the harness's, not the formatter's.
+fn format_text_with(
+    program: &Path,
+    style: &str,
+    text: &str,
+    name: Option<&Path>,
+) -> Option<String> {
     use std::io::Write;
-    let mut child = Command::new(program)
-        .arg(format!("-style={style}"))
+    let mut child = Command::new(program);
+    child.arg(format!("-style={style}"));
+    if let Some(name) = name {
+        child.arg(format!("-assume-filename={}", name.display()));
+    }
+    let mut child = child
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -220,7 +232,7 @@ fn the_diff_against_clang_format() {
         // **The second measurement: our spacing on text clang-format already laid out.** A file that differs here
         // differs in a *token-level* decision (a space, an indent, a comment), and a file that matches here but not
         // above differs in where the lines go.
-        match format_text_with(&ours, &style, &theirs) {
+        match format_text_with(&ours, &style, &theirs, Some(file)) {
             Some(on_theirs) if on_theirs == theirs => spacing_matched += 1,
             Some(on_theirs) => {
                 spacing_differing += compare(file, &theirs, &on_theirs).differing_lines;

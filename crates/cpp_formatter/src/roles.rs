@@ -48,6 +48,9 @@ pub enum BraceKind {
     Catch,
     Lambda,
     ExternBlock,
+    /// **A `case`/`default` body's brace**: clang-format gives the label its own option (`AfterCaseLabel`), and its
+    /// default is to attach — Microsoft and LLVM both write `case 1: {`, while GNU writes the brace on the next line.
+    CaseLabel,
 }
 
 impl Roles {
@@ -165,11 +168,14 @@ pub fn of(source: &str) -> Roles {
         // shape `breaks.rs` documents for `int count() { }` at file scope). So when no construct owns the body, the
         // token before the `{` decides: `)` is a function's parameter list (every control statement has its own
         // ancestor and was answered above), `]` is a lambda's capture list.
-        let brace_kind = body_kind_of(&parent).or(match previous {
-            Some(CppTokenKind::RightParen) => Some(BraceKind::Function),
-            Some(CppTokenKind::RightBracket) => Some(BraceKind::Lambda),
-            _ => None,
-        });
+        let brace_kind = opens_a_case_body(&token)
+            .then_some(BraceKind::CaseLabel)
+            .or_else(|| body_kind_of(&parent))
+            .or(match previous {
+                Some(CppTokenKind::RightParen) => Some(BraceKind::Function),
+                Some(CppTokenKind::RightBracket) => Some(BraceKind::Lambda),
+                _ => None,
+            });
         if let Some(brace_kind) = brace_kind {
             roles.brace_kind.insert(brace, brace_kind);
         }
@@ -227,6 +233,32 @@ fn body_kind_of(open: &cpp_parser::CppSyntaxNode) -> Option<BraceKind> {
         }
     }
     None
+}
+
+/// **Does this `{` open the body of a `case`/`default` label?** — `case 1: {`. The label is a `CaseStat` in the tree
+/// but the body is not inside it (measured: the body`s parent is the `SwitchStat`), so the tokens are the evidence:
+/// a `:` immediately before the brace, and a `case`/`default` between it and the previous label, statement or block.
+fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
+    let mut previous = open.prev_token();
+    let mut colon = false;
+    while let Some(token) = previous {
+        let kind = CppTokenKind::from(token.kind());
+        if cpp_parser::is_trivia(kind) {
+            previous = token.prev_token();
+            continue;
+        }
+        match kind {
+            CppTokenKind::Colon if !colon => colon = true,
+            CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => return colon,
+            CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::Semicolon
+            | CppTokenKind::Colon => return false,
+            _ => {}
+        }
+        previous = token.prev_token();
+    }
+    false
 }
 
 /// **The name a namespace declaration gives itself**, or `None` for an anonymous one.

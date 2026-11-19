@@ -33,6 +33,8 @@ pub fn a_brace_starts_a_line(style: &Style, kind: BraceKind) -> bool {
             BraceKind::Namespace => style.flag(StyleOption::BraceWrappingAfterNamespace),
             BraceKind::ExternBlock => style.flag(StyleOption::BraceWrappingAfterExternBlock),
             BraceKind::Lambda => style.flag(StyleOption::BraceWrappingBeforeLambdaBody),
+            // **A `case`/`default` body is its own option**, and its default attaches in every style but GNU's.
+            BraceKind::CaseLabel => style.flag(StyleOption::BraceWrappingAfterCaseLabel),
             // **One option for all five control kinds**: `Always` wraps, `Never` attaches, and `MultiLine` wraps a
             // body whose header spans several lines — which this layer cannot yet tell, so it attaches, the
             // conservative half of the two.
