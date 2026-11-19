@@ -393,7 +393,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // keeps an already-formatted file unchanged.
             let indent = statement_indent + style.count(StyleOption::ContinuationIndentWidth);
             out.push_str(line_ending);
-            out.push_str(&columns.indent(indent, false));
+            out.push_str(&columns.indent(indent, statement_indent));
             column = indent;
         } else if ((gap.newlines == 0 && !wrap) || empty_brace_pair || attach || join)
             && gap.comments.is_empty()
@@ -605,7 +605,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     // replaces: keeping it stacked the source's two spaces onto the column (10 where 8 belongs).
                     let prefix = source.get(gap.start..comment.start).unwrap_or("");
                     out.push_str(prefix.trim_end_matches([' ', '\t']));
-                    out.push_str(&columns.indent(indent, is_block_line));
+                    out.push_str(&columns.indent(
+                        indent,
+                        if is_block_line {
+                            indent
+                        } else {
+                            statement_indent
+                        },
+                    ));
                     column = indent;
                 } else {
                     let verbatim = source.get(gap.start..comment.end).unwrap_or("");
@@ -614,7 +621,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                         columns.advance(0, verbatim.rsplit(char::from(10)).next().unwrap_or(""));
                 }
             } else {
-                out.push_str(&columns.indent(indent, is_block_line));
+                out.push_str(&columns.indent(
+                    indent,
+                    if is_block_line {
+                        indent
+                    } else {
+                        statement_indent
+                    },
+                ));
                 column = indent;
             }
             // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
@@ -642,7 +656,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                         let indentation = tail.rsplit(char::from(10)).next().unwrap_or("");
                         out.push_str(indentation);
                     } else {
-                        out.push_str(&columns.indent(indent, is_block_line));
+                        out.push_str(&columns.indent(
+                            indent,
+                            if is_block_line {
+                                indent
+                            } else {
+                                statement_indent
+                            },
+                        ));
                     }
                     column = indent;
                 } else {

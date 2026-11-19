@@ -50,17 +50,17 @@ are the token-level ones — ten lines in three files.
 | --- | --- | --- | --- |
 | `LLVM` (base) | 5 / 29 | 1 452 / 6 850 | 19 / 29 match, 106 lines |
 | `IndentWidth: 4` | 5 / 29 | 1 737 / 7 015 | 15 / 29 match, 216 lines |
-| `UseTab: ForIndentation` | 5 / 29 | 1 556 / 6 850 | 11 / 29 match, 462 lines |
+| `UseTab: ForIndentation` | 5 / 29 | 1 452 / 6 850 | 18 / 29 match, 136 lines |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 461 / 8 657 | 15 / 29 match, 99 lines |
 | `AllowShortFunctionsOnASingleLine: None` | 5 / 29 | 1 424 / 6 906 | 19 / 29 match, 106 lines |
 | `ColumnLimit: 0` | **11 / 29** | **226** / 6 510 | **26 / 29 match, 10 lines** |
 
 What each row says:
 
-* **`UseTab`** is implemented (`Columns::indent` writes `indent / TabWidth` tabs and the remainder as spaces — the
-  oracle's split at `TabWidth` 8 and 4). Its remaining 462 lines are continuation lines: `ForIndentation` keeps
-  *alignment* as spaces, and this formatter cannot yet tell the indentation part of a continuation from its alignment
-  part.
+* **`UseTab`** is implemented, and a continuation line tabs its **indentation part** and keeps its *alignment* as
+  spaces (`Columns::indent` takes both columns): measured, a continuation at column 12 whose statement is indented 8
+  is `<TAB>` plus four spaces under `ForIndentation`. Its remaining 136 lines are the table alignment below and two
+  nested-continuation columns.
 * **`Allman`'s 99 spacing lines** are the case-body column, the empty-constructor split and `AlignEscapedNewlines`,
   all implemented this round; the remaining whole-file difference is the reflow, as for every style.
 * **`AllowShortFunctionsOnASingleLine: None`** costs nothing in spacing (106 lines, the base's number) and is

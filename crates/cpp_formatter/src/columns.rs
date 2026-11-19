@@ -58,21 +58,22 @@ impl Columns {
     /// of ten columns at `TabWidth: 8` as one tab and two spaces, and at `TabWidth: 4` as two tabs and two spaces, for
     /// every `UseTab` value. `ForIndentation` keeps *alignment* (a continuation line) as spaces; the two other values
     /// tab every leading column a tab can cover.
-    pub fn indent(&self, indent: usize, is_block_line: bool) -> String {
-        let tabs = match self.use_tab.as_str() {
-            "Never" => false,
-            "ForIndentation" => is_block_line,
-            _ => true,
+    pub fn indent(&self, indent: usize, base: usize) -> String {
+        // **`base` is the part of the column that belongs to indentation rather than alignment**: the whole column for
+        // a block line, the statement's own indent for a continuation line. Measured on clang-format 23.1.5: a
+        // continuation at column 12 whose statement is indented 8 is `<TAB>` plus four spaces under
+        // `UseTab: ForIndentation` — the indentation part is tabbed, the alignment part stays spaces. The two other
+        // values tab every leading column a tab can cover, and `Never` writes spaces.
+        let tabbed = match self.use_tab.as_str() {
+            "Never" => 0,
+            "ForIndentation" => base.min(indent) / self.tab_width,
+            _ => indent / self.tab_width,
         };
-        if tabs {
-            format!(
-                "{}{}",
-                "\t".repeat(indent / self.tab_width),
-                " ".repeat(indent % self.tab_width)
-            )
-        } else {
-            " ".repeat(indent)
-        }
+        format!(
+            "{}{}",
+            "\t".repeat(tabbed),
+            " ".repeat(indent.saturating_sub(tabbed * self.tab_width))
+        )
     }
 }
 
