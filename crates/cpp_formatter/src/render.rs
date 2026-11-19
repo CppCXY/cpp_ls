@@ -1458,11 +1458,33 @@ fn wrapping_lines(
                 closed = Some((open_index, kind));
                 // **An empty namespace gets no comment**: clang-format writes `namespace n {}`, measured; the
                 // comment is for a body whose closing brace a reader might otherwise have to search for.
+                //
+                // **`ShortNamespaceLines` counts the body's unwrapped lines**: a namespace holding one statement gets
+                // no comment with the LLVM default of 1, while two statements do — measured: `namespace d { void f(); }`
+                // stays `}`, and `void f(); void g();` (two unwrapped lines, even on one source line) gets
+                // `} // namespace d`.
                 if kind == crate::roles::BraceKind::Namespace && open_index + 1 != index {
-                    namespace_comments[index] = roles
-                        .namespace_names
-                        .get(&stream.tokens[open_index].start)
-                        .cloned();
+                    let mut body_lines = 0usize;
+                    let mut depth = 0isize;
+                    for inner in &stream.tokens[open_index + 1..index] {
+                        match inner.kind {
+                            K::LeftBrace => {
+                                depth += 1;
+                                if depth == 1 {
+                                    body_lines += 1;
+                                }
+                            }
+                            K::RightBrace => depth -= 1,
+                            K::Semicolon if depth == 0 => body_lines += 1,
+                            _ => {}
+                        }
+                    }
+                    if body_lines > style.count(StyleOption::ShortNamespaceLines) {
+                        namespace_comments[index] = roles
+                            .namespace_names
+                            .get(&stream.tokens[open_index].start)
+                            .cloned();
+                    }
                 }
             }
             K::ElseKeyword | K::CatchKeyword => {

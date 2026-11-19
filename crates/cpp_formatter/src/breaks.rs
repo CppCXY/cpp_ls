@@ -36,9 +36,43 @@ pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut start = 0usize;
     let mut parens = 0isize;
+    // **A preprocessor directive is one logical line, splices and all**: its body may hold `;`, `{` and `}`, and
+    // splitting there glued the macro's last line to the declaration after it (`lu_byte tt_ typedef struct TValue {`,
+    // measured on Lua 5.5's `lobject.h`). The directive ends at the first newline in the gap after a token.
+    let mut in_directive = false;
 
     for index in 0..stream.tokens.len() {
         let kind = stream.tokens[index].kind;
+        if in_directive {
+            // The newline **before** this token ends the directive, so this token starts a new logical line.
+            if stream.gaps[index].newlines > 0 {
+                in_directive = false;
+                lines.push(start..index);
+                start = index;
+            } else {
+                continue;
+            }
+        }
+        if kind == CppTokenKind::Hash && (index == 0 || stream.gaps[index].newlines > 0) {
+            in_directive = true;
+            continue;
+        }
+        // **A bare macro invocation is a line of its own**: `NLOHMANN_JSON_NAMESPACE_BEGIN` has no `;`, and without
+        // this the logical line ran into the declaration after it and the reflow joined them into
+        // `NLOHMANN_JSON_NAMESPACE_BEGIN namespace detail {` (measured on nlohmann json). The test is the shape
+        // clang-format uses for a macro: an all-capital identifier that ends its line.
+        if kind == CppTokenKind::Identifier
+            && is_a_macro_name(stream.tokens[index].text)
+            && stream
+                .gaps
+                .get(index + 1)
+                .is_some_and(|gap| gap.newlines > 0)
+            && index + 1 > start
+        {
+            lines.push(start..index + 1);
+            start = index + 1;
+            continue;
+        }
         match kind {
             CppTokenKind::LeftParen | CppTokenKind::LeftBracket => parens += 1,
             CppTokenKind::RightParen | CppTokenKind::RightBracket => parens -= 1,
@@ -73,6 +107,14 @@ pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
     lines
 }
 
+/// Is this identifier shaped like a macro name (`NLOHMANN_JSON_NAMESPACE_BEGIN`, `QT_BEGIN_NAMESPACE`)?
+fn is_a_macro_name(text: &str) -> bool {
+    text.chars().count() >= 2
+        && text.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
 /// Is the colon at `index` the end of a `case`/`default`/access label?
 fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
@@ -91,7 +133,7 @@ fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
 }
 
 /// Does the `)` at `index` close the condition of an `if`/`for`/`while`/`switch` whose body starts on the next line?
-fn starts_a_control_statement(stream: &Stream<'_>, index: usize) -> bool {
+pub(crate) fn starts_a_control_statement(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
     // Find the `(` that matches this `)`.
     let mut depth = 0isize;
@@ -118,6 +160,15 @@ fn starts_a_control_statement(stream: &Stream<'_>, index: usize) -> bool {
         return false;
     };
     if open == 0 {
+        return false;
+    }
+    // **A `while` after a `}` is the tail of a `do { … } while (…)`**, not a head that opens a body: it ends at the
+    // `;` that follows, and treating it as a body head indented the next line by a level (measured on a macro fixture
+    // whose `do { … } while (0)` was followed by `namespace ns {`).
+    if stream.tokens[open - 1].kind == WhileKeyword
+        && open >= 2
+        && stream.tokens[open - 2].kind == RightBrace
+    {
         return false;
     }
     matches!(

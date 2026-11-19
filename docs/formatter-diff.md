@@ -34,9 +34,9 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 5 / 29 | 1 441 / 6 850 | 19 / 29 match, **64 lines** |
-| `Google` | 3 / 29 | 1 605 / 6 887 | 21 / 29 match, 58 lines |
-| `Microsoft` | 5 / 29 | **485** / 8 031 | 28 / 29 match, **2 lines** |
+| `LLVM` | 4 / 29 | 1 445 / 6 850 | 18 / 29 match, 68 lines |
+| `Google` | 4 / 29 | 1 602 / 6 886 | 21 / 29 match, 58 lines |
+| `Microsoft` | 6 / 29 | **483** / 8 033 | 28 / 29 match, **2 lines** |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 match, 57 lines |
 | `LLVM, ColumnLimit: 0` | **11 / 29** | **224** / 6 510 | **27 / 29 match, 8 lines** |
 
@@ -128,8 +128,8 @@ and this repository's two C++ fixtures.
 | EmmyLua | `Google` | 3 / 29 | 1 605 / 6 887 | 21 / 29 files, 58 lines |
 | EmmyLua | `Microsoft` | 5 / 29 | 485 / 8 031 | **28 / 29 files, 2 lines** |
 | Lua 5.5 | `LLVM` | 0 / 40 | 7 309 / 20 302 | 10 / 40 files, 1 875 lines |
-| Lua 5.5 | `Google` | 0 / 40 | 10 842 / 20 268 | 5 / 40 files, 6 241 lines |
-| Lua 5.5 | `Microsoft` | 0 / 40 | 11 178 / 22 010 | 13 / 40 files, 1 480 lines |
+| Lua 5.5 | `Google` | 0 / 40 | 10 628 / 20 270 | 5 / 40 files, 5 983 lines |
+| Lua 5.5 | `Microsoft` | 0 / 40 | 10 574 / 22 006 | 13 / 40 files, **674 lines** |
 | nlohmann json | `LLVM` | 0 / 40 | 28 262 / 27 337 | 1 / 40 files, 2 558 lines |
 | nlohmann json | `Google` | 4 / 40 | 32 960 / 27 360 | 7 / 40 files, 8 062 lines |
 | nlohmann json | `Microsoft` | 7 / 40 | 9 820 / 27 327 | 12 / 40 files, 1 056 lines |

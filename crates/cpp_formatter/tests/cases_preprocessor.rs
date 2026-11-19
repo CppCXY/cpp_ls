@@ -110,3 +110,13 @@ fn preprocessor_07_define_alignment() {
     let again = cpp_formatter::format_file(path, expected, &styled);
     assert_eq!(again, expected, "the expected text is not a fixed point");
 }
+
+/// **A bare macro invocation is a line of its own**: `NLOHMANN_JSON_NAMESPACE_BEGIN` has no `;`, and the reflow used to
+/// join it with the declaration after it (`… _BEGIN namespace detail {`, measured on nlohmann json).
+#[test]
+fn preprocessor_08_a_bare_macro_line() {
+    check(
+        "NLOHMANN_JSON_NAMESPACE_BEGIN\nnamespace detail {\nvoid f();\n}\n",
+        "NLOHMANN_JSON_NAMESPACE_BEGIN\nnamespace detail {\nvoid f();\n}\n",
+    );
+}

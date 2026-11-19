@@ -114,12 +114,35 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
     // The level of the line currently being written, which is what a brace opened on that line closes back to.
     let mut line_level: isize = 0;
     let mut paren_depth: isize = 0;
+    // **An unbraced control body is one level in**: `if (x)` then `return 0;` on the next line puts the statement at
+    // the `if`'s level plus one, and that level ends with the statement (measured on Lua 5.5's `lauxlib.c`, where the
+    // statement came out at the block level and the trailing-comment alignment then moved the comment).
+    let mut unbraced: Vec<(usize, bool)> = Vec::new();
+    let mut extra: isize = 0;
+    let mut body_pending = false;
+    // **A directive is not a statement**: the `while (0)` of a macro`s `do { … } while (0)` must not open an unbraced
+    // body for the line after the macro.
+    let mut in_directive = false;
     let mut indents = vec![None; stream.tokens.len()];
 
     for index in 0..stream.tokens.len() {
         let token = stream.tokens[index];
         let brace = braces[index];
-        let level = base + case_extra;
+        if body_pending {
+            body_pending = false;
+            extra += 1;
+            // The body's statement: a control statement of its own ends with its nested statement, which the `;`
+            // handling below uses to unwind both levels.
+            let starts_control = matches!(
+                token.kind,
+                CppTokenKind::IfKeyword
+                    | CppTokenKind::ForKeyword
+                    | CppTokenKind::WhileKeyword
+                    | CppTokenKind::SwitchKeyword
+            );
+            unbraced.push((open.len(), starts_control));
+        }
+        let level = base + case_extra + extra;
         let closing_level = match brace {
             Brace::Closes | Brace::ClosesWithoutIndenting => {
                 open.last().map(|(_, _, opener, _)| *opener)
@@ -185,8 +208,10 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
         match brace {
             Brace::Opens => {
                 open.push((base, case_extra, line_level, paren_depth));
-                base = base + case_extra + 1;
+                base = base + case_extra + extra + 1;
                 case_extra = 0;
+                extra = 0;
+                unbraced.clear();
                 // **A brace ends the bracket context.** A lambda body opened inside `f(` is block-indented, not
                 // aligned to the bracket (measured: the lambda's body came out at the call's column, not a level in).
                 paren_depth = 0;
@@ -201,8 +226,54 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
                     case_extra = previous_case;
                     paren_depth = previous_parens;
                 }
+                // A `}` that closes the block an unbraced body was opened in ends that body too.
+                while unbraced
+                    .last()
+                    .is_some_and(|(depth, _)| *depth >= open.len())
+                {
+                    unbraced.pop();
+                    extra -= 1;
+                }
             }
             Brace::Nothing => {}
+        }
+        // **A control head that ends its line opens an unbraced body** for the statement after it: the body sits one
+        // level in and ends with that statement's `;` (or with the block's `}`).
+        if token.kind == CppTokenKind::Hash && (index == 0 || stream.gaps[index].newlines > 0) {
+            in_directive = true;
+        }
+        if token.kind == CppTokenKind::RightParen
+            && paren_depth == 1
+            && !in_directive
+            && crate::breaks::starts_a_control_statement(stream, index)
+            && stream
+                .tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind != CppTokenKind::LeftBrace)
+        {
+            body_pending = true;
+        }
+        if token.kind == CppTokenKind::Semicolon && paren_depth == 0 && !unbraced.is_empty() {
+            // **The statement that ends here ends every body whose own statement it was**: `if (a)` then `if (b)` then
+            // `g();` closes both unbraced bodies at that `;` (measured: `h();` after the nest belongs at the outer
+            // level, and popping one level left it one level in).
+            unbraced.pop();
+            extra -= 1;
+            while unbraced
+                .last()
+                .is_some_and(|(_, starts_control)| *starts_control)
+            {
+                unbraced.pop();
+                extra -= 1;
+            }
+        }
+        if in_directive
+            && stream
+                .gaps
+                .get(index + 1)
+                .is_some_and(|next| next.newlines > 0)
+        {
+            in_directive = false;
         }
         match token.kind {
             CppTokenKind::LeftParen | CppTokenKind::LeftBracket => paren_depth += 1,

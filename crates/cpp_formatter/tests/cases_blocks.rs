@@ -100,3 +100,38 @@ fn without_a_column_limit_an_empty_body_keeps_the_authors_lines() {
     check_with(unlimited.clone(), "void f() {\n}\n", "void f() {\n}\n");
     check_with(unlimited, "void f() {}\n", "void f() {}\n");
 }
+
+/// **The body of an unbraced control statement sits one level in**, and the level ends with that statement's `;` —
+/// including through a nest of two unbraced bodies. Measured against clang-format 23.1.5 (`LLVM`) on Lua 5.5's
+/// `lauxlib.c`, where the statement came out at the block level.
+#[test]
+fn blocks_21_an_unbraced_control_body() {
+    check(
+        "static int f(int level) {\n  if (level == 0)\n    return 0;\n  return 1;\n}\n",
+        "static int f(int level) {\n  if (level == 0)\n    return 0;\n  return 1;\n}\n",
+    );
+    check(
+        "void f(int a, int b) {\n  if (a)\n    if (b)\n      g();\n  h();\n}\n",
+        "void f(int a, int b) {\n  if (a)\n    if (b)\n      g();\n  h();\n}\n",
+    );
+    // A `do { … } while (…)` tail is not a head that opens a body: the line after it is at the block level. (The macro
+    // body itself is not formatted — a `#define` whose body holds braces is a separate, unimplemented feature, and
+    // `docs/formatter-diff.md` records it — so this fixture keeps the macro out and tests the statement after it.)
+    check(
+        "void f() {\n  do {\n    g();\n  } while (x);\n  h();\n}\n",
+        "void f() {\n  do {\n    g();\n  } while (x);\n  h();\n}\n",
+    );
+}
+/// **`ShortNamespaceLines` counts the body's unwrapped lines**: with the LLVM default of 1 a namespace holding one
+/// statement gets no closing comment, and one holding two gets it (measured against clang-format 23.1.5).
+#[test]
+fn blocks_22_short_namespace_lines() {
+    check(
+        "namespace detail {\nvoid f();\n}\n",
+        "namespace detail {\nvoid f();\n}\n",
+    );
+    check(
+        "namespace detail {\nvoid f();\nvoid g();\n}\n",
+        "namespace detail {\nvoid f();\nvoid g();\n} // namespace detail\n",
+    );
+}
