@@ -97,6 +97,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
         let forced = forced_breaks[index];
+        // **An empty block is `{}`, never `{` and `}` on two lines.** clang-format writes `void f() {}` for an empty
+        // body even when `AllowShortBlocksOnASingleLine` is `Never` — the option governs blocks with *statements* —
+        // and a record with nothing in it is `struct S {};` for the same reason. This is the pair being empty of
+        // **tokens and comments**: `{ /* nothing */ }` is a block with a comment and keeps its own lines.
+        let empty_brace_pair = index > 0
+            && gap.comments.is_empty()
+            && stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
+            && stream.tokens[index - 1].kind == cpp_parser::CppTokenKind::LeftBrace;
         // **Inside a `// clang-format off` span the gap is the source's**, byte for byte: no re-spacing, no re-indenting.
         // The tokens are still seen (a brace in the span still opens a block), so the indentation after `on` is right.
         if disabled.get(index).copied().unwrap_or(false) {
@@ -117,7 +125,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             out.push_str(line_ending);
             out.push_str(&" ".repeat(indent));
             column = indent;
-        } else if gap.newlines == 0
+        } else if (gap.newlines == 0 || empty_brace_pair)
             && gap.comments.is_empty()
             && !gap.at_end
             && index > 0
@@ -127,6 +135,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             out.push_str(&" ".repeat(spaces));
             column += spaces;
         } else if !in_directive
+            && !empty_brace_pair
             && (gap.comments.is_empty()
                 // **A comment on its own line still leaves the line's column to this pass**: a braced table's comment
                 // lines up with its elements (measured: `/* ORDER OPR */` belongs at the elements' column), and outside
@@ -649,7 +658,11 @@ mod tests {
 
     #[test]
     fn a_constructor_initializer_list_and_the_class_body_after_it() {
-        let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {\n  }\n\nprivate:\n  int a;\n  int b;\n};\n";
+        // **The empty body is `{}`** — the text clang-format writes for `T(const T &t) : a(t.a), b(t.b) {\n}`,
+        // where the fixture used to keep the two lines and this test claimed they were already formatted. The
+        // option that governs a *short* body is `AllowShortFunctionsOnASingleLine`; an **empty** one is `{}` under
+        // every style, which `render` now enforces for the `{`/`}` pair (see `empty_brace_pair`).
+        let source = "class T {\npublic:\n  T(const T &t)\n      : a(t.a),\n        b(t.b) {}\n\nprivate:\n  int a;\n  int b;\n};\n";
         let formatted = format(source, None, &llvm());
         assert_eq!(
             formatted, source,
