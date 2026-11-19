@@ -2745,3 +2745,22 @@ const`, and the type layer still takes the first member the list has. It needs t
 `operator_returns_of_with_arguments`/`a_members_answer_as_a_type` (the hover already does this filter for the card, via
 `Session::the_object_is_const`), and it is the same shape as the argument-conversion choice recorded above: the member
 list has both declarations and something has to decide between them.
+
+**Fixed in `3381fa6b`.** A `const` object has to pick the `const` overload, and the choice was by name and arity only.
+The qualifier now survives the alias step (it is written on the use, so it is put back on the target), `Type::is_const`
+looks through a reference but not a pointer, and the chooser prefers the declaration whose qualifier agrees — asking the
+member list only in the direction that can be wrong (a non-const object may call a `const` member). Measured:
+
+```text
+std::string&             s[0]   char&   →  char&
+const std::string&       s[0]   char&   →  const char&
+std::vector<int>&        v[0]   int&    →  int&
+const std::vector<int>&  v[0]   int&    →  const int&
+```
+
+`subscript_qualifiers.rs` pins it and fails without the change; `alias_members.rs`'s alias test now expects
+`const int&`, which is what its `const IntBox&` object means.
+
+**Still open beside it** is the argument-conversion half: `json["data"]` answers `basic_json&` because every
+`operator[]` of `basic_json` returns `reference`, and a class whose overloads return *different* types needs a choice by
+converting the argument, which no layer does yet.
