@@ -198,3 +198,158 @@ fn what_the_session_says_about_ldebug() {
         None => println!("[written] no view"),
     }
 }
+
+/// **Every source of the project, as a pull would report it** — the usability picture, not one file's story.
+///
+/// The report that started this probe was about one file; the question a reader actually has is "how much of this
+/// project does the analysis get wrong", and the answer is a list. Each `.c` is opened, cooked and diagnosed with the
+/// project's own configuration (`compile_commands.json` at the root, when it is there), and only files with something
+/// to say are printed.
+#[test]
+#[ignore = "a probe: opens every Lua source and prints its diagnostics"]
+fn what_every_file_says() {
+    let root = project();
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    let files = project_files(&root);
+    session.add_project_files(files.clone());
+    let mut slices = 0usize;
+    while session.pending_work() > 0 && slices < 600 {
+        session.advance(32);
+        slices += 1;
+    }
+    println!("[scan] {} file(s), {slices} slice(s)", files.len());
+
+    let mut with_errors = 0usize;
+    let mut with_checks = 0usize;
+    let mut total_errors = 0usize;
+    let mut total_checks = 0usize;
+    let mut sources: Vec<_> = files
+        .iter()
+        .filter(|path| path.extension().is_some_and(|it| it == "c"))
+        .collect();
+    sources.sort();
+    for path in sources {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        session.did_open(path, &text);
+        // **The server's own order**: a pull prepares the file, the pump cooks the closure, and the diagnostics are
+        // then answered from the reading it filed. Cooking before the pump reads a file whose unit is still
+        // provisional and answers `None` — which is what the first version of this scan measured.
+        let mut waited = 0usize;
+        while session.pending_work() > 0 && waited < 600 {
+            session.advance(32);
+            waited += 1;
+        }
+        if session.diagnostics(path).is_none() && session.cook(path).is_none() {
+            println!("== {} : no reading", path.display());
+            continue;
+        }
+        let Some(found) = session.diagnostics(path) else {
+            println!("== {} : no reading", path.display());
+            continue;
+        };
+        total_errors += found.errors.len();
+        total_checks += found.checks.len();
+        if found.errors.is_empty() && found.checks.is_empty() {
+            continue;
+        }
+        if !found.errors.is_empty() {
+            with_errors += 1;
+        }
+        if !found.checks.is_empty() {
+            with_checks += 1;
+        }
+        println!(
+            "== {} : {} error(s), {} check(s), reading {:?}, {} withheld",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            found.errors.len(),
+            found.checks.len(),
+            found.reading,
+            found.checks_withheld
+        );
+        for error in &found.errors {
+            let (line, column) = line_col(&text, error.start);
+            let around = text
+                .get(error.start..error.end.min(text.len()))
+                .unwrap_or("");
+            println!("   {line}:{column}  {}  [{around:?}]", error.message);
+        }
+        for finding in &found.checks {
+            let (line, column) = line_col(&text, finding.range.start_offset);
+            println!(
+                "   {line}:{column}  check {}  {}",
+                finding.code.name(),
+                finding.message
+            );
+        }
+    }
+    println!(
+        "[scan] {with_errors} file(s) with errors, {with_checks} with checks; {total_errors} error(s), {total_checks} check(s) in total"
+    );
+}
+/// **What the rendering looks like where a file reports parse errors** — the half a span in the file cannot show.
+///
+/// `lvm.c` reports seven errors at one position (`setnilvalue(s2v(L->top.p++))`), and the question is whether the
+/// *rendering* is malformed there (a macro expansion or a join rule) or whether the parser refused text that is
+/// well-formed. The file's own text is printed beside the rendering so the two can be compared at the same place.
+#[test]
+#[ignore = "a probe: prints the rendering at every parse error of one file"]
+fn what_the_rendering_looks_like_where_the_errors_are() {
+    let root = project();
+    let file = root.join("src/lvm.c");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("skipped: {} is not here", file.display());
+        return;
+    };
+    let mut session = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files(project_files(&root));
+    session.did_open(&file, &text);
+    let mut slices = 0usize;
+    while session.pending_work() > 0 && slices < 600 {
+        session.advance(32);
+        slices += 1;
+    }
+    let _ = session.cook(&file);
+    let Some(found) = session.diagnostics(&file) else {
+        println!("no reading");
+        return;
+    };
+    let view = session.view(&file).expect("the cooked file has a view");
+    let rendering = &view.source;
+    println!(
+        "{} error(s), rendering {} byte(s)",
+        found.errors.len(),
+        rendering.len()
+    );
+    for error in &found.errors {
+        let (line, column) = line_col(&text, error.start);
+        let written = text
+            .get(error.start..error.end.min(text.len()))
+            .unwrap_or("");
+        println!(
+            "--- {line}:{column} {} [written {written:?}]",
+            error.message
+        );
+        let reading = view.reading_offset_of(
+            cpp_code_analysis::file::coordinates::FileOffset::new(error.start),
+        );
+        match reading {
+            Some(reading) => {
+                let at = reading.get();
+                let from = at.saturating_sub(120);
+                let to = (at + 60).min(rendering.len());
+                println!("    rendering[{from}..{to}]: {:?}", &rendering[from..to]);
+            }
+            None => println!("    the error is at a place the rendering does not contain"),
+        }
+    }
+}
