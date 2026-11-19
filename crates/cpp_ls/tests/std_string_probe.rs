@@ -40,7 +40,11 @@ fn what_the_member_list_says_about_strings_subscript() {
     };
 
     for class in ["std::string", "std::basic_string<char>", "std::vector<int>"] {
-        match session.members_of(&view, class) {
+        let started = std::time::Instant::now();
+        let listed = session.members_of(&view, class);
+        let cost = started.elapsed();
+        println!("[members] {class}: {cost:?} for one list");
+        match listed {
             cpp_code_analysis::Known::Yes(listed) => {
                 println!(
                     "[members] {class}: {} member(s), {} overload(s) of operator[]",
