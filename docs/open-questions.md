@@ -2681,7 +2681,7 @@ the first inside MSVC's `string.h` C++ overloads (`template < size_t _Size > inl
 ( & _Destination ) [ _Size ], … ) throw ( ) { … }`), and the rest a cascade after it that reaches `lua.h`'s
 `extern void *(lua_touserdata) (…)` declarations. The individual shapes parse on their own (measured with
 `cpp_dump`), so the next instrument is the stream's first error's surroundings, not the shapes.
-### The program reading of a C file still has 15 parse errors, and they are a `>=`
+### The program reading of a C file: 15 parse errors, and they were a `>=` — fixed
 
 After the C seed (above) removed the C++ blocks from Lua's `ldebug.c` program stream, the stream still reports **15**
 `expected primary expression` errors, and the text at the first one is
@@ -2707,3 +2707,11 @@ the unit walk's stream of ldebug.c         ( ( s ) -> shrlen > = 0 )
 So the renderer and the cook are right, and the walk's `MacroBody` — the one built from `bodied` facts and replayed by
 `UnitDefinitions` — is where the spelling is lost. The artifact is `target/lua-render4/ldebug.c.parsed`, first error at
 `52862..52863`; `crates/cpp_parser/tests/stream_errors_probe.rs` (`CPPLS_STREAM=…`) prints the offsets and the context.
+
+**Fixed in `89afa111`.** `RenderedUnit::push` spaced every pair of an expansion apart, because it asked whether two
+tokens touched by comparing their **written** ranges and one expansion's tokens all carry the **invocation**. The
+expander's own answer (`ExpandedToken::space_before`) is now what the unit writer takes for the tokens the cook
+produced; text the file wrote keeps the range test. Measured on the same stream: **15 → 0** parse errors, and the
+expansion reads `(((s )->shrlen >= 0) ? …)`. `crates/cpp_code_analysis/tests/program_stream_separators.rs` pins the
+split operators (`>=`, `<=`, `>>`) and a clean parse, and fails without the change. `FORMAT_VERSION` is 40 so a stored
+program reading made with the old spacing is not served.
