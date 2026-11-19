@@ -134,12 +134,20 @@ fn is_one_group(body: &str) -> bool {
     false
 }
 
-/// **A replacement list as code**: line splices gone, comments gone.
+/// **A replacement list as code**: line splices gone, comments gone, and every literal reduced to its quotes.
 ///
-/// Both are text the preprocessor removes before a compiler sees the body, and both were read as operators by the
-/// scanners below — a splice is a `\\` at the end of a line, and the `*` of `/*` is a multiplication if nothing
-/// knows it is inside a comment. The strings themselves are kept: a `#define` that builds a format string is still
-/// a body with no loose operator, and removing the quotes would put its `%d` at depth zero.
+/// The first two are text the preprocessor removes before a compiler sees the body, and both were read as operators by
+/// the scanners below — a splice is a `\\` at the end of a line, and the `*` of `/*` is a multiplication if nothing
+/// knows it is inside a comment.
+///
+/// **A literal is one token, so its text is not scanned for operators.** This used to keep the contents, with the note
+/// that removing them would put the `%d` of a format string at depth zero — which is where it already was: the
+/// contents were scanned either way. Measured on `3rd/lua-5.4.3/src/lua.h:28`,
+/// `#define LUA_COPYRIGHT LUA_RELEASE "  Copyright (C) 1994-2021 Lua.org, PUC-Rio"` was reported as *"a caller's
+/// expression is spliced in without its precedence"* because the `-` of `1994-2021` was read as a subtraction; a
+/// `#define FORMAT "%d\n"` was reported for the same reason, and a `(` inside a literal made `is_a_call`'s bracket
+/// counting wrong. The quotes are kept so the body still reads as what it is, and nothing inside them can be an
+/// operator, a bracket or a paste.
 fn the_code_of(body: &str) -> String {
     let mut code = String::with_capacity(body.len());
     let mut characters = body.chars().peekable();
@@ -176,18 +184,26 @@ fn the_code_of(body: &str) -> String {
                 }
                 code.push(' ');
             }
-            // A string or a character literal is copied as it is: a `//` inside it is not a comment.
+            // **A literal is copied as its two quotes and nothing else.** Its contents are not code: a `//` inside it
+            // is not a comment, an operator inside it is not an operator, and a `##` inside it is not a paste — the
+            // lexer hands the whole literal over as one token, which is the text a body judge should see. The closing
+            // quote is only written when the literal has one, so a body cut off mid-literal still ends where the
+            // file does.
             quote @ ('"' | '\'') => {
-                code.push(quote);
+                let mut closed = false;
                 while let Some(inside) = characters.next() {
-                    code.push(inside);
                     if inside == '\\' {
-                        if let Some(escaped) = characters.next() {
-                            code.push(escaped);
-                        }
-                    } else if inside == quote {
+                        characters.next();
+                        continue;
+                    }
+                    if inside == quote {
+                        closed = true;
                         break;
                     }
+                }
+                code.push(quote);
+                if closed {
+                    code.push(quote);
                 }
             }
             other => code.push(other),

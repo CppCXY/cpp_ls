@@ -161,6 +161,56 @@ fn a_macro_that_expands_to_a_type_is_silent() {
     );
 }
 
+/// **A string literal is one token, not a run of operators.**
+///
+/// Measured on `3rd/lua-5.4.3/src/lua.h:28`:
+///
+/// ```c
+/// #define LUA_COPYRIGHT LUA_RELEASE "  Copyright (C) 1994-2021 Lua.org, PUC-Rio"
+/// ```
+///
+/// The `-` of `1994-2021` is inside a string literal, and it was read as a subtraction at depth zero — so an
+/// **object-like** macro whose body is a name and a literal was reported as *"a caller's expression is spliced in
+/// without its precedence — write `#define LUA_COPYRIGHT(…) (…)`"*, which is advice about a parameter that does not
+/// exist. The `%` of a format string is the same false positive, and so is a `(` inside a literal, which broke the
+/// bracket counting that `is_a_call` does.
+#[test]
+fn an_operator_inside_a_string_literal_is_not_an_operator() {
+    let copyright = codes_of(
+        "#define LUA_RELEASE \"Lua 5.4.3\"\n\
+         #define LUA_COPYRIGHT LUA_RELEASE \"  Copyright (C) 1994-2021 Lua.org, PUC-Rio\"\n\
+         int f() { return 0; }\n",
+    );
+    assert_silent_about(
+        &copyright,
+        DiagnosticCode::MacroParentheses,
+        "the body is a name and a literal, and the `-` is inside the literal",
+    );
+
+    let format = codes_of("#define FORMAT \"%d\\n\"\nint f() { return 0; }\n");
+    assert_silent_about(
+        &format,
+        DiagnosticCode::MacroParentheses,
+        "the `%` of a format string is inside the literal",
+    );
+
+    // **A literal's own parenthesis does not make a call**: `"("` is one token, and the body is not a call.
+    let unbalanced = codes_of("#define OPEN \"(\"\nint f() { return 0; }\n");
+    assert_silent_about(
+        &unbalanced,
+        DiagnosticCode::MacroParentheses,
+        "the `(` is inside the literal, so the body holds no operator and no call",
+    );
+
+    // …and a real operator **beside** the literal is still the finding: masking a literal must not hide code.
+    let still = codes_of("#define TWICE(x) \"(\" x * 2\nint f(int n) { return TWICE(n + 1); }\n");
+    assert_reported(
+        &still,
+        DiagnosticCode::MacroParentheses,
+        "the `*` is written outside the literal",
+    );
+}
+
 /// **Comments are not code, and a body that is a call after four lines of `/* … */` is still a call.**
 ///
 /// Measured on neovim's `src/klib/kvec.h:219`, where `kvi_resize_full` writes its replacement list as
