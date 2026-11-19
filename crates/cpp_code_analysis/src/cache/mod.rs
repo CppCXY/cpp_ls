@@ -69,7 +69,7 @@ pub mod cache_db;
 pub mod cache_lru;
 
 // **What the cache stores, and what it reads back.** A summary is the unit the whole cache is built from, the two
-// codecs are its bytes, and memory/lloc are the two numbers a report about it needs. lign is here because
+// codecs are its bytes, and memory/alloc are the two numbers a report about it needs. align is here because
 // the thing it compares against a compiler is a RenderedUnit --- the cached reading of a program.
 pub mod align;
 pub mod alloc;
@@ -365,7 +365,17 @@ use std::path::{Path, PathBuf};
 /// Measured on `nlohmann/json.hpp`: the cooked reading went from 6 parse errors and **151** `ClassBody` children to
 /// **0** errors and 242 members of `basic_json`, `operator[]` among them — the members after the first `at` had been
 /// filed without their class scope, which is what made `json["data"].` unanswerable.
-pub const FORMAT_VERSION: u32 = 38;
+///
+/// # Why this moved to 39
+///
+/// **A seed is part of the reading, and the seed now depends on the file's language.** The toolchain's predefines are
+/// probed once, with a `predefined.cpp`, so every `.c` file was cooked with `__cplusplus` and `_MSVC_LANG` in force:
+/// MSVC's `string.h` then contributed its `extern "C++" { template … }` overloads to a C program's stream, and the
+/// parse of that stream reported `expected primary expression` inside text no C compiler reads. A stored rendering
+/// made that way is keyed by a closure and an environment that did not change, so nothing but a version reaches it —
+/// measured on Lua 5.5.0's `ldebug.c` with a cache from before the fix: **30** syntax errors still published, against
+/// 0 with the same binary and an empty cache.
+pub const FORMAT_VERSION: u32 = 39;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
