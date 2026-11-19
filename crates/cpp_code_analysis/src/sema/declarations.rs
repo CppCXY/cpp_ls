@@ -3113,11 +3113,33 @@ pub(crate) fn declared_returns_of_with(
     let before_the_name = declarator
         .as_ref()
         .map(|declarator| {
-            before(
+            let text = before(
                 &declarator.text().to_string(),
                 declarator,
                 binding.name_range,
-            )
+            );
+            // **A parenthesized name is not a function pointer.** Lua's C API writes
+            // `LUALIB_API const char *(luaL_tolstring) (lua_State *L, …)` — the `*` is the *return type's*, and the
+            // parentheses only wrap the name. The text before the name is `*(`, which the operator filter below
+            // refused, so the fact recorded `const char` and every call was reported as returning something that
+            // does not convert (measured: `assign-type-check` on `const char *sep = luaL_optlstring(…)`, Lua 5.5.0).
+            //
+            // `int (*f)(int)` has the same two characters — `(*` — and there the `*` **is** the declarator's (a
+            // pointer to function), which this cannot assemble. The two differ in where the `(` is: after the
+            // operators for a function returning a pointer, before them for a pointer to function. Only the first
+            // is unparenthesised here.
+            let trimmed = text.trim_end();
+            match trimmed.strip_suffix('(') {
+                Some(rest)
+                    if rest
+                        .trim_end()
+                        .chars()
+                        .all(|c| c == '*' || c == '&' || c.is_whitespace()) =>
+                {
+                    rest.to_string()
+                }
+                _ => text,
+            }
         })
         .filter(|operators| {
             operators
@@ -6658,6 +6680,8 @@ void f(int value);
              auto trailing() -> Widget;\n\
              auto deduced() { return Widget{}; }
         auto unclearable() { return make(); }\n\
+             const char *(paren_name) (void);\n\
+             int (*through_pointer)(int);\n\
              void plain();\n",
         );
 
@@ -6669,6 +6693,22 @@ void f(int value);
         };
 
         assert_eq!(of("make").returns.as_deref(), Some("Widget"));
+        // **A parenthesized name keeps the return type's operators.** Lua's C API writes
+        // `LUALIB_API const char *(luaL_tolstring) (lua_State *L, …)`; the text before the name is `*(`, which the
+        // operator filter refused, so the fact said `const char` — and every call was then reported as returning a
+        // value that does not convert (`const char *sep = luaL_optlstring(…)` in Lua 5.5.0's `ltablib.c`).
+        // `int (*through_pointer)(int)` has the same two characters and is the *other* shape: there the `*` is the
+        // declarator's, so only a `(` **after** the operators is a parenthesized name.
+        assert_eq!(
+            of("paren_name").returns.as_deref(),
+            Some("const char *"),
+            "a parenthesized declarator name is not a function pointer"
+        );
+        assert_eq!(
+            of("through_pointer").type_of.as_deref(),
+            Some("int(int)*"),
+            "…and a pointer to function keeps its own shape"
+        );
         assert_eq!(
             of("make").type_of,
             None,
