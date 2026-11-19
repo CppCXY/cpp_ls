@@ -1758,7 +1758,12 @@ const COOKED_MAGIC: &[u8; 8] = b"CPPLSCKR";
 /// 2: the record may carry the rendering it was read from — the per-file cook's, which is what a cook hit needs to
 /// answer a `view` without rendering anything. A record without one is what a program read files (it has no
 /// per-file spans to keep), and the kind byte says which it is.
-const COOKED_VERSION: u32 = 2;
+///
+/// 3: the rendering carries the **inactive regions** — the spans of the branches this configuration does not compile,
+/// in file coordinates. They cannot be derived from a rendering after the fact (a rendering has no dead text, and "no
+/// token" is indistinguishable from a comment), so a warm start that dropped them would answer "nothing is greyed
+/// out" for a file full of dead branches.
+const COOKED_VERSION: u32 = 3;
 
 /// **The record has its rendering with it** — see [`COOKED_VERSION`].
 const COOKED_HAS_A_RENDERING: u8 = 1;
@@ -1794,6 +1799,12 @@ pub fn encode_the_cooked_record(
         put_u32(&mut out, rendered.spans.len() as u32);
         for span in &rendered.spans {
             put_span(&mut out, span);
+        }
+        // **The regions a reader sees greyed out**, which the rendering's text cannot answer for: they are spans of
+        // the file the rendering *dropped*, so nothing in `text` names them.
+        put_u32(&mut out, rendered.inactive.len() as u32);
+        for span in &rendered.inactive {
+            put_range(&mut out, *span);
         }
     }
     out
@@ -1916,10 +1927,14 @@ pub fn decode_the_cooked_record(
     for _ in 0..reader.count()? {
         spans.push(get_span(&mut reader)?);
     }
+    let mut inactive = Vec::new();
+    for _ in 0..reader.count()? {
+        inactive.push(reader.range()?);
+    }
     Ok((
         reading,
         Some(crate::preprocess::cooked::RenderedCooked::from_parts(
-            text, spans,
+            text, spans, inactive,
         )),
     ))
 }
@@ -2168,6 +2183,8 @@ fn a_cooked_record_with_its_rendering_round_trips() {
                 },
             ),
         ],
+        // **And the regions this configuration did not compile**, which no rendering text can answer for.
+        vec![SourceRange::new(7, 9), SourceRange::new(20, 4)],
     );
 
     let bytes = encode_the_cooked_record(&reading, Some(&rendered));
@@ -2179,6 +2196,10 @@ fn a_cooked_record_with_its_rendering_round_trips() {
     assert_eq!(
         rendering.spans, rendered.spans,
         "the spans, and where each token came from, are the record's reason to exist"
+    );
+    assert_eq!(
+        rendering.inactive, rendered.inactive,
+        "the inactive regions are the half a rendering cannot derive, so a warm start must get them back"
     );
 
     // **And the record without one says so**, which is what a program read writes: facts, no per-file spans.

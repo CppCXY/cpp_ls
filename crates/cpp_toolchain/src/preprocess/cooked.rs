@@ -220,6 +220,7 @@ impl CookedStream {
         RenderedCooked {
             text,
             spans,
+            inactive: self.inactive.clone(),
             written_order: std::sync::OnceLock::new(),
         }
     }
@@ -272,6 +273,17 @@ pub struct RenderedCooked {
     pub text: String,
     /// One entry per token of the stream it was rendered from, in the same order.
     pub spans: Vec<RenderedSpan>,
+    /// **The regions of the file this configuration does not compile**, in file coordinates — the answer behind the
+    /// editor's grey text.
+    ///
+    /// Copied from [`CookedStream::inactive`], which the walk fills while it decides branches: one span per dead
+    /// branch, the directive lines included on purpose so the pieces of one branch are one range. Every offset is an
+    /// offset into the **file's own text** — not into `text`, whose offsets mean nothing outside this value — which is
+    /// what makes an LSP range a line-index lookup rather than a mapping.
+    ///
+    /// Empty for a file with no conditionals, and empty for a rendering read back from a record written before this
+    /// field existed; the record's version is what tells those apart (`COOKED_VERSION`).
+    pub inactive: Vec<SourceRange>,
     /// **The reverse direction**, `(written start, cooked start)`, sorted by the file offset — built on the first
     /// question that needs it and never invalidated, because a rendering does not change. See
     /// [`RenderedCooked::the_rendering_offset_of`].
@@ -293,10 +305,14 @@ impl RenderedCooked {
     /// The reverse index is derived on the first question and never stored, so a rendering a cache hands back is the
     /// same value the renderer produced; nothing here checks the spans, and nothing needs to: the record they were
     /// read from is keyed by the text and the environment they were rendered under.
-    pub fn from_parts(text: String, spans: Vec<RenderedSpan>) -> Self {
+    ///
+    /// `inactive` comes from the same record: a rendering has no dead text in it, so the spans cannot be derived from
+    /// `text` after the fact ("no token" and "a comment" are indistinguishable), which is why the record carries them.
+    pub fn from_parts(text: String, spans: Vec<RenderedSpan>, inactive: Vec<SourceRange>) -> Self {
         RenderedCooked {
             text,
             spans,
+            inactive,
             written_order: std::sync::OnceLock::new(),
         }
     }

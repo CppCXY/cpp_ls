@@ -108,6 +108,8 @@ enum Command {
         #[arg(long, default_value_t = 40)]
         limit: usize,
     },
+    /// The regions of the file this configuration does not compile — what an editor greys out.
+    Inactive,
     /// The reading format the index on disk uses.
     Format,
     /// The session's own counters after the setup.
@@ -156,7 +158,7 @@ fn run(cli: Cli) -> Result<(), String> {
         return Ok(());
     }
 
-    let opened = project::open(&cli.project)?;
+    let mut opened = project::open(&cli.project)?;
     if cli.project.keep {
         eprintln!("[inspect] project root {}", opened.root.display());
     }
@@ -191,6 +193,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Summary => questions::the_summary(&opened)?,
         Command::Tree { limit } => questions::the_tree(&opened, &cli.place, *limit)?,
         Command::Grep { pattern, limit } => questions::the_grep(&opened, pattern, *limit)?,
+        Command::Inactive => questions::the_inactive(&mut opened)?,
         Command::Format | Command::Stats => unreachable!("handled above"),
     };
     print(&answer, cli.json);

@@ -746,3 +746,55 @@ pub fn the_grep(opened: &Opened, pattern: &str, limit: usize) -> Result<Answer, 
         json!({ "pattern": pattern, "nodes": nodes }),
     ))
 }
+
+/// The regions of the file this configuration does not compile — what an editor greys out.
+///
+/// The answer comes from the file's **rendering**, so a file that has never been cooked is cooked here: the spans are
+/// a by-product of the branch decisions, and no summary can answer for them. Every range is in the file's own
+/// coordinates, which is why this prints `line:column` from the file's text and not from any rendering offset.
+pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
+    let mut spans = match opened.session.inactive_regions(&opened.file) {
+        Some(spans) => spans,
+        None => {
+            let _ = opened.session.cook(&opened.file);
+            opened
+                .session
+                .inactive_regions(&opened.file)
+                .ok_or_else(|| format!("{} could not be cooked", opened.file.display()))?
+        }
+    };
+    spans.sort_by_key(|span| span.start_offset);
+
+    let text = opened.text.as_str();
+    let mut report = format!(
+        "{} inactive region(s) in {}\n",
+        spans.len(),
+        opened.file.display()
+    );
+    let mut regions = Vec::with_capacity(spans.len());
+    for span in &spans {
+        let start = at_a_place(text, span.start_offset);
+        let end = at_a_place(text, span.end_offset());
+        let first_line = text
+            .get(span.start_offset..span.end_offset())
+            .and_then(|covered| covered.lines().next())
+            .unwrap_or("")
+            .trim();
+        report.push_str(&format!(
+            "  {start}..{end}  {} byte(s)  {first_line}\n",
+            span.length
+        ));
+        let (line, character) = line_col(text, span.start_offset);
+        let (end_line, end_character) = line_col(text, span.end_offset());
+        regions.push(json!({
+            "start": { "line": line.saturating_sub(1), "character": character.saturating_sub(1) },
+            "end": { "line": end_line.saturating_sub(1), "character": end_character.saturating_sub(1) },
+            "bytes": span.length,
+        }));
+    }
+    let value = json!({
+        "file": opened.file.display().to_string(),
+        "regions": regions,
+    });
+    Ok(Answer::new(report, value))
+}

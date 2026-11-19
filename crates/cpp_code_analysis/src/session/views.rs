@@ -193,6 +193,36 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The regions of the file this configuration does not compile**, in the file's own coordinates — what an
+    /// editor greys out.
+    ///
+    /// Answered from the file's **rendering** ([`Session::known_rendering_of`], which also reads a persisted record
+    /// back), because the spans are a by-product of the walk that decided the branches: they are offsets into the
+    /// file's own text, so a consumer turns one into a line/column range with the file's own line index and no
+    /// mapping.
+    ///
+    /// `None` when no rendering is read yet: the call asks for one, and a later request answers. That is the same
+    /// "not now, next time" contract [`Session::view`] documents, and it is why the caller must be the pump's idle
+    /// drain or a request that can re-ask. **A file with no directives answers `Some(vec![])`** — "nothing is
+    /// inactive" is an answer, and `None` is reserved for "nobody has read this yet".
+    pub fn inactive_regions(&self, path: impl AsRef<Path>) -> Option<Vec<cpp_parser::SourceRange>> {
+        // The index's spelling, for the reason `view` gives: a client sends `C:\…`, the resolver wrote `c:/…`, and a
+        // lookup by the caller's spelling finds nothing.
+        let requested = path.as_ref();
+        let key = self
+            .store
+            .index()
+            .summary(requested)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| requested.to_path_buf());
+        let file = self.vfs.held(&key)?;
+        if let Some(rendered) = self.known_rendering_of(&file.path, &file.text) {
+            return Some(rendered.inactive.clone());
+        }
+        self.ask_for_a_rendering(&file.path, &file.text);
+        None
+    }
+
     /// **Ask for a file's rendering, once per text** — see [`Session::renderings_asked`].
     ///
     /// The callers are queries that could not answer from the rendering cache, and the distinction this makes is
