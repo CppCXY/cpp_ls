@@ -111,10 +111,24 @@ pub fn align(output: &str, style: &Style) -> String {
     }
 
     let mut rewritten: Vec<Option<String>> = vec![None; lines.len()];
+    // The lines that hold nothing but a comment: a run of trailing comments **continues through them**, because
+    // clang-format aligns across a doc comment's continuation line (measured: `a_long_name, ///< first` then
+    // `             ///< second` then `b, ///< bee` — the `b` and `cc` comments align to `a_long_name,`'s, not to each
+    // other). A line with code, and a blank line, do break the run.
+    let comment_only: Vec<bool> = lines
+        .iter()
+        .map(|line| line.trim_start().starts_with("//") || line.trim_start().starts_with("/*"))
+        .collect();
+    let continues_through_comments =
+        |from: usize, to: usize| from < to && (from + 1..to).all(|between| comment_only[between]);
+    let mut trailing_column: Vec<Option<usize>> = vec![None; lines.len()];
     let mut start = 0usize;
     while start < found.len() {
         let mut end = start + 1;
-        while end < found.len() && found[end].0 == found[end - 1].0 + 1 {
+        while end < found.len()
+            && (found[end].0 == found[end - 1].0 + 1
+                || continues_through_comments(found[end - 1].0, found[end].0))
+        {
             end += 1;
         }
         // **The column of the sequence, or the comment's own start when it cannot be aligned** (`run_columns`):
@@ -134,12 +148,48 @@ pub fn align(output: &str, style: &Style) -> String {
         let columns = run_columns(&entries, limit);
         for (offset, (index, code, comment)) in found[start..end].iter().enumerate() {
             let spaces = match columns[offset] {
-                Some(column) => column.saturating_sub(width(code)),
+                Some(column) => {
+                    trailing_column[*index] = Some(column);
+                    column.saturating_sub(width(code))
+                }
                 None => start_spaces(code, comment, minimum),
             };
             rewritten[*index] = Some(format!("{code}{}{comment}", " ".repeat(spaces)));
         }
         start = end;
+    }
+
+    // **A line that holds only a line comment directly under a trailing one starts at that comment's column**: that is
+    // what clang-format does for the continuation line of a doc comment (`///< actual value` under `///< …`), measured
+    // on nlohmann json's `lexer.hpp` and on a two-line `// one` / `// two` fixture.
+    let indentation = |line: &str| {
+        line.chars()
+            .take_while(|character| *character == ' ')
+            .count()
+    };
+    for index in 1..lines.len() {
+        if !comment_only[index] {
+            continue;
+        }
+        let Some(column) = trailing_column[index - 1] else {
+            continue;
+        };
+        let trimmed = lines[index].trim_start();
+        if !trimmed.starts_with("//") {
+            continue;
+        }
+        // **Only a comment written as a continuation is pulled in**: one that sits at the code's own indentation is a
+        // comment block of its own (measured: `int aaaa; // one` then `// two` at column 0 stays at column 0, while
+        // `// two` written five columns in moves to the trailing comment's column).
+        if indentation(lines[index]) <= indentation(lines[index - 1]) {
+            continue;
+        }
+        let ending = if trimmed.ends_with('\n') { "\n" } else { "" };
+        rewritten[index] = Some(format!(
+            "{}{}{ending}",
+            " ".repeat(column),
+            trimmed.trim_end()
+        ));
     }
 
     let mut out = String::with_capacity(output.len());
