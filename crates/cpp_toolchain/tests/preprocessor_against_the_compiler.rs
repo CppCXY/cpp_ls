@@ -330,3 +330,177 @@ int f(struct S *s, int a) {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// 3. Which regions of a file are inactive — the answer a reader sees greyed out
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The spans this crate greys out: the regions the walk decided not to compile.
+fn our_inactive(source: &str) -> Vec<cpp_parser::SourceRange> {
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    cook_with(source, &tokens, &nothing_defined).inactive
+}
+
+/// Every `MARK_*` identifier and the offset it starts at.
+fn marker_offsets(source: &str) -> Vec<(String, usize)> {
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    tokens
+        .iter()
+        .filter(|token| token.kind == cpp_parser::CppTokenKind::Identifier)
+        .map(|token| {
+            (
+                source[token.range.start_offset..token.range.end_offset()].to_string(),
+                token.range.start_offset,
+            )
+        })
+        .filter(|(text, _)| text.starts_with("MARK_"))
+        .collect()
+}
+
+/// The markers **outside** every inactive span — the code a reader sees compiled.
+fn markers_outside(spans: &[cpp_parser::SourceRange], markers: &[(String, usize)]) -> Vec<String> {
+    markers
+        .iter()
+        .filter(|(_, at)| {
+            !spans
+                .iter()
+                .any(|span| span.start_offset <= *at && *at < span.end_offset())
+        })
+        .map(|(text, _)| text.clone())
+        .collect()
+}
+
+fn covers(source: &str, span: &cpp_parser::SourceRange, needle: &str) -> bool {
+    let at = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("`{needle}` is in the fixture"));
+    span.start_offset <= at && at < span.end_offset()
+}
+
+/// **The branches a reader must see greyed out are the ones the compiler does not compile.**
+///
+/// The feature's whole risk is a wrong region: grey text over code that compiles is visible wrongness, and no
+/// downstream layer can catch it. So the comparison is differential, like the two fixtures above: every marker the
+/// compiler keeps must be outside the spans, and every marker it drops must be inside one.
+#[test]
+fn the_regions_a_reader_sees_greyed_are_the_ones_the_compiler_drops() {
+    let Some(compiler) = the_compiler() else {
+        eprintln!("skipped: no C++ compiler on this machine (set CPPLS_TEST_CXX to name one)");
+        return;
+    };
+    let fixture = Fixture::new("inactive-regions", INACTIVE_REGIONS);
+
+    let theirs = the_markers_of(&the_compilers_answer(&compiler, &fixture.path));
+    let spans = our_inactive(INACTIVE_REGIONS);
+    let ours = markers_outside(&spans, &marker_offsets(INACTIVE_REGIONS));
+
+    assert_eq!(
+        ours,
+        theirs,
+        "\nthe branches this crate would grey out are not the ones `{}` drops\n  visible: {ours:?}\n  theirs:  {theirs:?}",
+        compiler.display()
+    );
+    assert!(
+        !spans.is_empty(),
+        "the fixture has dead branches, so there is something to grey out"
+    );
+}
+
+/// Every conditional shape the compiler compares, each with a marker in the branch it keeps.
+const INACTIVE_REGIONS: &str = "\
+#define ON 1
+#define OFF 0
+
+#if ON
+MARK_LIVE_IF
+#else
+MARK_DEAD_ELSE
+#endif
+
+#if OFF
+MARK_DEAD_IF
+#elif ON
+MARK_LIVE_ELIF
+#else
+MARK_DEAD_ELSE_OF_ELIF
+#endif
+
+#ifndef MISSING
+MARK_LIVE_IFNDEF
+#endif
+
+#if ON
+#if OFF
+MARK_DEAD_NESTED
+#else
+MARK_LIVE_NESTED_ELSE
+#endif
+#endif
+
+#if OFF
+#if ON
+MARK_DEAD_IN_DEAD
+#else
+MARK_DEAD_ELSE_IN_DEAD
+#endif
+#endif
+";
+
+/// **One dead branch is one span, and an `#include` inside it is never read.**
+///
+/// The include names a header that does not exist: a compiler that entered the branch would fail the fixture, so the
+/// compiler's own success is the proof of the property the plan turns on (`docs/inactive-regions.md` §2.4). On this
+/// side, the span must cover both the `#include` line and the marker after it, which is what makes a dead branch one
+/// range a client can grey out.
+#[test]
+fn one_dead_branch_is_one_span_and_its_include_is_never_read() {
+    let Some(compiler) = the_compiler() else {
+        eprintln!("skipped: no C++ compiler on this machine (set CPPLS_TEST_CXX to name one)");
+        return;
+    };
+    let fixture = Fixture::new("dead-include", DEAD_INCLUDE);
+
+    let theirs = the_markers_of(&the_compilers_answer(&compiler, &fixture.path));
+    assert_eq!(
+        theirs,
+        ["MARK_LIVE_BEFORE", "MARK_LIVE_AFTER"],
+        "the compiler must not read the header the dead branch includes"
+    );
+
+    let spans = our_inactive(DEAD_INCLUDE);
+    assert_eq!(
+        spans.len(),
+        1,
+        "one dead branch is one span, not a piece per line: {spans:?}"
+    );
+    let span = &spans[0];
+    assert!(
+        covers(DEAD_INCLUDE, span, "#include"),
+        "the span covers the include line: {span:?}"
+    );
+    assert!(
+        covers(DEAD_INCLUDE, span, "MARK_DEAD_AFTER_THE_INCLUDE"),
+        "and the code after it: {span:?}"
+    );
+    for live in ["MARK_LIVE_BEFORE", "MARK_LIVE_AFTER"] {
+        let at = DEAD_INCLUDE.find(live).unwrap();
+        assert!(
+            !(span.start_offset <= at && at < span.end_offset()),
+            "`{live}` is compiled and must not be greyed"
+        );
+    }
+}
+
+const DEAD_INCLUDE: &str = "\
+#define ON 1
+
+#if ON
+MARK_LIVE_BEFORE
+#else
+#include \"a_header_that_does_not_exist.h\"
+MARK_DEAD_AFTER_THE_INCLUDE
+#endif
+
+MARK_LIVE_AFTER
+";
