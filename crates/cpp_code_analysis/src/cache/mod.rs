@@ -383,7 +383,16 @@ use std::path::{Path, PathBuf};
 /// out as `> =` and the program read of a C file reported `expected primary expression` — 15 of them on Lua 5.5.0's
 /// `ldebug.c`. A stored program reading made that way is keyed by the closure it was read from, which did not change,
 /// so only the version reaches it.
-pub const FORMAT_VERSION: u32 = 40;
+///
+/// # Why this moved to 41
+///
+/// **A fact's kind is part of what a summary says, and the scope walker changed it.** `struct CallInfo *previous;`
+/// was filed as a *type*: the class-like keyword was read as introducing the declarator's name. Every field declared
+/// with an elaborated-type-specifier had the wrong kind, and the semantic tokens coloured it as a type — reported from
+/// an editor on Lua 5.5.0's `ldebug.c` (`ci->previous`). Measured: `inspect facts` on `lstate.h` answered
+/// `190:20 previous type in CallInfo`, and `CallInfo`'s member list held a member named after the tag. A stored
+/// summary filed the old kind, and only the version reaches it.
+pub const FORMAT_VERSION: u32 = 41;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

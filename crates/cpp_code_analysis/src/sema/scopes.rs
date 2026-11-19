@@ -1706,6 +1706,68 @@ impl ScopeWalker<'_> {
                         return SpecifierName::Bound;
                     }
 
+                    // **A tag named *beside* the keyword is not the declarator's name.** `struct CallInfo *previous;`
+                    // is `DeclSpecifierSeq [struct, NameExpr(CallInfo)]` plus a declarator: the keyword names the tag
+                    // in an elaborated-type-specifier, and the declarator declares a **variable**. The bare-keyword
+                    // path below read that shape as "the keyword alone, so the declarator holds the class" and bound
+                    // `previous` as a class — measured, `inspect facts` filed it as `type in CallInfo`, so the
+                    // semantic-token pass coloured every such field as a type (reported from an editor on Lua 5.5.0's
+                    // `ldebug.c`, `ci->previous`).
+                    //
+                    // `class Widget w;` is the same shape and gains the other half: the tag is bound here (an
+                    // elaborated-type-specifier declares the tag in the enclosing scope, [basic.lookup.elab]) and `w`
+                    // is bound as the variable it is, which the keyword-only path skipped because it read the
+                    // declarator as the class.
+                    if let Some((tag, tag_range)) = specifiers
+                        .children()
+                        // **The tag is a `NamedType` here, not a `NameExpr`**: the grammar wraps the specifier's
+                        // name in the type node `struct CallInfo` produces, and a search for the bare `NameExpr` found
+                        // nothing on the shape this rule was written for. `specifier_name` walks into whichever of
+                        // the two it is given.
+                        .find(|child| {
+                            matches!(
+                                CppSyntaxKind::from(child.kind()),
+                                CppSyntaxKind::NameExpr | CppSyntaxKind::NamedType
+                            )
+                        })
+                        .and_then(|name| specifier_name(&name))
+                    {
+                        // **The tag is declared in the nearest enclosing namespace, not in the class.**
+                        // [basic.lookup.elab] puts an elaborated-type-specifier's declaration where the *use* is, and
+                        // a member declaration is not a scope a tag can live in — binding it in `outer` put a member
+                        // named after the tag into every class that wrote `struct X *field;`.
+                        let mut target = outer;
+                        while self.table.scope(target).is_some_and(|scope| {
+                            matches!(scope.kind, ScopeKind::Class | ScopeKind::Enum)
+                        }) {
+                            let Some(parent) =
+                                self.table.scope(target).and_then(|scope| scope.parent)
+                            else {
+                                break;
+                            };
+                            target = parent;
+                        }
+                        // **And only when the scope does not already declare it.** `struct CallInfo { struct CallInfo
+                        // *previous; }` names the tag in the *class's own* specifier and again in every field's — and
+                        // the class binding is already there, so re-binding it per field would leave the scope with a
+                        // dozen declarations of one name and turn a jump into `Ambiguous`. The tag is declared *once*
+                        // ([basic.lookup.elab] declares it, it does not redeclare it), so an existing binding is the
+                        // answer and this adds nothing.
+                        let already = self.table.scope(target).is_some_and(|scope| {
+                            scope
+                                .bindings
+                                .iter()
+                                .any(|held| held.name.is(&tag.spelled()) && held.kind == binding)
+                        });
+                        if !already {
+                            self.bind(target, tag, binding, &child, tag_range);
+                        }
+                        if declarators(node).is_empty() {
+                            return SpecifierName::Bound;
+                        }
+                        continue;
+                    }
+
                     let named_here = self.bare_class_like(&child, outer, inner, binding);
 
                     // The scoped-enum form carries its name; the forward-declaration form does not, and what

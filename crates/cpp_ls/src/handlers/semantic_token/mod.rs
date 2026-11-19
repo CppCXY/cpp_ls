@@ -1159,6 +1159,45 @@ using ContainerOf = Container<int, int>;
         (session, std::path::PathBuf::from("/p/a.cpp"))
     }
 
+    /// **A member of a struct is a property, not a type.** Reported from an editor on Lua 5.5.0's `ldebug.c`: the
+    /// semantic-token inspector showed `previous` in `ci->previous` as `type` (`entity.name.type`), where a reader
+    /// means the field. `member_kinds` answers a member access from the member's own fact — its `DeclKind` — and a
+    /// variable declaration is not a type.
+    ///
+    /// Measured through the encoder here, so the assertion is about the colour a client draws rather than about the
+    /// analysis's vocabulary alone.
+    #[test]
+    fn a_structs_field_is_a_property() {
+        let text = "\
+struct CallInfo {
+    struct CallInfo *previous;
+    int status;
+};
+
+int f(CallInfo *ci) {
+    return ci->previous != 0 && ci->status == 0;
+}
+";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None, false, &[]);
+        let at_type = by_offset(text, &tokens);
+
+        let a_property = index_of(TypeKind::Property);
+        let a_type = index_of(TypeKind::Type);
+        for field in ["previous", "status"] {
+            let at = text.find(&format!("ci->{field}")).expect("the fixture") + "ci->".len();
+            assert_eq!(
+                at_type.get(&at),
+                Some(&a_property),
+                "`{field}` is a field of `CallInfo`"
+            );
+            assert_ne!(at_type.get(&at), Some(&a_type), "and not a type");
+        }
+    }
+
     /// **How much work one encode is** — a measurement, not an assertion, and `#[ignore]`d because the fixture is a
     /// quarter of a megabyte and the *setup* (a parse, a classification) costs more than the loop it measures.
     ///
