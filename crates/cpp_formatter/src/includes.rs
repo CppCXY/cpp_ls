@@ -38,6 +38,11 @@ pub fn sorted(source: &str, stem: Option<&str>, style: &Style) -> String {
     let lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut out = String::with_capacity(source.len());
     let mut index = 0usize;
+    // **Only the first include block can hold the file's own header**: with `IncludeBlocks: Preserve` a header in a
+    // later block is sorted with its neighbours instead of being promoted (measured on Lua 5.5's `lgc.c`, whose
+    // `lgc.h` include comes after the `lprefix.h`/`<string.h>`/`lua.h` blocks — clang-format leaves it in alphabetical
+    // order, and the earlier rule put it right after `lua.h`).
+    let mut seen_a_block = false;
     while index < lines.len() {
         if !is_an_include(lines[index]) {
             out.push_str(lines[index]);
@@ -49,9 +54,11 @@ pub fn sorted(source: &str, stem: Option<&str>, style: &Style) -> String {
         while index < lines.len() && is_an_include(lines[index]) {
             index += 1;
         }
+        let first_block = !seen_a_block;
+        seen_a_block = true;
         let mut block: Vec<(IncludeKey, &str)> = lines[start..index]
             .iter()
-            .map(|line| (IncludeKey::of(line, stem, ignore_case), *line))
+            .map(|line| (IncludeKey::of(line, stem, ignore_case, first_block), *line))
             .collect();
         block.sort_by(|left, right| left.0.cmp(&right.0));
         // **A reordered block keeps a terminator on every line**: when the file`s last line has no trailing newline
@@ -81,7 +88,7 @@ struct IncludeKey {
 }
 
 impl IncludeKey {
-    fn of(line: &str, stem: Option<&str>, ignore_case: bool) -> IncludeKey {
+    fn of(line: &str, stem: Option<&str>, ignore_case: bool, promote: bool) -> IncludeKey {
         let rest = line.trim().strip_prefix("#include").unwrap_or("").trim();
         let (category, path) = if let Some(inner) = rest
             .strip_prefix('"')
@@ -89,7 +96,7 @@ impl IncludeKey {
         {
             // **The file`s own header comes first** (`clang-format` promotes it out of its category).
             (
-                if is_the_main_header(inner, stem) {
+                if promote && is_the_main_header(inner, stem) {
                     0u8
                 } else {
                     1u8
@@ -184,6 +191,14 @@ mod tests {
             sorted(source, Some("Mark"), &Style::default_style()),
             source
         );
+    }
+
+    #[test]
+    fn a_header_in_a_later_block_is_not_promoted() {
+        // Lua 5.5's `lgc.c` (clang-format 23.1.5): the first block holds `lprefix.h`, and the file's own `lgc.h`
+        // comes in a later block — the oracle leaves it in alphabetical order there.
+        let source = "#include \"lprefix.h\"\n\n#include <string.h>\n\n#include \"lfunc.h\"\n#include \"lgc.h\"\n";
+        assert_eq!(sorted(source, Some("lgc"), &Style::default_style()), source);
     }
 
     #[test]
