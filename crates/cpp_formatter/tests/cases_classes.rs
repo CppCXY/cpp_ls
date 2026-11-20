@@ -197,3 +197,14 @@ fn classes_24_a_record_name_on_its_own_line() {
     let input = "template <typename BasicJsonType>\nclass\n    iter_impl // NOLINT(cppcoreguidelines-special-member-functions,hicpp-special-member-functions)\n{\n  int x;\n};\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **An enumerator's value on the next line is a continuation**: `syntax_error =` then `101,` sits one
+/// `ContinuationIndentWidth` in, not at the body's own column (nlohmann json's `exceptions.hpp`, where every exception
+/// id is written that way). The enum alignment must not pull it back to the item column.
+#[test]
+fn classes_25_an_enumerator_value_on_its_own_line() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "enum class exception_id : int {\n  // parse_error\n  syntax_error =\n      101, ///< unexpected token or invalid literal while parsing JSON\n  patch_not_an_array =\n      104, ///< a JSON Patch document is not an array of objects\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}

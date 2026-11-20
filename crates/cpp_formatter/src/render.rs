@@ -603,12 +603,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                                 in_ctor_init,
                                 ctor_column,
                                 init_depths[index] > 0,
-                                // **A `<` that ended its line has no content column yet**: its continuation is
-                                // `ContinuationIndentWidth` past the statement (`template <` then the argument list,
-                                // measured on nlohmann json's `json_sax.hpp`), not the statement's own column.
+                                // **A `<` that ended its line has no content column yet**: its continuation is one
+                                // `ContinuationIndentWidth` past the line the `<` was written on (`*j.template get_ptr<`
+                                // at 8 continues at 12; `template <` at 2 continues at 6) — measured on nlohmann json.
                                 angles.last().copied().map(|column| {
                                     if column == usize::MAX {
-                                        statement_indent
+                                        angle_anchors.last().copied().unwrap_or(statement_indent)
                                             + style.count(StyleOption::ContinuationIndentWidth)
                                     } else {
                                         column
@@ -941,6 +941,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Greater
         {
             angles.pop();
+            angle_anchors.pop();
         }
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::RightBrace
             && enums.last().is_some_and(|(depth, _)| *depth == brace_depth)
@@ -1122,6 +1123,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         // can align after the `<` (the parentheses`s stack would otherwise be the only one consulted).
         if template_angles[index] && stream.tokens[index].kind == cpp_parser::CppTokenKind::Less {
             angles.push(usize::MAX);
+            // **The line this `<` was written on**: a list whose `<` ends its line indents from that line.
+            angle_anchors.push(line_column);
         }
         if enum_bodies[index] {
             enums.push((brace_depth, usize::MAX));
@@ -1319,8 +1322,11 @@ fn planned_indent(
     // `enum class Wide { A,` then `B,` at the column after the `{ ` (not the block indent).
     if let Some(column) = enum_column
         && blocks[index].is_some()
-        // The `}` that closes the body goes back to the declaration`s own column, not the items`.
+        // The `}` that closes the body goes back to the declaration's own column, not the items'.
         && stream.tokens[index].kind != cpp_parser::CppTokenKind::RightBrace
+        // **An enumerator's value on the next line is a continuation, not the next item**: `syntax_error =` then
+        // `101,` belongs one `ContinuationIndentWidth` in (measured on nlohmann json's `exceptions.hpp`).
+        && !(index > 0 && is_an_assignment(stream.tokens[index - 1].kind))
     {
         return Some((column, false));
     }
