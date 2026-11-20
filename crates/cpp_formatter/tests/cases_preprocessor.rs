@@ -131,3 +131,15 @@ fn preprocessor_09_a_define_after_an_include() {
         "#if defined(A)\n#define THROW(e) throw e\n#else\n#include <cstdlib>\n#define THROW(e) std::abort()\n#endif\n",
     );
 }
+
+/// **A spliced line break inside a `#define` keeps its line**: the `\` and the break are the macro's, and the pass had
+/// no line break to emit for them, so three spliced lines used to be joined into one (measured on nlohmann json's
+/// `macro_scope.hpp`, whose `NLOHMANN_JSON_SERIALIZE_ENUM` macro is 60 spliced lines). clang-format 23.1.5 writes this
+/// fixture exactly like the expected side.
+#[test]
+fn preprocessor_10_a_spliced_macro_keeps_its_lines() {
+    check(
+        "#define TWICE(x)   \\\n    int y = (x);   \\\n    use(y)\n",
+        "#define TWICE(x) \\\n    int y = (x); \\\n    use(y)\n",
+    );
+}

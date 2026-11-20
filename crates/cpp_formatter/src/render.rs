@@ -424,6 +424,23 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 Some(at) => columns.advance(0, &gap_text[at + 1..]),
                 None => columns.advance(column, gap_text),
             };
+        } else if in_directive
+            && source
+                .get(gap.start..gap.end)
+                .is_some_and(|text| text.contains('\\'))
+        {
+            // **A spliced line break inside a directive keeps its bytes**: the `\` and the line break are the macro's,
+            // and this pass has no line break to emit for them (`newlines` counts a real newline, and a splice is not
+            // one). Joining them wrote three lines of a `#define` as one — measured on nlohmann json's
+            // `macro_scope.hpp`, whose `NLOHMANN_JSON_SERIALIZE_ENUM` is 60 spliced lines. The `\` columns are still
+            // aligned afterwards by `macros::align_escaped_newlines`, and the author's indentation inside the macro is
+            // kept rather than recomputed (clang-format re-indents macro bodies, which is its own feature).
+            let gap_text = source.get(gap.start..gap.end).unwrap_or("");
+            out.push_str(gap_text);
+            column = match gap_text.rfind(char::from(10)) {
+                Some(at) => columns.advance(0, &gap_text[at + 1..]),
+                None => columns.advance(column, gap_text),
+            };
         } else if let Some(indent) = table_start
             && index > 0
             && !in_directive
