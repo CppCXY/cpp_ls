@@ -175,3 +175,14 @@ fn classes_22_a_directive_before_a_template_head() {
     let input = "#ifdef JSON_HAS_CPP_17\ntemplate <typename BasicJsonType, typename T,\n          typename std::enable_if<!nlohmann::detail::is_basic_json<T>::value,\n                                  int>::type = 0>\nvoid from_json(const BasicJsonType &j, std::optional<T> &opt) {\n  int x = 1;\n}\n#endif\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **A `template <` whose `<` ends the line**: clang-format puts the argument list one `ContinuationIndentWidth` past
+/// the statement (6 for a member at 2), not at the statement's own column. Measured on nlohmann json's `json_sax.hpp`;
+/// the oracle writes this fixture byte for byte.
+#[test]
+fn classes_23_a_template_angle_that_ends_the_line() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "class C {\n  template <\n      typename ObjectType, typename StringType,\n      bool = is_detected<detect_emplace_new_key, ObjectType, StringType>::value>\n  struct detect_indexable_keys : std::false_type {};\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}

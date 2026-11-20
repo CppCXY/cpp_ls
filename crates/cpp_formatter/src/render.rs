@@ -600,10 +600,17 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                                 in_ctor_init,
                                 ctor_column,
                                 init_depths[index] > 0,
-                                angles
-                                    .last()
-                                    .copied()
-                                    .filter(|column| *column != usize::MAX),
+                                // **A `<` that ended its line has no content column yet**: its continuation is
+                                // `ContinuationIndentWidth` past the statement (`template <` then the argument list,
+                                // measured on nlohmann json's `json_sax.hpp`), not the statement's own column.
+                                angles.last().copied().map(|column| {
+                                    if column == usize::MAX {
+                                        statement_indent
+                                            + style.count(StyleOption::ContinuationIndentWidth)
+                                    } else {
+                                        column
+                                    }
+                                }),
                                 enums
                                     .last()
                                     .map(|(_, column)| *column)
