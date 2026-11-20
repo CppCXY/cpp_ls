@@ -2930,3 +2930,16 @@ resolved."* (`hover/mod.rs`'s `member_markdown`, when `type_of_the_expression` i
 
 Nothing is implemented for (2). Item 1 is the next step; until then the popup's explanation is accurate about *why*
 (it does not claim the code is wrong).
+
+**The first attempt at (1), reverted, and what it measured.** Asking the rendering in `member_markdown` reached the
+crossing and answered the wrong expression: `the_rendering_offset_of` maps the object's first written byte to the
+expansion's first cooked byte ✓, but `expression_at` answers the **innermost** expression containing an offset — and
+at the first byte of `ci_func(ci)`'s expansion that is `(void)0`, the check macro's own first half, whose type is
+`void`. The card then said "`void` has no member `p`". The outermost expression starting there is the one to type, and
+the first version of that search found no node (it is a `ParenthesizedExpression` in the unit rendering, whose first
+token belongs to the comma expression rather than to its own node), so the attempt was reverted rather than left
+half-working. The shape of the rule to write: **the largest expression that starts at or before the mapped offset and
+ends at or after the object's last mapped byte**, which is also the shape that survives a rendering whose parens the
+renderer elided.
+
+That is where this stands: the false `missing-return` is fixed (`a324f05f`), the type of `ci_func(ci)->p` is not.
