@@ -3,6 +3,30 @@
 All notable changes to `cpp_ls` are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`build_database.json`** — CMake 3.31's module-aware build database (`CMAKE_EXPORT_BUILD_DATABASE`, Ninja generators)
+  is read as a compilation database, next to `compile_commands.json`: same per-file arguments, plus `work-directory`
+  resolution and the `baseline-arguments` + `local-arguments` split. A directory that has both is read as
+  `compile_commands.json`, which describes the build that ran. See
+  [`docs/configuration.md` §1](docs/configuration.md#the-two-database-formats).
+
+### Fixed
+
+- **A type is spelled from its declarator, not from the shape written back.** `int (*table[3])(int);` was recorded as
+  `int ([3]*)(int)`; a `typedef` of a function pointer kept its parameter *names* (`int (*)(int left, int right)`), so a
+  consumer comparing spellings read a different type. Both now come from the declarator's own text —
+  `int (*[3])(int)` and `int (*)(int, int)`.
+- **A function returning a function pointer records the pointer it returns**: `int (*maker(int a))(int b);` answers
+  `returns int (*)(int b)` rather than `int`.
+- **`void (lua_setfield) (…)` and the other parenthesised declarators** — a declarator keeps its own suffixes now, so a
+  function returning a function pointer is a *function* (`int (*maker(int a))(int b);` was a variable of type
+  `int(int)*`), and a typedef of a pointer (`typedef struct StackValue *StkId;`) is followed for a member access
+  (`s->val`).
+
+
 ## [0.1.0] — 2026-10-29
 
 The first release. A C and C++ language server written from scratch in Rust — parser, preprocessor, semantic
@@ -14,8 +38,10 @@ analysis and the protocol layer are all in this repository, with no clangd, no c
 - **Preprocessor first**: macros are expanded, conditional compilation is resolved for the branches actually in force,
   and `#include`s are inlined; the resulting *rendering* is what gets parsed, which is why a file that has never
   compiled still resolves.
-- **C and C++ (through C++23)**: `.h` is C++ and the language is read through its preprocessor. CUDA is a special toolchain case — `.cu`/`.cuh`, `<<<…>>>` launch blocks and the CUDA keywords, configured with a `[cuda]` section — rather than a first-class target:
-  grammar.
+- **C, C++ and CUDA**: `.h` is C++ and the language is read through its preprocessor; the grammar covers C++11 through
+  C++26, including static reflection and contracts, which are read without a feature bit
+  ([`docs/cpp-support.md`](docs/cpp-support.md)). CUDA is a special toolchain case — `.cu`/`.cuh`, `<<<…>>>` launch
+  blocks and the CUDA keywords, configured with a `[cuda]` section — rather than a first-class target.
 - **Coroutines**: `co_await`, `co_yield` and `co_return` are parsed, typed (`co_await` answers what `await_resume`
   returns), hovered and exempted from the missing-return rule.
 

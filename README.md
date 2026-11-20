@@ -25,6 +25,14 @@ database needed to start.** One is used when the project has one: `compile_comma
 
 ## What makes it different
 
+**The grammar goes to C++26.** Not a subset that stops at C++17: the parser reads C++11 through **C++26** — concepts
+and modules (C++20), deducing `this`, `if consteval` and multidimensional subscript (C++23), and the two C++26 language
+features nothing else parses yet — **static reflection** (`^^T`, `[: r :]`, the three splice positions) and **contracts**
+(`pre(…)`, `post(…)`, `contract_assert(…)`) — plus C23, CUDA, and the GNU/MSVC extensions a real header needs. Each
+construct is a feature bit opened by `-std=`, except the two C++26 ones: no earlier standard gives their tokens a
+meaning, so they are read whatever `-std=` says. The feature table, the P2996/P2900 status and the compiler-verified
+results are [`docs/cpp-support.md` §2](docs/cpp-support.md#2-standards-and-language-features).
+
 **1. The program is the unit of work, not the file.** A C++ file does not mean what its characters say until a
 preprocessor has run, so one runs: `#include`s are inlined, the `#if` branch actually in force is taken, macros are
 expanded, and the parser reads the text a compiler would see. A typical `import std;` program is a **384-file,
@@ -61,7 +69,7 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 
 | Crate | crates.io | What it is |
 | --- | --- | --- |
-| [`cpp_parser`](crates/cpp_parser) | [![crates.io](https://img.shields.io/crates/v/cpp_parser.svg)](https://crates.io/crates/cpp_parser) | A lossless C++ parser over preprocessed text: a rowan CST with error recovery, C++23/C23 features, CUDA, and vendor extensions |
+| [`cpp_parser`](crates/cpp_parser) | [![crates.io](https://img.shields.io/crates/v/cpp_parser.svg)](https://crates.io/crates/cpp_parser) | A lossless C++ parser over preprocessed text: a rowan CST with error recovery, **C++11 through C++26** (reflection `^^T`/`[: r :]`, contracts `pre`/`post`/`contract_assert`), C23, CUDA, and vendor extensions |
 | [`cpp_toolchain`](crates/cpp_toolchain) | [![crates.io](https://img.shields.io/crates/v/cpp_toolchain.svg)](https://crates.io/crates/cpp_toolchain) | The layer under the analysis: the project's build description and compiler, include resolution, the translation-unit walk, and the preprocessor — directives, macros, guards, expansion, and one file's rendering |
 | [`cpp_code_analysis`](crates/cpp_code_analysis) | [![crates.io](https://img.shields.io/crates/v/cpp_code_analysis.svg)](https://crates.io/crates/cpp_code_analysis)  | The index and its cache, symbol scopes, type inference, the session, completions, modules/partitions, and diagnostics |
 | [`cpp_ls`](crates/cpp_ls) | [![crates.io](https://img.shields.io/crates/v/cpp_ls.svg)](https://crates.io/crates/cpp_ls) | The server: LSP transport, handlers, configuration, and the binary |
@@ -108,6 +116,12 @@ A documentation comment is **a language of its own**, not prose the analysis ski
 `/**` and `/*!` open a block that stays documentation until its `*/`. Everything below works in all four, and in the
 file's own text — a comment produces no tokens in the cooked reading, so every one of these questions is answered
 from the buffer the reader is editing.
+
+**Writing one.** The editor keeps up with the comment you are writing: in the VS Code extension, Enter at the end of a
+`///` (or `//!`) line continues it with the same marker and indentation, Enter inside `/**` opens the next line as ` * `,
+and `///<` continues as `///<` — the three shapes are rules in the extension's
+[`language-configuration.json`](https://github.com/CppCXY/VSCode-Cppls/blob/main/language-configuration.json), so they
+are the editor's own behaviour rather than a server round trip.
 
 **Doxygen commands.** `@brief`, `@param`, `@return`, `@tparam`, `@exception`, `@see`, `@code`, `@name` and the rest of
 the table are vocabulary the server knows:

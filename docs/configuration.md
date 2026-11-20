@@ -418,7 +418,7 @@ module, and the same code with one violation of each rule.
 | Build-system integration (CMake, Meson, …) | the database is the interface; `compile_commands.json` is what they export |
 | `textDocument/onTypeFormatting` | the trigger is unreliable in practice; formatting on save and on demand covers it |
 | clang-format's line breaking, in the built-in formatter | `cpp_formatter` reads a common subset of `.clang-format` and computes spacing and indentation; the line breaks are the source's. `[format] formatter = "clang-format"` is the default for exactly that reason |
-| C++26 (contracts, reflection, `#embed`) | no feature bits yet; the syntax is read as C++23 |
+| C++26 `#embed` | not implemented (C23's `#embed` neither). The C++26 *language* features — static reflection and contracts — **are** read, without a feature bit: no earlier standard gives their tokens a meaning, so they are parsed whatever `-std=` says. See [`cpp-support.md` §2](cpp-support.md#2-standards-and-language-features) |
 | C23 `#embed` | not implemented |
 | `references` / `rename` of ordinary names | answering them means parsing every candidate file; the server refuses rather than editing half a name's uses (macros are answered exactly) |
 | Module linking | modules are parsed, indexed and resolved by name; nothing is linked or built |
