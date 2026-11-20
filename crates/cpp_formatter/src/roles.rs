@@ -357,7 +357,17 @@ fn control_keyword_before(open: &cpp_parser::CppSyntaxToken) -> Option<BraceKind
 
 /// Is this token a comment (which the parser keeps in the token stream but the layout treats as trivia)?
 fn is_a_comment(kind: CppTokenKind) -> bool {
-    matches!(kind, CppTokenKind::LineComment | CppTokenKind::BlockComment)
+    // **`is_trivia` does not cover a documentation comment**: the parser builds those as a tree whose tokens are
+    // `DocCommandName`/`DocText`/`DocTrivia`, and a `prev_token()` walk sees them — `default: // end` followed by `{`
+    // hit `DocText` and classified the brace as ordinary (measured: the braced case body's `}` came out a level in).
+    matches!(
+        kind,
+        CppTokenKind::LineComment
+            | CppTokenKind::BlockComment
+            | CppTokenKind::DocText
+            | CppTokenKind::DocCommandName
+            | CppTokenKind::DocTrivia
+    )
 }
 
 /// **Does this `{` open the body of a `case`/`default` label?** — `case 1: {`. The label is a `CaseStat` in the tree
@@ -378,6 +388,9 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
             continue;
         }
         if kind != CppTokenKind::Colon {
+            if std::env::var_os("CPPLS_TRACE_CASE").is_some() {
+                eprintln!("[case] -> false (saw {kind:?})");
+            }
             return false;
         }
         // The colon belongs to a label when a `case`/`default` comes before it — the label's own expression (and its
@@ -385,7 +398,12 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
         let mut label = token.prev_token();
         while let Some(token) = label {
             match CppTokenKind::from(token.kind()) {
-                CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => return true,
+                CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => {
+                    if std::env::var_os("CPPLS_TRACE_CASE").is_some() {
+                        eprintln!("[case] -> true (label found)");
+                    }
+                    return true;
+                }
                 CppTokenKind::Semicolon
                 | CppTokenKind::LeftBrace
                 | CppTokenKind::RightBrace

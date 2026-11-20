@@ -277,3 +277,15 @@ fn wrapping_20_a_control_brace_inside_a_case_body() {
     let input = "void f(int x)\n{\n    switch (x)\n    {\n    default:\n        if (JSON_HEDLEY_UNLIKELY(!scalar(p)))\n        {\n            return false;\n        }\n        goto done;\n    }\n}\n";
     assert_eq!(cpp_formatter::format_file(path, input, &microsoft), input);
 }
+
+/// **A documentation comment between the label's `:` and the brace is trivia**: `default: // end` then `{` is a braced
+/// case body, and its `}` sits at the brace's own column. The parser keeps a doc comment as its own token tree
+/// (`DocText`), which `is_trivia` does not cover, so the classifier walked into it and missed the label.
+#[test]
+fn wrapping_21_a_braced_case_body_after_a_comment() {
+    let mut microsoft = Style::preset("Microsoft").expect("Microsoft is a preset");
+    microsoft.set_from_text("ColumnLimit", "80");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f(int x)\n{\n    switch (x)\n    {\n    case 1:\n        break;\n    default: // end\n    {\n        goto endLoop;\n    }\n    }\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &microsoft), input);
+}
