@@ -135,3 +135,14 @@ fn blocks_22_short_namespace_lines() {
         "namespace detail {\nvoid f();\nvoid g();\n} // namespace detail\n",
     );
 }
+
+/// **A trailing comment is part of the line's width**: a member declaration that fits on its own but not with the
+/// `// NOLINT(…)` after it is broken by clang-format — after the `=`, leaving the comment on the last line. Measured
+/// against clang-format 23.1.5 on nlohmann json's `json_sax.hpp`.
+#[test]
+fn blocks_23_a_break_for_the_sake_of_a_trailing_comment() {
+    check(
+        "class json_sax_dom_error_state {\npublic:\n  json_sax_dom_error_state(json_sax_dom_error_state &&) = default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)\n};\n",
+        "class json_sax_dom_error_state {\npublic:\n  json_sax_dom_error_state(json_sax_dom_error_state &&) =\n      default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)\n};\n",
+    );
+}

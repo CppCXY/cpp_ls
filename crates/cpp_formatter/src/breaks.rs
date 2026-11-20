@@ -284,6 +284,9 @@ pub fn break_line(
     style: &crate::config::Style,
     line: &Range<usize>,
     start_column: usize,
+    // **Room the last piece must leave for something that is not a token** — a trailing comment. clang-format breaks
+    // a declaration that would fit because the comment after it would not.
+    extra_width: usize,
 ) -> Option<Vec<usize>> {
     let limit = style.count(crate::options::StyleOption::ColumnLimit);
     if limit == 0 {
@@ -374,7 +377,12 @@ pub fn break_line(
             // brackets, and at the continuation column otherwise — charging the statement column made the search
             // believe pieces fitted when they did not.
             let indent = indent_at(positions[start], start == 0);
-            let piece = width(positions[start], positions[end], indent);
+            let piece = width(positions[start], positions[end], indent)
+                + if positions[end] == line.end {
+                    extra_width
+                } else {
+                    0
+                };
             let excess = piece.saturating_sub(limit) as i64 * penalties.excess_character;
             let break_cost = if start == 0 {
                 0
@@ -550,7 +558,7 @@ pub fn break_over_long_pieces(
             width += stream.tokens[inside].text.chars().count();
         }
         if width > limit
-            && let Some(found) = break_line(stream, roles, style, &(start..index + 1), column)
+            && let Some(found) = break_line(stream, roles, style, &(start..index + 1), column, 0)
         {
             breaks.extend(found);
         }
@@ -585,7 +593,7 @@ mod break_tests {
         let roles = crate::roles::of(source);
         let lines = logical_lines(&stream);
         let line = lines.first().expect("a line").clone();
-        let breaks = break_line(&stream, &roles, &style, &line, 0)?;
+        let breaks = break_line(&stream, &roles, &style, &line, 0, 0)?;
         // Print the pieces, so that a test can read them.
         let mut pieces = Vec::new();
         let mut start = line.start;

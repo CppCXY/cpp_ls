@@ -175,7 +175,10 @@ pub fn align(output: &str, style: &Style) -> String {
             continue;
         };
         let trimmed = lines[index].trim_start();
-        if !trimmed.starts_with("//") {
+        // **A doc comment`s continuation is pulled in, a plain `//` line is not**: the two are told apart by the
+        // marker (`///`, `//!`) — measured on nlohmann json`s `json_sax.hpp`, where `// Handle all possible types …`
+        // sits at the case body`s own column and the first version of this rule pulled it to the trailing comment`s.
+        if !trimmed.starts_with("///") {
             continue;
         }
         // **Only a comment written as a continuation is pulled in**: one that sits at the code's own indentation is a

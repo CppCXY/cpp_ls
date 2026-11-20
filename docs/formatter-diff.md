@@ -131,7 +131,7 @@ and this repository's two C++ fixtures.
 | EmmyLua | `Microsoft` | 5 / 29 | 485 / 8 031 | **28 / 29 files, 2 lines** |
 | Lua 5.5 | `LLVM` | 0 / 40 | 7 309 / 20 302 | 10 / 40 files, 1 875 lines |
 | Lua 5.5 | `Google` | 0 / 40 | 10 628 / 20 270 | 5 / 40 files, 5 983 lines |
-| Lua 5.5 | `Microsoft` | 0 / 40 | 10 574 / 22 006 | 13 / 40 files, **674 lines** |
+| Lua 5.5 | `Microsoft` | 0 / 40 | 10 574 / 22 008 | 14 / 40 files, **667 lines** |
 | nlohmann json | `LLVM` | 0 / 40 | 28 262 / 27 337 | 1 / 40 files, 2 558 lines |
 | nlohmann json | `Google` | 4 / 40 | 32 960 / 27 360 | 7 / 40 files, 8 062 lines |
 | nlohmann json | `Microsoft` | 7 / 40 | 9 820 / 27 327 | 12 / 40 files, 1 056 lines |

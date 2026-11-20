@@ -239,9 +239,10 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             if stream.tokens[first].kind == cpp_parser::CppTokenKind::TemplateKeyword {
                 continue;
             }
-            if (first + 1..line.end).all(|index| stream.gaps[index].newlines == 0) {
-                continue;
-            }
+            // **A statement that is already on one line is left alone unless it overflows**: the fit test below
+            // answers that, and the trailing comment is part of the width (`= default; // NOLINT(…)` is 135 columns
+            // and clang-format breaks it after the `=`) — skipping every one-line statement meant an overflowing one
+            // was never re-cut.
             // **Only a real statement is reflowed**: `NUMBER_OPTION(indent_size)` lines and the values of an enum body
             // have no terminator, and joining them put two statements on one line (measured, 354 lines on
             // `LuaStyle.cpp`). A statement ends with `;`, or with the **signature** that a block brace follows — and a
@@ -303,14 +304,24 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             {
                 width += 2;
             }
-            // **A trailing comment is part of the line`s width**: clang-format breaks to leave room for it
-            // (measured: `if (::islower(ch) || ::isdigit(ch)) { // after the first underscore, …` stays broken).
+            // **A trailing comment is part of the line's width**: clang-format breaks to leave room for it
+            // (measured: `if (::islower(ch) || ::isdigit(ch)) { // after the first underscore, …` stays broken, and
+            // `json_sax_dom_error_state(json_sax_dom_error_state &&) = default; // NOLINT(…)` is broken after the `=`
+            // for the comment's sake). The comment lives in the gap **after** the line's last token — for a line that
+            // ends in `{` that is the gap after the brace, and for every other line the gap that follows it.
             let mut trailing = 0usize;
-            if next.is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftBrace)
-                && let Some(gap) = stream.gaps.get(line.end + 1)
-                && let Some(comment) = gap.comments.last().filter(|comment| !comment.own_line)
-            {
-                trailing = comment.text.chars().count() + 1;
+            for at in [line.end, line.end + 1] {
+                if at == line.end + 1
+                    && !next.is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftBrace)
+                {
+                    continue;
+                }
+                if let Some(gap) = stream.gaps.get(at)
+                    && let Some(comment) = gap.comments.last().filter(|comment| !comment.own_line)
+                {
+                    trailing = comment.text.chars().count() + 1;
+                    break;
+                }
             }
             if width + trailing <= style.count(StyleOption::ColumnLimit) {
                 for slot in &mut joined[first + 1..line.end] {
@@ -338,9 +349,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     }
                     piece += stream.tokens[index].text.chars().count();
                 }
-                overflows || indent + piece > limit
+                overflows || indent + piece + trailing > limit
             } && let Some(breaks) =
-                crate::breaks::break_line(&stream, &roles, style, &line, indent)
+                crate::breaks::break_line(&stream, &roles, style, &line, indent, trailing)
             {
                 // **The breaking half**: clang-format decides where a statement that does not fit is cut, and its
                 // answer is the penalty search. The search's positions become forced breaks and everything else in
