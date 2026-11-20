@@ -265,3 +265,15 @@ void f(int v)
     allman.set_from_text("BreakBeforeBraces", "Allman");
     check(allman, input, expected);
 }
+
+/// **A control statement's brace inside a `case`/`default` body is that statement's, not the label's**: under
+/// `Microsoft` (which breaks before a control brace) the brace belongs at the `if`'s column, and its `}` too. Measured
+/// against clang-format 23.1.5; the classifier used to walk back to the label's colon through the whole condition.
+#[test]
+fn wrapping_20_a_control_brace_inside_a_case_body() {
+    let mut microsoft = Style::preset("Microsoft").expect("Microsoft is a preset");
+    microsoft.set_from_text("ColumnLimit", "80");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f(int x)\n{\n    switch (x)\n    {\n    default:\n        if (JSON_HEDLEY_UNLIKELY(!scalar(p)))\n        {\n            return false;\n        }\n        goto done;\n    }\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &microsoft), input);
+}
