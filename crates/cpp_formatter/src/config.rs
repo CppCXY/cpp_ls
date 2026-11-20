@@ -155,7 +155,12 @@ impl Style {
             Value::Flag(value) => *value,
             Value::Number(value) => *value != 0,
             Value::Text(text) => {
-                matches!(text.as_ref(), "true" | "True" | "TRUE" | "Yes" | "On" | "1")
+                // **`Always` is a boolean spelling too**: `ReflowComments` is an enumerated option in clang-format 23
+                // (`Always`/`Never`/`Leave`), and a preset that says `Always` must not read as `false`.
+                matches!(
+                    text.as_ref(),
+                    "true" | "True" | "TRUE" | "Yes" | "On" | "1" | "Always"
+                )
             }
             Value::Unset => false,
         }
@@ -725,5 +730,21 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(keys, sorted);
         assert!(dumped.contains("IndentWidth: 2\n"), "{dumped}");
+    }
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    #[test]
+    fn an_enumerated_flag_reads_as_true() {
+        // `ReflowComments` is `Always`/`Never`/`Leave` in clang-format 23; a preset that says `Always` must not read as
+        // false (measured: the comment-reflow experiment never ran because of this).
+        let style = Style::preset("LLVM").expect("LLVM is a preset");
+        assert!(style.flag(StyleOption::ReflowComments));
+        let mut other = Style::preset("LLVM").expect("LLVM is a preset");
+        other.set_from_text("ReflowComments", "Never");
+        assert!(!other.flag(StyleOption::ReflowComments));
     }
 }
