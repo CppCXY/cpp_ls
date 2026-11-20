@@ -238,6 +238,76 @@ fn what_the_expansion_types_and_where_the_chain_stops() {
             }
             None => eprintln!("[probe] the file has no cooked view"),
         }
+        // **The exact rendering text** around the mapped start, and the tree of each small step — the failure is in the
+        // parenthesised spelling, and the parens are the part a reader cannot see from a type.
+        if let Some(cooked) = session.view(&file)
+            && let Some(at) = rendering_start(&cooked)
+        {
+            let text = cooked.source.to_string();
+            let from = at.saturating_sub(40);
+            let to = (at + 220).min(text.len());
+            eprintln!("[probe] rendering {:?}", &text[from..to]);
+            for needle in [
+                "ci",
+                "(ci)",
+                "((ci))",
+                "((ci)->func.p)",
+                "(&((ci)->func.p)->val)",
+                "((&((ci)->func.p)->val) )",
+                "((((&((ci)->func.p)->val) )->value_).gc)",
+            ] {
+                let mut found = None;
+                for node in cooked.root.descendants() {
+                    let node_text = node.text().to_string();
+                    if node_text == needle {
+                        found = Some(node);
+                        break;
+                    }
+                }
+                match found {
+                    Some(node) => {
+                        let typed = match session.type_of_the_expression(&cooked, &node) {
+                            cpp_code_analysis::Known::Yes(found) => found.type_of,
+                            other => format!("{other:?}"),
+                        };
+                        eprintln!(
+                            "[probe] exact {needle:?} ({:?}) -> {typed}",
+                            cpp_parser::CppSyntaxKind::from(node.kind())
+                        );
+                    }
+                    None => eprintln!("[probe] exact {needle:?} not a node"),
+                }
+            }
+        } // **The type of each step of the chain**, not of its object: the printed text is the whole sub-expression, so
+        // the first step whose *result* is unknown is the one that stops it.
+        if let Some(cooked) = session.view(&file) {
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for node in cooked.root.descendants() {
+                if cpp_code_analysis::sema::resolve::member_access_of(&node).is_some()
+                    || cpp_parser::CppSyntaxKind::from(node.kind())
+                        == cpp_parser::CppSyntaxKind::CastExpr
+                {
+                    let text = node
+                        .text()
+                        .to_string()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if text.len() > 120 || seen.iter().any(|(known, _)| *known == text) {
+                        continue;
+                    }
+                    let typed = match session.type_of_the_expression(&cooked, &node) {
+                        cpp_code_analysis::Known::Yes(found) => found.type_of,
+                        other => format!("{other:?}"),
+                    };
+                    seen.push((text.clone(), typed.clone()));
+                    eprintln!("[probe] step {text:?} -> {typed}");
+                    if seen.len() > 24 {
+                        break;
+                    }
+                }
+            }
+        }
         for class in [
             "GCUnion",
             "union GCUnion",

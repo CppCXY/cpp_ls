@@ -554,14 +554,64 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
+    /// **The type of an expression the file's own text cannot type, taken from its rendering.**
+    ///
+    /// `ci_func(ci)->p` is the case, and it is Lua 5.5.0's `ldebug.c:101`: `ci_func` is a macro, so the object is a
+    /// `MacroCall` in the file's own tree and nothing there has a type for it — the hover answered "the type of
+    /// `ci_func(ci)` is not known here" beside a member the project's own headers declare. The rendering has the
+    /// expansion (`(&(…)->cl.l)`), and after it the chain types (`Proto *`).
+    ///
+    /// The expression is found by its **span**: the smallest expression in the rendering that covers the mapped first
+    /// byte and reaches the mapped last one. "The expression at the mapped start" is a different question and was
+    /// measured as the wrong one — the start of an expansion is a `(`, and what contains it is the whole `…->p`, which
+    /// answers the *member*'s type rather than the object's.
+    ///
+    /// `None` when the file has no rendering, when the two ends do not map into one expression, or when the answer is
+    /// unknown there too — the caller keeps the answer it had.
+    pub fn the_type_of_an_expression_in_the_rendering(
+        &self,
+        path: impl AsRef<Path>,
+        expression: &cpp_parser::CppSyntaxNode,
+    ) -> Option<ExpressionType> {
+        let path = path.as_ref();
+        let range = expression.text_range();
+        let first = self.the_rendering_offset(path, usize::from(range.start()))?;
+        // **The byte *after* the object**, not its last one: every written byte of a macro invocation maps to the
+        // expansion's first byte, so the object's own end is not a boundary the rendering knows. What is exact is what
+        // follows it — `->` of `ci_func(ci)->p` is written text and survives the expansion.
+        let stop = self.the_rendering_offset(path, usize::from(range.end()))?;
+        let rendered = self.view(path)?;
+        let found =
+            crate::sema::resolve::the_largest_expression_between(&rendered.root, first, stop)
+                .or_else(|| {
+                    let last =
+                        self.the_rendering_offset(path, usize::from(range.end()).checked_sub(1)?)?;
+                    crate::sema::resolve::the_smallest_expression_covering(
+                        &rendered.root,
+                        first,
+                        last,
+                    )
+                })?;
+        if crate::probes::hover() {
+            eprintln!(
+                "[across] {:?} -> {first}..={stop}: {:?}",
+                expression.text().to_string(),
+                found.text().to_string()
+            );
+        }
+
+        match self.type_of_the_expression(&rendered, &found) {
+            Known::Yes(found) => Some(found),
+            _ => None,
+        }
+    }
     pub fn type_at(&self, view: &FileView, offset: ReadingOffset) -> Known<ExpressionType> {
         let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset.get()) else {
             return Known::No;
         };
 
         let written = expression.text().to_string().trim().to_string();
-
-        match crate::index::project::type_of_expression(
+        let answer = match crate::index::project::type_of_expression(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
@@ -571,13 +621,62 @@ impl<F: FileProvider + Clone> Session<F> {
             0,
         ) {
             Known::Yes((type_of, file)) => Known::Yes(ExpressionType {
-                expression: written,
+                expression: written.clone(),
                 type_of: type_of.to_string(),
                 file,
             }),
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::No,
+        };
+        // **A macro invocation has no type in the file's own text — its expansion does.** `ci_func(ci)->p` is the
+        // shape, and it is Lua 5.5.0's `ldebug.c:101`: `ci_func` is a macro, so the object of the arrow is a `MacroCall`
+        // that nothing in this reading can type, and the answer was `UnknownType("ci_func")` beside a member the
+        // project's own headers declare. The rendering holds the expansion and types the chain.
+        //
+        // Only when both are true: this reading has **nothing** to say, and the expression **contains an invocation**.
+        // A crossing on anything else would be a second reading of the same text, and the two can disagree — that is
+        // what a `#if` is for.
+        if matches!(answer, Known::Unknown(_)) {
+            // **A member of a macro's expansion is asked as a member, not as an expression.** A span cannot cross the
+            // expansion exactly — the writer maps the invocation's trailing bytes to the end of what it expanded — so
+            // asking the whole `tsvalue(o)->shrlen` in the rendering answered the *object*'s type (`TString*`) rather
+            // than the member's. The object's type crosses correctly (its end is the expansion's end), and the member
+            // is then found in it: `TString::shrlen`, `ls_byte`.
+            if let Some(access) = crate::sema::resolve::member_access_of(&expression)
+                && let Some(object_type) =
+                    self.the_type_of_an_expression_in_the_rendering(&view.path, &access.object)
+                && let Known::Yes(list) = self.members_of(view, &object_type.type_of)
+                && let Some(member) = list
+                    .members
+                    .iter()
+                    .find(|member| member.fact.name == access.member)
+                && let Some(spelled) = member.fact.type_of.clone()
+            {
+                return Known::Yes(ExpressionType {
+                    expression: written,
+                    type_of: spelled.to_string(),
+                    file: member.file.clone(),
+                });
+            }
+            // **A name alone is a declaration question, not a span.** A macro's name has no rendering counterpart at
+            // all — the expansion replaced it — so the span cross would land on whatever surrounds the invocation and
+            // answer that (`int` for `ci_func`, the enclosing call's return type). The name's own card is the hover's
+            // business (`the macro's definition`), not a type.
+            let a_name_alone = matches!(
+                cpp_parser::CppSyntaxKind::from(expression.kind()),
+                cpp_parser::CppSyntaxKind::NameExpr | cpp_parser::CppSyntaxKind::IdentifierExpr
+            );
+            if !a_name_alone
+                && let Some(found) =
+                    self.the_type_of_an_expression_in_the_rendering(&view.path, &expression)
+            {
+                return Known::Yes(ExpressionType {
+                    expression: written,
+                    ..found
+                });
+            }
         }
+        answer
     }
 
     /// **The member of the class the cursor is inside that `name` names** — C++'s unqualified member lookup.

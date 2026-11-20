@@ -836,8 +836,16 @@ fn member_markdown(
     // `win->w_buffer` and the right one for objects that end in a delimiter — `Pair<int, int>{1, 2}`'s last byte is
     // inside the braced list, and the offset question answered `int` for it, which is the "`int` has no member `sum`"
     // in the report.
-    let cpp_code_analysis::Known::Yes(found) = session.type_of_the_expression(view, &access.object)
-    else {
+    let object_type = match session.type_of_the_expression(view, &access.object) {
+        cpp_code_analysis::Known::Yes(found) => Some(found),
+        // **A macro call has no type in the file's own text; its expansion has.** `ci_func(ci)->p` in Lua 5.5.0's
+        // `ldebug.c:101` is the case: `ci_func` is a macro, so the object is a `MacroCall` that nothing can type, and
+        // the card said "the type of `ci_func(ci)` is not known here" beside a member the project's own headers
+        // declare. The rendering holds the expansion, and the chain types there. The card still spells the object the
+        // way the **file** writes it — the expansion is a compiler's text, not the reader's.
+        _ => session.the_type_of_an_expression_in_the_rendering(&view.path, &access.object),
+    };
+    let Some(found) = object_type else {
         // **Saying "I do not know" is the answer.** A reader who sees this knows the popup is about a type the analysis
         // could not read, and the next thing to do — annotate the declaration, or read the header it comes from — is
         // theirs. Nine unrelated declarations would tell them the same thing at four times the size, and worse.

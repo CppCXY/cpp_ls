@@ -21,7 +21,20 @@ use smol_str::SmolStr;
 /// are two or three.
 pub(crate) const MAX_NESTED_TYPE_DEPTH: usize = 8;
 
-pub(crate) const MAX_TYPE_DEPTH: usize = 8;
+/// **How many expression levels one question may walk.** Raised from 8 after measuring what a *macro expansion*
+/// costs, which is not a deep type but a deeply **parenthesised** one — and every parenthesis and every comma operator
+/// is a level:
+///
+/// ```text
+/// ci_func(ci)  →  ((((void)0),((((void)0),(&((union GCUnion *)(…)‐>cl.l))))))->p
+/// ```
+///
+/// The chain `…->value_` inside that expansion needs **ten** levels (`ci` itself is asked at depth 10), and the whole
+/// expansion more than the eight this used to allow — so the last two steps of `ci_func(ci)->p` answered
+/// `UnknownType("ci")`, the spelling at the depth where the walk stopped. The bound is still a bound on an ill-formed
+/// file's recursion rather than a statement about a type's complexity, and a cycle is caught by
+/// [`TypeMemo::enter`] rather than by it.
+pub(crate) const MAX_TYPE_DEPTH: usize = 24;
 
 /// **How many inference answers the index keeps** — see `ProjectIndex::type_answers`.
 pub(crate) const MAX_TYPE_ANSWERS: usize = 8192;

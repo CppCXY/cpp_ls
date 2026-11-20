@@ -873,6 +873,72 @@ pub fn expression_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNod
     }
 }
 
+/// **The smallest expression covering both a first and a last byte** — the question a rendering asks of a written
+/// expression, whose own spelling no longer exists on the other side of a macro expansion.
+///
+/// `expression_at` asks "what is at this byte", which is the right question for a cursor and the wrong one for a span:
+/// the expansion of `ci_func(ci)` starts at a `(` that alone would answer the whole `…->p` (and so the *member's* type),
+/// while the object's own type is the smallest expression that still covers both of its ends.
+///
+/// `None` when no expression covers the span — the two ends landed in different expansions, which happens when a
+/// macro's argument is expanded elsewhere.
+pub fn the_smallest_expression_covering(
+    root: &CppSyntaxNode,
+    first: usize,
+    last: usize,
+) -> Option<CppSyntaxNode> {
+    let mut best: Option<CppSyntaxNode> = None;
+    for node in root.descendants() {
+        if !cpp_parser::CppExpr::can_cast(node.kind().into()) {
+            continue;
+        }
+        let range = node.text_range();
+        if usize::from(range.start()) > first || usize::from(range.end()) <= last {
+            continue;
+        }
+        let smaller = best.as_ref().is_none_or(|known| {
+            usize::from(range.end()) - usize::from(range.start())
+                < usize::from(known.text_range().end()) - usize::from(known.text_range().start())
+        });
+        if smaller {
+            best = Some(node);
+        }
+    }
+    best
+}
+
+/// **The largest expression that starts at or after `first` and ends at or before `stop`** — the question an
+/// expansion asks, where the two ends are the expansion's own `(` and the written text that follows it.
+///
+/// A macro's expansion is one node the writer records as replacing the invocation, so every written byte of
+/// `ci_func(ci)` maps to the expansion's **first** byte; the object's end is therefore not usable as a boundary. What is
+/// exact is the byte *after* the object — `->` in `ci_func(ci)->p` is written text — so the expansion is the largest
+/// expression that fits between the expansion's start and that operator.
+pub fn the_largest_expression_between(
+    root: &CppSyntaxNode,
+    first: usize,
+    stop: usize,
+) -> Option<CppSyntaxNode> {
+    let mut best: Option<CppSyntaxNode> = None;
+    for node in root.descendants() {
+        if !cpp_parser::CppExpr::can_cast(node.kind().into()) {
+            continue;
+        }
+        let range = node.text_range();
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        if start < first || end > stop {
+            continue;
+        }
+        let larger = best.as_ref().is_none_or(|known| {
+            end - start
+                > usize::from(known.text_range().end()) - usize::from(known.text_range().start())
+        });
+        if larger {
+            best = Some(node);
+        }
+    }
+    best
+}
 /// The shape of a node that **is** a member access: its object, its member, and where the member was written.
 ///
 /// Separate from [`member_access_at`] because the question comes in two forms: a *cursor* is on a member of some

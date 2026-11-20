@@ -3046,3 +3046,57 @@ after: `int (*maker(int a))(int b);` is a **function** with parameters `(int a)`
 `maker` answers `returns int (*)(int b)`, `signal` `returns void (*)(int)` — through
 `a_parenthesised_return_type`, which reads the operators between the declarator's `(` and the name and the suffix after
 the name's own parameter list.
+
+## `MACRO(x)->member` — the chain, and the two rules a rendering crossing needs
+
+The last of the Lua reports, and the one that had been open the longest: `ci_func(ci)->p` in `ldebug.c:101`. Two
+separate defects, both measured, and neither was in the macro reader.
+
+### 1. The expansion types, and what stopped it was a **depth bound**
+
+The expansion is `(((void)0),((((void)0),(&((union GCUnion *)(…)->cl.l))))))->p` — a function-callish, cast-laden,
+deeply **parenthesised** chain, not a deep type. `MAX_TYPE_DEPTH` was **8**, and every parenthesis and every comma
+operator is a level; traced with `CPPLS_TRACE_TYPES`, the object `…->value_` asks `ci` at depth **10** and the whole
+expression needs more. Past the bound the walk answered `UnknownType("ci")` — the spelling at the level it stopped on,
+which is why the symptom named `ci` rather than anything the reader could act on.
+
+Raised to **24**, with the measurement in the constant's own documentation. Nothing else about the bound changed: a
+cycle is still caught by `TypeMemo::enter` rather than by it.
+
+### 2. The crossing: **span, not first byte** — and a member is asked as a member
+
+With the chain typing, the remaining question was where to ask it from. The file's own text has no type for
+`ci_func(ci)` — the object is a call to a name nothing declares — so the answer has to come from the rendering, and
+three rules were measured on the way:
+
+* **A written expression is found in the rendering by its span.** The first byte of an expansion is a `(`, and what
+  contains it is the whole `…->p`, which answers the *member*'s type rather than the object's. Because the writer maps
+  an invocation's trailing bytes to the end of what it expanded, the end of a *written* offset inside the invocation is
+  not a boundary either; what is exact is the byte **after** the object (`->` of `ci_func(ci)->p` is written text), so
+  the expansion is the largest expression between the expansion's start and that operator.
+  `sema::resolve::the_largest_expression_between`.
+* **A member of an expansion is asked as a member, not as an expression.** `tsvalue(o)->shrlen` crossed as one span
+  answered `TString*` — the *object*'s type, because the span ends inside the expansion — while the member is
+  `ls_byte`. The object's type crosses correctly (its end is the expansion's end), and the member is then found in it.
+* **A name alone is not a span question.** A macro's name has no rendering counterpart at all, so crossing a bare
+  `ci_func` landed on whatever surrounded the invocation and answered the enclosing call's type. It answers "not known",
+  which is the truth; the hover answers that word with the macro's definition.
+
+### Measured after
+
+```text
+hover at ldebug.c:101:40        Proto* p / `LClosure::p` — a variable of type `Proto*`, in `LClosure` / lobject.h:708
+hover at lapi.c:440:61          ls_byte shrlen / `TString::shrlen` / lobject.h:408
+type  at ldebug.c:101:40        `ci_func(ci)->p` is `Proto *`
+type  at lapi.c:440:61          `tsvalue(o)->shrlen` is `ls_byte`
+type  at ldebug.c:101:34        `ci_func(ci)` is `LClosure*`
+type  at ldebug.c:101:30        not known — UnknownType("ci_func")   (a name, not an expression)
+```
+
+Pinned by `crates/cpp_code_analysis/tests/macro_member_types.rs` (a hermetic Lua-shaped fixture), and
+`crates/cpp_ls/tests/macro_member_probe.rs` remains the instrument: it prints the type of every member access along the
+real expansion.
+
+**Still open, and unrelated to macros:** `type` on the argument of a call whose callee is a function defined in the
+same file answers the *call's* type (`currentpc(ci)` at `ldebug.c:101:46`), because the argument's node is not the
+innermost expression there. `hover` on the same position answers the declaration, which is right.
