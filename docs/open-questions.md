@@ -2970,3 +2970,23 @@ Measured after: every declaration in the probe's three headers answers its sourc
 **One shape still answers nothing, and it is a different defect:** `lua.h` writes `LUA_API int (lua_pcall) (…)`, a
 **parenthesised declarator**, and the name lookup answers `Unknown(UnparsableName)` — so "go to definition" on that
 token fails too, not just implementation. That is the name resolver's, not this handler's.
+
+## A parenthesised declarator had no parameter list — fixed
+
+The next report from the same editor: hovering `lua_setfield` printed `extern void lua_setfield(…)` and no inlay hint
+was placed. Lua 5.5.0 writes its whole public API as `LUA_API void (lua_setfield) (lua_State *L, int idx, const char
+*k);`, and the tree puts the `ParameterList` **beside** the declarator (`InitDeclarator (Declarator
+"(lua_setfield)", ParameterList …)`) rather than inside it — so `CppDeclarator::get_param_list`'s direct-child search
+found nothing, the fact had no `parameter_list`, and the parameters were filed as **file-scope variables**.
+
+`CppDeclarator::get_param_list` now reads that sibling, only when the declarator is the declaration's own (parent is
+the `InitDeclarator`) and holds no `*`/`&` — `void (*bar)(int a);` is a *variable* of type `void(int)*` and its list
+belongs to the pointed-to type. The analysis's two readers ask through it and rise through the declarators around a
+name, stopping at a pointer; the list is asked for **before** that guard, so `int *f(int a)` keeps its parameters.
+
+Measured on the project: `lua.h:281:16 lua_setfield` went from `function returns void` to `function returns void
+parameters (lua_State *L, int idx, const char *k)`; the hover card reads the real signature; `lauxlib.c` now places
+**301** parameter hints, with `idx:` and `k:` at the `lua_setfield(L, -2, "__name")` call. The inlay guard
+(`a_call_through_a_function_pointer_is_not_hinted`) still passes: a function-pointer *type*'s list is not a
+function's. `FORMAT_VERSION` 41 → 42, because a stored summary carries the empty list and `cpp_parser::VERSION` does
+not move for a reader's change.
