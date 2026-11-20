@@ -1351,6 +1351,12 @@ fn case_label_indent(
     blocks: &[Option<usize>],
     index: usize,
 ) -> Option<usize> {
+    // **The brace must follow the label's colon directly**: walking back from an `if (…)` inside a case body found
+    // the label and put the `if`'s brace at the label's column (measured on nlohmann json under `Microsoft`, where
+    // clang-format puts it at the `if`).
+    if index == 0 || stream.tokens[index - 1].kind != cpp_parser::CppTokenKind::Colon {
+        return Option::None;
+    }
     let mut earlier = index;
     while earlier > 0 {
         earlier -= 1;

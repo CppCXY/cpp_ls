@@ -355,28 +355,46 @@ fn control_keyword_before(open: &cpp_parser::CppSyntaxToken) -> Option<BraceKind
     None
 }
 
+/// Is this token a comment (which the parser keeps in the token stream but the layout treats as trivia)?
+fn is_a_comment(kind: CppTokenKind) -> bool {
+    matches!(kind, CppTokenKind::LineComment | CppTokenKind::BlockComment)
+}
+
 /// **Does this `{` open the body of a `case`/`default` label?** — `case 1: {`. The label is a `CaseStat` in the tree
 /// but the body is not inside it (measured: the body`s parent is the `SwitchStat`), so the tokens are the evidence:
 /// a `:` immediately before the brace, and a `case`/`default` between it and the previous label, statement or block.
 fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
+    // **Only trivia may stand between the `:` and the `{`**, and the colon must be the label's: walking back past the
+    // whole condition of an `if` inside a case body found the label's colon and classified the `if`'s brace as the
+    // label's (measured on nlohmann json under `Microsoft`: after `default:` the `if (…) {` came out attached where
+    // clang-format breaks before the brace, and the closing brace landed a level out).
     let mut previous = open.prev_token();
-    let mut colon = false;
     while let Some(token) = previous {
         let kind = CppTokenKind::from(token.kind());
-        if cpp_parser::is_trivia(kind) {
+        // **A comment between the label's `:` and the brace is trivia too**: `default: // end` and then `{` is a
+        // braced case body, and the parser keeps the comment as a token this walk sees.
+        if cpp_parser::is_trivia(kind) || is_a_comment(kind) {
             previous = token.prev_token();
             continue;
         }
-        match kind {
-            CppTokenKind::Colon if !colon => colon = true,
-            CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => return colon,
-            CppTokenKind::LeftBrace
-            | CppTokenKind::RightBrace
-            | CppTokenKind::Semicolon
-            | CppTokenKind::Colon => return false,
-            _ => {}
+        if kind != CppTokenKind::Colon {
+            return false;
         }
-        previous = token.prev_token();
+        // The colon belongs to a label when a `case`/`default` comes before it — the label's own expression (and its
+        // brackets) may stand in between.
+        let mut label = token.prev_token();
+        while let Some(token) = label {
+            match CppTokenKind::from(token.kind()) {
+                CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => return true,
+                CppTokenKind::Semicolon
+                | CppTokenKind::LeftBrace
+                | CppTokenKind::RightBrace
+                | CppTokenKind::Colon => return false,
+                _ => {}
+            }
+            label = token.prev_token();
+        }
+        return false;
     }
     false
 }
