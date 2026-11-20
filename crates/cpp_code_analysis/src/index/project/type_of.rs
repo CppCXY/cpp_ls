@@ -2028,17 +2028,53 @@ pub(crate) fn operator_returns_of_with_arguments(
             .class_name()
             .is_some_and(|named| named != class.as_str())
         {
-            return operator_returns_of_with_arguments(
-                index,
-                declaring,
-                scopes,
-                root,
-                path,
-                &target_type,
-                operator,
-                argument_types,
-                argument_count,
-            );
+            // **The alias's namespace is the target's.** `namespace nlohmann { using json = basic_json<>; }` —
+            // `basic_json` means `nlohmann::basic_json`, and the two queries below are not the same question about the
+            // two spellings: `files_declaring` searches by **name** and answers the unqualified one, while
+            // `declarations_in` — the scope posting `member_candidates` needs — is keyed by the **qualified** name.
+            // Measured: `member_candidates("basic_json", "operator[]")` answered **0 candidates** (so the overload
+            // ranking never ran and the first member was taken), while `members_of("basic_json")` listed all 242
+            // members of the class.
+            //
+            // C++ would look `basic_json` up in `nlohmann` first, so the qualified spelling is tried first and the
+            // unqualified one is kept as the fallback — an alias whose target is a class at file scope has no such
+            // qualifier, and qualifying it would find nothing.
+            let qualified = match (
+                class
+                    .rsplit_once("::")
+                    .map(|(qualifier, _)| qualifier.to_string()),
+                target_type.class_name(),
+            ) {
+                (Some(qualifier), Some(bare)) if !bare.contains("::") => {
+                    let mut named = target_type.clone();
+                    if let crate::sema::types::Type::Named { name, .. } = &mut named {
+                        *name = format!("{qualifier}::{bare}");
+                    }
+                    Some(named)
+                }
+                _ => None,
+            };
+            for candidate in qualified.iter().chain(std::iter::once(&target_type)) {
+                if candidate
+                    .class_name()
+                    .is_some_and(|named| named == class.as_str())
+                {
+                    continue;
+                }
+                if let Some(answer) = operator_returns_of_with_arguments(
+                    index,
+                    declaring,
+                    scopes,
+                    root,
+                    path,
+                    candidate,
+                    operator,
+                    argument_types,
+                    argument_count,
+                ) {
+                    return Some(answer);
+                }
+            }
         }
         return None;
     }
@@ -2124,6 +2160,7 @@ pub(crate) fn operator_returns_of_with_arguments(
     // **Asked before the arity choice, not after it.** The arity choice builds a member list (`members_of`), so
     // asking it first and then overriding the answer would pay for both. It is also what makes this a *saving* on the
     // shape that used to pay the list: the ranking is facts, and the list is only asked when nothing was ranked.
+
     let ranked = (!argument_types.is_empty())
         .then(|| {
             let declared = crate::index::project::member_candidates(
@@ -2144,6 +2181,16 @@ pub(crate) fn operator_returns_of_with_arguments(
                     !object_is_const || fact.modifiers.contains(crate::DeclModifiers::CONST)
                 })
                 .collect();
+            if crate::probes::inference() {
+                eprintln!(
+                    "[rank] {class}::{wanted}: {} candidate(s): {:?}",
+                    callable.len(),
+                    callable
+                        .iter()
+                        .map(|(fact, _)| fact.parameter_list().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                );
+            }
             if callable.len() < 2 {
                 return None;
             }

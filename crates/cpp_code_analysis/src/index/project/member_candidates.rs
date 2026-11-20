@@ -80,8 +80,25 @@ pub(crate) fn member_candidates(
         (Some((head, _)), Some(written)) => (head.trim(), Some(written.as_slice())),
         _ => (class.as_str(), arguments),
     };
-    let from_the_index: Vec<(DeclFact, PathBuf)> = index
-        .declarations_in(bare, path)
+    let all = index.declarations_in(bare, path);
+    // **What the query found, before the pattern filter.** A candidate list of zero is not distinguishable from "the
+    // class has no such member" without this line, and it is the line that found the alias defect this query had:
+    // `basic_json::operator[]` answered 0 while `members_of("basic_json")` listed 8 of them, because the alias step
+    // handed it the unqualified spelling (see `operator_returns_of_with_arguments`).
+    let named_of = |declarations: &[crate::VisibleDeclaration<'_>]| -> usize {
+        declarations
+            .iter()
+            .filter(|declaration| declaration.fact.name == member)
+            .count()
+    };
+    if crate::probes::inference() {
+        eprintln!(
+            "[candidates] {bare}::{member}: {} declaration(s) in scope, {} named",
+            all.len(),
+            named_of(&all)
+        );
+    }
+    let from_the_index: Vec<(DeclFact, PathBuf)> = all
         .into_iter()
         .filter(|declaration| {
             declaration.fact.name == member

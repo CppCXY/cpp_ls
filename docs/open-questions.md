@@ -2643,10 +2643,9 @@ hover asked that class first, so it was reading the member list of the class tem
 object's own type first and the arrow's class second. Measured: `std::string second` / "a variable of type
 `std::string`", where it said `_Ty2` before, and the smart-pointer arrow test still passes.
 
-**What is left** is overload selection for a subscript that really has several different answers: `json["data"]`
-answers `basic_json&` because every `operator[]` of `basic_json` returns `reference`, and the list's first member is
-taken once `member_fact` refuses with `Ambiguous`. A class whose overloads return *different* types needs a choice by
-argument conversion, which is the next step for the type layer.
+**What was left** — overload selection for a subscript with several different answers — is closed at the end of this
+note: the ranking was there, and the *candidate list* was empty because the alias step lost the class's namespace. See
+*"The subscript's overloads, through an alias"*.
 ## Lua's own sources: syntax errors at positions in comments
 
 Reported from an editor: opening `lua-5.5.0/src/ldebug.c` showed "large-scale syntax errors", with the squiggles
@@ -3100,3 +3099,48 @@ real expansion.
 **Still open, and unrelated to macros:** `type` on the argument of a call whose callee is a function defined in the
 same file answers the *call's* type (`currentpc(ci)` at `ldebug.c:101:46`), because the argument's node is not the
 innermost expression there. `hover` on the same position answers the declaration, which is right.
+
+## The subscript's overloads, through an alias — `json["k"]` and `const std::string cs; cs[0]`
+
+The item the `is_string` round left open: *"a class whose overloads return different types needs a choice by argument
+conversion"*, and `json["data"]` answered `basic_json&` only because every `operator[]` of `basic_json` returns
+`reference`, so taking the first member happened to be right.
+
+The ranking already existed (`the_one_the_arguments_select`, `crate::sema::overload::choose`) and was already wired
+into the subscript arm; what it needs is the **candidate list**, which is `member_candidates` — a *scope* posting
+keyed by the class's **qualified** name. Following an alias handed it the target's own spelling, and the target is
+written unqualified inside the alias's namespace:
+
+```cpp
+namespace ns { struct Table { int& operator[](int); double& operator[](const char*); }; using Json = Table; }
+```
+
+so the query asked the index for `Table` and found nothing, while `members_of("Table")` listed every member. With no
+candidates the ranking never ran and the first declaration was taken. Measured on `nlohmann::basic_json`:
+
+```text
+before   [candidates] basic_json::operator[]:          0 declaration(s) named, 0 candidates
+after    [candidates] nlohmann::basic_json::operator[]: 242 in scope, 8 named → 8 candidates:
+         (size_type idx) / (const object_t::key_type& key) / (T* key) / (const json_pointer& ptr), each const and not
+```
+
+`operator_returns_of_with_arguments` now tries the **qualified** target first — `nlohmann::basic_json` for
+`nlohmann::json` — and keeps the unqualified one as the fallback, for an alias whose target is a class at file scope.
+Both spellings are asked because the two queries are not the same question: `files_declaring` searches by **name** and
+answers the unqualified one, `declarations_in` is keyed by the **qualified** one.
+
+### Measured
+
+```text
+                                  before        after
+ns::Json table; table["k"]        int&          double&      (the `const char*` overload)
+ns::Json table; table[0]          int&          int&         (unchanged — the first declaration was right)
+const ns::Crate crate; crate[0]   const int&    const int&   (constness already chose; kept as a guard)
+nlohmann::json j; j["emmylua"]    basic_json&   basic_json&  (every overload returns `reference`; now by choice)
+```
+
+`crates/cpp_code_analysis/tests/subscript_overloads.rs` pins it in two files (a header declares the class and the
+alias), and it **fails without the change** — `table["k"]` answers `int&`. A class in the file being edited never had
+the defect: its members come from its own scope tree, where the bindings are filed under the name they were declared
+with. `CPPLS_TRACE_INFERENCE` prints the candidate list and the chosen member (`[candidates]`, `[rank]`), which is how
+this was found.
