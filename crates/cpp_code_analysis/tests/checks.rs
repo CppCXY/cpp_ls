@@ -715,6 +715,52 @@ int broken() { }
     );
 }
 
+/// **What the return type promises is a question about the type, not about the word `void`.**
+///
+/// Three defects of the keyword test this replaces, each measured with `inspect diagnostics` on the fixtures below:
+///
+/// ```text
+///   void *p() { }                        silent before — a pointer returns a value, and `void` is in its spelling
+///   typedef void nothing; nothing t()    reported before — the name *is* `void`
+///   static UNRESOLVED_TYPE v() { }       reported — and a name the reading cannot resolve is not evidence of a value
+/// ```
+///
+/// The third is the shape reported from Lua 5.5.0's `ldebug.c`: `static l_noret typeerror(…)` is declared to return
+/// `l_noret`, which is `void __declspec(noreturn)` (or `void __attribute__((noreturn))`, or plain `void`), and in a
+/// reading that does not carry that `#define` the rule called a function whose whole purpose is not to return
+/// incomplete.
+#[test]
+fn missing_return_reads_the_declared_type_rather_than_the_word_void() {
+    let reported = [
+        // A pointer is a value whatever precedes it.
+        "void *buffer() { }",
+        // A name that resolves to something with a size.
+        "struct W { int x; };\nstatic W make() { }",
+        // A `typedef` for a value.
+        "typedef int myint;\nstatic myint count() { }",
+    ];
+    for source in reported {
+        assert!(
+            codes_of(source).contains(&DiagnosticCode::MissingReturn),
+            "something is promised here: {source}"
+        );
+    }
+
+    let silent = [
+        // A `typedef` of `void` is `void`: the reported shape.
+        "typedef void nothing;\nstatic nothing stop() { }",
+        // **A name this reading cannot resolve is not a value.** The reading may not have expanded a macro, and the
+        // safe direction is silence — the rule's other arms still report what they are sure of.
+        "static UNRESOLVED_TYPE stop() { }",
+    ];
+    for source in silent {
+        assert!(
+            !codes_of(source).contains(&DiagnosticCode::MissingReturn),
+            "nothing is proven to be promised here: {source}"
+        );
+    }
+}
+
 #[test]
 fn missing_return_is_not_reported_for_void_or_for_a_returning_body() {
     assert!(

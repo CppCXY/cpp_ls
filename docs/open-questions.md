@@ -2866,3 +2866,67 @@ empty list instead of grey.
 
 What is left: the program path (a file read as a unit answers from its per-file cook — same configuration, same spans,
 only slower), and the hover line ("this region is excluded by the configuration").
+
+## Lua 5.5.0 again: a false `missing-return`, and where `ci_func(ci)->p` stops
+
+Two reports from an editor on the C project, measured against `C:\Users\zc\Desktop\github\lua_rt\lua_src\lua-5.5.0`.
+
+### 1. `missing-return` on `l_noret` — fixed
+
+`static l_noret typeerror (lua_State *L, …)` was reported as *"declared to return `l_noret` and its body has no
+`return`"*. `l_noret` is `void __declspec(noreturn)` (llimits.h:194-204), so the rule's premise was wrong twice over:
+it asked **the word `void`** rather than what the declaration promises, and it treated *a name it cannot resolve* as
+evidence of a value. The same keyword test had the opposite defect, measured on a fixture: `void *p() { }` — a pointer
+return is a value — was **silent**.
+
+The rule now reads the declaration in three answers (`the_promise_of`): a pointer or reference returns a value, `void`
+returns nothing, another built-in returns a value, and a **name** is followed through the index — `typedef void
+nothing` is `void`, a class is a value, and a name nothing declares is `NotKnown`, which is silence. Measured with
+`inspect diagnostics --cook` on one fixture:
+
+```text
+void *buffer() { }                          reported (was silent)
+int count() { }                             reported
+typedef void nothing; nothing stop() { }    silent   (was reported)
+typedef int myint; myint count() { }        reported
+static UNRESOLVED_TYPE stop() { }           silent   (was reported — the shape of the Lua report)
+```
+
+The Lua project is unchanged by the fix where it should be: `missing-return` appears **nowhere** in its 61 sources
+(`ldebug.c` still answers its 3 unrelated findings). `tests/checks.rs`'s
+`missing_return_reads_the_declared_type_rather_than_the_word_void` pins all five shapes.
+
+### 2. `ci_func(ci)->p` — where it stops, measured
+
+`inspect type` on `ldebug.c:101`:
+
+```text
+col 26  `luaG_getfuncline(…)` is `int`          the call around it types
+col 36  `ci` is `CallInfo*`                     the argument types
+col 38  not known — UnknownType("ci_func")      the call the macro spells
+```
+
+`ci_func(ci)` is a `CallExpr` whose callee is the **macro** `ci_func`; the callee's name lookup answers `Known::No`
+(nothing declares it — it is a `#define`), and `type_of_a_call` has no arm for that: the only thing it can do with a
+callee that declares nothing is `UnknownType(callee)`. The expression is fine once expanded
+(`(&((union GCUnion *)…->cl.l))->p`, which is `Proto *`), so the type exists — in the **cooked** text, which the
+written query never asks.
+
+The hover then says exactly what the editor showed: *"The type of `ci_func(ci)` is not known here, so `p` cannot be
+resolved."* (`hover/mod.rs`'s `member_markdown`, when `type_of_the_expression` is not `Known`.)
+
+**Two ways forward, in the order that fits the architecture:**
+
+1. **Ask the rendering when the written answer is not known.** The mapping already exists
+   (`RenderedCooked::the_rendering_offset_of`), and the object here is written *outside* the invocation's argument
+   list, so its own span maps (measured with `expansion_spans_probe`: `->p` has `written: Some`). The work is: map the
+   object's range, find the node in the cooked tree that *is* that expression, and type it there. Open question: the
+   "innermost node at this offset" is not the object — the rendering's object is a parenthesised chain — so the node
+   search has to take the **outermost expression whose written range equals the mapped one**, which is a rule worth
+   writing down before writing it.
+2. **Type the macro body with the arguments substituted.** The general answer, and the expensive one: a macro body is
+   text, its parameters have the arguments' types, and the engine would need a small expansion-and-type pass. It would
+   fix every `MACRO(x)->member` in every C project, which is a real class and not one expression.
+
+Nothing is implemented for (2). Item 1 is the next step; until then the popup's explanation is accurate about *why*
+(it does not claim the code is wrong).

@@ -53,6 +53,102 @@ fn range_of_the_name(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser:
 /// **`missing-return`** — see the module documentation.
 pub struct MissingReturn;
 
+/// **What the declared return type promises**, as far as *this reading* can tell.
+///
+/// Three answers rather than a boolean, because "is it void" and "is it not void" are not each other's negation here:
+/// a spelling the reading cannot resolve is neither, and a rule that has to be sure before it speaks needs a place to
+/// stand when it is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Promise {
+    /// Nothing is returned — `void`, or a name this reading says is `void` (`typedef void nothing`).
+    Nothing,
+    /// A value is returned — a scalar, a pointer, a reference, a class — so a body that falls off its end is a finding.
+    AValue,
+    /// This reading cannot tell: a deduced type, or a name nothing it can see declares.
+    NotKnown,
+}
+
+/// **What one declaration promises**, read from the specifiers and the declarator, not from a spelling.
+///
+/// The spelling is what the *message* wants; the question is the tree's, because `void *p()` and `void p()` are the
+/// same two keywords and different promises. Measured with a fixture: the keyword test this replaced (`is_void`)
+/// treated `void *p() { }` as "nothing is promised" and was **silent about a function that returns nothing at all** —
+/// a pointer is a value whatever precedes it.
+///
+/// The name arm is what keeps the rule honest when the reading has not expanded something. `static l_noret typeerror(…)`
+/// is Lua's own spelling: `l_noret` is `void __declspec(noreturn)` (or `void __attribute__((noreturn))`, or plain
+/// `void`), and in a reading that does not carry that `#define` the spelling is a name nothing declares — the rule read
+/// it as "not void" and reported *"this function is declared to return `l_noret` and its body has no `return`"* on a
+/// function whose whole purpose is not to return. A name the reading cannot resolve is not evidence of a value, and a
+/// rule that has to be sure does not speak.
+fn the_promise_of(context: &CheckContext<'_>, declaration: &cpp_parser::CppDeclaration) -> Promise {
+    use cpp_parser::CppAstNode;
+    let Some(specifiers) = declaration.get_decl_specifiers() else {
+        return Promise::NotKnown;
+    };
+    // A deduced return type promises nothing this rule can read.
+    if specifiers.is_deduced_return_type() {
+        return Promise::NotKnown;
+    }
+    // **A pointer or a reference returns a value whatever precedes it.** Asked of the declarator, which is where the
+    // `*` is: `void *p` writes the `void` keyword too, and the keyword alone cannot tell the two apart.
+    let pointer_or_reference = declaration
+        .get_init_declarator()
+        .and_then(|declarator| declarator.child::<cpp_parser::CppDeclarator>())
+        .is_some_and(|declarator| declarator.is_a_pointer() || declarator.is_a_reference());
+    if pointer_or_reference {
+        return Promise::AValue;
+    }
+    if specifiers.is_void() {
+        return Promise::Nothing;
+    }
+    if specifiers.get_builtin_type().is_some() {
+        return Promise::AValue;
+    }
+    let Some(name) = specifiers.get_type_name() else {
+        return Promise::NotKnown;
+    };
+    the_promise_of_a_name(context, &name.get_qualified_name(), 0)
+}
+
+/// **What a name promises** — followed through the index to the declaration it names, and through a `typedef`'s target.
+///
+/// `typedef void nothing; nothing f() { }` is the shape this exists for: the name is a type, and a type that *is* `void`
+/// promises nothing, so "not the keyword `void`" is not the same as "a value". Two answers are read from a target
+/// without asking again — `void` itself, and the built-ins (`typedef int myint;`) — and a target that is another name
+/// is followed. The walk is bounded because a `typedef` chain can be a cycle (`typedef A B; typedef B A;` is
+/// ill-formed but readable) and three hops answer every real spelling.
+///
+/// A target this cannot classify — an attributéd `void`, a template-id — answers `NotKnown` rather than guessing: the
+/// safe direction is silence, and the rule's other arms already report the shapes that are certain.
+fn the_promise_of_a_name(context: &CheckContext<'_>, spelling: &str, depth: usize) -> Promise {
+    let spelled = spelling.trim();
+    if spelled.is_empty() || depth > 3 {
+        return Promise::NotKnown;
+    }
+    let crate::Known::Yes(known) = context.index().definition(spelled, context.path) else {
+        return Promise::NotKnown;
+    };
+    let fact = &known.fact;
+    // A class, a struct, an enum — something with a size, which is a value.
+    if fact.kind != crate::DeclKind::Type {
+        return Promise::AValue;
+    }
+    match fact.type_of.as_deref().map(str::trim) {
+        // A type declared through its own name (`class Widget;`) is an ordinary class.
+        None | Some("") => Promise::AValue,
+        Some("void") => Promise::Nothing,
+        // **A built-in target is a value** — `typedef int myint;` — and a pointer to anything is a value too.
+        Some(target)
+            if target.contains('*')
+                || target.contains('&')
+                || crate::sema::layout::a_builtin_in_memory(target).is_some() =>
+        {
+            Promise::AValue
+        }
+        Some(target) => the_promise_of_a_name(context, target, depth + 1),
+    }
+}
 impl Check for MissingReturn {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::MissingReturn];
 
@@ -80,12 +176,11 @@ impl Check for MissingReturn {
             // written return type: a constructor, a destructor, and an out-of-class definition whose head the grammar could
             // not read all answer `None` here. That is the answer the old rule got wrong by falling through to the
             // parameter list and reading the first parameter's specifier.
-            let Some(specifiers) = declaration.get_decl_specifiers() else {
-                continue;
-            };
-            // **`void` and the deduced types** — asked of the specifier sequence, not of a spelling: `void [[nodiscard]]`,
-            // `auto`, `auto&` and `decltype(auto)` are all "nothing is promised here".
-            if specifiers.is_void() || specifiers.is_deduced_return_type() {
+            // **What the return type promises**, which is the whole of the rule's premise. A pointer decides by its
+            // declarator (`void *p` is a value), a keyword by the specifier sequence, and a *name* by what the index
+            // says it declares — see [`the_promise_of`], where the three answers and the ones they replaced are
+            // recorded.
+            if the_promise_of(context, &declaration) != Promise::AValue {
                 continue;
             }
 
