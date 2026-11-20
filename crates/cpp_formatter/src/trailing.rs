@@ -232,7 +232,12 @@ fn run_columns(entries: &[(usize, usize, usize)], limit: usize) -> Vec<Option<us
             .map(|at| entries[at].0 + entries[at].2)
             .max()
             .unwrap_or(0);
-        let too_long = (start..end).find(|at| limit > 0 && column + entries[*at].1 > limit);
+        // **A comment that cannot fit even on a line of its own does not split the run**: splitting would not help
+        // it, and clang-format keeps the earlier lines aligned (`binary_reader.hpp`'s 100-column `// false_type,
+        // integral_constant, …` stays in the include block's column 23). A comment that *would* fit on its own line
+        // but not at the run's column is the offender the run splits at.
+        let too_long = (start..end)
+            .find(|at| limit > 0 && column + entries[*at].1 > limit && entries[*at].1 <= limit);
         match too_long {
             Some(at) => {
                 // The offending comment keeps its own start (`None`), and the run continues **after** it.

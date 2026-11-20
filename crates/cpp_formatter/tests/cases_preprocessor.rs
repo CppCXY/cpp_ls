@@ -155,3 +155,21 @@ fn preprocessor_11_a_directive_after_a_trailing_comment() {
     let input = "int x; // note\n#include <iosfwd>\n#include <string>\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **A comment that cannot fit even on a line of its own does not split the trailing-comment run**: the 90-column
+/// `// xxxx…` here is longer than the 80-column limit, so splitting would not help it, and clang-format keeps the
+/// earlier lines in the widest line's column (`binary_reader.hpp`'s 100-column `// false_type, integral_constant, …`
+/// is where this was measured). A comment that *would* fit on its own line but not at the run's column is what splits
+/// a run. clang-format 23.1.5 (`LLVM`) writes this fixture byte for byte.
+#[test]
+fn preprocessor_12_an_unsplittable_comment_keeps_the_run() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = concat!(
+        "#include <array>       // array\n",
+        "#include <type_traits> // ",
+    );
+    let long: String = std::iter::repeat_n('x', 90).collect();
+    let input = format!("{input}{long}\n#include <utility>     // move\n");
+    assert_eq!(cpp_formatter::format_file(path, &input, &llvm), input);
+}
