@@ -981,6 +981,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         // before each cell are computed here, where the column after the `{` is known.
         if stream.tokens[index].kind == cpp_parser::CppTokenKind::LeftBrace
             && let Some(close) = pairs[index]
+            // **A braced list that is an argument of a call is wrapped by the argument rules, not laid out as a
+            // table**: `frames.push_back(frame{nullptr, nullptr, slot, elements.size(), ordered_state(…)})` is a plain
+            // wrapped list in clang-format, while `std::vector<int> v{…}` — a declaration`s initializer — is a table
+            // (measured on nlohmann json`s `json_sax.hpp`). The bracket stack tells them apart: a list opened inside a
+            // `(`/`[` is an argument.
+            && stack.is_empty()
             && crate::tables::is_an_initializer_list(&roles, &stream, index)
             && let Some(cells) = crate::tables::cells_of(&stream, index, close)
         {

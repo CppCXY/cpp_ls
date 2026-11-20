@@ -72,3 +72,14 @@ fn a_fitting_list_is_one_line() {
         "static const int n[] = {1, 2, 3};\n",
     );
 }
+
+/// **A braced list that is a call's argument is wrapped by the argument rules, not laid out as a table.** clang-format
+/// (`LLVM`) writes this fixture byte for byte: the temporary `frame{…}` wraps as a plain list aligned after the `(`,
+/// while a declaration's initializer (`std::vector<int> v{…}`, `= {…}`, `std::array<int, 15>{…}`) is a table.
+#[test]
+fn a_braced_argument_is_not_a_table() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f() {\n  frames.push_back(frame{nullptr, nullptr, slot, elements.size(),\n                         ordered_state(dest_member, false)});\n  std::vector<int> v{111, 2222, 33, 44444, 5,  666, 7777, 88,\n                     999, 10,   11, 12,    13, 14,  15};\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}
