@@ -164,6 +164,22 @@ re-wraps most of their lines: their `changed lines` column measures the **break 
 formatter implements only for statements that already overflow. Their **spacing-only** column — the same text
 clang-format laid out, fed back through `cppfmt` — is the comparable one, and it is where the remaining work is
 named: 1 875 lines on Lua 5.5, 2 558 on nlohmann json with `LLVM`.
+### The fallback, and why the spacing column rises
+
+The renderer verifies its own output: if the token stream changed (a rule glued two words, `> >` became `>>`), it returns
+the **source unchanged** — a safety net, and a masking one. An environment-gated diagnostic (`CPPLS_TRACE_FALLBACK`)
+reports the first token that differs; on nlohmann json it found **four** of forty files falling back, all of them on a
+word pair glued by a spacing rule (`operator size_t`, `operator string_t`, `return enter_array`, `typename
+IteratorType`). Two were fixed at the rule (`operator` keeps the space before a type name); the rest are now covered by a
+**floor**: two tokens that both start/end with a word character are never glued, whatever the rule answered, because
+clang-format never writes that pair and the result would not lex the same. No file of the forty falls back now.
+
+That is why the spacing column **rises** while the whole-file column falls: a file that fell back was, for the
+spacing-only measurement, clang-format's own text fed back unchanged — a perfect score for the wrong reason. The two files
+now really formatted (`binary_reader.hpp`, `input_adapters.hpp`) with their token-level defects visible: 2 592 lines
+instead of 1 022 (`LLVM`), 1 721 instead of 561 (`Microsoft`), 2 751 instead of 1 092 (`Google`), against whole-file
+20 444 instead of 24 989, 7 207 instead of 9 499 and 20 526 instead of 25 058. The defects those two files hold are the
+next item on the list, not a regression in behaviour.
 ## What the remaining difference is
 
 Three kinds, in the order they cost lines on the corpus:

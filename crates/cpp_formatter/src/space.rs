@@ -19,17 +19,47 @@
 use crate::config::Style;
 use crate::options::StyleOption;
 use crate::roles::Roles;
-use crate::tokens::Stream;
+use crate::tokens::{Stream, Token};
 use cpp_parser::CppTokenKind;
 
 /// The number of spaces between `tokens[index - 1]` and `tokens[index]`.
 pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) -> usize {
-    use CppTokenKind::*;
     if index == 0 {
         return 0;
     }
     let current = stream.tokens[index];
     let previous = stream.tokens[index - 1];
+    // **Two words are never glued**: a rule that answers 0 between a token that ends with a word character and one that
+    // starts with one would merge them into a single token — `case 0xB7` became `case0xB7`, `return enter_array` became
+    // `returnenter_array`, `operator size_t` became `operatorsize_t` — and the renderer's token-stream check then threw
+    // the **whole file** away. clang-format never writes that pair glued, so one space is the answer whatever the rule
+    // said; the individual rules are still fixed on their own (a guard is not a substitute, it is the floor).
+    let glued_words = previous
+        .text
+        .chars()
+        .last()
+        .is_some_and(|character| character.is_alphanumeric() || character == '_')
+        && current
+            .text
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_alphanumeric() || character == '_');
+    let answer = between_rules(stream, index, roles, style, current, previous);
+    if answer == 0 && glued_words {
+        return 1;
+    }
+    answer
+}
+
+fn between_rules(
+    stream: &Stream<'_>,
+    index: usize,
+    roles: &Roles,
+    style: &Style,
+    current: Token<'_>,
+    previous: Token<'_>,
+) -> usize {
+    use CppTokenKind::*;
     let offset = current.start;
 
     // **Two operator characters the source wrote together stay together.** `cpp_parser`s lexer splits `>=` into
@@ -983,6 +1013,33 @@ mod tests {
         assert_eq!(spaces("int * p;", 2), 0, "after the star");
     }
 
+    #[test]
+    fn two_words_are_never_glued() {
+        // `case 0xB7:` — a rule that answers 0 between the keyword and the literal merged them into `case0xB7`, which
+        // no longer lexes the same; the renderer then threw the whole file away. The floor is one space.
+        assert_eq!(spaces("case 0xB7:", 1), 1, "case and the literal");
+        assert_eq!(
+            spaces("return enter_array(len);", 1),
+            1,
+            "return and the call"
+        );
+        assert_eq!(
+            spaces("typename IteratorType :: type;", 1),
+            1,
+            "typename and the name"
+        );
+        // The floor does not disturb the punctuator rules: `operator=` still glues.
+        assert_eq!(
+            spaces("bool operator ==(const T &);", 2),
+            0,
+            "operator and =="
+        );
+        assert_eq!(
+            spaces("operator size_t();", 1),
+            1,
+            "operator and a type name"
+        );
+    }
     #[test]
     fn a_product_keeps_its_spaces() {
         // `int x = a * b;` is `int` `x` `=` `a` `*` `b` `;`: the star is index 4.
