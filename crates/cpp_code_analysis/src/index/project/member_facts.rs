@@ -632,14 +632,30 @@ pub(crate) fn resolve_aliases_or_unresolved(
         // **Read as a type, not as a name**: the target's own arguments are what the class it names was written
         // with, and `base_type_name` — which the name-only walk used — is exactly the part that threw them away.
         let target_type = parse_type_spelling(&target);
-        let Some(target) = target_type.class_name().map(a_class_name_without_spaces) else {
+        // **A `typedef` of a pointer names the class it points at.** Lua 5.5.0 declares
+        // `typedef struct StackValue *StkId;` and writes its whole stack API with one, so `StkId` was read as "no
+        // class", the walk broke, and every member question about it asked the *alias* for its members —
+        // `NotDeclaredHere("StkId::val")`, and no `->` chain that starts at one could be followed (measured through
+        // the expansion of `ci_func(ci)`, whose first step is `(ci)->func.p`, typed `StkId`). A member of a pointer is
+        // a member of its pointee's class, which is the rule `member_access_class` already applies.
+        let (named, arguments) = match target_type.class_name() {
+            Some(named) => (Some(named.to_string()), target_type.arguments().to_vec()),
+            None => match target_type.pointee() {
+                Some(pointee) => (
+                    pointee.class_name().map(str::to_string),
+                    pointee.arguments().to_vec(),
+                ),
+                None => (None, Vec::new()),
+            },
+        };
+        let Some(target) = named.map(|named| a_class_name_without_spaces(&named)) else {
             break;
         };
         if target.is_empty() {
             break;
         }
-        if !target_type.arguments().is_empty() {
-            carried = target_type.arguments().to_vec();
+        if !arguments.is_empty() {
+            carried = arguments;
         }
 
         // An unqualified target is looked for **from the scope the alias was declared in, outward** — which is

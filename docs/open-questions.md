@@ -2990,3 +2990,32 @@ parameters (lua_State *L, int idx, const char *k)`; the hover card reads the rea
 (`a_call_through_a_function_pointer_is_not_hinted`) still passes: a function-pointer *type*'s list is not a
 function's. `FORMAT_VERSION` 41 → 42, because a stored summary carries the empty list and `cpp_parser::VERSION` does
 not move for a reader's change.
+
+## `MACRO(x)->member`, after the typedef fix: the last two steps, named
+
+The chain in `ci_func(ci)` is `(&((union GCUnion *)…->cl.l))->p`. With the alias walk following a pointer `typedef`
+(commit `f952a0e`, `StkId` → `StackValue`), the expansion types almost to the end, and
+`crates/cpp_ls/tests/macro_member_probe.rs` names the step that stops it:
+
+```text
+..p  on "(ci)->func"        object typed StkIdRel
+..gc on "(((&((ci)->func.p)->val) )->value_)"   object typed Unknown(UnknownType("(ci)"))
+..l  on "(((union GCUnion *)(…))->cl"           object typed Unknown(NotDeclaredHere("union GCUnion::cl"))
+```
+
+Two findings, both measured:
+
+1. **An elaborated-type-specifier spelling is not read by the *type engine's* member lookup.** `members_of("union
+   GCUnion")` answers its 8 members (`cl`, `gc`, `h`, `p`, `th`, `ts`, `u`, `upv`) and `members_of("Closure")` its 2 —
+   so the member list query normalises the `union ` prefix, while the access behind `->`/`.` does not: it asks for
+   `union GCUnion::cl` and comes back `NotDeclaredHere`. The engine's class comes from the cast's type, which C allows
+   to be written elaborated (`(union GCUnion *)`), and a C project that typedefs its unions writes it that way.
+2. **One `UnknownType("(ci)")` remains inside `(&((ci)->func.p)->val)`** while the same `(ci)` types as `CallInfo *`
+   in `(ci)->func.p` two steps earlier. Parentheses are not the cause — a fixture (`((x))`, `((s))->n`) types both
+   correctly — so it is something about the *rendering's* spelling of that run (the writer leaves a space before the
+   closing parenthesis: `)->val) )`), and the next measurement is that node's tree, not a guess.
+
+Nothing else in the chain is unknown: `StkIdRel`, `TValue`, `GCUnion`, `Closure` and `LClosure` all answer members once
+the program reading is committed (`TValue`'s body is written by a macro, `TValuefields`, so its two members exist only
+in the rendering — `session.commit_a_unit_reading` is what files them, and the probe shows `[]` before it and
+`["tt_", "value_"]` after).

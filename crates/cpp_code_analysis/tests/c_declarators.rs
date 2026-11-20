@@ -122,3 +122,53 @@ fn a_parenthesised_declarators_parameters_are_locals() {
         other => panic!("the parameter resolves: {other:?}"),
     }
 }
+
+/// **A `typedef` of a pointer is followed for a member access** — `typedef struct StackValue *StkId;`.
+///
+/// Lua 5.5.0 declares that alias and writes its whole stack API with one, so `s->val` asked the **alias** for its
+/// members and answered `NotDeclaredHere("StkId::val")`; no `->` chain that started at a `StkId` could be followed,
+/// including the one inside the expansion of `ci_func(ci)`. The alias walk in `resolve_aliases_or_unresolved` read the
+/// target as a *type* and required a `class_name`, which a pointer type does not have (`StackValue *`) — so the walk
+/// broke and returned the alias unchanged. The pointee's class name is the answer, which is the rule the rest of the
+/// layer already applies to a written `T *`.
+#[test]
+fn a_typedef_of_a_pointer_is_followed_for_a_member() {
+    use cpp_code_analysis::file::coordinates::ReadingOffset;
+
+    let source = "\
+struct StackValue { int val; };
+typedef struct StackValue *StkId;
+struct CallInfo { union { StkId p; long offset; } func; };
+int f(struct CallInfo *ci) { return ci->func.p->val; }
+int g(StkId s) { return s->val; }
+";
+    let files = MemoryFiles::new().with_file("/p/a.c", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.c")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.c"));
+    session.index_everything();
+    session.load(std::path::Path::new("/p/a.c"));
+    let held = session
+        .files()
+        .held(std::path::Path::new("/p/a.c"))
+        .expect("the file is readable")
+        .clone();
+    let view =
+        cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
+
+    // The `val` at the end of each chain, and what the chain says it is.
+    for (needle, expected) in [("ci->func.p->val", "int"), ("return s->val", "int")] {
+        let at = source.find(needle).expect("the chain") + needle.find("val").expect("the member");
+        let found = session.type_at(&view, ReadingOffset::new(at));
+        match found {
+            cpp_code_analysis::Known::Yes(found) => assert_eq!(found.type_of, expected),
+            other => panic!("{needle}: {other:?}"),
+        }
+    }
+}
