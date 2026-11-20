@@ -199,6 +199,35 @@ Three kinds, in the order they cost lines on the corpus:
 Each step is measured with the command above before and after, and each fix carries a hermetic case in
 `tests/cases_*.rs` — the oracle's answer, not this implementation's.
 
+## The verdict: is it usable?
+
+**It is, for the job it was built for, and the measurement says where.** "Usable" here means two things that a
+formatter is judged by, and they land very differently:
+
+| what | evidence (clang-format 23.1.5) |
+| --- | --- |
+| **Token-level formatting** — spacing, indentation, whether a comment or a directive sits where clang-format puts it | **EmmyLuaCodeStyle, `Microsoft`: 2 lines differ in 8 033**, 28 of 29 files byte-identical. `LLVM` with `ColumnLimit: 0` (the corpus's own style, so no re-wrapping is asked for): **8 lines in 6 510**, 27 of 29 files. nlohmann json, `Microsoft`: **517 lines in 27 551**. Lua 5.5: 841 in 20 304 (`LLVM`), 661 (`Microsoft`) |
+| **Line layout** — where the breaks go on text that has to be wrapped | nlohmann json under `LLVM` re-wraps almost every file (15 of 40 identical), because the break half is a fitting search this formatter answers with the author's own breaks ([*What the remaining difference is*](#what-the-remaining-difference-is)) |
+
+So: **on code that is already laid out the way the style wants — which is the case a formatter is used for in a
+repository that has been formatted before — it is byte-identical to clang-format on 28 of 29 files of a real code
+base, with two lines left.** On text that still has to be re-flowed it is not, and the gap is the penalty model, not
+the token rules.
+
+Three properties hold on every input, and they are what makes it safe to run:
+
+* **the token stream never changes** — the renderer verifies that the output lexes to the same tokens and falls back
+  to the input if it does not (`same_tokens`); that check is what caught `> >` merging into `>>`;
+* **idempotent** — running it twice produces the same bytes (`tests/layout_reflow.rs`, and the spacing measurement
+  itself is a second pass over clang-format's output);
+* **the differences are named** — every rule that cannot be matched is recorded in
+  [*Differences that are not going to be fixed silently*](#differences-that-are-not-going-to-be-fixed-silently) with
+  the measurement that decided it, and nothing is skipped by narrowing the corpus.
+
+What is **not** usable yet, stated plainly: it is not a drop-in replacement for clang-format under `LLVM`/`Google` on
+unformatted `C++` headers (nlohmann json is the witness), it does not wrap comments (`ReflowComments`), and it does not
+format macro bodies. Those are the first three items of [The plan](#the-plan) plus one gap row each.
+
 ## Differences that are **not** going to be fixed silently
 
 Every one of these is a known gap with a reason, not a skipped comparison:
