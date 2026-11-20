@@ -146,3 +146,17 @@ fn blocks_23_a_break_for_the_sake_of_a_trailing_comment() {
         "class json_sax_dom_error_state {\npublic:\n  json_sax_dom_error_state(json_sax_dom_error_state &&) =\n      default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)\n};\n",
     );
 }
+
+/// **A namespace that contains another one closes with its own name**: `namespace multi { … namespace inner { … } }`
+/// ends with `} // namespace multi`, not the inner name — the syntax node of the outer declaration may hold only the
+/// body, so the name is read from the source text before the brace. clang-format 23.1.5 (`LLVM`) writes this fixture
+/// byte for byte.
+#[test]
+fn blocks_24_a_nested_namespace_comment() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "namespace multi {\nint a;\nnamespace inner {\nint b;\n}\n}\n";
+    let expected =
+        "namespace multi {\nint a;\nnamespace inner {\nint b;\n}\n} // namespace multi\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
+}

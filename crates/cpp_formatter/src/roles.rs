@@ -135,7 +135,7 @@ pub fn of(source: &str) -> Roles {
                     // **The name, for `FixNamespaceComments`.** Read from the tokens the declaration holds: the word
                     // after `namespace`, when it is an identifier. `namespace ns::inner {` records `inner`, which is
                     // the name clang-format writes in the comment (`} // namespace inner`).
-                    if let Some(name) = namespace_name(&node) {
+                    if let Some(name) = namespace_name(source, brace) {
                         roles.namespace_names.insert(brace, name);
                     }
                 }
@@ -418,27 +418,20 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
 }
 
 /// **The name a namespace declaration gives itself**, or `None` for an anonymous one.
-fn namespace_name(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    let mut after_the_keyword = false;
-    for element in node.descendants_with_tokens() {
-        let Some(token) = element.into_token() else {
-            continue;
-        };
-        let kind = CppTokenKind::from(token.kind());
-        if kind == CppTokenKind::NamespaceKeyword {
-            after_the_keyword = true;
-            continue;
-        }
-        if !after_the_keyword || cpp_parser::is_trivia(kind) {
-            continue;
-        }
-        return match kind {
-            CppTokenKind::Identifier => Some(token.text().to_string()),
-            CppTokenKind::LeftBrace => None,
-            _ => None,
-        };
+fn namespace_name(source: &str, brace: usize) -> Option<String> {
+    // **The head of the declaration, read from the source, not from the node**: an outer namespace's syntax node may
+    // hold only the *body*, so its text starts at the brace and the first `namespace` keyword in it belongs to a
+    // nested declaration (`namespace multi { … namespace inner { … } }` closed with `// namespace inner`, measured).
+    // The text since the last `;`, `}` or `{` is this declaration's head; its last `::` component is the name
+    // clang-format writes (`namespace a::b {` closes with `// namespace b`).
+    let head = source.get(..brace)?.rsplit(['}', ';', '{']).next()?;
+    let after = head.rsplit_once("namespace").map(|(_, rest)| rest)?;
+    let name = after.rsplit("::").next().unwrap_or(after).trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
-    None
 }
 
 /// The kind of the token before this one that is not trivia — `)`, `=`, a name.
@@ -522,6 +515,21 @@ mod tests {
         assert_eq!(
             roles.brace_kind.get(&method_brace),
             Some(&BraceKind::Function)
+        );
+    }
+    #[test]
+    fn a_nested_namespace_keeps_its_own_name() {
+        let source = "namespace multi {\nint a;\nnamespace inner {\nint b;\n}\n}\n";
+        let roles = of(source);
+        let outer = source.find('{').expect("the outer body");
+        let inner = source.find("inner {").expect("the inner body") + "inner ".len();
+        assert_eq!(
+            roles.namespace_names.get(&outer),
+            Some(&"multi".to_string())
+        );
+        assert_eq!(
+            roles.namespace_names.get(&inner),
+            Some(&"inner".to_string())
         );
     }
     #[test]
