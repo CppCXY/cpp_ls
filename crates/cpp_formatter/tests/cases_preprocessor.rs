@@ -173,3 +173,19 @@ fn preprocessor_12_an_unsplittable_comment_keeps_the_run() {
     let input = format!("{input}{long}\n#include <utility>     // move\n");
     assert_eq!(cpp_formatter::format_file(path, &input, &llvm), input);
 }
+
+/// **An `#include` line keeps its trailing comment byte for byte**, while a `#define` line's and a statement's comment
+/// get the prefix space every other path gives them (`//byteswap` stays, `//no space` becomes `// no space`). Measured
+/// on clang-format 23.1.5, which writes this fixture byte for byte — including the last line, whose comment is
+/// normalised even though it ends the file.
+#[test]
+fn preprocessor_13_an_include_comment_keeps_its_bytes() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "#define X      // no space\n#include <bit> //byteswap\nint y;         // also\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+    // The same file with the comments unnormalised formats to that same text — the rule is about `#include`, not about
+    // keeping the source — and the trailing comments are aligned by the post-pass (`int y;` joins the `#define` column).
+    let ragged = "#define X //no space\n#include <bit> //byteswap\nint y; //also\n";
+    assert_eq!(cpp_formatter::format_file(path, ragged, &llvm), input);
+}

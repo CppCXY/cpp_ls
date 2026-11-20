@@ -721,7 +721,22 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 }
             } else if let Some(comment) = trailing {
                 let prefix = source.get(gap.start..comment.start).unwrap_or("");
-                let comment_text = crate::comments::normalized(comment.text, style);
+                // **An `#include` line keeps its comment byte for byte**: clang-format sorts and places includes but
+                // does not normalise their trailing comments — `#include <bit> //byteswap` stays as written, while
+                // `#define X //no space` and `int y; //also` both get the space (measured on the oracle). The line is
+                // found from the comment's own line start.
+                let an_include_line = {
+                    let line_begin = line_start(&stream, index.saturating_sub(1));
+                    stream.tokens[line_begin].kind == cpp_parser::CppTokenKind::Hash
+                        && source
+                            .get(stream.tokens[line_begin].start..comment.start)
+                            .is_some_and(|text| text.contains("include"))
+                };
+                let comment_text: std::borrow::Cow<'_, str> = if an_include_line {
+                    std::borrow::Cow::Borrowed(comment.text)
+                } else {
+                    crate::comments::normalized(comment.text, style)
+                };
                 out.push_str(prefix);
                 out.push_str(&comment_text);
                 // The column is reassigned by the break and indent below, so only the text is written here.
@@ -865,8 +880,18 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 columns.advance(column + usize::from(before), &comment_text) + usize::from(after);
         } else {
             // Verbatim: the gap's own bytes (newlines, indentation, comments) are not ours to change in this pass —
-            // except the one thing every path owes a comment, its prefix spacing (`//using` is `// using`).
-            let gap_text = verbatim_gap(source, gap, style);
+            // except the one thing every path owes a comment, its prefix spacing (`//using` is `// using`), and except
+            // on an `#include` line, whose trailing comment clang-format leaves byte for byte.
+            let an_include_line = {
+                let line_begin = line_start(&stream, index.saturating_sub(1));
+                stream.tokens[line_begin].kind == cpp_parser::CppTokenKind::Hash
+                    && gap.comments.first().is_some_and(|comment| {
+                        source
+                            .get(stream.tokens[line_begin].start..comment.start)
+                            .is_some_and(|text| text.contains("include"))
+                    })
+            };
+            let gap_text = verbatim_gap(source, gap, style, an_include_line);
             column = match gap_text.rfind('\n') {
                 Some(at) => columns.advance(0, &gap_text[at + 1..]),
                 None => columns.advance(column, &gap_text),
@@ -1188,20 +1213,27 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     }
 
     if let Some(trailing) = stream.gaps.last() {
-        let text = source.get(trailing.start..trailing.end).unwrap_or("");
         // **The file's last closer keeps its comment in this gap**, and `FixNamespaceComments` rewrites it like any
-        // other — there is no next token, so it is written here.
+        // other — there is no next token, so it is written here. A comment that is not rewritten still gets the prefix
+        // spacing every other path gives it (`int y; //also` is `// also`), except on an `#include` line.
         let last_comment = trailing
             .comments
             .last()
             .filter(|comment| !comment.own_line && comment.ends_line);
+        let last_line_begin = line_start(&stream, stream.tokens.len().saturating_sub(1));
+        let an_include_line = stream.tokens[last_line_begin].kind == cpp_parser::CppTokenKind::Hash
+            && last_comment.is_some_and(|comment| {
+                source
+                    .get(stream.tokens[last_line_begin].start..comment.start)
+                    .is_some_and(|text| text.contains("include"))
+            });
         match (namespace_comment.take(), last_comment) {
             (Some(wanted), Some(comment)) => {
                 out.push_str(source.get(trailing.start..comment.start).unwrap_or(""));
                 out.push_str(&wanted);
                 out.push_str(source.get(comment.end..trailing.end).unwrap_or(""));
             }
-            _ => out.push_str(text),
+            _ => out.push_str(&verbatim_gap(source, trailing, style, an_include_line)),
         }
     }
 
@@ -1572,8 +1604,18 @@ fn is_an_assignment(kind: cpp_parser::CppTokenKind) -> bool {
 /// **A gap copied verbatim, except for its comments' prefix spacing.** The bytes of a gap are the author's (a
 /// directive's alignment, a macro body's spacing), but `SpacesInLineCommentPrefix` applies everywhere clang-format
 /// prints a comment — and these gaps are how a file's first line and a directive's comments are printed.
-fn verbatim_gap(source: &str, gap: &crate::tokens::Gap, style: &Style) -> String {
-    if gap.comments.is_empty() {
+/// **The gap's own bytes**, with one exception every path owes a comment: its prefix spacing (`//using` is `// using`).
+///
+/// **An `#include` line is exempt**: clang-format sorts and places includes but leaves their trailing comments byte for
+/// byte (`#include <bit> //byteswap` stays as written, while `#define X //no space` and `int y; //also` both get the
+/// space — measured on the oracle). The caller passes `skip_comments` for those gaps.
+fn verbatim_gap(
+    source: &str,
+    gap: &crate::tokens::Gap,
+    style: &Style,
+    skip_comments: bool,
+) -> String {
+    if gap.comments.is_empty() || skip_comments {
         return source.get(gap.start..gap.end).unwrap_or("").to_string();
     }
     let mut out = String::with_capacity(gap.end - gap.start + 2);
