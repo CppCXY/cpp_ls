@@ -486,7 +486,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     // indent is the nested-continuation question this formatter still answers one level short, and
                     // recomputing it made the `Lua 5.5` spacing column worse, not better.
                     comment.own_line || (comment.ends_line && !enums.is_empty())
-                }))
+                })
+                // **A directive always gets its column from this pass**: `#include <iosfwd> // ostream` then
+                // `#include <string>` — the trailing comment left the gap to the verbatim copy, which kept the
+                // source's indentation of the next directive (four spaces inside a namespace, measured on nlohmann
+                // json's `json_pointer.hpp`).
+                || stream.tokens[index].kind == cpp_parser::CppTokenKind::Hash)
             && (gap.newlines > 0 || wrap)
             && index > 0
             && let Some((indent, is_block_line)) = {

@@ -143,3 +143,15 @@ fn preprocessor_10_a_spliced_macro_keeps_its_lines() {
         "#define TWICE(x) \\\n    int y = (x); \\\n    use(y)\n",
     );
 }
+
+/// **A directive after a trailing comment still goes to column 0**: the gap holds the previous line's comment, and the
+/// verbatim copy used to keep the *source's* indentation of the directive (`    #include <string>` stayed four columns
+/// in, measured on nlohmann json's `json_pointer.hpp`, where the includes sit indented inside a namespace). clang-format
+/// 23.1.5 (`LLVM`) writes this fixture byte for byte.
+#[test]
+fn preprocessor_11_a_directive_after_a_trailing_comment() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "int x; // note\n#include <iosfwd>\n#include <string>\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}
