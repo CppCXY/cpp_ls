@@ -86,7 +86,7 @@ server knows; the detector around it still requires a parenthesised width follow
 | `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it |
 | `textDocument/semanticTokens` | the standard types (namespace, type, class, enum, typeParameter, parameter, variable, property, enumMember, function, method, macro, keyword, modifier, operator, decorator) and, inside string literals, `printf`/`scanf` format fields (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
-| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` |
+| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting — clang-format from `PATH` by default (`[format] formatter`), or the built-in `cpp_formatter` |
 | `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
 
 ## 6. Diagnostics

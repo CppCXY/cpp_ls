@@ -41,9 +41,10 @@ pub mod ue;
 
 pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
 pub use config::{
-    CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, FormatSection, FormatSyntax,
-    FunctionEntry, HoverSection, IndexSection, LibrarySection, PROJECT_CONFIG_FILE, ProjectConfig,
-    Severity, TargetSection, WorkspaceSection, load_config, parse_config, target_for, targets_for,
+    CompileSection, ConfigProblem, ConfigReport, DEFAULT_FORMATTER, DiagnosticsSection,
+    FormatStringsSection, FormatSyntax, FormattingSection, FunctionEntry, HoverSection,
+    IndexSection, LibrarySection, PROJECT_CONFIG_FILE, ProjectConfig, Severity, TargetSection,
+    WorkspaceSection, load_config, parse_config, target_for, targets_for,
 };
 pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 

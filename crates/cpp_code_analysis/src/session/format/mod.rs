@@ -141,8 +141,8 @@ impl Piece {
 /// **Which functions' literals to read, and with what names** — the project's own answer, not the scanner's.
 ///
 /// The scanner does not know this type exists; the locator ([`literals_in`]) does. Defaults are **on**: a project
-/// that says nothing gets the feature, and `false` is how it is turned off. See `[format]` in `.cppls.toml` — the
-/// file's shape and the reasons for it are in `crate::project::config::FormatSection`.
+/// that says nothing gets the feature, and `false` is how it is turned off. See `[format_strings]` in `.cppls.toml` — the
+/// file's shape and the reasons for it are in `crate::project::config::FormatStringsSection`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatConfig {
     /// Read `{…}`: `std::format` / `print` / `println` / `format_to` … and `fmt::`'s.

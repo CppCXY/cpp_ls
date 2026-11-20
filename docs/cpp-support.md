@@ -163,7 +163,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 | `textDocument/codeAction` | `source.include`: an unresolved name → an edit adding the header that declares it, chosen by the include-visibility rule; `source.create-definition`: a member function declared with no definition → the `Ret Class::method(params) const { }` written at the end of the paired `.cpp`, or of this file when there is no pair (always this file for a template class, whose members cannot be defined in a `.cpp`); `source.implement-pure-virtuals`: a derived class that has not implemented all of its base's pure virtuals → every missing `Ret Class::method(params) const { }` in one edit |
 | `textDocument/semanticTokens` | the standard types plus `decorator` (Doxygen commands) and the custom `variableTemplate`; inside string literals, `std::format`/`fmt`'s `{}` fields and the `printf` family (`formatSpecifier`, `formatArgument`, `formatConversion`, `formatEscape`) |
 | `textDocument/diagnostic` | **pull mode**: syntax errors plus the rules in §6 |
-| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting, reading the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |
+| `textDocument/formatting`, `rangeFormatting`, `willSaveWaitUntil` | whole-file and range formatting — clang-format from `PATH` by default (`[format] formatter`), or the built-in `cpp_formatter`, which reads the common subset of `.clang-format` (indent, column limit, brace style, short blocks on one line, …) |
 | `workspace/didChangeConfiguration` | `.cppls.toml` and editor settings — see [`configuration.md`](configuration.md) |
 
 ## 6. Diagnostics

@@ -32,13 +32,16 @@
 //! [hover]
 //! enable = true
 //!
-//! [format]                                        # where this project's format strings are
+//! [format]                                        # how this project's files are formatted
+//! formatter = "clang-format"                      # or "cpp_formatter", or a path — see `FormattingSection`
+//!
+//! [format_strings]                                # where this project's format strings are
 //! enable = true                                   # colouring, popup and completion, all three
 //! std = true                                      # `{…}` — std::format / fmt::format
 //! printf = true                                   # `%…` — printf, fprintf, fmt::printf
 //! scanf = true                                    # `%…` with scansets — scanf, sscanf
 //!
-//! [format.functions]                              # our own, by the resolved qualified name
+//! [format_strings.functions]                      # our own, by the resolved qualified name
 //! "mylib::logf" = "printf"
 //! "mylib::log" = "std"
 //! "mylib::trace" = { syntax = "printf", argument = 1 }
@@ -124,9 +127,9 @@ pub const PROJECT_CONFIG_FILE: &str = ".cppls.toml";
 /// Everything `.cppls.toml` can say, after parsing.
 ///
 /// The sections that only a language server reads ([`DiagnosticsSection`], [`HoverSection`],
-/// [`FormatSection`]) are here as **data**: this crate parses and validates one file, so that two crates cannot
-/// disagree about what it says — the meaning of `diagnostics.on_change_ms` lives in the server, and what lives here is
-/// the key and its type.
+/// [`FormattingSection`], [`FormatStringsSection`]) are here as **data**: this crate parses and validates one file, so
+/// that two crates cannot disagree about what it says — the meaning of `diagnostics.on_change_ms` lives in the
+/// server, and what lives here is the key and its type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub workspace: WorkspaceSection,
@@ -136,7 +139,17 @@ pub struct ProjectConfig {
     pub hover: HoverSection,
     /// **`[code_lens]`** — is the reference count drawn over each function? See [`CodeLensSection`].
     pub code_lens: CodeLensSection,
-    pub format: FormatSection,
+    /// **`[format]`** — which formatter `textDocument/formatting` runs. See [`FormattingSection`].
+    ///
+    /// This section used to hold the **format-string** settings (`std`, `printf`, `scanf`, `functions`), which are a
+    /// different question with a confusing name: one is "how is this file laid out", the other is "which literals are
+    /// format strings and what is inside them". The format strings moved to [`FormatStringsSection`], and this name
+    /// now belongs to the formatter. A file that still writes the old keys gets a warning naming the move — see the
+    /// `"format"` arm in [`parse_config`].
+    pub format: FormattingSection,
+    /// **`[format_strings]`** — where this project's format strings are, read by the language server. See
+    /// [`FormatStringsSection`].
+    pub format_strings: FormatStringsSection,
     /// **`[completion]`** — how many items one completion may carry.
     ///
     /// ```toml
@@ -723,17 +736,68 @@ pub struct CompletionSection {
     pub suggest_unincluded: Option<bool>,
 }
 
-/// `[format]` — **where this project's format strings are**, read by the language server.
+/// **`[format]` — which formatter `textDocument/formatting` runs**, read by the language server.
 ///
 /// ```toml
 /// [format]
+/// formatter = "clang-format"    # the default; or "cpp_formatter" for the one in this repository; or a path
+/// ```
+///
+/// # Why a name and not a boolean
+///
+/// There are now two formatters, and a second one was always going to arrive: `cpp_formatter` is this repository's
+/// own and does not yet reflow lines the way clang-format does, so a project that wants clang-format's output has to
+/// be able to ask for the real thing. A `use_clang_format = true` would have had to grow a third value the day the
+/// second one appeared; a name is the value that already says which.
+///
+/// **Anything that is not one of the two built-in names is a program**, looked up in `PATH` when it is a bare name
+/// (`clang-format`, `clang-format-18`) and run as written when it is a path. That is one rule instead of three, and it
+/// is why a project with a private build of clang-format needs no setting beyond the path to it. The value is not
+/// checked here: whether a program exists is a question about the machine, which this crate does not see — the server
+/// answers it and warns the client when the answer is no.
+pub const DEFAULT_FORMATTER: &str = "clang-format";
+
+/// `[format]` — the formatter this project uses. See [`DEFAULT_FORMATTER`] for what `formatter` means and why.
+///
+/// ```toml
+/// [format]
+/// formatter = "clang-format"     # the default: found in PATH, and the client is warned when it is not there
+/// formatter = "cpp_formatter"    # this repository's own formatter, no external program needed
+/// formatter = "clang-format-18"  # a versioned install on PATH
+/// formatter = "D:/LLVM/bin/clang-format.exe"   # a program named by path
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormattingSection {
+    /// **Which formatter to run.** `None` is [`DEFAULT_FORMATTER`]; see [`FormattingSection::formatter`] for the
+    /// resolved answer, which is what a caller should read.
+    #[serde(default)]
+    pub formatter: Option<String>,
+}
+
+impl FormattingSection {
+    /// The formatter's name, program or path — [`DEFAULT_FORMATTER`] when the file said nothing, or said nothing
+    /// usable.
+    pub fn formatter(&self) -> &str {
+        self.formatter
+            .as_deref()
+            .map(str::trim)
+            .filter(|written| !written.is_empty())
+            .unwrap_or(DEFAULT_FORMATTER)
+    }
+}
+
+/// `[format_strings]` — **where this project's format strings are**, read by the language server.
+///
+/// ```toml
+/// [format_strings]
 /// enable = true          # the whole feature: the colouring inside a literal, the popup on a part of one, the
 ///                        # completions inside one. `false` is all three at once.
 /// std = true             # `{…}` — std::format / std::print / fmt::format …
 /// printf = true          # `%…` — printf, fprintf, snprintf, fmt::printf …
 /// scanf = true           # `%…` with scansets — scanf, sscanf …
 ///
-/// [format.functions]     # the project's own, by the name the analysis **resolves** them to
+/// [format_strings.functions]     # the project's own, by the name the analysis **resolves** them to
 /// "mylib::logf" = "printf"                        # printf's syntax, the format string first
 /// "mylib::log" = "std"
 /// "mylib::trace" = { syntax = "printf", argument = 1 }   # `trace(level, fmt, …)`
@@ -744,9 +808,13 @@ pub struct CompletionSection {
 /// **One section named for the feature, not for one of its three faces.** It began as `[highlight]` with
 /// `format_strings` / `extra_format` in it, which was wrong twice over: the same question decides a popup and a
 /// completion as well as a colour, and two list keys spelled that differently could only be understood by reading
-/// which one took `{}` and which took `%`. So the section is `[format]`, each grammar switch is named after the
-/// grammar it switches, and **a project's own functions are one table keyed by name** — the syntax is the value, so
-/// nothing has to be remembered.
+/// which one took `{}` and which took `%`. So the section is named for the strings, each grammar switch is named
+/// after the grammar it switches, and **a project's own functions are one table keyed by name** — the syntax is the
+/// value, so nothing has to be remembered.
+///
+/// **It was `[format]` until the formatter needed a section.** Two different questions were spelling the same word
+/// — "how is this file laid out" and "which literals are format strings" — and the formatter's question is the one a
+/// reader expects `[format]` to answer. See [`FormattingSection`].
 ///
 /// **A table rather than a list because a wrapper has a position.** `mylib::trace(level, fmt, …)` puts the format
 /// string second, and a list of names cannot say so; `{ syntax = "printf", argument = 1 }` can. A bare string is the
@@ -754,7 +822,7 @@ pub struct CompletionSection {
 ///
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FormatSection {
+pub struct FormatStringsSection {
     /// The whole feature. `Some(false)` turns the colouring, the popup and the completions off together.
     #[serde(default)]
     pub enable: Option<bool>,
@@ -984,8 +1052,50 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
                 Ok(decoded) => report.config.code_lens = decoded,
                 Err(problem) => report.problems.push(problem),
             },
-            "format" => match decode::<FormatSection>(section, name) {
-                Ok(decoded) => report.config.format = decoded,
+            // **[format]** — which formatter the project runs. See [`FormattingSection`]. It used to hold the
+            // format-string settings, so a file that writes those keys here is read the old way **and told** where
+            // they went: silently ignoring them would turn a project's colouring off without saying so, and silently
+            // reading them without a word would leave a file that no longer matches the documentation.
+            "format" => {
+                let legacy = ["enable", "std", "printf", "scanf", "functions"]
+                    .into_iter()
+                    .any(|key| section.get(key).is_some());
+                if !legacy {
+                    match decode::<FormattingSection>(section, name) {
+                        Ok(decoded) => report.config.format = decoded,
+                        Err(problem) => report.problems.push(problem),
+                    }
+                } else {
+                    report.problems.push(ConfigProblem::warning(
+                        "`[format]` now names the formatter (`formatter = \"clang-format\"`); the format-string \
+                         settings (`enable`, `std`, `printf`, `scanf`, `functions`) moved to `[format_strings]`. \
+                         They are read from here for now, and a `[format_strings]` section wins."
+                            .to_string(),
+                    ));
+                    // **The two halves are read out of one table.** A file that moved the format strings but already
+                    // wrote `formatter` is not a contradiction — it is a file half-way through the move — so the new
+                    // key is taken out first and each section is decoded from what is left for it. Without this, the
+                    // one key that is *in* its new home would be reported as unknown.
+                    let mut strings = match section.as_table() {
+                        Some(table) => table.clone(),
+                        None => toml::map::Map::new(),
+                    };
+                    if let Some(formatter) = strings.remove("formatter") {
+                        let mut only = toml::map::Map::new();
+                        only.insert("formatter".to_string(), formatter);
+                        match decode::<FormattingSection>(toml::Value::Table(only), "format") {
+                            Ok(decoded) => report.config.format = decoded,
+                            Err(problem) => report.problems.push(problem),
+                        }
+                    }
+                    match decode::<FormatStringsSection>(toml::Value::Table(strings), "format_strings") {
+                        Ok(decoded) => report.config.format_strings = decoded,
+                        Err(problem) => report.problems.push(problem),
+                    }
+                }
+            }
+            "format_strings" => match decode::<FormatStringsSection>(section, name) {
+                Ok(decoded) => report.config.format_strings = decoded,
                 Err(problem) => report.problems.push(problem),
             },
             // **[completion]** — how many items one completion may carry. See [`CompletionSection`].
@@ -1027,8 +1137,8 @@ pub fn parse_config(text: &str, path: &Path) -> ConfigReport {
             },
             unknown => report.problems.push(ConfigProblem::error(format!(
                 "[{unknown}] is not a section this server reads (workspace, compile, index, diagnostics, hover, \
-                 code_lens, completion, format), and `locale` is the one key that stands alone, so nothing under it \
-                 is in effect"
+                 code_lens, completion, format, format_strings), and `locale` is the one key that stands alone, so \
+                 nothing under it is in effect"
             ))),
         }
     }
@@ -1111,7 +1221,22 @@ fn validate(report: &mut ConfigReport) {
         }
     }
 
-    // **`[format.functions]`: a syntax this build does not have, and a name that is not a name.**
+    // **`[format] formatter` names a program, and the empty string names nothing.** [`FormattingSection::formatter`]
+    // answers the default for it, which is the right behaviour and the wrong silence: a project that wrote
+    // `formatter = ""` meant something, and the one thing it cannot have meant is "clang-format".
+    if report
+        .config
+        .format
+        .formatter
+        .as_deref()
+        .is_some_and(|written| written.trim().is_empty())
+    {
+        report.problems.push(ConfigProblem::warning(format!(
+            "format.formatter is empty, so the default ({DEFAULT_FORMATTER}) is used"
+        )));
+    }
+
+    // **`[format_strings.functions]`: a syntax this build does not have, and a name that is not a name.**
     //
     // The section decodes without them (a `BTreeMap<String, FunctionEntry>` takes any string as a value), so this is
     // the only place that can say so — and it must, because a function listed with a syntax nobody reads is a
@@ -1119,36 +1244,36 @@ fn validate(report: &mut ConfigReport) {
     // otherwise have to carry a "this one is broken" state in a type that has no room for it.
     let broken: Vec<String> = report
         .config
-        .format
+        .format_strings
         .functions
         .iter()
         .filter(|(_, entry)| entry.syntax().is_none())
         .map(|(name, _)| name.clone())
         .collect();
     for name in broken {
-        let written = match report.config.format.functions.get(&name) {
+        let written = match report.config.format_strings.functions.get(&name) {
             Some(FunctionEntry::Syntax(syntax)) | Some(FunctionEntry::Detailed { syntax, .. }) => {
                 syntax.clone()
             }
             None => String::new(),
         };
         report.problems.push(ConfigProblem::warning(format!(
-            "format.functions names {name:?} with the syntax {written:?}, which is not one this server reads \
+            "format_strings.functions names {name:?} with the syntax {written:?}, which is not one this server reads \
              (std, printf, scanf), so that function is not read"
         )));
-        report.config.format.functions.remove(&name);
+        report.config.format_strings.functions.remove(&name);
     }
 
-    for (name, entry) in &report.config.format.functions {
+    for (name, entry) in &report.config.format_strings.functions {
         if !name.contains("::") {
             report.problems.push(ConfigProblem::warning(format!(
-                "format.functions has {name:?}, which is not a qualified name; an unqualified entry would claim \
+                "format_strings.functions has {name:?}, which is not a qualified name; an unqualified entry would claim \
                  every function of that spelling in the project, including the standard library's"
             )));
         }
         if entry.argument() > 3 {
             report.problems.push(ConfigProblem::warning(format!(
-                "format.functions gives {name:?} the argument {}, which is past the point any format function puts \
+                "format_strings.functions gives {name:?} the argument {}, which is past the point any format function puts \
                  its format string",
                 entry.argument()
             )));
@@ -1206,23 +1331,23 @@ mod tests {
     }
 
     #[test]
-    fn the_format_section_is_read() {
+    fn the_format_strings_section_is_read() {
         let report = parse(
-            "[format]\nenable = true\nstd = false\nprintf = false\n\n[format.functions]\n\
+            "[format_strings]\nenable = true\nstd = false\nprintf = false\n\n[format_strings.functions]\n\
              \"mylib::logf\" = \"printf\"\n\
              \"mylib::log\" = \"std\"\n\
              \"mylib::trace\" = { syntax = \"printf\", argument = 1 }\n",
         );
 
-        assert_eq!(report.config.format.enable, Some(true));
-        assert_eq!(report.config.format.std, Some(false));
-        assert_eq!(report.config.format.printf, Some(false));
+        assert_eq!(report.config.format_strings.enable, Some(true));
+        assert_eq!(report.config.format_strings.std, Some(false));
+        assert_eq!(report.config.format_strings.printf, Some(false));
         // **A key the section does not name keeps its default**, which is "on" — the server reads `None` that way.
-        assert_eq!(report.config.format.scanf, None);
+        assert_eq!(report.config.format_strings.scanf, None);
         assert_eq!(
             report
                 .config
-                .format
+                .format_strings
                 .functions
                 .get("mylib::logf")
                 .and_then(FunctionEntry::syntax),
@@ -1231,7 +1356,7 @@ mod tests {
         assert_eq!(
             report
                 .config
-                .format
+                .format_strings
                 .functions
                 .get("mylib::trace")
                 .map(|entry| (entry.syntax(), entry.argument())),
@@ -1241,7 +1366,7 @@ mod tests {
         assert_eq!(
             report
                 .config
-                .format
+                .format_strings
                 .functions
                 .get("mylib::log")
                 .map(FunctionEntry::argument),
@@ -1250,24 +1375,30 @@ mod tests {
         );
         assert!(report.problems.is_empty(), "{:?}", problems(&report));
 
-        // A project with no `[format]` at all is the ordinary case: everything default, nothing wrong.
+        // A project with no `[format_strings]` at all is the ordinary case: everything default, nothing wrong.
         let report = parse("[workspace]\nexclude = [\"build/**\"]\n");
-        assert_eq!(report.config.format, FormatSection::default());
+        assert_eq!(
+            report.config.format_strings,
+            FormatStringsSection::default()
+        );
         assert!(report.problems.is_empty());
 
         // …and a misspelled key is *this* section's problem, not the file's.
-        let report = parse("[format]\nprintff = false\n");
-        assert_eq!(report.config.format, FormatSection::default());
+        let report = parse("[format_strings]\nprintff = false\n");
+        assert_eq!(
+            report.config.format_strings,
+            FormatStringsSection::default()
+        );
         assert_eq!(report.problems.len(), 1);
         assert!(
-            report.problems[0].message.contains("[format]"),
+            report.problems[0].message.contains("[format_strings]"),
             "{:?}",
             problems(&report)
         );
 
         // **A syntax this build does not have is reported and the rest of the section is kept.** A function that is
         // silently never read is a project believing it configured something.
-        let report = parse("[format.functions]\n\"mylib::logf\" = \"printff\"\n");
+        let report = parse("[format_strings.functions]\n\"mylib::logf\" = \"printff\"\n");
         assert_eq!(report.problems.len(), 1);
         assert!(
             report.problems[0].message.contains("printff"),
@@ -1275,6 +1406,96 @@ mod tests {
             problems(&report)
         );
         assert!(report.problems[0].message.contains("std, printf, scanf"));
+    }
+
+    /// **`[format]` names the formatter**, and absent means the default — which the section answers, so that every
+    /// caller reads one value rather than repeating `unwrap_or("clang-format")`.
+    #[test]
+    fn the_format_section_names_the_formatter() {
+        assert_eq!(
+            parse("[format]\nformatter = \"cpp_formatter\"\n")
+                .config
+                .format
+                .formatter(),
+            "cpp_formatter"
+        );
+        // A path is a value like any other: whether a program exists is the machine's question, not this file's.
+        assert_eq!(
+            parse("[format]\nformatter = \"D:/LLVM/bin/clang-format.exe\"\n")
+                .config
+                .format
+                .formatter(),
+            "D:/LLVM/bin/clang-format.exe"
+        );
+        // Absent, and whitespace-only, are both the default.
+        assert_eq!(
+            parse("[workspace]\n").config.format.formatter(),
+            DEFAULT_FORMATTER
+        );
+        assert_eq!(
+            parse("[format]\nformatter = \"   \"\n")
+                .config
+                .format
+                .formatter(),
+            DEFAULT_FORMATTER
+        );
+        // The section is not silent about the empty string: it is a value somebody wrote on purpose.
+        let report = parse("[format]\nformatter = \"\"\n");
+        assert_eq!(report.config.format.formatter(), DEFAULT_FORMATTER);
+        assert_eq!(report.problems.len(), 1, "{:?}", problems(&report));
+        assert!(
+            report.problems[0].message.contains("clang-format"),
+            "the warning names what is used instead: {:?}",
+            problems(&report)
+        );
+
+        // A key the section does not have is reported, as everywhere else.
+        let report = parse("[format]\nformater = \"cpp_formatter\"\n");
+        assert_eq!(report.config.format, FormattingSection::default());
+        assert!(
+            report.problems[0].message.contains("[format]"),
+            "{:?}",
+            problems(&report)
+        );
+    }
+
+    /// **The old home of the format-string settings is still read, and says where they went.** Silently ignoring the
+    /// keys would turn a project's colouring off without a word; reading them without one would leave a file that no
+    /// longer matches the documentation.
+    #[test]
+    fn the_old_format_keys_are_read_and_the_move_is_reported() {
+        let report =
+            parse("[format]\nstd = false\n\n[format.functions]\n\"mylib::logf\" = \"printf\"\n");
+        assert_eq!(report.config.format_strings.std, Some(false));
+        assert_eq!(report.config.format_strings.functions.len(), 1);
+        assert_eq!(report.problems.len(), 1, "{:?}", problems(&report));
+        assert!(
+            report.problems[0].message.contains("[format_strings]"),
+            "the warning names the new section: {:?}",
+            problems(&report)
+        );
+        assert_eq!(report.config.format, FormattingSection::default());
+
+        // **`[format_strings]` wins when both are written**, and it is the file's order that decides — `format`
+        // sorts first, so the legacy keys are read and then overwritten.
+        let report = parse("[format]\nstd = false\n[format_strings]\nstd = true\n");
+        assert_eq!(report.config.format_strings.std, Some(true));
+
+        // A file that writes *only* the formatter is the new shape and gets no warning.
+        let report = parse("[format]\nformatter = \"cpp_formatter\"\n");
+        assert!(report.problems.is_empty(), "{:?}", problems(&report));
+
+        // **A file half-way through the move**: the format strings are still under `[format]`, and the formatter is
+        // already there. Both are read, and the only problem is the one warning about the move.
+        let report = parse("[format]\nformatter = \"cpp_formatter\"\nstd = false\n");
+        assert_eq!(report.config.format.formatter(), "cpp_formatter");
+        assert_eq!(report.config.format_strings.std, Some(false));
+        assert_eq!(report.problems.len(), 1, "{:?}", problems(&report));
+        assert!(
+            report.problems[0].message.contains("[format_strings]"),
+            "{:?}",
+            problems(&report)
+        );
     }
 
     #[test]

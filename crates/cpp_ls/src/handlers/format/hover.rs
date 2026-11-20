@@ -48,7 +48,7 @@ pub fn format_string_hover(
     }
 
     // **The one translation**, from [`super::config_for`]: a project that turned the feature off gets no popup, which
-    // is the same answer the colouring gives — the three faces are one feature and `[format] enable = false` is all
+    // is the same answer the colouring gives — the three faces are one feature and `[format_strings] enable = false` is all
     // of it.
     let config = super::config_for(session)?;
 

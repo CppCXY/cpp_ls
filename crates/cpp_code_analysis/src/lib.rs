@@ -217,10 +217,11 @@ pub use paths::{
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use project::{
-    CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, Database,
-    DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, FormatSection, FormatSyntax,
-    FunctionEntry, HoverSection, IndexSection, PROJECT_CONFIG_FILE, ProjectConfig,
-    ProjectDiscovery, Severity, WorkspaceSection, find_database, load_config, parse_config,
+    CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, DEFAULT_FORMATTER,
+    Database, DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, FormatStringsSection,
+    FormatSyntax, FormattingSection, FunctionEntry, HoverSection, IndexSection,
+    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
+    find_database, load_config, parse_config,
 };
 pub use summary::ModuleReading;
 // `MacroBodies` is the parser's trait, re-exported here because this crate's public API names it: the seam between

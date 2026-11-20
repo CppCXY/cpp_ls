@@ -460,6 +460,11 @@ fn a_shutdown_ends_the_process_while_the_client_keeps_the_pipe() {
 #[test]
 fn a_formatting_request_returns_edits_for_the_whole_file() {
     let project = Project::new("formatting");
+    // **This test names the built-in formatter**, because what it pins is *this server's* promise about a range —
+    // that an edit never carries a line outside it — and an external clang-format's own `--lines` does not make that
+    // promise (measured: 19.1.7 reindents the neighbour of the range). Which formatter a project runs is
+    // `formatter_choice.rs`'s question; this one is the protocol's.
+    project.write(".cppls.toml", "[format]\nformatter = \"cpp_formatter\"\n");
     // The file the server must be able to format: two spaces where one belongs, and a line indented with three.
     project.write("main.cpp", "int  x = 1;\n   int y = 2;\n");
 

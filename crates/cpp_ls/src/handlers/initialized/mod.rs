@@ -230,6 +230,7 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64)>
         .flatten();
     context.diagnostics().set_change_delay(diagnostic_delay);
     report_project_configuration(context);
+    report_a_missing_formatter(context);
 
     log::info!("analysing {}", root.display());
     Some((root, version))
@@ -263,6 +264,52 @@ async fn install_prepared_session(
         );
     }
     true
+}
+
+/// **Tell the reader, once, that the formatter `[format] formatter` names is not on this machine.**
+///
+/// Asked at startup rather than only when a format is requested, because the answer changes what the reader should
+/// do — install clang-format, or change the setting — and a warning that first appears when they press Ctrl+S arrives
+/// while they are watching the file be saved. The request path checks again (a program can disappear) and falls back
+/// to the built-in formatter either way; [`crate::handlers::formatting::formatter::warn_once`] is what keeps the two
+/// from saying it twice.
+///
+/// The built-in formatter is not looked for: it *is* this binary.
+fn report_a_missing_formatter(context: &ServerContextSnapshot) {
+    use crate::handlers::formatting::formatter::{Formatter, is_available, warn_once};
+
+    let configured = context
+        .analysis()
+        .with_snapshot(|session| {
+            session
+                .project_config()
+                .config
+                .format
+                .formatter()
+                .to_string()
+        })
+        .unwrap_or_else(|| cpp_code_analysis::DEFAULT_FORMATTER.to_string());
+
+    let Formatter::Program(program) = Formatter::of(&configured) else {
+        return;
+    };
+    if is_available(&program) {
+        log::info!("formatter: {program}");
+        return;
+    }
+    if !warn_once(&program) {
+        return;
+    }
+    let message = format!(
+        "format.formatter names {program:?}, which is not on this machine. The built-in cpp_formatter is used \
+         instead — install clang-format, or set formatter = \"cpp_formatter\" in .cppls.toml to choose it \
+         deliberately."
+    );
+    log::warn!("{message}");
+    context.client().show_message(lsp_types::ShowMessageParams {
+        typ: lsp_types::MessageType::WARNING,
+        message,
+    });
 }
 
 /// Tell the user what working the project out produced, when there is something to tell.

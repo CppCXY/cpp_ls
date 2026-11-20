@@ -32,7 +32,10 @@ mod document_link;
 mod document_symbol;
 mod folding_range;
 mod format;
-mod formatting;
+/// **Public because the choice of formatter is worth testing from outside**: which program a configuration names,
+/// and what the command line for it is, are questions a test answers without a server — see
+/// `tests/formatter_choice.rs`.
+pub mod formatting;
 pub mod hover;
 pub mod implementation;
 pub mod inactive_regions;

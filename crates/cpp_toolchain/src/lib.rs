@@ -103,10 +103,11 @@ pub use macros::{
     MacroBindings, MacroBody, MacroDef, MacroTable, Parameter, ParameterKind, UnitSources,
 };
 pub use project::{
-    CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, Database,
-    DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, FormatSection, FormatSyntax,
-    FunctionEntry, HoverSection, IndexSection, PROJECT_CONFIG_FILE, ProjectConfig,
-    ProjectDiscovery, Severity, WorkspaceSection, find_database, load_config, parse_config,
+    CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, DEFAULT_FORMATTER,
+    Database, DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, FormatStringsSection,
+    FormatSyntax, FormattingSection, FunctionEntry, HoverSection, IndexSection,
+    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
+    find_database, load_config, parse_config,
 };
 pub use toolchain::{
     CommandRunner, DiskCommands, Environment, Output, Toolchain, ToolchainSource, discover,

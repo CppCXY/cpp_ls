@@ -212,17 +212,43 @@ enable = true            # the `N references` a function gets, and its price: a 
 max_items = 1000         # how many items one completion may carry; clamped to 1..20000
 suggest_unincluded = true  # offer names from a nearby header, with the `#include` that makes them usable
 
-[format]                 # where this project's format strings are
+[format]                 # how this project's files are formatted
+formatter = "clang-format"   # the default: found on PATH. Or "cpp_formatter" for the built-in one, or a path
+
+[format_strings]         # where this project's format strings are
 enable = true            # the colouring, the popup and the completion — `false` is all three at once
 std = true               # `{…}` — std::format / std::print / fmt::format, fmt::print
 printf = true            # `%…` — printf, fprintf, snprintf, fmt::printf, fmt::sprintf
 scanf = true             # `%…` with scansets — scanf, sscanf
 
-[format.functions]       # your own, keyed by the name the analysis RESOLVES them to
+[format_strings.functions]   # your own, keyed by the name the analysis RESOLVES them to
 "mylib::logf" = "printf"                                 # printf's syntax, format string first
 "mylib::log" = "std"
 "mylib::trace" = { syntax = "printf", argument = 1 }     # `trace(level, fmt, …)`
 ```
+
+`[format] formatter` names the program `textDocument/formatting` runs, and it takes three shapes:
+
+```toml
+formatter = "clang-format"        # the default — a bare name, looked up in PATH
+formatter = "clang-format-18"     # a versioned install is the same kind of value
+formatter = "D:/LLVM/bin/clang-format.exe"   # a path is run as written
+formatter = "cpp_formatter"       # this repository's own formatter: a library call, no child process
+```
+
+`cpp_formatter` (also spelled `cpp_format` and `cppfmt`) is the built-in one — it claims clang-format's configuration
+surface and reads `.clang-format`, but it does not yet reflow lines the way clang-format does (`docs/formatter-diff.md`
+measures the gap). Anything else is a program run the way clang-format documents for a filter: the text on stdin, the
+formatted text on stdout, `--assume-filename` for the style lookup, and `--lines` for a range format.
+
+**A program that is not on the machine is a warning, not a failure.** The server says so once — at startup, and again
+only if the request finds it gone — and answers the request with the built-in formatter, so format-on-save keeps
+working. A project that does not want clang-format at all should say `formatter = "cpp_formatter"` and hear nothing.
+
+Format strings are a different question and have their own section: `[format_strings]` decides which literals are
+format strings and what is inside them — the colouring, the hover and the completion inside a literal. It was called
+`[format]` until the formatter needed that name; the old keys are still read from `[format]` with a warning naming
+the move, and a `[format_strings]` section wins over them.
 
 For clients without pull-diagnostics support, `on_change_ms` sets the debounce in milliseconds before publishing
 diagnostics for open files; the default is 300 ms. Pull-capable clients request diagnostics themselves, so this setting
@@ -283,7 +309,8 @@ needs the standard library's index, which is the reason the rule can run at all.
 [diagnostics] on_change_ms  enable  disable
 [hover]      enable
 [completion] max_items  suggest_unincluded
-[format]     enable  std  printf  scanf      + [format.functions]
+[format]     formatter
+[format_strings] enable  std  printf  scanf      + [format_strings.functions]
 
 [unreal]     enable  engine
 locale       "zh-CN"
@@ -353,7 +380,7 @@ module, and the same code with one violation of each rule.
 |---|---|
 | Build-system integration (CMake, Meson, …) | the database is the interface; `compile_commands.json` is what they export |
 | `textDocument/onTypeFormatting` | the trigger is unreliable in practice; formatting on save and on demand covers it |
-| clang-format itself | `cpp_formatter` is this project's own formatter; it reads a common subset of `.clang-format` |
+| clang-format's line breaking, in the built-in formatter | `cpp_formatter` reads a common subset of `.clang-format` and computes spacing and indentation; the line breaks are the source's. `[format] formatter = "clang-format"` is the default for exactly that reason |
 | C++26 (contracts, reflection, `#embed`) | no feature bits yet; the syntax is read as C++23 |
 | C23 `#embed` | not implemented |
 | `references` / `rename` of ordinary names | answering them means parsing every candidate file; the server refuses rather than editing half a name's uses (macros are answered exactly) |

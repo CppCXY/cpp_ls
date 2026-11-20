@@ -13,7 +13,7 @@
 //! part of it is), and the server has **three** LSP faces for it — `textDocument/semanticTokens/full`, `hover` and
 //! `completion`. The handlers are organised by LSP method, which is right for a server: each method has one entry
 //! point and one capability. But the *feature* would then be three files in three directories with three copies of
-//! "translate `[format]` into the analysis's own configuration", and the third copy is where they disagree.
+//! "translate `[format_strings]` into the analysis's own configuration", and the third copy is where they disagree.
 //!
 //! So the translation lives here, once, and each handler asks for the face it needs. The handler modules keep their
 //! one-entry-point shape and this module owns the feature.
@@ -32,7 +32,7 @@
 //! ```
 
 use cpp_code_analysis::format::{ExtraFunction, FormatConfig, FormatKind};
-use cpp_code_analysis::{DiskFiles, FormatSection, FormatSyntax, Session};
+use cpp_code_analysis::{DiskFiles, FormatStringsSection, FormatSyntax, Session};
 
 pub mod complete;
 pub mod draw;
@@ -41,7 +41,7 @@ pub mod hover;
 pub use draw::draw;
 pub use hover::format_string_hover;
 
-/// **`[format]`, as the analysis reads it** — the one translation, so that the three faces cannot disagree.
+/// **`[format_strings]`, as the analysis reads it** — the one translation, so that the three faces cannot disagree.
 ///
 /// The defaults are decided here rather than in the section so that `.cppls.toml` stays *data* (see
 /// [`cpp_code_analysis::ProjectConfig`]), and `None` therefore means "on": a project that has written no
@@ -50,7 +50,7 @@ pub use hover::format_string_hover;
 /// A project's own function is dropped when its syntax is not one this build has — [`cpp_code_analysis::load_config`]
 /// has already told the user which entry that was, and a name the analysis cannot read a grammar for is one it would
 /// have to guess about.
-pub fn config_from(section: &FormatSection) -> FormatConfig {
+pub fn config_from(section: &FormatStringsSection) -> FormatConfig {
     let grammar = |syntax: FormatSyntax| match syntax {
         FormatSyntax::Std => FormatKind::Std,
         FormatSyntax::Printf => FormatKind::Printf,
@@ -77,9 +77,9 @@ pub fn config_from(section: &FormatSection) -> FormatConfig {
 /// **The configuration in force for this session**, or `None` when the project turned the feature off.
 ///
 /// `None` is the cheap answer every face wants: no colouring, no popup, no list — and it is read here so that a
-/// `[format] enable = false` cannot be honoured by two faces and forgotten by the third.
+/// `[format_strings] enable = false` cannot be honoured by two faces and forgotten by the third.
 pub fn config_for(session: &Session<DiskFiles>) -> Option<FormatConfig> {
-    let section = &session.project_config().config.format;
+    let section = &session.project_config().config.format_strings;
     if section.enable == Some(false) {
         return None;
     }

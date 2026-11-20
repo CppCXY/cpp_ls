@@ -5,6 +5,12 @@ tokens and the **indentation** of a line are computed, but the **line breaks are
 re-lays-out lines that already exist (`lib.rs` says so out loud: *"Until then `format` keeps the input's line
 structure"*). This note is the measurement of that gap and the plan for closing it.
 
+**Because of that gap the server does not use this formatter by default.** `[format] formatter` names the program
+`textDocument/formatting` runs, and the default is `clang-format` from `PATH`; `cpp_formatter` is what answers when a
+project asks for it (`formatter = "cpp_formatter"`) or when no clang-format can be found (with one warning). This
+document measures the built-in one either way — it is the half of the answer that has no external dependency, and it
+is what the hover's macro layout uses. See `docs/configuration.md`'s `[format]`.
+
 The oracle is **clang-format 23.1.5** — the newest release, installed with `pip install clang-format==23.1.5`, at
 `C:\Users\zc\AppData\Local\Programs\Python\Python314\Lib\site-packages\clang_format\data\bin\clang-format.exe`.
 Visual Studio's own copy is 15.0.1 and is **too old to measure against**: on this corpus the Google style alone moved
