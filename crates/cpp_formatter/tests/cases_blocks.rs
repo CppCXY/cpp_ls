@@ -160,3 +160,18 @@ fn blocks_24_a_nested_namespace_comment() {
         "namespace multi {\nint a;\nnamespace inner {\nint b;\n}\n} // namespace multi\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
 }
+
+/// **`FixNamespaceComments` also fixes a wrong comment**: `} // wrong name` becomes `} // namespace existing`, and it
+/// does so whatever the body length — while a *missing* comment is only added past `ShortNamespaceLines` (the fixture
+/// above). clang-format 23.1.5 (`LLVM`) writes this fixture byte for byte.
+#[test]
+fn blocks_25_a_wrong_namespace_comment_is_fixed() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "namespace existing {\nint w;\n} // wrong name\n";
+    let expected = "namespace existing {\nint w;\n} // namespace existing\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
+    // A one-statement body gets no new comment: `} ` stays `}`.
+    let short = "namespace detail {\nvoid f();\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, short, &llvm), short);
+}

@@ -427,10 +427,17 @@ fn namespace_name(source: &str, brace: usize) -> Option<String> {
     let head = source.get(..brace)?.rsplit(['}', ';', '{']).next()?;
     let after = head.rsplit_once("namespace").map(|(_, rest)| rest)?;
     let name = after.rsplit("::").next().unwrap_or(after).trim();
-    if name.is_empty() {
-        None
-    } else {
+    // **Only an identifier is a name**: the text before a brace inside an `#if` block may end with a comment's tail
+    // (`NLOHMANN_JSON_NAMESPACE_END -in-header)` produced the name `-in-header)`), and a name that is not an
+    // identifier belongs to no namespace this rule can name.
+    let identifier = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_');
+    if identifier {
         Some(name.to_string())
+    } else {
+        None
     }
 }
 

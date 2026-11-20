@@ -111,6 +111,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         mut attached,
         mut split,
         namespace_comments,
+        namespace_long,
         closers,
         pairs,
     } = wrapping_lines(&stream, &roles, style);
@@ -380,6 +381,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **The lambda body being joined**, once its `{` was printed and the width was known to fit.
     let mut join_until: Option<usize> = None;
     let mut in_directive = false;
+    // **The comment a namespace's closer wants** (`FixNamespaceComments` with an existing comment): written where
+    // that comment is — the next gap's trailing comment, or the file's last gap, which is written after the loop.
+    let mut namespace_comment: Option<String> = None;
 
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
@@ -703,7 +707,19 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 .comments
                 .last()
                 .filter(|comment| !comment.own_line && comment.ends_line);
-            if let Some(comment) = trailing {
+            // **`FixNamespaceComments` rewrites the comment after a namespace's closer**: clang-format turns
+            // `} // wrong name` into `} // namespace existing` (measured), so the text to write is taken from the
+            // namespace's own name instead of the source. The name was recorded when the `}` was written — this gap
+            // is the next token's, and the comment belongs to the closer's line.
+            if let Some(wanted) = namespace_comment.take() {
+                if trailing.is_some() {
+                    out.push_str(" ");
+                    out.push_str(&wanted);
+                    let _ = columns.advance(columns.advance(column, " "), &wanted);
+                } else {
+                    namespace_comment = Some(wanted);
+                }
+            } else if let Some(comment) = trailing {
                 let prefix = source.get(gap.start..comment.start).unwrap_or("");
                 let comment_text = crate::comments::normalized(comment.text, style);
                 out.push_str(prefix);
@@ -1096,10 +1112,19 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         // on the `cases_wrapping` fixture before this.
         if let Some(name) = &namespace_comments[index]
             && style.flag(StyleOption::FixNamespaceComments)
-            && !stream
+            && stream
                 .gaps
                 .get(index + 1)
                 .is_some_and(|gap| gap.comments.iter().any(|comment| !comment.own_line))
+        {
+            // **An existing comment is fixed, not left alone**: the text is written where the gap's trailing
+            // comment is handled (or a line later, for the file's last closer, whose gap is written after the loop).
+            namespace_comment = Some(format!("// namespace {name}"));
+        } else if let Some(name) = &namespace_comments[index]
+            && style.flag(StyleOption::FixNamespaceComments)
+            // **A missing comment is added only past `ShortNamespaceLines`** (one statement stays bare, two get the
+            // comment — measured); an existing one is fixed either way, which is the branch above.
+            && namespace_long[index]
         {
             let comment = format!(" // namespace {name}");
             out.push_str(&comment);
@@ -1163,7 +1188,21 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     }
 
     if let Some(trailing) = stream.gaps.last() {
-        out.push_str(source.get(trailing.start..trailing.end).unwrap_or(""));
+        let text = source.get(trailing.start..trailing.end).unwrap_or("");
+        // **The file's last closer keeps its comment in this gap**, and `FixNamespaceComments` rewrites it like any
+        // other — there is no next token, so it is written here.
+        let last_comment = trailing
+            .comments
+            .last()
+            .filter(|comment| !comment.own_line && comment.ends_line);
+        match (namespace_comment.take(), last_comment) {
+            (Some(wanted), Some(comment)) => {
+                out.push_str(source.get(trailing.start..comment.start).unwrap_or(""));
+                out.push_str(&wanted);
+                out.push_str(source.get(comment.end..trailing.end).unwrap_or(""));
+            }
+            _ => out.push_str(text),
+        }
     }
 
     // **The token stream is verified, not assumed.** Removing a space can *merge* two tokens — `> >` becomes `>>`
@@ -1513,6 +1552,9 @@ struct WrappingLines {
     attached: Vec<bool>,
     split: Vec<bool>,
     namespace_comments: Vec<Option<String>>,
+    /// **Whether each namespace body is longer than `ShortNamespaceLines`** — the gate for adding a missing closing
+    /// comment (`FixNamespaceComments`); an existing one is fixed whatever the length.
+    namespace_long: Vec<bool>,
     closers: Vec<Option<usize>>,
     /// **Which `}` each `{` closes** — a flat initializer list needs its extent to be laid out as a table.
     pairs: Vec<Option<usize>>,
@@ -1543,6 +1585,9 @@ fn wrapping_lines(
     let mut split = vec![false; count];
     // **`FixNamespaceComments`**: the name to write after the closing brace of a namespace, per closer.
     let mut namespace_comments: Vec<Option<String>> = vec![None; count];
+    // **Whether that namespace's body is longer than `ShortNamespaceLines`** — the gate for *adding* a comment that is
+    // not there; an existing one is fixed either way.
+    let mut namespace_long: Vec<bool> = vec![false; count];
 
     // One entry per `{` the stream opened, `Some` only when it is a **block** — a braced initializer is not one, and
     // its `}` must not pop a block's entry.
@@ -1603,11 +1648,18 @@ fn wrapping_lines(
                             _ => {}
                         }
                     }
-                    if body_lines > style.count(StyleOption::ShortNamespaceLines) {
-                        namespace_comments[index] = roles
-                            .namespace_names
-                            .get(&stream.tokens[open_index].start)
-                            .cloned();
+                    // **The name of every namespace, and whether the body is long enough for a *new* comment**: an
+                    // existing comment is fixed whatever the length (the oracle turns `} // wrong name` into
+                    // `} // namespace existing` for a one-statement body too), and a missing one is added only past
+                    // `ShortNamespaceLines`.
+                    if let Some(name) = roles
+                        .namespace_names
+                        .get(&stream.tokens[open_index].start)
+                        .cloned()
+                    {
+                        namespace_comments[index] = Some(name);
+                        namespace_long[index] =
+                            body_lines > style.count(StyleOption::ShortNamespaceLines);
                     }
                 }
             }
@@ -1719,6 +1771,7 @@ fn wrapping_lines(
         attached,
         split,
         namespace_comments,
+        namespace_long,
         closers,
         pairs,
     }
