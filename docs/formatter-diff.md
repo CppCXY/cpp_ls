@@ -44,11 +44,11 @@ Two numbers, because two different defects produce them:
 | `Google` | 4 / 29 | 1 602 / 6 886 | 21 / 29 match, 58 lines |
 | `Microsoft` | 6 / 29 | **483** / 8 033 | 28 / 29 match, **2 lines** |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 match, 57 lines |
-| `LLVM, ColumnLimit: 0` | **11 / 29** | **224** / 6 510 | **27 / 29 match, 8 lines** |
+| `LLVM, ColumnLimit: 0` | **10 / 29** | **228** / 6 510 | **26 / 29 match, 12 lines** |
 
 The last row is the corpus's own style. It scores best for a reason that is also the best evidence the formatter
 works: `ColumnLimit: 0` is the one setting where clang-format itself does not reflow, so the only differences left
-are the token-level ones — ten lines in three files.
+are the token-level ones — twelve lines in three files.
 
 ### Per-option rates (same corpus, `LLVM` base with one option changed)
 
