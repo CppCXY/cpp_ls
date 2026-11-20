@@ -186,3 +186,14 @@ fn classes_23_a_template_angle_that_ends_the_line() {
     let input = "class C {\n  template <\n      typename ObjectType, typename StringType,\n      bool = is_detected<detect_emplace_new_key, ObjectType, StringType>::value>\n  struct detect_indexable_keys : std::false_type {};\n};\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **A record keyword at the end of a line continues the declaration**: `class` then the name on the next line is one
+/// `ContinuationIndentWidth` in, while a `{` after the keyword still sits at the block's column. clang-format 23.1.5
+/// writes the fixture byte for byte.
+#[test]
+fn classes_24_a_record_name_on_its_own_line() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "template <typename BasicJsonType>\nclass\n    iter_impl // NOLINT(cppcoreguidelines-special-member-functions,hicpp-special-member-functions)\n{\n  int x;\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}

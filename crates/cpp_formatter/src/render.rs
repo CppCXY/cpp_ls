@@ -1284,6 +1284,28 @@ fn planned_indent(
             false,
         ));
     }
+    // **A record keyword at the end of a line continues the declaration**: `class` then the name on the next line is
+    // one `ContinuationIndentWidth` in (measured on nlohmann json`s `iter_impl.hpp`, where a long `// NOLINT(…)` pushes
+    // the name down), not at the block`s column.
+    if index > 0
+        && stream.gaps[index].newlines > 0
+        // **A `{` is the brace rules` business**, not the declaration`s: `static const struct` then `{` sits at the
+        // block`s column.
+        && stream.tokens[index].kind != cpp_parser::CppTokenKind::LeftBrace
+        && matches!(
+            stream.tokens[index - 1].kind,
+            cpp_parser::CppTokenKind::ClassKeyword
+                | cpp_parser::CppTokenKind::StructKeyword
+                | cpp_parser::CppTokenKind::UnionKeyword
+                | cpp_parser::CppTokenKind::EnumKeyword
+        )
+    {
+        return Some((
+            statement_indent + style.count(StyleOption::ContinuationIndentWidth),
+            false,
+        ));
+    }
+
     if stream.tokens[index].text == "requires" {
         return Some((
             statement_indent + style.count(StyleOption::IndentWidth),
