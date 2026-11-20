@@ -193,6 +193,60 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         }
     }
 
+    // **`AllowShortEnumsOnASingleLine`**: an enumeration whose whole text fits the column limit is one line — `LLVM`
+    // and `Google` set the option, `Microsoft` does not, and the oracle's shape was measured: `enum class input_format_t
+    // { json, cbor, msgpack };` is 48 columns and joins, a five-item enumeration does not. A comment inside the body
+    // refuses the join (it would have to move), and `ColumnLimit: 0` never reflows.
+    if style.count(StyleOption::ColumnLimit) > 0
+        && style.flag(StyleOption::AllowShortEnumsOnASingleLine)
+    {
+        for open_index in 0..stream.tokens.len() {
+            // **The body is found lexically**: `roles.brace_kind` does not mark an enumeration defined with the
+            // brace on its own line (measured on the fixture), while the lexical pass does — and it is what the
+            // enumeration column already uses.
+            if !enum_bodies[open_index] {
+                continue;
+            }
+            let Some(close_index) = pairs[open_index] else {
+                continue;
+            };
+            if close_index <= open_index + 1 {
+                continue;
+            }
+            // **A trailing comma refuses the join**: the one-line form would be `{ A, B, }`, which clang-format never
+            // writes — measured on a member enumeration written `{\n  A,\n  B,\n} i = I::A;`, which the oracle keeps
+            // broken while the same body without the last comma is one line.
+            if stream.tokens[close_index - 1].kind == cpp_parser::CppTokenKind::Comma {
+                continue;
+            }
+            if (open_index..=close_index).any(|at| !stream.gaps[at].comments.is_empty()) {
+                continue;
+            }
+            // The construct starts at its `enum` keyword and ends at the `;` after the closer.
+            let Some(start) = (0..open_index)
+                .rev()
+                .find(|at| stream.tokens[*at].kind == cpp_parser::CppTokenKind::EnumKeyword)
+            else {
+                continue;
+            };
+            let end = (close_index..stream.tokens.len())
+                .find(|at| stream.tokens[*at].kind == cpp_parser::CppTokenKind::Semicolon)
+                .unwrap_or(close_index);
+            let mut width = blocks[start].unwrap_or(0);
+            for at in start..=end {
+                if at > start {
+                    width += crate::space::between(&stream, at, &roles, style);
+                }
+                width += stream.tokens[at].text.chars().count();
+            }
+            if width <= style.count(StyleOption::ColumnLimit) {
+                for slot in &mut joined[open_index..=close_index] {
+                    *slot = true;
+                }
+            }
+        }
+    }
+
     // **Which `{` on the bracket stack is an initializer`s** — so its `}` pops the bracket again.
     let mut init_braces: Vec<bool> = Vec::new();
     // **What kind each bracket on `stack` is**: a break inside a parenthesis or a subscript indents from the line it
@@ -1787,8 +1841,19 @@ fn wrapping_lines(
     }
 
     // **Second pass: where each block brace goes**, now that emptiness is known.
+    let enum_bodies = layout::enum_body_braces(stream);
     for index in 0..count {
         let Some(kind) = roles.brace_kind.get(&stream.tokens[index].start).copied() else {
+            // **An enumeration's brace is found lexically**: `roles.brace_kind` does not mark an enum body when the
+            // `{` is written on its own line (measured), and `BreakBeforeBraces` still decides its placement —
+            // `enum class E` then `{` is attached by `LLVM` (measured on the oracle) and kept apart by `Allman`.
+            if enum_bodies[index] {
+                if crate::wrapping::a_brace_starts_a_line(style, crate::roles::BraceKind::Enum) {
+                    wrapped[index] = true;
+                } else if reflows {
+                    attached[index] = true;
+                }
+            }
             continue;
         };
         let closer = pairs[index];

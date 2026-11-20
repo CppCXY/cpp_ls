@@ -189,3 +189,27 @@ fn blocks_26_a_record_body_is_never_one_line() {
     let empty = "struct E {};\n";
     assert_eq!(cpp_formatter::format_file(path, empty, &llvm), empty);
 }
+
+/// **`AllowShortEnumsOnASingleLine`**: an enumeration whose text fits is one line under `LLVM`/`Google` (the option is
+/// true there and false in `Microsoft`), and the one-line form is refused when the last item keeps a trailing comma —
+/// `{ A, B, }` is not a shape clang-format writes, so `enum class I { A, B, } i = I::A;` stays broken while the same
+/// body without the comma joins. All four shapes are the oracle's, byte for byte.
+#[test]
+fn blocks_27_a_short_enum_is_one_line() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "enum class E\n{\n    A,\n    B\n};\n";
+    let expected = "enum class E { A, B };\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
+    // A trailing comma keeps the body broken.
+    let trailing = "enum class I\n{\n    A,\n    B,\n} i = I::A;\n";
+    let broken = "enum class I {\n  A,\n  B,\n} i = I::A;\n";
+    assert_eq!(cpp_formatter::format_file(path, trailing, &llvm), broken);
+    // Microsoft writes `BeforeEnum: true` (Allman) and keeps `AllowShortEnumsOnASingleLine` off, so the brace and the
+    // body keep their own lines — the oracle's text.
+    let microsoft = Style::preset("Microsoft").expect("Microsoft is a preset");
+    assert_eq!(
+        cpp_formatter::format_file(path, input, &microsoft),
+        "enum class E\n{\n    A,\n    B\n};\n"
+    );
+}
