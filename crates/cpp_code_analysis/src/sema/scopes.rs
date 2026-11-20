@@ -2121,19 +2121,17 @@ impl ScopeWalker<'_> {
             },
         };
 
-        // **A parenthesised declarator does not name a function.** `int (*fp)(int) = negate;` holds a `ParameterList`
-        // because it is a pointer *to* a function, and its name sits inside `(*fp)` — reading that as a function bound
-        // `fp` as one, and the declaration's own variable was then not declared at all from the reader's side: measured,
-        // `definitions("fp")` answered `NotDeclaredHere` and the undeclared-identifier check reported the file's own
-        // variable.
-        // **A pointer-to-function declarator starts with `(*` or `(&`** — and only that. A qualified definition writes its
-        // declarator as a bare parameter list (`void Widget::grow(Widget& other)` is `InitDeclarator "(Widget& other)"`), which
-        // also starts with `(` and must keep being read as a function.
-        let spelled = declarator.text().to_string();
-        let trimmed = spelled.trim_start();
-        let parenthesised_a_pointer = trimmed.starts_with("(*") || trimmed.starts_with("(&");
-        let is_function =
-            !parenthesised_a_pointer && a_parameter_list_of_the_declarator(declarator);
+        // **Is this a function's declarator?** — asked of the grammar's shape: the declarator that *names* something,
+        // risen through the declarators around it while there is no pointer between them, and the answer is whether
+        // one of them has a parameter list of its own (`noptr-declarator: declarator-id ( params )`).
+        //
+        // The reading this replaces looked at the **text**: a declarator starting with `(*` or `(&` was a pointer to a
+        // function and therefore a variable. That is right for `int (*fp)(int) = negate;` — whose name sits in `(*fp)`
+        // with no list, which is why the rule was written — and wrong for a **function returning a function pointer**,
+        // which starts the same way: measured on `int (*maker(int a))(int b);`, `maker` came out a `variable` of type
+        // `int(int)*`, so its calls, signature help and hover all described an object. The structural question
+        // separates them: `maker`'s name is in a declarator with `(int a)`, `fp`'s is in one with no list and a `*`.
+        let is_function = the_declarator_that_names_it_has_a_list(declarator);
 
         // **A class-like keyword in the specifiers settles the question**: whatever the declarator looks like, the
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
@@ -2610,14 +2608,21 @@ fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
 /// A list *inside* another parameter list — a function-pointer parameter — is left alone for a different
 /// reason: its names belong to the type, not to this function.
 fn parameter_lists(declarator: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
+    // **The name's own lists, and only those** — see [`the_lists_of_the_name`], which is the same walk the
+    // function-or-variable question uses. The subtree scan this replaces collected the lists of *types* too:
+    // `int (*maker(int a))(int b);` bound `b` — a parameter of the returned pointer's type — as a file-scope variable.
+    if let Some(naming) = the_naming_declarator(declarator) {
+        return the_lists_of_the_name(naming).collect();
+    }
+
+    // **A declarator with no name** — a qualified definition (`void Widget::grow(int)`), whose name the specifier
+    // sequence took — keeps the subtree reading, which is the only thing that can find its lists. A body is skipped so
+    // that a nested lambda's or a nested class's parameters are not this function's.
     fn collect(node: &CppSyntaxNode, out: &mut Vec<CppSyntaxNode>) {
         for child in node.children() {
             match CppSyntaxKind::from(child.kind()) {
                 CppSyntaxKind::ParameterList => out.push(child),
-                // A body belongs to something else, and a class body to something else again.
                 CppSyntaxKind::CompoundStat | CppSyntaxKind::ClassBody => {}
-                // Reached through the `ParameterList` arm above when it is this function's, and its contents
-                // are a parameter's type when it is not.
                 CppSyntaxKind::Declarator => collect(&child, out),
                 _ => {}
             }
@@ -2989,6 +2994,82 @@ fn class_like_binding_of(specifier: &CppSyntaxNode) -> Option<BindingKind> {
 /// measured on a <ranges> pipeline, its fact was kind: Function with no parameters, so its hover read ids(…)
 /// and its type could never be asked, which is why nothing downstream of the pipe worked. Nothing inside an
 /// initializer declares this declarator, so that subtree is skipped.
+/// **Does the declarator that names something have a parameter list of its own** — is this a function's?
+///
+/// The grammar asks it structurally: `noptr-declarator: declarator-id ( params )`, so the list is a **child** of the
+/// declarator whose other child is the name. Two shapes need the rise through the chain, and both are measured:
+///
+/// ```text
+/// void (named) (int x);          named  → (named) → (named)(int x)      no pointer on the way: the list is named's
+/// int (*fp)(int);                *fp                                    a pointer first: a variable, the list is the type's
+/// int (*maker(int a))(int b);    *maker(int a)                          has its own `(int a)` first: a function
+/// ```
+///
+/// A declarator with no name anywhere (a qualified definition, `void Widget::grow(int)`, whose name the specifier
+/// sequence took) falls back to the subtree search the callers had.
+fn the_declarator_that_names_it_has_a_list(declarator: &CppSyntaxNode) -> bool {
+    let Some(naming) = the_naming_declarator(declarator) else {
+        return a_parameter_list_of_the_declarator(declarator);
+    };
+    the_lists_of_the_name(naming).next().is_some()
+}
+
+/// **The declarator whose direct children include the name** — `declarator_id` in the grammar's `noptr-declarator`.
+///
+/// The innermost one, because the parents are wrappers: `(*maker(int a))(int b)` nests three declarators and the name
+/// `maker` is a direct child of the second. `None` for a declarator that names nothing, which is a qualified
+/// definition whose name the specifier sequence took (`void Widget::grow(int)`).
+fn the_naming_declarator(declarator: &CppSyntaxNode) -> Option<CppSyntaxNode> {
+    use cpp_parser::CppAstNode;
+    let mut naming = declarator.clone();
+    loop {
+        if naming
+            .children()
+            .any(|child| cpp_parser::CppNameExpr::can_cast(child.kind().into()))
+        {
+            return Some(naming);
+        }
+        naming = naming
+            .children()
+            .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))?;
+    }
+}
+
+/// **The parameter lists that belong to the name**, its own first, risen through the declarators around it — and
+/// **stopping at a pointer or a reference**, because a list beyond one belongs to a *type* rather than to the function.
+///
+/// ```text
+/// void (named) (int x);          named → (named) → (named)(int x)   one list, the name's
+/// int (*maker(int a))(int b);    *maker(int a)                      `(int a)` first, then the `*` stops the rise:
+///                                                                   `(int b)` is the returned pointer's
+/// int (*fp)(int);                *fp                                a `*` and no list: a variable, the list is the type's
+/// ```
+///
+/// Measured on `int (*maker(int a))(int b);` before this: the subtree scan collected both lists, and `b` — a parameter
+/// of the *returned pointer's* type — was bound as a file-scope variable.
+fn the_lists_of_the_name(
+    naming: cpp_parser::CppSyntaxNode,
+) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> {
+    use cpp_parser::CppAstNode;
+    let mut lists: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+    let mut current = Some(naming);
+    while let Some(node) = current {
+        for child in node.children() {
+            if cpp_parser::CppParamList::can_cast(child.kind().into()) {
+                lists.push(child);
+            }
+        }
+        if let Some(typed) = cpp_parser::CppDeclarator::cast(node.clone())
+            && (typed.is_a_pointer() || typed.is_a_reference())
+        {
+            break;
+        }
+        current = node
+            .parent()
+            .filter(|parent| cpp_parser::CppDeclarator::can_cast(parent.kind().into()));
+    }
+    lists.into_iter()
+}
 fn a_parameter_list_of_the_declarator(node: &CppSyntaxNode) -> bool {
     use cpp_parser::CppAstNode;
     for child in node.children() {

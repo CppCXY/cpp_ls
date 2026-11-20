@@ -1329,23 +1329,26 @@ fn a_using_declaration_ends_at_its_own_semicolon() {
     );
 }
 
-/// **A parenthesised declarator's parameter list is a sibling** — `void (foo) (int a, char *b);`.
+/// **A parenthesised declarator names its parameter list as a child** — `void (foo) (int a, char *b);`.
 ///
 /// The shape is how Lua 5.5.0 writes its entire public API (`LUA_API void (lua_setfield) (lua_State *L, int idx,
-/// const char *k);`), and the tree puts the list beside the declarator rather than inside it:
+/// const char *k);`). The grammar's rule is `noptr-declarator: ( ptr-declarator ) suffix*`, so the list belongs to the
+/// declarator that opens at the `(`:
 ///
 /// ```text
 /// InitDeclarator  "(foo) (int a, char *b)"
-///   Declarator    "(foo)"
-///     Declarator  "foo"
-///   ParameterList "(int a, char *b)"
+///   Declarator    "(foo) (int a, char *b)"
+///     Declarator  "(foo)"
+///       Declarator "foo"
+///     ParameterList "(int a, char *b)"
 /// ```
 ///
-/// Measured before this: `get_param_list` answered `None`, so the declaration read as a function with no parameters.
-/// The function-pointer **variable** has the same node shape (`void (*bar)(int a);` — `InitDeclarator (Declarator
-/// "(*bar)", ParameterList …)`) and must keep answering `None`: its list belongs to the pointed-to type.
+/// It was a **sibling** of the declarator until the grammar was fixed, which is why `get_param_list` carried a "look at
+/// my parent" rule; see `docs/declarator-shapes.md`. The function-pointer **variable** (`void (*bar)(int a);`) names
+/// its list too — the pointed-to type's — and the distinction between it and a function is the *name's* declarator,
+/// which is the analysis's question (`crates/cpp_code_analysis/tests/c_declarators.rs`), not this accessor's.
 #[test]
-fn a_parenthesised_declarator_has_a_parameter_list_and_a_function_pointer_does_not() {
+fn a_parenthesised_declarator_names_its_parameter_list_as_a_child() {
     let (root, _tree) = unit("void (foo) (int a, char *b);\nvoid (*bar)(int a);\n");
     let declarations: Vec<CppDeclaration> = root.descendants::<CppDeclaration>().collect();
     assert_eq!(declarations.len(), 2, "two declarations");
@@ -1354,9 +1357,23 @@ fn a_parenthesised_declarator_has_a_parameter_list_and_a_function_pointer_does_n
         .get_param_list()
         .expect("a parenthesised declarator declares a function");
     assert_eq!(list.syntax().text().to_string(), "(int a, char *b)");
+    // …and it is that declarator's **child**, not its sibling.
+    let declarator = declarations[0]
+        .get_init_declarator()
+        .and_then(|init| init.child::<cpp_parser::CppDeclarator>())
+        .expect("a declarator");
+    assert_eq!(
+        declarator.syntax().text().to_string(),
+        "(foo) (int a, char *b)",
+        "the declarator's own text covers the list"
+    );
 
-    assert!(
-        declarations[1].get_param_list().is_none(),
-        "a function pointer variable's parameter list belongs to the pointed-to type"
+    // The function pointer's list is the pointed-to type's, and it is still a child of the declarator that spells
+    // `(*bar)` — which is what makes "is this a function" a question about the *name's* declarator.
+    assert_eq!(
+        declarations[1]
+            .get_param_list()
+            .map(|list| list.syntax().text().to_string()),
+        Some("(int a)".to_string())
     );
 }

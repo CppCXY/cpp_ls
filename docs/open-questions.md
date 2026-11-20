@@ -3020,7 +3020,7 @@ the program reading is committed (`TValue`'s body is written by a macro, `TValue
 in the rendering — `session.commit_a_unit_reading` is what files them, and the probe shows `[]` before it and
 `["tt_", "value_"]` after).
 
-## Is the declarator's shape reasonable? No — measured, and the change is planned
+## The declarator's shape was not reasonable — measured, and fixed
 
 Asked after the parenthesised-declarator fix: whether the tree that needed it is the tree it should be. The answer is
 in [`declarator-shapes.md`](declarator-shapes.md), with the table printed from the grammar by
@@ -3034,8 +3034,14 @@ in [`declarator-shapes.md`](declarator-shapes.md), with the table printed from t
   `maker variable type int(int)*`, and `void (*signal(int, void (*)(int)))(int);` the same. That is a wrong answer at
   the fact level, not a missing one, so its calls, its signature help and its hover all answer about an object.
 
-The change is the grammar's own rule — attach the suffixes to the declarator that opens at `(`, and ask the parameters
-of the declarator that **holds the name** rather than of the outermost one — and the note lists the six readers that
-have to be re-checked when it lands (`declared_parameters_with`, `the_parameters_of`, `promises_no_return`/`get_body`,
-`declarator_declaring`, `call_syntax`'s two, and the type engine's pointer questions). Not done yet: the survey and the
-fact table are the instrument, and the change is the next round's work.
+**Fixed.** The grammar attaches the suffixes to the declarator that opens at `(`
+(`parse_init_declarator`'s parenthesised branch and `parse_parenthesised_declarator`), `CppDeclarator::get_param_list`
+is a direct child again, `CppDeclaration::get_param_list` walks for the declarator that owns both a name and a list, and
+`sema::scopes`'s function-or-variable question is structural (rise from the naming declarator, list first, stopping at
+a pointer) — which also stopped the returned pointer's parameter (`b` of `(int b)`) being filed at file scope. Measured
+after: `int (*maker(int a))(int b);` is a **function** with parameters `(int a)`, `void (*signal(…))(int);` likewise,
+`int (*fp)(int);` stays a variable, and the whole suite is green (`docs/declarator-shapes.md`).
+
+**What it surfaced and did not fix:** the *return* type of a function returning a function pointer is recorded as the
+pointed-to function's return type (`maker` answers `returns int`), because `declared_type_of` reads the specifier
+sequence and the pointer-and-list part now lives in one declarator node.

@@ -1,12 +1,11 @@
-# The declarator's shape, measured
+# The declarator's shape, measured — and fixed
 
 Written after the round that fixed the parenthesised declarator's parameter list (`LUA_API void (lua_setfield) (…)`)
-and asked whether the tree that needed that fix is the tree it should be. The answer is **no**, and this is the
-measurement.
+and asked whether the tree that needed that fix is the tree it should be. It was **not**, and this is the measurement
+that said so plus the change it led to.
 
 The instrument is `crates/cpp_parser/tests/declarator_shapes.rs` — `cargo test --release -p cpp_parser --test
-declarator_shapes -- --nocapture` prints the table below from the grammar itself, and its tests pin which half of the
-split each shape is on.
+declarator_shapes -- --nocapture` prints the table from the grammar itself, and its tests pin the invariant.
 
 ## What the grammar says
 
@@ -27,85 +26,95 @@ Two consequences matter here, and they are the whole of this note:
 2. `( declarator )` is a `noptr-declarator` like any other, so the suffixes that follow it belong to it, not to the
    declaration around it.
 
-## What our tree does
+## What the tree was, and what it is
 
-`get_param_list()` is the declaration-level answer, and `shape` is the chain of the `InitDeclarator`'s children.
+`shape` is the chain of the `InitDeclarator`'s children; `get_param_list()` is the declaration-level answer.
 
-| declaration | shape | `get_param_list()` |
+| declaration | before | after |
 | --- | --- | --- |
-| `void simple(int a);` | `Declarator[simple(int a)]` | `(int a)` — a child ✓ |
-| `int *ret(int);` | `Declarator[*ret(int)]` | `(int)` — a child ✓ |
-| `void (named) (int a, char *b);` | `Declarator[(named)] ParameterList[…]` | the list is a **sibling** |
-| `int (*fp)(int);` | `Declarator[(*fp)] ParameterList` | **None** (correct here — a pointer is a variable, and the list is the type's) |
-| `int (**ppf)(int);` | `Declarator[(**ppf)] ParameterList` | **None** (correct, same reason) |
-| `int (*maker(int a))(int b);` | `Declarator[(*maker(int a))] ParameterList` | **None** — *wrong*: `maker` is a function with `(int a)` |
-| `int (*table[3])(int);` | `Declarator[(*table[3])] ParameterList` | **None** (correct: a variable, array of pointers) |
-| `void (Widget::*pm)(int);` | `Declarator[(Widget::*pm)] ParameterList` | **None** (correct: a member-pointer variable) |
-| `void (*signal(int, void (*)(int)))(int);` | `Declarator[(*signal(…))] ParameterList` | **None** — *wrong*, same as `maker` |
-| `void takes(int (&arr)[3]);` | `Declarator[takes(int (&arr)[3])]` | the list — a child ✓ |
-| `void takes2(int (*)(int));` | one declarator | ✓ |
-| `typedef int (*Fn)(int);` | `DeclSpecifierSeq[int] Declarator[(*Fn)(int)]` | the list is inside ✓ |
-| `using Fn2 = int (*)(int);` | `NameExpr[Fn2] TypeId[…]` | n/a |
-| `auto trailing(int a) -> int;` | one declarator | ✓ |
-| `struct S { int (*m)(int); };` | the class body | n/a |
+| `void simple(int a);` | `Declarator[simple(int a)]` ✓ | unchanged |
+| `int *ret(int);` | `Declarator[*ret(int)]` ✓ | unchanged |
+| `void (named) (int a, char *b);` | `Declarator[(named)] ParameterList[…]` | `Declarator[(named) (int a, char *b)]` |
+| `int (*fp)(int);` | `Declarator[(*fp)] ParameterList` | `Declarator[(*fp)(int)]` |
+| `int (**ppf)(int);` | sibling list | `Declarator[(**ppf)(int)]` |
+| `int (*maker(int a))(int b);` | sibling list | `Declarator[(*maker(int a))(int b)]` |
+| `int (*table[3])(int);` | sibling list | `Declarator[(*table[3])(int)]` |
+| `void (Widget::*pm)(int);` | sibling list | `Declarator[(Widget::*pm)(int)]` |
+| `void (*signal(int, void (*)(int)))(int);` | sibling list | `Declarator[(*signal(int, void (*)(int)))(int)]` |
+| `void takes(int (&arr)[3]);` | ✓ | unchanged |
+| `typedef int (*Fn)(int);` | ✓ | unchanged |
+| `auto trailing(int a) -> int;` | ✓ | unchanged |
 
-## The two defects
+## The two defects the old shape caused
 
-**1. A suffix after `( ptr-declarator )` is left as a sibling of the declarator.** Six of the shapes above do it. It is
-why `CppDeclarator::get_param_list` had to grow a rule that looks at the parent — and that rule is right for exactly
-one of the six (`(named)(int)`, where the list really is the name's) and wrong for the other five, where the list
-belongs to a *type* (a pointer's pointee, an array's element, a member pointer's class). Today it is saved only because
-it refuses when the declarator holds a `*`/`&`.
+**1. A suffix after `( ptr-declarator )` was a sibling of the declarator.** It is why `CppDeclarator::get_param_list`
+had grown a rule that looked at the parent — right for one shape (`(named)(int)`, where the list really is the name's)
+and wrong for the rest, where the list belongs to a *type*.
 
-**2. The consequence is not only a missing list: a function returning a function pointer is recorded as a variable.**
+**2. A function returning a function pointer was recorded as a variable.**
 
 ```text
-int (*maker(int a))(int b);   fact: `maker variable type int(int)*`
-int (*fp)(int);               fact: `fp    variable type int(int)*`
+before   int (*maker(int a))(int b);   `maker  variable type int(int)*`
+after    int (*maker(int a))(int b);   `maker  function parameters (int a)`
+
+before   void (*signal(int, void (*)(int)))(int);   variable
+after    void (*signal(int, void (*)(int)))(int);   function
 ```
 
-`maker` **is** a function (`(int) -> int(*)(int)`), and the fact says it is an object of function-pointer type, so its
-calls, its signature help and its hover are all answering about an object. `void (*signal(int, void (*)(int)))(int);`
-— the declaration every C textbook uses to explain declarators — is the same.
-
-## The change, and why it is a change rather than a workaround
-
-The grammar produces the tree; the accessors then guess. Guessing cannot fix (2), because the *fact builder* decides
-"function or variable" from the binding's kind, which comes from the declarator chain — and the chain has no
-`ParameterList` where the name's own function type is.
-
-So the change is the grammar's own rule, in two steps:
-
-1. **Attach the suffixes to the declarator that opens at `(`** — i.e. `parse_parenthesised_declarator` reads the
-   suffixes before closing its own node, which is `noptr-declarator: ( ptr-declarator ) suffix*`. Every shape in the
-   sibling column then has the list *inside* the declarator, beside the parenthesised group.
-2. **Ask the parameters of the declarator that holds the name**, not of the outermost one. With the fixed tree,
-   `maker`'s `(int a)` is a direct child of the declarator whose other children are `*` and `maker`, and the pointer's
-   `(int b)` is a child of the declarator one level out. That distinction is what `get_param_list` must make, and it is
-   the rule the grammar states: `noptr-declarator: declarator-id ( params )`.
-
-The sibling rule in `CppDeclarator::get_param_list` then goes away, and `CppDeclaration::get_param_list` becomes "the
-declarator that names the declaration, its own list".
-
-**What has to be re-checked when it lands**, because they read the same shapes:
+and the leaked parameter:
 
 ```text
-sema::declarations::declared_parameters_with   the fact's parameter_list
-sema::scopes::the_parameters_of                a function scope's parameters (its bindings)
-sema::scopes::promises_no_return / get_body    a `{` after the declarator is a body
-sema::types::declarator_declaring               which declarator declares a binding
-call_syntax::{parameter_list_of, parameter_list_text}
-index::project::type_of / calls                `is_a_pointer`, `get_pointer_types`, the member questions
+before   `b` (from the returned pointer's `(int b)`)   a file-scope variable
+after    not declared — it is the type's, not the function's
 ```
 
-The guards are this survey (a table a person reads), `crates/cpp_code_analysis/tests/c_declarators.rs` (the facts:
-kind, parameters, the two chains that now type), and the whole suite — 190 test binaries, 41 server binaries.
+## The change
+
+1. **The grammar attaches the suffixes to the declarator that opens at `(`** — in `parse_init_declarator`'s
+   parenthesised branch, `finish_declarator_suffixes` runs before `paren.complete(p)`; and
+   `parse_parenthesised_declarator` reads its own suffixes for the other entry points. The suffix loop's
+   "is this a parameter list or an initialiser" decision needs `last_declarator_is_function`, so that flag is set
+   *before* the suffixes are read.
+2. **`CppDeclarator::get_param_list` is a direct child again** — the sibling rule is gone.
+3. **`CppDeclaration::get_param_list` walks for the declarator that owns both a name and a list** — the grammar's
+   `noptr-declarator: declarator-id ( params )` — and falls back to the outermost list when no declarator has a name
+   beside it (`(named)(int)`).
+4. **`sema::scopes`'s function-or-variable question is structural**: rise from the declarator that *names* the binding,
+   list first and **stopping at a pointer/reference** (a list beyond one is a type's), and the same walk collects the
+   function scope's parameter lists — which is what stopped `b` being filed at file scope. The reading it replaced
+   looked at the **text**: a declarator starting with `(*` or `(&` was a pointer to a function.
+
+## What was re-checked
+
+```text
+sema::declarations::declared_parameters_with   ✓ the facts' parameter_list
+sema::scopes::parameter_lists / the kind       ✓ the function scope's parameters, function-vs-variable
+sema::scopes::promises_no_return / get_body    ✓ unchanged (a body is a declaration child)
+call_syntax::{parameter_list_of, parameter_list_text}   ✓ the name-anchored rise they already had
+index::project::type_of / calls                ✓ (the type spellings improved: `int (*)(int)` where it was `int(int)*`)
+```
+
+The guards:
+
+```text
+cargo test -p cpp_parser -p cpp_toolchain -p cpp_code_analysis   all green
+cargo test --release -p cpp_ls --tests                          all green
+crates/cpp_code_analysis/tests/c_declarators.rs                 the facts: kind, parameters, the two chains that type
+crates/cpp_parser/tests/declarator_shapes.rs                    the shape invariant, per declarator
+```
+
+And on Lua 5.5.0 — the project the reports came from: `lua_setfield`'s fact keeps its parameters, the hover card reads
+the real signature, `lauxlib.c` places its 301 parameter hints.
+
+**One thing the change surfaced and did not fix:** the *return* type of a function returning a function pointer is
+recorded as the pointed-to function's return type (`int (*maker(int a))(int b)` answers `returns int`), because
+`declared_type_of` reads the specifier sequence and the pointer-and-list part now lives in one declarator node. That is
+the next step for the *type* half of this shape; the kind and the parameters — the defects that made the declaration
+read as a variable — are fixed.
 
 ## What not to do
 
 - **Do not search descendants for a `ParameterList`.** `int (*f(int))(int)` has two, and the first found is the wrong
-  one half the time. The rule has to be positional: the list that is a *sibling of the name* under the same
-  declarator.
-- **Do not keep the sibling rule "for compatibility".** It answers a type's list as if it were the name's; the only
-  reason it looks right today is the guard that refuses pointer declarators, and that guard is what makes `maker` a
-  variable.
+  one half the time. The rule is positional: the list that is a *sibling of the name* under the same declarator.
+- **Do not decide function-or-variable from the declaration's text.** The prefix `(*` is the same for a pointer
+  variable and for a function returning a pointer, and one of the two is a function.

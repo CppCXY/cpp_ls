@@ -6706,7 +6706,7 @@ void f(int value);
         );
         assert_eq!(
             of("through_pointer").type_of.as_deref(),
-            Some("int(int)*"),
+            Some("int (*)(int)"),
             "…and a pointer to function keeps its own shape"
         );
         assert_eq!(

@@ -1657,7 +1657,6 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
             p.rollback(checkpoint);
         } else if p.current_token() == CppTokenKind::RightParen {
             p.bump();
-            paren.complete(p);
 
             // `S()` is a function declarator, and this branch is the one that recognises it: the empty
             // parentheses are consumed here rather than by `parse_parameter_list`, so the flag that
@@ -1667,19 +1666,21 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
             //
             // Safe for the variable reading (`int (x)`, a parenthesized declarator) because the two are
             // distinguished by what follows: a name cannot be followed by `:`, so the flag is only ever
-            // consulted on a path where the function reading is the right one.
+            // consulted on a path where the function reading is the right one. Set **before** the suffixes,
+            // because it is what tells `parse_function_suffix_or_initializer` that a `(` here is a parameter list.
             p.set_last_declarator_is_function(true);
 
-            // The qualifiers that follow a parameter list, which the suffix loop below does not know about: it
-            // continues on `(` and `[`, and `noexcept` is neither. Leaving them to the caller is how
-            // `C() noexcept : x(0)` ended up with the `noexcept` unread and the member initializer list
-            // unrecognised — the two mistakes are the same one.
-            types::eat_function_qualifiers(p);
-
+            // **The suffixes are this declarator's own** — `noptr-declarator: ( ptr-declarator ) suffix*` — so they
+            // are read *before* the node closes and end up as its children. Leaving them to the caller is what made
+            // `int (*fp)(int)` a declarator `(*fp)` with the list as a **sibling** under the `InitDeclarator`, made
+            // `void (lua_setfield) (lua_State *L, …)` — the whole of Lua's public API — depend on a "look at my
+            // parent" rule inside `get_param_list`, and made `int (*maker(int a))(int b)` lose `maker`'s own
+            // `(int a)` entirely (its fact said `maker` is a variable). See `docs/declarator-shapes.md`.
             if let Err(err) = finish_declarator_suffixes(p, declarator_from) {
                 p.close_marks_above(base);
                 return Err(err);
             }
+            paren.complete(p);
             return finish_init_declarator(p, m, declarator_from);
         } else {
             p.rollback(checkpoint);
