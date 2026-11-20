@@ -39,11 +39,17 @@ pub(crate) fn member_fact_inner(
     // from a caller that does not know them, which answers the way this did before the rule existed.
     arguments: Option<&[String]>,
 ) -> Known<(DeclFact, PathBuf)> {
+    // **The elaborated specifier is not part of the class's name, and it was not coming off here.**
+    // `(union GCUnion *)…->cl` — a C cast spells the type that way, and every one of Lua 5.5.0's macros is written
+    // that way — asked for `union GCUnion::cl` and answered `NotDeclaredHere`, while `members_of("union GCUnion")`
+    // answered its 8 members: the member *list* query normalised the keyword and this one did not. Measured on the
+    // expansion of `ci_func(ci)`, whose step `->cl` was the one that stopped the chain (`->p` after it never ran).
+    let class = a_type_spelling_with_its_arguments(class).to_string();
     // Followed **before** anything else, so that both the lookup and the spelling this answer reports when it
     // fails name the class rather than the alias: `Widget::size` is the question that could not be answered, and
     // `Alias::size` would be a question nobody asked. `direct_member` follows it again for the bases it is handed,
     // where the step is idempotent — a class resolves to itself.
-    let class = &resolve_aliases(shapes, index, scopes, root, path, class);
+    let class = &resolve_aliases(shapes, index, scopes, root, path, &class);
 
     // **The arguments written on the class are what tells a partial specialization from its primary, and the caller
     // that has only a spelling has none to pass.** The nested-name walk is that caller: it arrives with

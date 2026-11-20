@@ -172,3 +172,48 @@ int g(StkId s) { return s->val; }
         }
     }
 }
+
+/// **An elaborated-type-specifier is not part of the class's name** — `(union GCUnion *)…->cl`.
+///
+/// A C cast spells its type that way, and every one of Lua 5.5.0's macros is written that way. `members_of("union
+/// GCUnion")` answered its 8 members while the member *fact* query asked for `union GCUnion::cl` and came back
+/// `NotDeclaredHere` — the member-list path normalised the keyword and the single-member path did not, so the chain
+/// inside `ci_func(ci)`'s expansion stopped at `->cl` and `->p` after it never ran.
+#[test]
+fn a_member_of_an_elaborated_cast_is_found() {
+    use cpp_code_analysis::file::coordinates::ReadingOffset;
+
+    let source = "\
+struct Proto { int nup; };
+union Closure { struct LClosure { struct Proto *p; int n; } l; };
+union GCUnion { void *gc; union Closure cl; };
+int f(void *object) {
+    return ((union GCUnion *)object)->cl.l.p->nup;
+}
+";
+    let files = MemoryFiles::new().with_file("/p/a.c", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.c")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.c"));
+    session.index_everything();
+    session.load(std::path::Path::new("/p/a.c"));
+    let held = session
+        .files()
+        .held(std::path::Path::new("/p/a.c"))
+        .expect("the file is readable")
+        .clone();
+    let view =
+        cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
+
+    let at = source.find("nup;").expect("the member") + 1;
+    match session.type_at(&view, ReadingOffset::new(at)) {
+        cpp_code_analysis::Known::Yes(found) => assert_eq!(found.type_of, "int"),
+        other => panic!("`->nup` through an elaborated cast: {other:?}"),
+    }
+}
