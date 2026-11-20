@@ -846,8 +846,37 @@ impl CppDeclarator {
     }
 
     /// The parameter list, if this declarator declares a function.
+    ///
+    /// # The parenthesised declarator, whose list is a **sibling**
+    ///
+    /// `void (foo) (int a, char *b);` parses as
+    ///
+    /// ```text
+    /// InitDeclarator  "(foo) (int a, char *b)"
+    ///   Declarator    "(foo)"
+    ///     Declarator  "foo"
+    ///   ParameterList "(int a, char *b)"      <- beside the declarator, not inside it
+    /// ```
+    ///
+    /// so the direct-child search found nothing and the declaration read as a function with **no** parameters. Lua
+    /// writes its whole public API that way (`LUA_API void (lua_setfield) (lua_State *L, int idx, const char *k);`),
+    /// and the measurements were: a `Function` fact with no `parameter_list` (the hover card printed `lua_setfield(…)`
+    /// and no inlay hint was placed), and its parameters filed as **file-scope variables**.
+    ///
+    /// The guard is the `*`: `void (*bar)(int a);` has the same node shape and is a *variable* declared as a function
+    /// pointer, whose list belongs to the pointed-to type rather than to `bar`. A parenthesised declarator with a
+    /// pointer or a reference inside it is that shape, and it keeps answering `None`.
     pub fn get_param_list(&self) -> Option<CppParamList> {
-        self.child()
+        self.child().or_else(|| {
+            let parent = self.syntax().parent()?;
+            if CppSyntaxKind::from(parent.kind()) != CppSyntaxKind::InitDeclarator {
+                return None;
+            }
+            if self.is_a_pointer() || self.is_a_reference() {
+                return None;
+            }
+            parent.children().find_map(CppParamList::cast)
+        })
     }
 
     /// The trailing return type after `->`, if this declarator has one.

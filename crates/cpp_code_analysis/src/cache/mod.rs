@@ -392,7 +392,18 @@ use std::path::{Path, PathBuf};
 /// an editor on Lua 5.5.0's `ldebug.c` (`ci->previous`). Measured: `inspect facts` on `lstate.h` answered
 /// `190:20 previous type in CallInfo`, and `CallInfo`'s member list held a member named after the tag. A stored
 /// summary filed the old kind, and only the version reaches it.
-pub const FORMAT_VERSION: u32 = 41;
+///
+/// # Why this moved to 42
+///
+/// **A parameter list is part of what a summary says, and the declarator's reader changed it.** `LUA_API void
+/// (lua_setfield) (lua_State *L, int idx, const char *k);` — a parenthesised declarator, which is how Lua writes its
+/// whole public API — parsed with its `ParameterList` *beside* the declarator rather than inside it, so
+/// `CppDeclarator::get_param_list` found nothing: the fact was a function with no `parameters`, the hover card printed
+/// `lua_setfield(…)`, no inlay hint was placed, and its parameters were filed as **file-scope variables**.
+/// `inspect facts` on `lua.h` answered `281:16  lua_setfield  function returns `void`` with no list. A stored summary
+/// carries the empty list, and `cpp_parser::VERSION` is the package version — it does not move for a reader's change —
+/// so only the version reaches it.
+pub const FORMAT_VERSION: u32 = 42;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

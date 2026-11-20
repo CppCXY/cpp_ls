@@ -1328,3 +1328,35 @@ fn a_using_declaration_ends_at_its_own_semicolon() {
         "and the shape that already worked still does — `ns::f` is one name, so `f` is not a top-level declaration"
     );
 }
+
+/// **A parenthesised declarator's parameter list is a sibling** — `void (foo) (int a, char *b);`.
+///
+/// The shape is how Lua 5.5.0 writes its entire public API (`LUA_API void (lua_setfield) (lua_State *L, int idx,
+/// const char *k);`), and the tree puts the list beside the declarator rather than inside it:
+///
+/// ```text
+/// InitDeclarator  "(foo) (int a, char *b)"
+///   Declarator    "(foo)"
+///     Declarator  "foo"
+///   ParameterList "(int a, char *b)"
+/// ```
+///
+/// Measured before this: `get_param_list` answered `None`, so the declaration read as a function with no parameters.
+/// The function-pointer **variable** has the same node shape (`void (*bar)(int a);` — `InitDeclarator (Declarator
+/// "(*bar)", ParameterList …)`) and must keep answering `None`: its list belongs to the pointed-to type.
+#[test]
+fn a_parenthesised_declarator_has_a_parameter_list_and_a_function_pointer_does_not() {
+    let (root, _tree) = unit("void (foo) (int a, char *b);\nvoid (*bar)(int a);\n");
+    let declarations: Vec<CppDeclaration> = root.descendants::<CppDeclaration>().collect();
+    assert_eq!(declarations.len(), 2, "two declarations");
+
+    let list = declarations[0]
+        .get_param_list()
+        .expect("a parenthesised declarator declares a function");
+    assert_eq!(list.syntax().text().to_string(), "(int a, char *b)");
+
+    assert!(
+        declarations[1].get_param_list().is_none(),
+        "a function pointer variable's parameter list belongs to the pointed-to type"
+    );
+}

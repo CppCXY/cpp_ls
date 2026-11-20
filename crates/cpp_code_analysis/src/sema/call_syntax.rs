@@ -63,7 +63,42 @@ pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyn
         .parent_ancestors()
         .find(|node| cpp_parser::CppDeclarator::can_cast(node.kind().into()))?;
 
-    cpp_parser::first_child_of_kind(&declarator, &[CppSyntaxKind::ParameterList])
+    // **The innermost declarator that answers, then the ones around it.** A name inside a parenthesised declarator
+    // (`void (foo) (int a);`) is in a declarator with no list of its own — the list is beside the declarator one
+    // level up — so the search rises until one answers. See [`the_param_list_rising`].
+    Some(the_param_list_rising(&declarator)?.syntax().clone())
+}
+
+/// **The parameter list of the declaration this declarator is part of**, found by rising through the declarators
+/// around it.
+///
+/// The *innermost* declarator that answers wins, which is the relationship [`parameter_list_of`]'s note states: for
+/// `void (*f(int a))(int b)` the list that belongs to the name `f` is the innermost one. A **parenthesised**
+/// declarator has no list of its own — `void (foo) (int a);` puts it beside the declarator one level up — so the walk
+/// rises until one answers, and it cannot borrow a *function's* list for a local variable: a local's declarator has no
+/// declarator ancestor above it (the body is a sibling of the declarator, not a parent).
+fn the_param_list_rising(declarator: &CppSyntaxNode) -> Option<cpp_parser::CppParamList> {
+    let mut current = Some(declarator.clone());
+    while let Some(node) = current {
+        let typed = cpp_parser::CppDeclarator::cast(node.clone())?;
+        // **The list first, then the guard**: `int *f(int a)` is a function returning a pointer, and its list is a
+        // direct child of the declarator that carries the `*` — asking the pointer question first would refuse every
+        // function whose return type ends in `*` or `&`.
+        if let Some(list) = typed.get_param_list() {
+            return Some(list);
+        }
+        // **A declarator with a `*` or `&` inside it is not a function's own name.** `void (*cb)(int a)` is a
+        // *function-pointer type*: the list beside it belongs to the pointed-to type, not to `cb`, so the rise stops
+        // here. Measured: without this, `cb(1)` was hinted with the type's own `a` — the test
+        // `a_call_through_a_function_pointer_is_not_hinted` is exactly that shape.
+        if typed.is_a_pointer() || typed.is_a_reference() {
+            return None;
+        }
+        current = node
+            .parent()
+            .filter(|parent| cpp_parser::CppDeclarator::can_cast(parent.kind().into()));
+    }
+    None
 }
 
 /// The **text** of that list, as the file writes it — `(_Ty* _First, size_type _Count)`, parentheses included.
@@ -72,9 +107,14 @@ pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyn
 /// ([`crate::sema::declarations::parameter_list_at`], which is what a completion shows beside a name) and anything
 /// that has to print a signature without walking it.
 pub(crate) fn parameter_list_text(declarator: &CppSyntaxNode) -> Option<String> {
-    let list = cpp_parser::first_child_of_kind(declarator, &[CppSyntaxKind::ParameterList])?;
+    // **The declarator's reading, rising through the declarators around it** — the direct-child search agrees for
+    // every ordinary function and finds nothing for a parenthesised declarator, whose list is a *sibling*:
+    // `LUA_API void (lua_setfield) (lua_State *L, …)` parses as `InitDeclarator (Declarator "(lua_setfield)",
+    // ParameterList …)`. Measured before this: `lua_setfield` was a `Function` fact with no `parameter_list`, so its
+    // card printed `lua_setfield(…)` and no inlay hint was placed — Lua writes its whole public API that way.
+    let list = the_param_list_rising(declarator)?;
 
-    Some(tidy_list_text(&list.text().to_string()).0)
+    Some(tidy_list_text(&list.syntax().text().to_string()).0)
 }
 
 /// **A list as one line, and where every byte of the original went.**
