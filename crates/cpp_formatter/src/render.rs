@@ -1214,6 +1214,48 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     if same_tokens(&stream, &out) {
         out
     } else {
+        // **A diagnostic for the fallback**: which token first differs tells the rule that merged or split one.
+        if std::env::var_os("CPPLS_TRACE_FALLBACK").is_some() {
+            let after = tokens::stream(&out);
+            for (at, (mine, theirs)) in stream.tokens.iter().zip(&after.tokens).enumerate() {
+                if mine.kind != theirs.kind || mine.text != theirs.text {
+                    eprintln!(
+                        "[fallback] token {at}: expected {:?} `{}`, wrote {:?} `{}`",
+                        mine.kind, mine.text, theirs.kind, theirs.text
+                    );
+                    for around in at.saturating_sub(4)..(at + 3).min(stream.tokens.len()) {
+                        eprintln!(
+                            "  in[{around}] {:?} `{}` newlines={} start={}",
+                            stream.tokens[around].kind,
+                            stream.tokens[around].text,
+                            stream.gaps[around].newlines,
+                            stream.tokens[around].start
+                        );
+                    }
+                    // The rendered text around the output token: the merge is visible in the bytes.
+                    let out_start = theirs.start.saturating_sub(80);
+                    let out_end = (theirs.start + 80).min(out.len());
+                    eprintln!(
+                        "  out[{out_start}..{out_end}] {:?}",
+                        out.get(out_start..out_end).unwrap_or("")
+                    );
+                    let in_start = stream.tokens[at].start.saturating_sub(80);
+                    let in_end = (stream.tokens[at].start + 80).min(source.len());
+                    eprintln!(
+                        "  src[{in_start}..{in_end}] {:?}",
+                        source.get(in_start..in_end).unwrap_or("")
+                    );
+                    break;
+                }
+            }
+            if stream.tokens.len() != after.tokens.len() {
+                eprintln!(
+                    "[fallback] {} tokens in, {} out",
+                    stream.tokens.len(),
+                    after.tokens.len()
+                );
+            }
+        }
         source.to_string()
     }
 }

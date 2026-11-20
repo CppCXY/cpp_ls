@@ -145,3 +145,17 @@ fn spacing_17_a_pointer_in_a_for_init() {
         "void f(int a, int b) {\n    int c = a * b;\n}\n",
     );
 }
+
+/// **A conversion operator keeps the space after `operator`**: `operator size_t()` is a type name, not punctuation,
+/// while `operator=`, `operator==` and `operator[]` stay glued. The rule used to glue every token after `operator`,
+/// which wrote `operatorsize_t()` — a merge that made the whole file fall back to its source (the renderer verifies the
+/// token stream). Measured on nlohmann json's `position_t.hpp`; clang-format 23.1.5 writes the fixture byte for byte.
+#[test]
+fn spacing_18_a_conversion_operator_keeps_its_space() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "struct S {\n  operator size_t() const { return 2; }\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+    let glued = "struct S {\n  bool operator==(const S &other) const { return x == other.x; }\n  int operator[](int at) const { return x; }\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, glued, &llvm), glued);
+}

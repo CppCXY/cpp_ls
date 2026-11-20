@@ -228,9 +228,20 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
         return 0;
     }
 
-    // **After `operator` the punctuator is glued**: `operator=(T &&)`, `operator==(const T &)`, `operator[]`.
+    // **After `operator` a punctuator is glued**: `operator=(T &&)`, `operator==(const T &)`, `operator[]`.
     // Measured against 22.1.3: the space before `=` turned `operator = (` into something clang-format never writes.
-    if matches!(previous.kind, CppTokenKind::OperatorKeyword) {
+    //
+    // **A conversion operator's type keeps its space**: `operator size_t()`, `operator const char *()` — the rule used
+    // to glue every token after `operator` and wrote `operatorsize_t()`, which no longer lexes the same (`size_t` is a
+    // declarator name, not punctuation). Measured on nlohmann json's `position_t.hpp`, where that merge made the whole
+    // file fall back to its source.
+    if matches!(previous.kind, CppTokenKind::OperatorKeyword)
+        && !current
+            .text
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    {
         return 0;
     }
     // The `(` of an operator function is glued to the punctuator (`operator=(`), which is the token after the
