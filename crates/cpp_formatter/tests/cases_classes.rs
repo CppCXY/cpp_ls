@@ -151,3 +151,15 @@ fn classes_20_an_equality_default_is_not_a_label() {
         template
     );
 }
+
+/// **A template head that spans lines aligns its arguments under the `<`**, and the declaration after it starts a new
+/// line at the block's column — clang-format 23.1.5 (`LLVM`) writes this fixture byte for byte. Two rules were missing:
+/// `template <typename …>` / `template <class …>` did not mark the angle at all, and the "the line after a template's
+/// `>` is a new declaration" test looked at the line's start instead of the declaration's.
+#[test]
+fn classes_21_a_template_head_that_spans_lines() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "template <typename BasicJsonType, typename InputAdapterType,\n          bool Collect = false,\n          typename LexerType = lexer<BasicJsonType, InputAdapterType>>\nclass json_sax_dom_parser : public json_sax_dom_error_state {\npublic:\n  void f();\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}

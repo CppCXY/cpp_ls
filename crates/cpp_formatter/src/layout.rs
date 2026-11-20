@@ -409,6 +409,17 @@ fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
                 | Ampersand
                 | LogicalAnd
                 | Scope
+                // **`template <typename T>` and `template <class T>`**: the two keyword forms were not in this set, so
+                // a template head that spans lines did not align its continuation lines under the `<` (measured on
+                // nlohmann json`s `json_sax.hpp`).
+                | TypenameKeyword
+                | ClassKeyword
+                | StructKeyword
+                | BoolLiteral
+                | SizeofKeyword
+                | DecltypeKeyword
+                | NoexceptKeyword
+                | TypeidKeyword
         );
     if !opens_a_list {
         return Option::None;

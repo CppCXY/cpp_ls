@@ -1341,7 +1341,21 @@ fn planned_indent(
 /// template header (the next line is a declaration at the block level) and a type that continues onto the next line
 /// (`std::vector<std::pair<…>>`, whose next line is a continuation indent).
 fn line_starts_with_template(stream: &tokens::Stream<'_>, index: usize) -> bool {
-    let start = line_start(stream, index);
+    // **The declaration's start, not this line's**: a template head that spans lines has continuation lines starting
+    // with `typename`, and the declaration after the head is a new one — looking only at the line's start missed the
+    // `template` keyword and `class json_sax_dom_parser …` came out four columns in (measured on nlohmann json's
+    // `json_sax.hpp`).
+    let mut start = line_start(stream, index);
+    while start > 0 {
+        match stream.tokens[start - 1].kind {
+            cpp_parser::CppTokenKind::Semicolon
+            | cpp_parser::CppTokenKind::LeftBrace
+            | cpp_parser::CppTokenKind::RightBrace
+            // An access specifier or a `case` label ends the walk: a declaration never spans its colon.
+            | cpp_parser::CppTokenKind::Colon => break,
+            _ => start -= 1,
+        }
+    }
     stream.tokens[start].kind == cpp_parser::CppTokenKind::TemplateKeyword
 }
 
