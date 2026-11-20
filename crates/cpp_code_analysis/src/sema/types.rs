@@ -2392,7 +2392,7 @@ fn array_extent(node: &CppSyntaxNode) -> Option<usize> {
 }
 
 /// The parameters of a `ParameterList`, as types — for a function type's shape.
-fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
+pub(crate) fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
     let mut parameters = Vec::new();
 
     for parameter in list.children() {
