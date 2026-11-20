@@ -1848,6 +1848,22 @@ fn wrapping_lines(
         } else if reflows {
             attached[index] = true;
         }
+        // **A record's body is never on one line**: clang-format breaks `struct T { int z; };` into three lines under
+        // every style that attaches the brace (measured on the oracle under `LLVM`, `Google` and `Microsoft`), so the
+        // first member and the closing brace start their own lines even when the author wrote the record on one. An
+        // **empty** body is the `{}` case above, and an **enumeration** has its own option
+        // (`AllowShortEnumsOnASingleLine`) instead of this rule.
+        if matches!(
+            kind,
+            crate::roles::BraceKind::Class
+                | crate::roles::BraceKind::Struct
+                | crate::roles::BraceKind::Union
+        ) && let Some(closer) = closer
+            && closer > index + 1
+        {
+            wrapped[index + 1] = true;
+            wrapped[closer] = true;
+        }
     }
 
     WrappingLines {

@@ -175,3 +175,17 @@ fn blocks_25_a_wrong_namespace_comment_is_fixed() {
     let short = "namespace detail {\nvoid f();\n}\n";
     assert_eq!(cpp_formatter::format_file(path, short, &llvm), short);
 }
+
+/// **A record's body is never on one line**: `struct T { int z; };` written on one line comes back as three lines —
+/// clang-format breaks a non-empty record body under every style (measured on `LLVM`, `Google` and `Microsoft`). An
+/// empty body is still `{}`, and an enumeration has `AllowShortEnumsOnASingleLine` instead.
+#[test]
+fn blocks_26_a_record_body_is_never_one_line() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "struct T { int z; };\n";
+    let expected = "struct T {\n  int z;\n};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
+    let empty = "struct E {};\n";
+    assert_eq!(cpp_formatter::format_file(path, empty, &llvm), empty);
+}
