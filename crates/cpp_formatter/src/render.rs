@@ -713,7 +713,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // is the next token's, and the comment belongs to the closer's line.
             if let Some(wanted) = namespace_comment.take() {
                 if trailing.is_some() {
-                    out.push_str(" ");
+                    out.push(' ');
                     out.push_str(&wanted);
                     let _ = columns.advance(columns.advance(column, " "), &wanted);
                 } else {
