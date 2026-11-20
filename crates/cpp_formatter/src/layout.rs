@@ -412,6 +412,10 @@ fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
                 // **`template <typename T>` and `template <class T>`**: the two keyword forms were not in this set, so
                 // a template head that spans lines did not align its continuation lines under the `<` (measured on
                 // nlohmann json`s `json_sax.hpp`).
+                // **A template argument may start with `!`**: `std::enable_if<!is_basic_json<T>::value, int>` is
+                // an argument list, and without this its continuation lines aligned to the outer list (measured on
+                // nlohmann json`s `from_json.hpp`).
+                | LogicalNot
                 | TypenameKeyword
                 | ClassKeyword
                 | StructKeyword

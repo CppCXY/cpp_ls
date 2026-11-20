@@ -1348,27 +1348,35 @@ fn planned_indent(
 /// (`std::vector<std::pair<…>>`, whose next line is a continuation indent).
 fn line_starts_with_template(stream: &tokens::Stream<'_>, index: usize) -> bool {
     // **The declaration's start, not this line's**: a template head that spans lines has continuation lines starting
-    // with `typename`, and the declaration after the head is a new one — looking only at the line's start missed the
-    // `template` keyword and `class json_sax_dom_parser …` came out four columns in (measured on nlohmann json's
-    // `json_sax.hpp`).
+    // with `typename`, and the declaration after the head is a new one. The walk is **line by line** — it stops at a
+    // line that ends a statement (`;`, `{`, `}`), at a directive line (`#ifdef JSON_HAS_CPP_17` may stand between the
+    // head and the previous statement) and at a comment line (a doc comment is a tree of `DocText` tokens).
     let mut start = line_start(stream, index);
     while start > 0 {
-        match stream.tokens[start - 1].kind {
-            cpp_parser::CppTokenKind::Semicolon
-            | cpp_parser::CppTokenKind::LeftBrace
-            | cpp_parser::CppTokenKind::RightBrace
-            // An access specifier or a `case` label ends the walk: a declaration never spans its colon.
-            | cpp_parser::CppTokenKind::Colon
-            // **A comment ends it too**: a doc comment is a tree of `DocText`-like tokens, and walking through one ran
-            // past the declaration's own start (measured: `template <typename T>` after a doc comment's `*/` made the
-            // `struct json_sax {` that follows it a continuation, four columns in).
-            | cpp_parser::CppTokenKind::LineComment
-            | cpp_parser::CppTokenKind::BlockComment
-            | cpp_parser::CppTokenKind::DocText
-            | cpp_parser::CppTokenKind::DocCommandName
-            | cpp_parser::CppTokenKind::DocTrivia => break,
-            _ => start -= 1,
+        let previous_end = start - 1;
+        let previous_start = line_start(stream, previous_end);
+        let first = stream.tokens[previous_start].kind;
+        let last = stream.tokens[previous_end].kind;
+        if first == cpp_parser::CppTokenKind::Hash
+            || matches!(
+                first,
+                cpp_parser::CppTokenKind::LineComment
+                    | cpp_parser::CppTokenKind::BlockComment
+                    | cpp_parser::CppTokenKind::DocText
+                    | cpp_parser::CppTokenKind::DocCommandName
+                    | cpp_parser::CppTokenKind::DocTrivia
+            )
+            || matches!(
+                last,
+                cpp_parser::CppTokenKind::Semicolon
+                    | cpp_parser::CppTokenKind::LeftBrace
+                    | cpp_parser::CppTokenKind::RightBrace
+                    | cpp_parser::CppTokenKind::Colon
+            )
+        {
+            break;
         }
+        start = previous_start;
     }
     stream.tokens[start].kind == cpp_parser::CppTokenKind::TemplateKeyword
 }

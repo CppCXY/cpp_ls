@@ -163,3 +163,15 @@ fn classes_21_a_template_head_that_spans_lines() {
     let input = "template <typename BasicJsonType, typename InputAdapterType,\n          bool Collect = false,\n          typename LexerType = lexer<BasicJsonType, InputAdapterType>>\nclass json_sax_dom_parser : public json_sax_dom_error_state {\npublic:\n  void f();\n};\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **A template head's continuation lines, a `!`-prefixed template argument and a directive before the head**: the
+/// nested `std::enable_if<!…, int>` list aligns under *its* `<` (34), and the declaration after the head starts at the
+/// block's column even though a `#ifdef` line stands before the head. clang-format 23.1.5 (`LLVM`) writes the fixture
+/// byte for byte.
+#[test]
+fn classes_22_a_directive_before_a_template_head() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "#ifdef JSON_HAS_CPP_17\ntemplate <typename BasicJsonType, typename T,\n          typename std::enable_if<!nlohmann::detail::is_basic_json<T>::value,\n                                  int>::type = 0>\nvoid from_json(const BasicJsonType &j, std::optional<T> &opt) {\n  int x = 1;\n}\n#endif\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}
