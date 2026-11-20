@@ -265,3 +265,27 @@ fn the_two_lists_of_a_function_returning_a_function_pointer() {
         "and the pointer's list is the outer declarator's: {lists:?}"
     );
 }
+/// A dump of the initialised-variable declarator, for the type reader's constructor-call guard.
+#[test]
+fn debug_initialised_variable() {
+    let declaration = declaration("std::unique_lock<M> lock(mutex, 1);");
+    let declarator = declaration
+        .get_init_declarator()
+        .and_then(|init| init.child::<cpp_parser::CppDeclarator>());
+    fn dump(node: &cpp_parser::CppSyntaxNode, depth: usize) {
+        println!(
+            "{:indent$}{:?} {:?}",
+            "",
+            cpp_parser::CppSyntaxKind::from(node.kind()),
+            node.text().to_string(),
+            indent = depth * 2
+        );
+        for child in node.children() {
+            dump(&child, depth + 1);
+        }
+    }
+    match declarator {
+        Some(declarator) => dump(declarator.syntax(), 0),
+        None => println!("no declarator"),
+    }
+}

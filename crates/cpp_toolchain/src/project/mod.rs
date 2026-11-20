@@ -39,7 +39,9 @@ pub mod cuda;
 pub mod discovery;
 pub mod ue;
 
-pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
+pub use build::{
+    BUILD_DATABASE_FILE, COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database,
+};
 pub use config::{
     CompileSection, ConfigProblem, ConfigReport, DEFAULT_FORMATTER, DiagnosticsSection,
     FormatStringsSection, FormatSyntax, FormattingSection, FunctionEntry, HoverSection,

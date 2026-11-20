@@ -875,6 +875,149 @@ pub fn parse_compile_commands(json: &str) -> CompileCommands {
     }
 }
 
+/// **A build database, read for the two fields this layer needs** — CMake's `build_database.json`
+/// (`CMAKE_EXPORT_BUILD_DATABASE`, CMake 3.31+, written by the Ninja generators).
+///
+/// ```json
+/// { "version": 1, "revision": 0,
+///   "sets": [ { "family-name": "export_build_database", "name": "export_build_database@Debug",
+///     "translation-units": [ {
+///         "arguments": ["/usr/bin/c++", "-I/…", "-o", "CMakeFiles/app.dir/a.cpp.o", "-c", "/src/a.cpp"],
+///         "baseline-arguments": ["…"], "local-arguments": ["…"],
+///         "object": "CMakeFiles/app.dir/a.cpp.o",
+///         "provides": { "importable": "path/to/bmi" }, "requires": [],
+///         "source": "/src/a.cpp", "work-directory": "/build" } ],
+///     "visible-sets": [] } ] }
+/// ```
+///
+/// It is a **superset of `compile_commands.json` for the question this layer asks**: each unit carries its source file
+/// and its arguments, exactly as the compiler ran them, plus the working directory those arguments are relative to.
+/// What it adds — `provides`/`requires`, the module BMIs, `visible-sets` — is C++ modules metadata, which no reader
+/// here consumes yet; what it deliberately does not carry is a per-*header* entry (`compile_commands.json` does not
+/// either, and [`CompileCommands::a_command_for_a_header`] is how either is used for one).
+///
+/// `arguments` is optional: when a set shares flags, the command is `baseline-arguments` followed by
+/// `local-arguments`, and the two are concatenated here — that is the whole of the split's meaning.
+pub fn parse_build_database(json: &str) -> CompileCommands {
+    let mut commands = Vec::new();
+    let mut malformed = 0usize;
+
+    for object in objects_in_every_array_named(json, "translation-units") {
+        match parse_translation_unit(&object) {
+            Some(command) => commands.push(command),
+            None => malformed += 1,
+        }
+    }
+
+    CompileCommands {
+        commands,
+        malformed,
+    }
+}
+
+/// Read one `translation-units` entry: its source, its working directory, and its command.
+fn parse_translation_unit(object: &str) -> Option<CompileCommand> {
+    let source = string_field(object, "source")?;
+    let directory = string_field(object, "work-directory").map(PathBuf::from);
+    let arguments = match array_field(object, "arguments") {
+        Some(arguments) if !arguments.is_empty() => arguments,
+        _ => {
+            let mut arguments = array_field(object, "baseline-arguments").unwrap_or_default();
+            arguments.extend(array_field(object, "local-arguments").unwrap_or_default());
+            arguments
+        }
+    };
+    if arguments.is_empty() {
+        return None;
+    }
+
+    // **`source` is relative to `work-directory`** — that is how CMake writes it — so a relative one is resolved here
+    // rather than left for every later reader to remember. A reader that does not resolve it asks
+    // `command_for(/project/src/a.cpp)` about a database entry spelled `src/a.cpp` and gets nothing.
+    let file = PathBuf::from(source);
+    let file = match (&directory, file.is_absolute()) {
+        (Some(directory), false) => directory.join(&file),
+        _ => file,
+    };
+
+    Some(CompileCommand {
+        file,
+        directory,
+        arguments,
+    })
+}
+
+/// The raw text of every object inside every array whose key is `name` — a small, string-aware brace walk.
+///
+/// `top_level_objects` reads one array at the top of the document (a compile database's shape). A build database nests
+/// its entries two levels down, and rather than teach one scanner about nesting this walks the document for each array
+/// the key names and brackets the objects inside it.
+fn objects_in_every_array_named(json: &str, name: &str) -> Vec<String> {
+    let key = format!("\"{name}\"");
+    let mut objects = Vec::new();
+    let mut searched = 0usize;
+
+    while let Some(found) = json[searched..].find(&key) {
+        let after_key = searched + found + key.len();
+        searched = after_key;
+        let Some(array) = json[after_key..].find('[') else {
+            break;
+        };
+        let start = after_key + array;
+        // **Two counters, because a `{` inside an entry is not another entry.** `provides` and `requires` are objects
+        // and arrays of their own, and one counter would take them for the next translation unit — measured: a
+        // database with two units in one set read as one command.
+        let mut brackets = 0usize;
+        let mut braces = 0usize;
+        let mut object_start: Option<usize> = None;
+        let mut in_string = false;
+        let mut escaped = false;
+
+        for (offset, character) in json[start..].char_indices() {
+            let index = start + offset;
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match character {
+                '"' => in_string = true,
+                '[' => brackets += 1,
+                ']' => {
+                    brackets = brackets.saturating_sub(1);
+                    if brackets == 0 {
+                        searched = index + 1;
+                        break;
+                    }
+                }
+                '{' => {
+                    braces += 1;
+                    if brackets == 1 && braces == 1 {
+                        object_start = Some(index);
+                    }
+                }
+                '}' => {
+                    braces = braces.saturating_sub(1);
+                    if brackets == 1
+                        && braces == 0
+                        && let Some(from) = object_start.take()
+                    {
+                        objects.push(json[from..=index].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    objects
+}
+
 /// A parsed compile database, and what was skipped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileCommands {

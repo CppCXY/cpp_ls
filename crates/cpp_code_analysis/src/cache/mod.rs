@@ -403,7 +403,19 @@ use std::path::{Path, PathBuf};
 /// `inspect facts` on `lua.h` answered `281:16  lua_setfield  function returns `void`` with no list. A stored summary
 /// carries the empty list, and `cpp_parser::VERSION` is the package version — it does not move for a reader's change —
 /// so only the version reaches it.
-pub const FORMAT_VERSION: u32 = 42;
+/// # Why this moved to 43
+///
+/// **A type's spelling is part of what a summary says, and the declarator's shape changed it.** `2b07593a` made a
+/// declarator keep its own suffixes, so the readers that write a type back changed what they answer for the classic C
+/// declarators: `int (*table[3])(int);` was `int ([3]*)(int)` (the operators in the wrong order around the name) and is
+/// `int (*[3])(int)` now, and a function returning a function pointer records `int (*)(int b)` rather than `int`. A
+/// stored summary carries the old spelling, and only the version reaches it.
+/// # Why this moved to 44
+///
+/// **A type's spelling drops a parameter list's names, and the readers now do.** `typedef int (*binary_op)(int left,
+/// int right);` names the type `int (*)(int, int)`: the names are not part of it, and a stored summary that kept them
+/// (`int (*)(int left, int right)`) answered a different spelling from the one a consumer comparing types expects.
+pub const FORMAT_VERSION: u32 = 44;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

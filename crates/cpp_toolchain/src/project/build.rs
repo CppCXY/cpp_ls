@@ -33,6 +33,19 @@ use crate::include::config::{CompileCommands, parse_compile_commands};
 /// The name a compile database is conventionally written under.
 pub const COMPILE_DATABASE_FILE: &str = "compile_commands.json";
 
+/// **The name CMake writes a *build* database under** — `CMAKE_EXPORT_BUILD_DATABASE`, CMake 3.31 and later.
+///
+/// It carries, per translation unit, the same two things this layer reads out of a compile database — the source file
+/// and the arguments — plus the working directory and what each unit requires and provides as a C++ module. The
+/// generator writes variants as `build_database_<CONFIG>.json`, `build_database_<LANG>.json` and
+/// `build_database_<LANG>_<CONFIG>.json`, so the test is the name's prefix rather than this one spelling.
+pub const BUILD_DATABASE_FILE: &str = "build_database.json";
+
+/// Is this file name one of the two database formats?
+fn is_a_database_file(name: &str) -> bool {
+    name == COMPILE_DATABASE_FILE || (name.starts_with("build_database") && name.ends_with(".json"))
+}
+
 /// How deep the search for a database goes, relative to the project root.
 pub const MAX_DEPTH: usize = 3;
 
@@ -113,23 +126,27 @@ pub fn find_database(
         };
     }
 
-    let conventional = root.join(COMPILE_DATABASE_FILE);
-    if let Some(commands) = read_database(files, &conventional) {
-        return (
-            Some(Database {
-                path: conventional,
-                commands,
-                origin: DatabaseOrigin::Root,
-            }),
-            problems,
-        );
+    // **Either conventional name**, `compile_commands.json` first: a project with both has one build that exported
+    // module information and one that did not, and the compile database is the one that describes the build that ran.
+    for name in [COMPILE_DATABASE_FILE, BUILD_DATABASE_FILE] {
+        let conventional = root.join(name);
+        if let Some(commands) = read_database(files, &conventional) {
+            return (
+                Some(Database {
+                    path: conventional,
+                    commands,
+                    origin: DatabaseOrigin::Root,
+                }),
+                problems,
+            );
+        }
     }
 
     let (found, truncated) = search_for_database(root);
     if truncated {
         problems.push(format!(
-            "the search for {COMPILE_DATABASE_FILE} stopped after {MAX_DIRECTORIES} directories; \
-             compile.database in .cppls.toml can name one directly"
+            "the search for a compilation database ({COMPILE_DATABASE_FILE}, {BUILD_DATABASE_FILE}) stopped after \
+             {MAX_DIRECTORIES} directories; compile.database in .cppls.toml can name one directly"
         ));
     }
 
@@ -155,7 +172,15 @@ pub fn find_database(
 /// compiled, and a project with a malformed one is better analysed the way a project with none is.
 fn read_database(files: &impl FileProvider, path: &Path) -> Option<CompileCommands> {
     let json = files.read(path)?;
-    let mut database = parse_compile_commands(&json);
+    // **Which format, by the name the build wrote.** A build database is CMake's module-aware one and carries the
+    // same two fields this layer reads — the source file and the arguments — so the two readers produce one type and
+    // everything below (response files, the working directory, `command_for`) is shared.
+    let mut database = match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) if name.starts_with("build_database") => {
+            crate::include::config::parse_build_database(&json)
+        }
+        _ => parse_compile_commands(&json),
+    };
 
     // **The response files, read here rather than wherever the flags are used.** CMake writes a target's include
     // paths and defines into `@CMakeFiles/<target>.dir/includes_CXX.rsp` and names that file in the command, for the
@@ -219,8 +244,14 @@ fn search_for_database(root: &Path) -> (Vec<PathBuf>, bool) {
             }
 
             if kind.is_file() {
-                if name == COMPILE_DATABASE_FILE {
-                    here = Some(path);
+                if is_a_database_file(name) {
+                    // **One per directory**, and `compile_commands.json` wins when a build wrote both: it is the
+                    // format every other generator writes, and a project that has both has one build with module
+                    // information and one without, so the superset is not always the better answer — the *compile*
+                    // database is the one that describes the build that ran.
+                    if here.is_none() || name == COMPILE_DATABASE_FILE {
+                        here = Some(path);
+                    }
                 }
                 continue;
             }
@@ -334,5 +365,99 @@ mod tests {
         assert!(none.is_none());
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("elsewhere.json"));
+    }
+
+    #[test]
+    fn a_build_database_is_found_and_read() {
+        // **The walk reads directories**, so discovery needs a real filesystem — the same reason the compile-database
+        // search test uses one. Parsing is checked through the *configured* path, which reads with the provider.
+        let root = std::env::temp_dir().join("cppls-build-database-search");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("build")).expect("the fixture directories");
+        let database = r#"{
+  "version": 1,
+  "revision": 0,
+  "sets": [
+    {
+      "family-name": "export_build_database",
+      "name": "export_build_database@Debug",
+      "translation-units": [
+        {
+          "arguments": ["/usr/bin/c++", "-I/p/include", "-DVALUE=1", "-c", "src/a.cpp"],
+          "object": "CMakeFiles/app.dir/src/a.cpp.o",
+          "provides": { "importable": "CMakeFiles/app.dir/a.cpp.pcm" },
+          "requires": [],
+          "source": "src/a.cpp",
+          "work-directory": "/p/build"
+        },
+        {
+          "baseline-arguments": ["/usr/bin/c++", "-I/p/include"],
+          "local-arguments": ["-DVALUE=2", "-c", "src/b.cpp"],
+          "source": "/p/src/b.cpp",
+          "work-directory": "/p/build"
+        }
+      ],
+      "visible-sets": []
+    }
+  ]
+}
+"#;
+        std::fs::write(root.join("build/build_database.json"), database)
+            .expect("the fixture writes");
+
+        let (found, problems) = find_database(&crate::DiskFiles, &root, None);
+        assert!(problems.is_empty(), "{problems:?}");
+        let found = found.expect("the build database is found");
+        assert_eq!(found.origin, DatabaseOrigin::BuildDirectory);
+        assert_eq!(found.commands.len(), 2);
+
+        // The relative `source` is resolved against the working directory, so a lookup by the file's real path answers.
+        let relative = found
+            .commands
+            .command_for(Path::new("/p/build/src/a.cpp"))
+            .expect("the relative source is resolved");
+        assert!(
+            relative
+                .arguments
+                .iter()
+                .any(|argument| argument == "-DVALUE=1"),
+            "its own arguments: {:?}",
+            relative.arguments
+        );
+
+        // `baseline-arguments` + `local-arguments` is the command when there is no `arguments`.
+        let split = found
+            .commands
+            .command_for(Path::new("/p/src/b.cpp"))
+            .expect("the absolute source is kept");
+        assert!(
+            split
+                .arguments
+                .iter()
+                .any(|argument| argument == "-DVALUE=2")
+                && split
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "-I/p/include"),
+            "the two halves are one command: {:?}",
+            split.arguments
+        );
+
+        // …and when a directory has both, `compile_commands.json` is the one read: it describes the build that ran.
+        std::fs::write(
+            root.join("build/compile_commands.json"),
+            "[\n  {\"directory\": \"/p\", \"file\": \"/p/a.cpp\", \"arguments\": [\"g++\", \"-c\", \"/p/a.cpp\"]}\n]\n",
+        )
+        .expect("the fixture writes");
+        let (found, _) = find_database(&crate::DiskFiles, &root, None);
+        let found = found.expect("a database is found");
+        assert!(
+            crate::file::paths::normalize_path(&found.path, cfg!(windows))
+                .ends_with("compile_commands.json"),
+            "the compile database wins: {}",
+            found.path.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

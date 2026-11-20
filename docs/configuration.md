@@ -7,6 +7,7 @@ features themselves are in [`c-support.md`](c-support.md) and [`cpp-support.md`]
 
 ```text
 compile_commands.json     the build, as it ran                    — every build system can export it
+build_database.json       the same, for a build with C++ modules — CMake 3.31's CMAKE_EXPORT_BUILD_DATABASE
 .cppls.toml               what a person knows and a build cannot  — this file
 ```
 
@@ -18,9 +19,40 @@ is to produce a compilation database, and `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (
 
 When there is no database, three fallbacks apply in this order, each weaker than the last:
 
+### The two database formats
+
+Both describe **one command per translation unit** — its source file and the flags it was compiled with — and both are
+read into the same structure; only the JSON layout differs.
+
+```text
+compile_commands.json   [ { "file": "src/a.cpp", "directory": "…", "arguments": [...] | "command": "…" } ]
+                        written by CMake (…_COMPILE_COMMANDS=ON), Ninja, Meson, Bazel, Bear, intercept-build, …
+build_database.json     { "sets": [ { "translation-units": [ { "source": "src/a.cpp",
+                          "work-directory": "…", "arguments": [...] | baseline+local, … } ] } ] }
+                        written by CMake 3.31+ (CMAKE_EXPORT_BUILD_DATABASE=ON, Ninja generators), for C++ modules
+```
+
+* **Discovery.** Either name in the project root, or up to three directories below it (`build/`, `out/build/linux/`,
+  …). A directory that has both is read as `compile_commands.json`: it describes the build that actually ran, while a
+  build database exists only when a build has module information to export. The `build_database_<CONFIG>.json`,
+  `build_database_<LANG>.json` and `build_database_<LANG>_<CONFIG>.json` variants are found the same way.
+* **What is read** is the same from either: the per-file **arguments** — include paths, defines, standard, target. In a
+  build database an entry's command may be split into `baseline-arguments` + `local-arguments` (the format's way of
+  sharing flags inside a set); that is read as the concatenation, and a relative `source` is resolved against its
+  `work-directory`, which is how CMake writes it.
+* **What is not read (yet):** the module metadata a build database carries — `provides`/`requires`, BMI paths,
+  `visible-sets`. Modules are resolved from their **interface sources** instead, which needs no build output; see
+  [`cpp-support.md`](cpp-support.md).
+* **Response files are followed** either way: CMake writes a target's include paths into
+  `@CMakeFiles/<target>.dir/includes_CXX.rsp` and names that file in the command, so a reader that did not expand them
+  would see a project with no include paths at all.
+* `[compile] database` in `.cppls.toml` may name either format explicitly, which is how a project with several build
+  directories picks the one to use.
+
 ```text
 1. .cppls.toml says                a person wrote the compilation down — it wins outright
-2. compile_commands.json says      found beside the root, or up to three directories down (build/, out/build/linux/)
+2. compile_commands.json says      found beside the root, or up to three directories down (build/, out/build/linux/);
+   or build_database.json says     the same search, when the build wrote the module-aware database instead
 3. fuzzy include matching          an #include whose directory no search path could place, matched by the tail
                                    of its path against the files that are actually in the tree
 ```
@@ -54,6 +86,7 @@ reached through an `#include`.
 ```toml
 [compile]
 database = "build/compile_commands.json"   # where the database is, when discovery would not find it
+                                           # (either format: `build/build_database.json` works here too)
 compiler = "clang++"                       # a name on PATH or a path; "auto" (or absent) leaves it to discovery
 standard = "c++20"                         # the project-wide language standard, as `-std=` spells it
 args = ["-std=c++20", "-Iinclude"]         # the project's **whole** command line, instead of the database's

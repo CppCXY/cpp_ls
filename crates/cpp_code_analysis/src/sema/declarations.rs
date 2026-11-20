@@ -407,7 +407,31 @@ pub(crate) fn declared_type_of_with(
         matches!(binding.kind, BindingKind::Variable),
     );
 
-    let written = found.to_string();
+    // **The operators are spliced from the declarator's own text**, and the base comes from the specifiers read as
+    // syntax. Writing the operators back from the `Type` is what produced `int ([3]*)(int)` for
+    // `int (*table[3])(int);` — the shape knows the nesting (array of three pointers to a function), but the writer
+    // that turns it back into a declarator has to reproduce C's precedence, and one nesting it does not reproduce is
+    // exactly this one. The source wrote the spelling already, and the name is the only thing to cut out of it — the
+    // same arithmetic [`without`] does for a return type.
+    let written = match declarator
+        .as_ref()
+        .filter(|node| reaches_the_name(node, binding.name_range))
+        .map(|node| the_operators_around_the_name(node, binding.name_range))
+        .map(|operators| operators.trim().to_string())
+        .filter(|operators| !operators.is_empty())
+    {
+        Some(operators) => {
+            let base = crate::sema::types::read_specifiers_named(
+                &specifiers,
+                spelled.as_deref(),
+                cpp_parser::source_range(specifiers.text_range()),
+            )
+            .to_string();
+            format!("{base} {operators}")
+        }
+        None => found.to_string(),
+    };
+    let written = written.split_whitespace().collect::<Vec<_>>().join(" ");
     (!written.is_empty()).then_some(written)
 }
 
@@ -1476,11 +1500,10 @@ pub(crate) fn declared_alias_target_with(
     let spelling = format!(
         "{} {}",
         strip_declaration_specifiers(&specifiers.text().to_string()),
-        without(
-            &declarator.text().to_string(),
-            declarator,
-            binding.name_range
-        )
+        // The same splice a variable's type takes: the name out, an initialiser and a constructor call out, and a
+        // type's parameter **names** out — `typedef int (*binary_op)(int left, int right);` names the type
+        // `int (*)(int, int)`, and a consumer that compares spellings reads the names as part of it.
+        the_operators_around_the_name(declarator, binding.name_range)
     );
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
@@ -1522,18 +1545,95 @@ fn the_class_a_typedef_body_names(
 /// into `(*)(int)`. Offsets are byte offsets into the same source, so this is arithmetic on the two ranges rather
 /// than a search for a word — a search would cut the wrong one in `typedef int int32_t;`(the second `int` is the
 /// name, and the first is the type).
-fn without(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> String {
-    let start = usize::from(node.text_range().start());
+/// **The operators a declarator writes around its name** — `(*[3])(int)` for `int (*table[3])(int);`.
+///
+/// The declarator's own text with three things cut out of it: the **name**, an **initialiser** (`lock(mutex, 1)` — the
+/// call is not part of the type) and a **parameter list that belongs to the name** of an object (`T x(a, b)`, a
+/// constructor call). Everything else is the type's: the `*`, the `[3]`, the list of a function the pointer points to.
+///
+/// Written from the source rather than from the [`crate::sema::types::Type`], because turning the shape back into a
+/// declarator is a spelling problem with C's precedence in it: writing `Array { Pointer { Function } }` back gave
+/// `int ([3]*)(int)` for `int (*table[3])(int);` — the operators in the wrong order around the name — and a helper
+/// that reproduced precedence would be a second grammar. The file wrote the spelling; this keeps it.
+fn the_operators_around_the_name(
+    declarator: &CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> String {
+    let text = declarator.text().to_string();
+    let start = usize::from(declarator.text_range().start());
+    let mut cut: Vec<(usize, usize)> = Vec::new();
+    // The name itself.
     let (from, to) = (
         name.start_offset.saturating_sub(start),
         name.end_offset().saturating_sub(start),
     );
-
-    if from > to || to > text.len() || !text.is_char_boundary(from) || !text.is_char_boundary(to) {
-        return text.to_string();
+    if from <= to && to <= text.len() {
+        cut.push((from, to));
     }
-
-    format!("{}{}", &text[..from], &text[to..])
+    // An initialiser, which the grammar keeps inside the declarator.
+    use cpp_parser::CppAstNode;
+    let names_the_binding =
+        cpp_parser::typed_children::<cpp_parser::CppNameExpr>(declarator).any(|child| {
+            let range = child.get_range();
+            usize::from(range.start()) <= name.start_offset
+                && name.start_offset + name.length <= usize::from(range.end())
+        });
+    // **What is not part of the type**: an initialiser, a parameter list that is a constructor call, and a type's
+    // parameter *names* — `int (*)(int left, int right)` is the spelling of the type, and writing the names into it
+    // makes `int (*)(int left, int right)` a different answer for consumers that compare spellings.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for child in declarator.children() {
+        let kind = cpp_parser::CppSyntaxKind::from(child.kind());
+        let is_initialiser = kind == cpp_parser::CppSyntaxKind::Initializer;
+        // …and a parameter list at the name's own level is a constructor call when the declarator spells the name.
+        let is_a_constructor_call =
+            names_the_binding && kind == cpp_parser::CppSyntaxKind::ParameterList;
+        if is_initialiser || is_a_constructor_call {
+            let range = child.text_range();
+            let (from, to) = (
+                usize::from(range.start()).saturating_sub(start),
+                usize::from(range.end()).saturating_sub(start),
+            );
+            if from <= to && to <= text.len() {
+                cut.push((from, to));
+            }
+            continue;
+        }
+        if kind == cpp_parser::CppSyntaxKind::ParameterList {
+            let range = child.text_range();
+            let (from, to) = (
+                usize::from(range.start()).saturating_sub(start),
+                usize::from(range.end()).saturating_sub(start),
+            );
+            if from <= to && to <= text.len() {
+                let parameters = crate::sema::types::read_parameters(&child);
+                let spelled = parameters
+                    .iter()
+                    .map(|parameter| parameter.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                replacements.push((from, to, format!("({spelled})")));
+                cut.push((from, to));
+            }
+        }
+    }
+    cut.sort_unstable();
+    let mut out = String::new();
+    let mut at = 0usize;
+    for (from, to) in cut {
+        if from > at {
+            out.push_str(&text[at..from]);
+        }
+        // A parameter list is **replaced** by its types rather than dropped — see `replacements`.
+        if let Some((_, _, spelled)) = replacements.iter().find(|(start, _, _)| *start == from) {
+            out.push_str(spelled);
+        }
+        at = at.max(to);
+    }
+    if at < text.len() {
+        out.push_str(&text[at..]);
+    }
+    out.trim().to_string()
 }
 
 /// The type a **function** declaration returns, as the file spells it.

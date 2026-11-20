@@ -8,14 +8,16 @@
 [![license](https://img.shields.io/crates/l/cpp_ls.svg)](#license)
 
 A C, C++ and CUDA language server written from scratch in Rust: the parser, the preprocessor, the index, the semantic
-layer and the LSP server are all in this repository. **No clangd, no libclang, no compiler daemon, and no
-`compile_commands.json` required.**
+layer and the LSP server are all in this repository. **No clangd, no libclang, no compiler daemon — and no compilation
+database needed to start.** One is used when the project has one: `compile_commands.json` (any build system) or CMake
+3.31's `build_database.json`, discovered beside the workspace root or in a build directory; see
+[`docs/configuration.md`](docs/configuration.md#the-two-database-formats).
 
 ## Why another C++ language server
 
 | | clangd | cpp_ls |
 | --- | --- | --- |
-| Project model | a compilation database, or heuristics | nothing, or `.cppls.toml`, or a compilation database |
+| Project model | a compilation database, or heuristics | nothing, or `.cppls.toml`, or a compilation database (`compile_commands.json` **and** CMake's `build_database.json`) |
 | Unit of work | a file with flags | **the program**: includes inlined, `#if` resolved, macros expanded, modules resolved from their interface units |
 | Modules | needs BMIs produced by the build | reads the interface's **source** (`import std;` → libstdc++'s `bits/std.cc`, MSVC's `modules/std.ixx`, libc++'s `std.cppm` named by its `libc++.modules.json`); a unit is identified by the `export module` it declares |
 | Answers in | a file that compiles | a file being edited — half-typed lines included |
@@ -38,8 +40,17 @@ found by reading each candidate file: a file that does not declare `export modul
 the naming conventions are a search order, not an assumption.
 
 **3. No build system required.** Includes that no compiler ever looked at are found by a bounded fuzzy search under the
-project root, so a Visual Studio solution and an unconfigured checkout both work. A compilation database, when present,
-is used for exact per-file flags.
+project root, so a Visual Studio solution and an unconfigured checkout both work. A **compilation database**, when
+present, is used for exact per-file flags — either format:
+
+```text
+compile_commands.json   every build system can export it (CMake …_COMPILE_COMMANDS=ON, Ninja, Meson, Bazel, Bear, …)
+build_database.json     CMake 3.31's module-aware one (CMAKE_EXPORT_BUILD_DATABASE=ON), same commands plus module info
+```
+
+Both are discovered in the root or up to three directories down, `@response` files are followed, and
+`[compile] database` names one explicitly when a project has several builds. See
+[`docs/configuration.md`](docs/configuration.md#the-two-database-formats).
 
 **4. Every claim in this repository is measured.** **3,000+ tests in 200 suites**, plus probes that run against real
 headers rather than fixtures. [`docs/open-questions.md`](docs/open-questions.md) is a record of before/after numbers: a sweep of
@@ -155,8 +166,11 @@ Point an editor at `target/release/cpp_ls`. The VS Code client is
 [CppCXY/VSCode-Cppls](https://github.com/CppCXY/VSCode-Cppls); any other LSP client works directly.
 
 A project needs no configuration. When it wants some, a `.cppls.toml` in the workspace root names the language standard,
-include paths, defines, per-path rules and diagnostic switches; a `compile_commands.json` is used for exact flags when it
-exists. Both are described in [`docs/configuration.md`](docs/configuration.md).
+include paths, defines, per-path rules and diagnostic switches; a **compilation database** supplies exact flags when the
+project has one — `compile_commands.json` from any build system, or CMake 3.31's module-aware `build_database.json`
+(`CMAKE_EXPORT_BUILD_DATABASE`). Either is found in the root or up to three directories down, response files included,
+and `[compile] database` names one explicitly when a project has several builds. Both formats are described in
+[`docs/configuration.md`](docs/configuration.md#the-two-database-formats).
 
 The server currently analyzes only the first workspace folder. If the client cannot dynamically register file
 watches, a native watcher monitors that folder; watcher failures are reported to the client.
