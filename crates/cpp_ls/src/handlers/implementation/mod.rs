@@ -150,10 +150,21 @@ pub fn definitions_of<F: FileProvider + Clone>(
             }) {
                 continue;
             }
-            // **A definition is the one with a body.** The fact does not record whether it has one (a declaration and
-            // its definition are the same seven fields), so the text is asked: a declaration ends with `;`, a
-            // definition with `}`. One read per candidate file, and only for the name the cursor is on.
-            if !ends_with_a_body(session, path, fact.range) {
+            // **A definition is the one the analysis recorded as defining** — [`DeclFact::definition`], which is set
+            // from the declaration's own node: a function whose declaration contains a compound statement.
+            //
+            // This used to be decided from the *text*: "a declaration ends with `;`, a definition with `}`". That was
+            // written when the fact had no such flag, and it is wrong for every C project: measured on Lua 5.5.0,
+            // `lstate.c`'s `lua_newstate` is `definition: true` with the range `8508..8560`, whose text is
+            // `*lua_newstate (lua_Alloc f, void *ud, unsigned seed)` — the fact's range covers the **declarator**, not
+            // the body, so the text never ends with `}` and every implementation of a function declared in a header
+            // was skipped. Reported from an editor as "a function defined in a C header cannot go to its
+            // implementation".
+            //
+            // The text test stays as a fallback for the one state the flag cannot describe: a fact that says `false`
+            // while its range does end with a `}` — a declaration whose body the reading did not attach. It costs one
+            // read per candidate file, and only for the name the cursor is on.
+            if !fact.definition && !ends_with_a_body(session, path, fact.range) {
                 continue;
             }
             push_location(session, path, fact.name_range, &mut locations);

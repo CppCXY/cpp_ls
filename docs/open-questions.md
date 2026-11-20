@@ -2943,3 +2943,30 @@ ends at or after the object's last mapped byte**, which is also the shape that s
 renderer elided.
 
 That is where this stands: the false `missing-return` is fixed (`a324f05f`), the type of `ci_func(ci)->p` is not.
+
+## A C header's function declaration did not go to its implementation — fixed
+
+Reported after the two above, from the same project: "a function defined in a C header cannot go to its
+implementation". Measured with `crates/cpp_ls/tests/implementation_c_probe.rs` on Lua 5.5.0 — `lua.h`'s
+`lua_newstate` answered **0** implementations while the body is in `lstate.c:335`.
+
+The rule in `handlers/implementation` decided "is this fact a definition" from **the text**: a declaration ends with
+`;`, a definition with `}`. That was written when the fact had no such flag, and it is wrong for every C project:
+
+```text
+lstate.c  lua_newstate  definition true   range 8508..8560  text `*lua_newstate (lua_Alloc f, void *ud, unsigned seed)`
+```
+
+— the fact's range covers the **declarator**, not the body, so the text never ends with `}`. `DeclFact::definition`
+carries the answer (`crates/cpp_code_analysis/src/cache/summary.rs`, "a function whose declaration contains a compound
+statement"), and the handler now reads it, keeping the text test as a fallback for a fact that says `false` while its
+range does end with a `}`.
+
+Measured after: every declaration in the probe's three headers answers its source — `lua_newstate` →
+`lstate.c:335`, `lua_gettop` → `lapi.c:173`, `lua_settop` → `lapi.c:178`, `luaG_runerror` → `ldebug.c:856`,
+`luaG_typeerror` → `ldebug.c:756` — and the C++ probe (`implementation_real`, `EmmyLuaCodeStyle`) still passes.
+`tests/implementation_declaration.rs` pins the C shape, the C++ out-of-line member, and a declaration no file defines.
+
+**One shape still answers nothing, and it is a different defect:** `lua.h` writes `LUA_API int (lua_pcall) (…)`, a
+**parenthesised declarator**, and the name lookup answers `Unknown(UnparsableName)` — so "go to definition" on that
+token fails too, not just implementation. That is the name resolver's, not this handler's.
