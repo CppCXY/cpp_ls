@@ -227,7 +227,8 @@ scanf = true             # `%…` with scansets — scanf, sscanf
 "mylib::trace" = { syntax = "printf", argument = 1 }     # `trace(level, fmt, …)`
 ```
 
-`[format] formatter` names the program `textDocument/formatting` runs, and it takes three shapes:
+`[format] formatter` names the program `textDocument/formatting` runs, and it is one of two things: the built-in
+formatter's name, or a program — a bare name looked up in `PATH`, or a path run as written.
 
 ```toml
 formatter = "clang-format"        # the default — a bare name, looked up in PATH
@@ -239,7 +240,10 @@ formatter = "cpp_formatter"       # this repository's own formatter: a library c
 `cpp_formatter` (also spelled `cpp_format` and `cppfmt`) is the built-in one — it claims clang-format's configuration
 surface and reads `.clang-format`, but it does not yet reflow lines the way clang-format does (`docs/formatter-diff.md`
 measures the gap). Anything else is a program run the way clang-format documents for a filter: the text on stdin, the
-formatted text on stdout, `--assume-filename` for the style lookup, and `--lines` for a range format.
+formatted text on stdout, `--assume-filename` for the style lookup, and `--lines` for a range format — and the answer
+of a range request is then **clamped to the requested lines**, because `--lines` alone was measured to reformat the
+line beside the range (clang-format 19.1.7), and a range that edits outside itself is the one thing this server
+promises not to do.
 
 **A program that is not on the machine is a warning, not a failure.** The server says so once — at startup, and again
 only if the request finds it gone — and answers the request with the built-in formatter, so format-on-save keeps
