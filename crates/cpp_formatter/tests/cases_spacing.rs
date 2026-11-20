@@ -129,3 +129,19 @@ fn spacing_16_scope_after_a_template_argument_list() {
         "void f() {\n    (std::numeric_limits<std::size_t>::max)();\n    auto x = std::vector<int>::size_type{};\n}\n",
     );
 }
+
+/// **A `*` after a builtin type name is a declarator even where the tree does not say so**: a `for` statement's init
+/// declaration is not annotated, so both sides got binary-operator spaces (`const char * p`, measured on nlohmann
+/// json's `number_parse.hpp`). The rule is `PointerAlignment`'s, as for every other declarator.
+#[test]
+fn spacing_17_a_pointer_in_a_for_init() {
+    check(
+        "void f() {\n    for (const char *p = first; p != last; ++p) {\n        g(p);\n    }\n}\n",
+        "void f() {\n    for (const char *p = first; p != last; ++p) {\n        g(p);\n    }\n}\n",
+    );
+    // A cast's `*` and a multiplication are not declarators: `a * b` keeps its spaces.
+    check(
+        "void f(int a, int b) {\n    int c = a * b;\n}\n",
+        "void f(int a, int b) {\n    int c = a * b;\n}\n",
+    );
+}

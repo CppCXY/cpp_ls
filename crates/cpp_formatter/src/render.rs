@@ -1352,7 +1352,15 @@ fn line_starts_with_template(stream: &tokens::Stream<'_>, index: usize) -> bool 
             | cpp_parser::CppTokenKind::LeftBrace
             | cpp_parser::CppTokenKind::RightBrace
             // An access specifier or a `case` label ends the walk: a declaration never spans its colon.
-            | cpp_parser::CppTokenKind::Colon => break,
+            | cpp_parser::CppTokenKind::Colon
+            // **A comment ends it too**: a doc comment is a tree of `DocText`-like tokens, and walking through one ran
+            // past the declaration's own start (measured: `template <typename T>` after a doc comment's `*/` made the
+            // `struct json_sax {` that follows it a continuation, four columns in).
+            | cpp_parser::CppTokenKind::LineComment
+            | cpp_parser::CppTokenKind::BlockComment
+            | cpp_parser::CppTokenKind::DocText
+            | cpp_parser::CppTokenKind::DocCommandName
+            | cpp_parser::CppTokenKind::DocTrivia => break,
             _ => start -= 1,
         }
     }

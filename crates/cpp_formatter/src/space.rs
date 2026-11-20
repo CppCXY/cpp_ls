@@ -404,14 +404,24 @@ pub fn between(stream: &Stream<'_>, index: usize, roles: &Roles, style: &Style) 
     let mark_after_a_template = index >= 2
         && stream.tokens[index - 2].kind == Greater
         && roles.is_template_angle(stream.tokens[index - 2].start);
-    if is_a_mark(current.kind) && (roles.is_declarator(offset) || after_a_template) {
+    // **After a builtin type name the mark is a declarator too**: `for (const char *p = first; …)` is a declaration and
+    // the tree does not annotate its `*`, so both sides got binary-operator spaces (`char * p`, measured on nlohmann
+    // json's `number_parse.hpp`). Only a builtin type or `auto` is evidence; an identifier before a `*` is just as
+    // likely to be a multiplication.
+    let after_a_type_name = index >= 2 && is_a_builtin_type(stream.tokens[index - 2].kind);
+    let mark_after_a_type_name = index >= 2 && is_a_builtin_type(stream.tokens[index - 2].kind);
+    if is_a_mark(current.kind)
+        && (roles.is_declarator(offset) || after_a_template || mark_after_a_type_name)
+    {
         return match style.text(StyleOption::PointerAlignment) {
             "Left" => 0,
             "Middle" => 1,
             _ => 1,
         };
     }
-    if is_a_mark(previous.kind) && (roles.is_declarator(previous.start) || mark_after_a_template) {
+    if is_a_mark(previous.kind)
+        && (roles.is_declarator(previous.start) || mark_after_a_template || after_a_type_name)
+    {
         return match style.text(StyleOption::PointerAlignment) {
             "Left" => 1,
             "Middle" => 1,
@@ -519,6 +529,25 @@ fn is_operator_punctuation(kind: CppTokenKind) -> bool {
             | CaretAssign
             | LeftShiftAssign
             | RightShiftAssign
+    )
+}
+
+/// Is this token a builtin type name (or `auto`)? A `*` after one is a declarator, not a multiplication.
+fn is_a_builtin_type(kind: CppTokenKind) -> bool {
+    use CppTokenKind::*;
+    matches!(
+        kind,
+        BoolLiteral
+            | IntKeyword
+            | CharKeyword
+            | ShortKeyword
+            | LongKeyword
+            | FloatKeyword
+            | DoubleKeyword
+            | VoidKeyword
+            | UnsignedKeyword
+            | SignedKeyword
+            | AutoKeyword
     )
 }
 
