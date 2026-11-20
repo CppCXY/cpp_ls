@@ -75,6 +75,12 @@ libstdc++'s 2,500 headers, MSVC's 166 STL headers, and a construct-by-construct 
 | [`cpp_ls`](crates/cpp_ls) | [![crates.io](https://img.shields.io/crates/v/cpp_ls.svg)](https://crates.io/crates/cpp_ls) | The server: LSP transport, handlers, configuration, and the binary |
 | [`cpp_formatter`](crates/cpp_formatter) | [![crates.io](https://img.shields.io/crates/v/cpp_formatter.svg)](https://crates.io/crates/cpp_formatter) | An independent formatter with clang-format's configuration surface |
 
+Each crate has its own README — what it is, the map of its modules, the contracts that matter, and how it is tested:
+[`cpp_parser`](crates/cpp_parser#readme) · [`cpp_toolchain`](crates/cpp_toolchain#readme) ·
+[`cpp_code_analysis`](crates/cpp_code_analysis#readme) · [`cpp_ls`](crates/cpp_ls#readme) ·
+[`cpp_formatter`](crates/cpp_formatter#readme) · [`cpp_check`](crates/cpp_check#readme) — the workspace-wide front end
+for the analysis's checks (`publish = false`).
+
 ## What it answers
 
 **Reading**

@@ -6,6 +6,7 @@ description = "A C++ formatter with clang-format's configuration surface."
 license = "MIT"
 authors = ["CppCXY"]
 repository = "https://github.com/CppCXY/cpp_ls"
+readme = "README.md"
 keywords = ["cpp", "language-server"]
 categories = ["development-tools"]
 
