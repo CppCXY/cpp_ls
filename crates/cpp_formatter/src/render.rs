@@ -45,6 +45,9 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // `layout::template_angles` is the lexical test, because the parser does not mark every list (`using` aliases).
     let template_angles = layout::template_angles(&stream, &roles);
     let mut angles: Vec<usize> = Vec::new();
+    // **The indent of the line each `<` was written on**: a template list whose `<` ends its line indents its
+    // arguments one `ContinuationIndentWidth` past *that* line (measured: `*j.template get_ptr<` at 8 then 12).
+    let mut angle_anchors: Vec<usize> = Vec::new();
     // **An enumeration body keeps a column of its own**: `enum class Wide { A,` puts `B,` under `A`.
     let enum_bodies = layout::enum_body_braces(&stream);
     let mut enums: Vec<(usize, usize)> = Vec::new();
