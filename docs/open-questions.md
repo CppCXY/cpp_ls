@@ -3019,3 +3019,23 @@ Nothing else in the chain is unknown: `StkIdRel`, `TValue`, `GCUnion`, `Closure`
 the program reading is committed (`TValue`'s body is written by a macro, `TValuefields`, so its two members exist only
 in the rendering — `session.commit_a_unit_reading` is what files them, and the probe shows `[]` before it and
 `["tt_", "value_"]` after).
+
+## Is the declarator's shape reasonable? No — measured, and the change is planned
+
+Asked after the parenthesised-declarator fix: whether the tree that needed it is the tree it should be. The answer is
+in [`declarator-shapes.md`](declarator-shapes.md), with the table printed from the grammar by
+`crates/cpp_parser/tests/declarator_shapes.rs`. Two defects, both consequences of one rule:
+
+* **A suffix after `( ptr-declarator )` is left as a sibling of the declarator**, not inside it
+  (`int (*fp)(int);` is `Declarator[(*fp)] ParameterList`). Six of the surveyed shapes do it, and the "list is my
+  parent's sibling" rule in `CppDeclarator::get_param_list` is right for one of them (`(named)(int)`, the Lua case) and
+  wrong for the rest.
+* **A function returning a function pointer is recorded as a variable**: `int (*maker(int a))(int b);` gives
+  `maker variable type int(int)*`, and `void (*signal(int, void (*)(int)))(int);` the same. That is a wrong answer at
+  the fact level, not a missing one, so its calls, its signature help and its hover all answer about an object.
+
+The change is the grammar's own rule — attach the suffixes to the declarator that opens at `(`, and ask the parameters
+of the declarator that **holds the name** rather than of the outermost one — and the note lists the six readers that
+have to be re-checked when it lands (`declared_parameters_with`, `the_parameters_of`, `promises_no_return`/`get_body`,
+`declarator_declaring`, `call_syntax`'s two, and the type engine's pointer questions). Not done yet: the survey and the
+fact table are the instrument, and the change is the next round's work.
