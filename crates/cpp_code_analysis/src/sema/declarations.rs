@@ -3110,43 +3110,57 @@ pub(crate) fn declared_returns_of_with(
     // Only the operators, and only when they are *purely* operators: `int (*f)(int)` returns a function pointer
     // and its text before the name is `(*` — a spelling this cannot assemble, so it keeps the specifiers instead
     // of returning something that is not a type.
-    let before_the_name = declarator
+    // **A function returning a function pointer** — `int (*maker(int a))(int b);` returns `int (*)(int)`, and the
+    // assembly below could not say so: the text before the name is `(*`, which is not "purely operators", so the whole
+    // thing was refused and the fact answered the bare specifiers (`returns int`). Measured on the shape this round
+    // fixed (`docs/declarator-shapes.md`): the declarator's own spelling is `(*maker(int a))(int b)` — the `(` before
+    // the `*` is the return type's, `(int a)` is the function's own list, and `(int b)` describes the pointed-to
+    // function. [`a_parenthesised_return_type`] reads exactly that.
+    let before_the_name = match declarator
         .as_ref()
-        .map(|declarator| {
-            let text = before(
-                &declarator.text().to_string(),
-                declarator,
-                binding.name_range,
-            );
-            // **A parenthesized name is not a function pointer.** Lua's C API writes
-            // `LUALIB_API const char *(luaL_tolstring) (lua_State *L, …)` — the `*` is the *return type's*, and the
-            // parentheses only wrap the name. The text before the name is `*(`, which the operator filter below
-            // refused, so the fact recorded `const char` and every call was reported as returning something that
-            // does not convert (measured: `assign-type-check` on `const char *sep = luaL_optlstring(…)`, Lua 5.5.0).
-            //
-            // `int (*f)(int)` has the same two characters — `(*` — and there the `*` **is** the declarator's (a
-            // pointer to function), which this cannot assemble. The two differ in where the `(` is: after the
-            // operators for a function returning a pointer, before them for a pointer to function. Only the first
-            // is unparenthesised here.
-            let trimmed = text.trim_end();
-            match trimmed.strip_suffix('(') {
-                Some(rest)
-                    if rest
-                        .trim_end()
-                        .chars()
-                        .all(|c| c == '*' || c == '&' || c.is_whitespace()) =>
-                {
-                    rest.to_string()
+        .and_then(|declarator| a_parenthesised_return_type(declarator, binding.name_range))
+    {
+        // A parenthesised return type is a *whole* spelling — `(*)(int b)` — so it is not put through the operator
+        // filter below, which is there to reject text that is not purely operators.
+        Some(spelling) => spelling,
+        None => declarator
+            .as_ref()
+            .map(|declarator| {
+                let text = before(
+                    &declarator.text().to_string(),
+                    declarator,
+                    binding.name_range,
+                );
+                // **A parenthesized name is not a function pointer.** Lua's C API writes
+                // `LUALIB_API const char *(luaL_tolstring) (lua_State *L, …)` — the `*` is the *return type's*, and the
+                // parentheses only wrap the name. The text before the name is `*(`, which the operator filter below
+                // refused, so the fact recorded `const char` and every call was reported as returning something that
+                // does not convert (measured: `assign-type-check` on `const char *sep = luaL_optlstring(…)`, Lua 5.5.0).
+                //
+                // `int (*f)(int)` has the same two characters — `(*` — and there the `*` **is** the declarator's (a
+                // pointer to function), which this cannot assemble. The two differ in where the `(` is: after the
+                // operators for a function returning a pointer, before them for a pointer to function. Only the first
+                // is unparenthesised here.
+                let trimmed = text.trim_end();
+                match trimmed.strip_suffix('(') {
+                    Some(rest)
+                        if rest
+                            .trim_end()
+                            .chars()
+                            .all(|c| c == '*' || c == '&' || c.is_whitespace()) =>
+                    {
+                        rest.to_string()
+                    }
+                    _ => text,
                 }
-                _ => text,
-            }
-        })
-        .filter(|operators| {
-            operators
-                .chars()
-                .all(|c| c == '*' || c == '&' || c.is_whitespace())
-        })
-        .unwrap_or_default();
+            })
+            .filter(|operators| {
+                operators
+                    .chars()
+                    .all(|c| c == '*' || c == '&' || c.is_whitespace())
+            })
+            .unwrap_or_default(),
+    };
 
     // **The specifiers are read as syntax, not as text**, which is the rule [`crate::sema::types::read_specifiers`]
     // states and the one that already fixed `std::cin`: a macro standing where a specifier goes is a *name* to the
@@ -3198,6 +3212,85 @@ pub(crate) fn declared_returns_of_with(
 ///
 /// Both are arithmetic on byte offsets into the same source rather than a search for a word, for the reason
 /// [`without`] gives: `Widget Widget(1);` has two spellings of one name, and a search cuts the wrong one.
+/// **The `(*)(int)` of a function returning a function pointer** — the return type, from the declarator's own shape.
+///
+/// `int (*maker(int a))(int b);` returns `int (*)(int)`, and every part of that spelling is in one declarator:
+///
+/// ```text
+/// Declarator "(*maker(int a))(int b)"
+///   Declarator "(*maker(int a))"
+///     Declarator "*maker(int a)"       <- the name and the function's own `(int a)`
+///   ParameterList "(int b)"            <- the pointed-to function's
+/// ```
+///
+/// The operators before the name (`*`) go inside parentheses, and what follows the name's **own** parameter list is
+/// the rest — so `(int b)` stays attached in the right place. `None` for every other shape, which is what keeps the
+/// ordinary assembly ([`before`] plus its operator filter) answering `Widget *` and `const char *`.
+fn a_parenthesised_return_type(
+    declarator: &CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> Option<String> {
+    use cpp_parser::CppAstNode;
+
+    // The declarator that names the binding: the innermost one holding the name as a direct child.
+    let mut naming = declarator.clone();
+    loop {
+        if cpp_parser::typed_children::<cpp_parser::CppNameExpr>(&naming).any(|child| {
+            let range = child.get_range();
+            usize::from(range.start()) <= name.start_offset
+                && name.start_offset + name.length <= usize::from(range.end())
+        }) {
+            break;
+        }
+        naming = naming
+            .children()
+            .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))?;
+    }
+
+    // Only the parenthesised spelling — `(*`, `(&`, `(* const`.
+    let outer_text = declarator.text().to_string();
+    let prefix = before(&outer_text, declarator, name);
+    if !prefix.trim().starts_with('(') {
+        return None;
+    }
+
+    // The operators written before the name are the pointer (or reference) the function returns. Read off the
+    // prefix's text rather than its nodes: a `*` in a declarator is often a bare token rather than a `PointerType`.
+    let operators: String = prefix.chars().filter(|c| matches!(c, '*' | '&')).collect();
+    if operators.trim().is_empty()
+        || !prefix
+            .chars()
+            .all(|c| matches!(c, '(' | '*' | '&') || c.is_whitespace())
+    {
+        return None;
+    }
+
+    // …and what follows the name's own parameters is the pointed-to function's: the outer declarator's suffixes that
+    // are not on the path to the name.
+    let from = u32::try_from(name.start_offset).unwrap_or(u32::MAX);
+    let to = from.saturating_add(u32::try_from(name.length).unwrap_or_default());
+    let path = declarator.children().find(|child| {
+        let range = child.text_range();
+        u32::from(range.start()) <= from && to <= u32::from(range.end())
+    })?;
+    let after: String = declarator
+        .children()
+        .filter(|child| {
+            child.text_range() != path.text_range()
+                && matches!(
+                    cpp_parser::CppSyntaxKind::from(child.kind()),
+                    cpp_parser::CppSyntaxKind::ParameterList | cpp_parser::CppSyntaxKind::ArrayType
+                )
+        })
+        .map(|suffix| suffix.text().to_string())
+        .collect::<Vec<_>>()
+        .join("");
+    if after.trim().is_empty() {
+        return None;
+    }
+    Some(format!("({operators}){after}"))
+}
+
 fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> String {
     if name.length == 0 {
         return String::new();
@@ -6692,6 +6785,19 @@ void f(int value);
                 .unwrap_or_else(|| panic!("`{name}` is declared in the fixture"))
         };
 
+        // **A function returning a function pointer** — `int (*maker(int a))(int b);` returns `int (*)(int)`, and the
+        // declarator's own spelling says so (see `a_parenthesised_return_type`). Measured before: `returns int`.
+        let (returning, _) = {
+            let source = "int (*maker(int a))(int b);\nvoid (*signal(int, void (*)(int)))(int);\n";
+            super::tests::facts(source)
+        };
+        for (name, expected) in [("maker", "int (*)(int b)"), ("signal", "void (*)(int)")] {
+            let fact = returning
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is declared in the fixture"));
+            assert_eq!(fact.returns.as_deref(), Some(expected), "`{name}` returns");
+        }
         assert_eq!(of("make").returns.as_deref(), Some("Widget"));
         // **A parenthesized name keeps the return type's operators.** Lua's C API writes
         // `LUALIB_API const char *(luaL_tolstring) (lua_State *L, …)`; the text before the name is `*(`, which the

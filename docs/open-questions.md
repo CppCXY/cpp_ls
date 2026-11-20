@@ -3042,6 +3042,7 @@ a pointer) — which also stopped the returned pointer's parameter (`b` of `(int
 after: `int (*maker(int a))(int b);` is a **function** with parameters `(int a)`, `void (*signal(…))(int);` likewise,
 `int (*fp)(int);` stays a variable, and the whole suite is green (`docs/declarator-shapes.md`).
 
-**What it surfaced and did not fix:** the *return* type of a function returning a function pointer is recorded as the
-pointed-to function's return type (`maker` answers `returns int`), because `declared_type_of` reads the specifier
-sequence and the pointer-and-list part now lives in one declarator node.
+**Including the type half:** a function returning a function pointer now records the returned type from the shape —
+`maker` answers `returns int (*)(int b)`, `signal` `returns void (*)(int)` — through
+`a_parenthesised_return_type`, which reads the operators between the declarator's `(` and the name and the suffix after
+the name's own parameter list.

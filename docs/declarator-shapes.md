@@ -106,11 +106,20 @@ crates/cpp_parser/tests/declarator_shapes.rs                    the shape invari
 And on Lua 5.5.0 — the project the reports came from: `lua_setfield`'s fact keeps its parameters, the hover card reads
 the real signature, `lauxlib.c` places its 301 parameter hints.
 
-**One thing the change surfaced and did not fix:** the *return* type of a function returning a function pointer is
-recorded as the pointed-to function's return type (`int (*maker(int a))(int b)` answers `returns int`), because
-`declared_type_of` reads the specifier sequence and the pointer-and-list part now lives in one declarator node. That is
-the next step for the *type* half of this shape; the kind and the parameters — the defects that made the declaration
-read as a variable — are fixed.
+**The type half, fixed in the same round:** the *return* type of a function returning a function pointer now reads the
+shape rather than the specifiers — `a_parenthesised_return_type` in `sema::declarations` takes the operators written
+between the declarator's `(` and the name, and everything after the name's own parameter list:
+
+```text
+before   int (*maker(int a))(int b);            `returns int`
+after    int (*maker(int a))(int b);            `returns int (*)(int b)`
+
+before   void (*signal(int, void (*)(int)))(int);   `returns void`
+after    void (*signal(int, void (*)(int)))(int);   `returns void (*)(int)`
+```
+
+`const char *(luaL_tolstring)(int)` and `Widget *make()` keep their spellings (`const char *`, `Widget *`), which is
+what the ordinary assembly answers — the parenthesised reading is only for the shape it names.
 
 ## What not to do
 
