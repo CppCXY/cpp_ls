@@ -218,3 +218,32 @@ fn the_same_names_are_keywords_in_cpp() {
     let errors = errors_in("void f() { int *p = new int(1); (void)p; }", cpp23());
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// **`extern "C" {` in C must not hide what follows it.**
+///
+/// The construct is C++'s, and a C file only ever sees it because the header that writes it guards it with
+/// `#ifdef __cplusplus` — and a header read from its **raw text**, which is what the index reads when nothing has
+/// cooked the file yet, keeps *both* branches. Read as C there is no linkage specification at all, so the grammar
+/// takes `extern` for a declaration and the `{` for a body, and every declaration after it becomes a local of that
+/// body. Measured on libuv 1.53.1: `include/uv.h` contributed **20 declarations of ~800** for exactly this reason
+/// (`docs/c-support.md` §7), and the 11 `undefined-name` findings on its Windows build followed from it.
+#[test]
+fn an_extern_c_block_in_c_does_not_hide_what_follows_it() {
+    for source in [
+        "extern \"C\" {\nint f(void);\n}\nint g(void);\n",
+        "extern \"C\" {\nint f(void);\n}\nstruct S { int x; };\nint g(void);\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default().with_language(c11()));
+        let root = CppTranslationUnit::cast(tree.get_red_root()).expect("a translation unit");
+        let declared: Vec<String> = root
+            .syntax()
+            .descendants()
+            .filter_map(CppDeclaration::cast)
+            .filter_map(|declaration| declaration.get_name_text())
+            .collect();
+        assert!(
+            declared.contains(&"g".to_string()),
+            "`g` is declared at file scope in the text, so it must be a declaration: {declared:?} in {source:?}"
+        );
+    }
+}

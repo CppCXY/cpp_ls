@@ -111,6 +111,7 @@ fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
 mod abstract_class_instantiated;
 mod access_invisible;
 mod argument_count;
+mod assign_type_check;
 mod assignment_in_condition;
 mod braces_around_statements;
 mod concept_not_satisfied;

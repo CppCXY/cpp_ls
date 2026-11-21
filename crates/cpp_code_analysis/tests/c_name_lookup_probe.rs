@@ -114,9 +114,34 @@ fn a_name_a_header_declares() {
         name,
         session.index().definitions(&name, &header)
     );
+    // **The program read**, which is what a server does for an open file — and the path that cooks the whole
+    // closure. Asked here because the summary a program read commits and the one an include cascade commits are
+    // built from different text (a unit stream versus the file's own text), and only one of them was wrong.
+    let core_text = std::fs::read_to_string(&user).unwrap_or_default();
+    session.did_open(&user, &core_text);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
     println!(
-        "[probe] who includes the header: {:?}",
-        session.index().dependents_of(&header)
+        "[probe] a program is owed now: {:?}",
+        session.the_program_to_read()
+    );
+    let reading = session.read_a_program_now();
+    println!(
+        "[probe] program read: {:?}",
+        reading
+            .as_ref()
+            .map(|reading| (reading.files, reading.tokens, reading.errors))
+    );
+    if let Some(summary) = session.index().summary(&header) {
+        println!(
+            "[probe] after the program read, that summary: {} declaration(s)",
+            summary.declarations.len()
+        );
+    }
+    println!(
+        "[probe] after the program read, {} can see {}: {:?}",
+        user.display(),
+        name,
+        session.index().definitions(&name, &user)
     );
     println!(
         "[probe] who includes src/win/internal.h: {:?}",

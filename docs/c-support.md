@@ -183,9 +183,14 @@ resolves), so the trigger is in `uv.h`'s own structure: a guard, `UV_EXTERN` def
 `#ifdef _WIN32`, then `#if defined(UV_FREERTOS) … #else … #endif`, then `#elif defined(_WIN32) # include "uv/win.h"`.
 That is the next thing to fix, and this section is the measurement it will be checked against.
 
-### 7.2 `assign-type-check` inside a macro's expansion
+### 7.2 `assign-type-check` inside a macro's expansion — fixed
 
-`src/uv-common.c:576` says `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` `` —
-the name comes from a GCC builtin-shaped macro in a body (`__atomic_exchange_n(&…, …)` expanded by our own preprocessor),
-so the finding is about a construct the reader never wrote. The rule's own doc says a name the implementation reserves is
-never a finding; the *assignment* half of that reading needs the same silence.
+`src/uv-common.c:576` said `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` `` —
+the name comes from the expansion of `atomic_exchange_explicit(…)` in the project's own macro, so the declaration the
+rule judged is one this layer made up. The rule now uses the exemption `undefined-name` has had since the C corpus: a
+name the **implementation** reserves (`__atomic_*`, `__builtin_*`, `__sync_*`, `_Interlocked*`, `_mm*`) is not the
+reader's declaration, and a declaration this layer invented deserves the same silence.
+
+Measured: libuv's Windows build went from **12 errors to 11** (0 warnings, 97 hints unchanged; the 33-second pull run
+became 108 s on the machine, which is noise between runs rather than a regression — the same run measured 30 s once).
+Fixture: `sema/check/test/assign_type_check.rs` (three reserved spellings silent, a string in an `int` still reported).
