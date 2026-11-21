@@ -10,6 +10,40 @@ The protocol for asking one question at a time is [`inspect.md`](inspect.md).
 
 ---
 
+## curl 8.x — the third C project, and the cleanest so far
+
+Cloned at `E:\corpora\curl`, configured with its own CMake and MinGW's gcc — a **real** database, not a synthesized one:
+
+```text
+cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      -DCMAKE_C_COMPILER=…/w64devkit/bin/gcc.exe
+      -DCURL_USE_OPENSSL=OFF -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF
+      -DUSE_LIBIDN2=OFF -DCURL_ZLIB=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF
+      -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+```
+
+255 entries (`lib/` 210, `src/` the rest); `compile_commands.json` copied beside the project root, which is where the
+session looks for it.
+
+| Measurement | files | findings | errors |
+| --- | --- | --- | --- |
+| `lib/` | 152 | **68** | **0** |
+| `src/` (the command-line tool) | 44 | **13** | **0** |
+
+No `syntax-error`, no `undefined-name`, no type finding — in either half. All 81 findings are warnings, and each class is
+one of the three the earlier projects named:
+
+| Code | Count | What it is |
+| --- | --- | --- |
+| `missing-include` | 56 + 13 | "`Curl_easy` is declared in `curl_trc.h`, which this file does not include" — in a **header** (`lib/cf-h1-proxy.h`) that every translation unit includes *after* `curl_setup.h`. Plausible "include what you use", noisy for curl's header style. The attribution ("declared in `cf-https-connect.h`") also looks arbitrary for a name several files declare — the *first* declaring file the index happened to hold. |
+| `include-not-found` | 10 | **Platform headers, not this platform**: `ConditionalMacros.h` (macOS), `<sys/socket.h>`/`<gskssl.h>`/`<qsoasync.h>` (OS/400's `setup-os400.h`), `<pwd.h>`/`<unixlib.h>`/`<openssl/evp.h>` (VMS's `setup-vms.h`). Those files are guarded out of a Windows build; the sweep scans them because they are `.h` in `lib/`. |
+| `macro-parentheses` | 2 | `#define argv_item_t char *` and `#define curl_thread_t …` — macros that stand for a **type**. Parenthesising the replacement list would break the declaration, so this is a rule refinement (a body that is a type is not an expression), not a defect in curl. |
+
+That is the third C project measured end to end, and the first with **no errors at all** on its first run — after
+`f53b5bc6`, `db1bb5c6` and the two rule fixes above. It is also the strongest evidence so far for the claim the work
+started from: what a C project reports is dominated by whether its build configuration is real, and by then by style
+warnings, not by the analysis failing to read the code.
+
 ## redis 8.x — the second C project, and the first measured with a database
 
 131 files (`src/*.c`), a database synthesized from `src/Makefile`'s own flags: `gcc -std=gnu11 -pedantic
