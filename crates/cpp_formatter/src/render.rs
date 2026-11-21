@@ -1596,6 +1596,35 @@ fn planned_indent(
         // continuation of it and came out four columns in (measured: `class FunctionOption {` at 4 instead of 0).
         && !the_line_starts_with_a_directive(stream, index - 1)
     {
+        // **A function declarator after its return type sits at the declaration's own indent**: clang-format writes
+        //
+        //     std::shared_ptr<LuaEditorConfig>
+        //     LuaEditorConfig::OpenFile(const std::string &path) {
+        //
+        // — the signature at 0, not one continuation in (`PenaltyReturnTypeOnItsOwnLine` is what makes the break, and
+        // the continuation is a new declarator of the same declaration). A **variable** declarator is one continuation
+        // in (`std::vector<std::pair<…>>` then `name_styles = …` at 4, measured). The `(` before any `=` is the
+        // difference.
+        let mut declarator_with_parameters = false;
+        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Identifier {
+            for token in &stream.tokens[index..] {
+                match token.kind {
+                    cpp_parser::CppTokenKind::LeftParen => {
+                        declarator_with_parameters = true;
+                        break;
+                    }
+                    cpp_parser::CppTokenKind::Assign
+                    | cpp_parser::CppTokenKind::Semicolon
+                    | cpp_parser::CppTokenKind::LeftBrace
+                    | cpp_parser::CppTokenKind::RightBrace
+                    | cpp_parser::CppTokenKind::Comma => break,
+                    _ => {}
+                }
+            }
+        }
+        if declarator_with_parameters {
+            return Some((statement_indent, false));
+        }
         return Some((
             statement_indent + style.count(StyleOption::ContinuationIndentWidth),
             false,

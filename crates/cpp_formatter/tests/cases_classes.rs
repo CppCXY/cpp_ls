@@ -208,3 +208,19 @@ fn classes_25_an_enumerator_value_on_its_own_line() {
     let input = "enum class exception_id : int {\n  // parse_error\n  syntax_error =\n      101, ///< unexpected token or invalid literal while parsing JSON\n  patch_not_an_array =\n      104, ///< a JSON Patch document is not an array of objects\n};\n";
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
 }
+
+/// **A function declarator after its return type sits at the declaration's own indent**: clang-format writes
+/// `std::shared_ptr<LuaEditorConfig>` then `LuaEditorConfig::OpenFile(const std::string &path) {` at column 0, not one
+/// continuation in (`PenaltyReturnTypeOnItsOwnLine` makes the break; the continuation is a new declarator of the same
+/// declaration). A **variable** declarator is one continuation in (`some_global_name_table =` then `{};` at 4). Both are
+/// the oracle's text, byte for byte.
+#[test]
+fn classes_26_a_declarator_after_its_return_type() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "std::shared_ptr<LuaEditorConfig>\nLuaEditorConfig::OpenFile(const std::string &path) {\n  return {};\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+    let variable =
+        "static const std::map<std::string, std::vector<int>> some_global_name_table =\n    {};\n";
+    assert_eq!(cpp_formatter::format_file(path, variable, &llvm), variable);
+}

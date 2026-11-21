@@ -40,7 +40,7 @@ Two numbers, because two different defects produce them:
 
 | style | identical files | changed lines | spacing-only |
 | --- | --- | --- | --- |
-| `LLVM` | 4 / 29 | 1 438 / 6 850 | 18 / 29 match, 68 lines |
+| `LLVM` | 5 / 29 | **1 434** / 6 850 | 21 / 29 match, **62 lines** |
 | `Google` | 4 / 29 | 1 602 / 6 886 | 21 / 29 match, 58 lines |
 | `Microsoft` | 7 / 29 | **453** / 8 033 | 28 / 29 match, **2 lines** |
 | `BreakBeforeBraces: Allman` | 3 / 29 | 1 450 / 8 657 | 16 / 29 match, 57 lines |
