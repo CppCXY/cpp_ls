@@ -1989,6 +1989,17 @@ fn wrapping_lines(
             wrapped[index + 1] = true;
             wrapped[closer] = true;
         }
+        // **A block's statement is never on one line either**: `AllowShortBlocksOnASingleLine` is `Never` in `LLVM`,
+        // `Google` and `Microsoft` alike, so `if (a) { g(); }` comes back as three lines however the author wrote it
+        // (measured on the oracle under all three styles). The **empty** `{}` is the branch above.
+        if kind == crate::roles::BraceKind::Control
+            && let Some(closer) = closer
+            && closer > index + 1
+            && stream.gaps[index + 1].newlines == 0
+        {
+            wrapped[index + 1] = true;
+            wrapped[closer] = true;
+        }
     }
 
     WrappingLines {

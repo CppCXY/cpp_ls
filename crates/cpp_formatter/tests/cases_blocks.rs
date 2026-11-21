@@ -213,3 +213,27 @@ fn blocks_27_a_short_enum_is_one_line() {
         "enum class E\n{\n    A,\n    B\n};\n"
     );
 }
+
+/// **`AllowShortBlocksOnASingleLine: Never`** is the one option all three styles agree on: `if (a) { g(); }` written on
+/// one line comes back as three lines under `LLVM`, `Google` and `Microsoft` (measured on the oracle). An **empty**
+/// body stays `{}` — the branch this rule sits next to.
+#[test]
+fn blocks_28_a_control_block_is_never_one_line() {
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f(int a) {\n  if (a) { g(); }\n}\n";
+    let expected = "void f(int a) {\n  if (a) {\n    g();\n  }\n}\n";
+    // `LLVM` and `Google` attach the brace, so both write the same text; `Microsoft`'s Allman placement is covered by
+    // its own cases.
+    for preset in ["LLVM", "Google"] {
+        let style = Style::preset(preset).expect("a preset");
+        assert_eq!(
+            cpp_formatter::format_file(path, input, &style),
+            expected,
+            "{preset}"
+        );
+    }
+    // An empty body keeps its one line.
+    let empty = "void f(int a) {\n  if (a) {}\n}\n";
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    assert_eq!(cpp_formatter::format_file(path, empty, &llvm), empty);
+}
