@@ -22,7 +22,8 @@ about POSIX headers rather than about redis.
 | scan only, no database (§8.1 below in the old numbering) | 427 (4 syntax) | 573 | 975 |
 | with the synthesized database | 38 (2 syntax) | 181 | 850 |
 | … and C's string-literal rule (`e023c54e`) | 19 (2 syntax) | 181 | 829 |
-| … and a parenthesised function declarator (`4b6c8f1a`-era) | **17 (0 syntax)** | 181 | 902 |
+| … and a parenthesised function declarator (`db1bbcd3`) | 17 (0 syntax) | 181 | 902 |
+| … and two more probes of the same kind (`f0e2c1d4`-era): a multi-declarator's type, the assignment idiom | **16 (0 syntax)** | 181 | 902 |
 
 ### 1. A macro parameter may be spelled with a keyword — `d0de833f`
 
@@ -108,7 +109,59 @@ unchanged at **0**. The C++ shapes are untouched: `int (*fp)(int)`, `int (*maker
 Fixture: `char **(*p__environ2(void));` and `char **(*f());` in `target/bench/environ2.c`'s shape — a parser test is
 added beside `a_second_parameter_list_after_a_macro_type_is_one_declarator`.
 
+### 6. Two rules and one reader, from the same measurement — fixed
+
+Three defects, all found by reading the sweep's output rather than by a report:
+
+* **`return-type-mismatch` on `src/dict.c:1156`.** `unsigned long long integers[6], hash = 0;` followed by
+  `return hash;` was reported as returning a value that does not convert — because the reader that answers "the type
+  this name was declared with" took the declaration's **first** `InitDeclarator`, so `hash` inherited `integers[6]`'s
+  array. `declarator_declaring` now picks the `InitDeclarator` **that holds the name** (`sema/types.rs`), and the same
+  reader answers `unsigned long long` for `hash` and `int` for `a` in `int a = 0, b[6];`. Fixture
+  `types::each_declarator_of_one_declaration_has_its_own_type`.
+* **`assignment-in-condition` on redis's own idiom.** `if ((ln = listNext(&li)))` — the assignment is wrapped in its
+  own parentheses, which is exactly how C says "this one is deliberate"; gcc's `-Wparentheses` does not warn for it
+  either. The rule knew about `((x = f()) != 0)` (a comparison) but not about the bare doubled parenthesised
+  assignment, and reported **13** of them. It is now silent for that spelling, and `if (x = f())` is still reported.
+* **The `dangling-return` one is *not* fixed, and the attempt was reverted.** `src/t_hash.c:4192` returns
+  `&dictExpireMeta->elemExpires` where `dictExpireMeta` is a local **pointer**: the referent is the object the pointer
+  points at, not the local, so the finding looks wrong. `CppMemberExpr::is_arrow()` is the right question and the
+  change was written — but the rule still reported the shape through the cooked reading, and a `codes_of` fixture did
+  not reproduce the case at all (a local pointer to a struct, `&meta->expire`). A change that no test and no
+  measurement shows is a change not made: both the change and its test were removed, and this stays an **open** item
+  whose next step is to instrument `origin_of` on the cooked tree of `t_hash.c`.
+
+After the first two: redis 8.x src, 222 files — `assignment-in-condition` 12 → **0**, `return-type-mismatch` 1 → **0**.
+The probe that produced the earlier error counts is deleted (§7 of `inspect.md`), so the tally below is `sweep`'s: 222
+files, and the Error-severity codes are `undefined-name` 23 and `dangling-return` 1.
+
 ### What is left, and whose defect it is
+
+### 6. Two rules and one reader, from the same measurement — fixed
+
+Three defects, all found by reading the sweep's output rather than by a report:
+
+* **`return-type-mismatch` on `src/dict.c:1156`.** `unsigned long long integers[6], hash = 0;` followed by
+  `return hash;` was reported as returning a value that does not convert — because the reader that answers "the type
+  this name was declared with" took the declaration's **first** `InitDeclarator`, so `hash` inherited `integers[6]`'s
+  array. `declarator_declaring` now picks the `InitDeclarator` **that holds the name** (`sema/types.rs`), and the same
+  reader answers `unsigned long long` for `hash` and `int` for `a` in `int a = 0, b[6];`. Fixture
+  `types::each_declarator_of_one_declaration_has_its_own_type`.
+* **`assignment-in-condition` on redis's own idiom.** `if ((ln = listNext(&li)))` — the assignment is wrapped in its
+  own parentheses, which is exactly how C says "this one is deliberate"; gcc's `-Wparentheses` does not warn for it
+  either. The rule knew about `((x = f()) != 0)` (a comparison) but not about the bare doubled parenthesised
+  assignment, and reported **13** of them. It is now silent for that spelling, and `if (x = f())` is still reported.
+* **The `dangling-return` one is *not* fixed, and the attempt was reverted.** `src/t_hash.c:4192` returns
+  `&dictExpireMeta->elemExpires` where `dictExpireMeta` is a local **pointer**: the referent is the object the pointer
+  points at, not the local, so the finding looks wrong. `CppMemberExpr::is_arrow()` is the right question and the
+  change was written — but the rule still reported the shape through the cooked reading, and a `codes_of` fixture did
+  not reproduce the case at all (a local pointer to a struct, `&meta->expire`). A change that no test and no
+  measurement shows is a change not made: both the change and its test were removed, and this stays an **open** item
+  whose next step is to instrument `origin_of` on the cooked tree of `t_hash.c`.
+
+After the first two: redis 8.x src, 222 files — `assignment-in-condition` 12 → **0**, `return-type-mismatch` 1 → **0**.
+The probe that produced the earlier error counts is deleted (§7 of `inspect.md`), so the tally below is `sweep`'s: 222
+files, and the Error-severity codes are `undefined-name` 23 and `dangling-return` 1.
 
 ### What is left, and whose defect it is
 

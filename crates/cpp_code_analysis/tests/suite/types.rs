@@ -4209,3 +4209,30 @@ void f(std::string const& text, std::string& plain) {
         "an offset that is not a name answers nothing rather than `false`"
     );
 }
+
+/// **Every declarator of one declaration has its own type** — `unsigned long long integers[6], hash = 0;`.
+///
+/// The declaration writes one specifier sequence and **two** declarators, and only the first carries the array
+/// suffix. The reader that answers "what type was this name declared with" looked the declarator up by taking the
+/// declaration's *first* `InitDeclarator`, so the second name inherited the first one's type: redis's
+/// `dictFingerprint` (`src/dict.c:1128`) was reported as returning `unsigned long long[6]` from `return hash;`, which
+/// is `return-type-mismatch` on code that compiles (`docs/worklog.md`).
+///
+/// The two directions are both here: an array first (`hash` must not be one) and an array second (`b` must be).
+#[test]
+fn each_declarator_of_one_declaration_has_its_own_type() {
+    let source = "unsigned long long f(void) {\n    unsigned long long integers[6], hash = 0;\n    (void)integers;\n    return hash;\n}\n";
+    assert_eq!(
+        type_of_use(source, "hash").as_deref(),
+        Some("unsigned long long"),
+        "`hash` is declared by the second declarator, which has no array suffix"
+    );
+
+    let source =
+        "int g(void) {\n    int a = 0, b[6];\n    (void)a;\n    (void)b;\n    return a;\n}\n";
+    assert_eq!(
+        type_of_use(source, "a").as_deref(),
+        Some("int"),
+        "`a` is declared by the first declarator, which has no array suffix"
+    );
+}

@@ -834,6 +834,9 @@ pub fn the_sweep(
     let mut answered = 0usize;
     let mut counted = 0usize;
 
+    // **Each file is read for its own line numbers.** The findings a file gets are in that file's coordinates, and
+    // `--file` names only the one the session was opened around: a sweep that measured every line against it printed
+    // `module.c:2453` for a file with no 2 453rd line.
     let mut paths: Vec<std::path::PathBuf> = opened.session.project_files().to_vec();
     if let Some(including) = including {
         paths.retain(|path| path.to_string_lossy().contains(including));
@@ -845,10 +848,24 @@ pub fn the_sweep(
         // and `Session::diagnostics` answers `None` for it rather than a claim about a file nothing read. Cooking is
         // the expensive half and it is paid once per file, which is what a sweep is for.
         let _ = opened.session.cook(path);
+        // **A finding's range is in the reading's coordinates, not the file's.** A check walks the tree of the
+        // *rendering* — the file with its includes collapsed — so an offset into it is not a byte of this file: a
+        // sweep that printed it as one reported `module.c:2453` for a file whose 2 453rd line is a function
+        // signature. The crossing is the same one every answer in this tool makes, and `None` (a finding about text
+        // another file wrote) falls back to the raw offset.
+        let view = opened.session.view(path);
         let Some(found) = opened.session.diagnostics(path) else {
             continue;
         };
         answered += 1;
+        // **The file's own text, for its own line numbers.** `--file` names the one file the session was opened
+        // around; a sweep that measured every file's line against it printed `module.c:2453` for a file whose 2 453rd
+        // line is somebody else's.
+        let text = opened
+            .session
+            .text(path)
+            .map(|text| text.to_string())
+            .unwrap_or_default();
         let mut findings: Vec<Value> = Vec::new();
         for finding in &found.checks {
             let code = finding.code.name();
@@ -858,10 +875,23 @@ pub fn the_sweep(
             *per_code.entry(code).or_default() += 1;
             counted += 1;
             if findings.len() < limit {
-                let (line, column) = line_col(
-                    &opened.text,
-                    finding.range.start_offset.min(opened.text.len()),
-                );
+                // **A finding's range is in the *reading's* coordinates.** A check walks the tree of the rendering —
+                // the file with its includes collapsed — so an offset into it is not a byte of this file, and the
+                // crossing is the same one every answer in this tool makes. `None` (text another file's macro body
+                // wrote) falls back to the raw offset.
+                let in_the_file = view
+                    .as_ref()
+                    .and_then(|view| {
+                        view.file_offset_of(
+                            cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                                finding.range.start_offset,
+                            ),
+                        )
+                    })
+                    .map(|offset| offset.get())
+                    .unwrap_or(finding.range.start_offset)
+                    .min(text.len());
+                let (line, column) = line_col(&text, in_the_file);
                 findings.push(json!({
                     "code": code,
                     "line": line,
@@ -881,7 +911,7 @@ pub fn the_sweep(
             *per_code.entry(code).or_default() += 1;
             counted += 1;
             if findings.len() < limit {
-                let (line, column) = line_col(&opened.text, error.start.min(opened.text.len()));
+                let (line, column) = line_col(&text, error.start.min(text.len()));
                 findings.push(json!({
                     "code": code,
                     "line": line,

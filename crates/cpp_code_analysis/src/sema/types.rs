@@ -1533,18 +1533,32 @@ pub fn declarator_declaring(
             continue;
         }
 
-        let init = node
-            .children()
-            .find(|child| cpp_parser::CppInitDeclarator::can_cast(child.kind().into()));
+        // **The declarator that reaches *this* name, not the declaration's first one.** A declaration may declare
+        // several names — `unsigned long long integers[6], hash = 0;` — and each is its own `InitDeclarator` under the
+        // one `Declaration`. Taking the first was the bug: `hash`'s type was read from `integers[6]`'s declarator, so
+        // redis's `dictFingerprint` was reported as returning `unsigned long long[6]` from `return hash;`
+        // (`src/dict.c:1156`, `docs/worklog.md`). The range test is the same one the descent above uses.
+        let holds_the_name = |child: &cpp_parser::CppSyntaxNode| {
+            let own = child.text_range();
+            usize::from(own.start()) <= name.start_offset
+                && usize::from(own.end()) >= name.end_offset()
+        };
+        let init = node.children().find(|child| {
+            cpp_parser::CppInitDeclarator::can_cast(child.kind().into()) && holds_the_name(child)
+        });
         let declarator = init
             .as_ref()
             .and_then(|init| {
-                init.children()
-                    .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
+                init.children().find(|child| {
+                    cpp_parser::CppDeclarator::can_cast(child.kind().into())
+                        && holds_the_name(child)
+                })
             })
             .or_else(|| {
-                node.children()
-                    .find(|child| cpp_parser::CppDeclarator::can_cast(child.kind().into()))
+                node.children().find(|child| {
+                    cpp_parser::CppDeclarator::can_cast(child.kind().into())
+                        && holds_the_name(child)
+                })
             });
         if declarator.is_some() {
             return declarator;

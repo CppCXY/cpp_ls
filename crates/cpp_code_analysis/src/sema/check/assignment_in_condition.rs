@@ -86,6 +86,19 @@ impl Check for AssignmentInCondition {
             if is_a_comparison {
                 continue;
             }
+            // **An assignment wrapped in its own parentheses is deliberate** — the same rule gcc's `-Wparentheses`
+            // applies: it does not warn for `if ((x = f()))`, because the extra pair is the author saying "yes, this
+            // one is an assignment". redis writes it in thirteen places (`docs/worklog.md`), every one of them
+            // reported by this rule before this arm existed.
+            //
+            // The condition is *already* a `CppParenExpr` — the `if`'s own parentheses — so "doubled" is a paren whose
+            // child is another paren. `if ((x = f()) != 0)` never reaches here: the comparison arm above takes it.
+            let deliberately_parenthesised = cpp_parser::CppParenExpr::cast(condition.clone())
+                .and_then(|outer| outer.child::<cpp_parser::CppParenExpr>())
+                .is_some();
+            if deliberately_parenthesised {
+                continue;
+            }
             let text = context.node_text(&condition);
             let text = text.trim();
 
