@@ -3,7 +3,39 @@
 //! Moved here from `session/mod.rs` without a change. An edit is not applied to the index; it *invalidates* what the
 //! index holds, and the dependents that have to be re-read are queued here.
 
+//! What changed — edits, opens, closes, and the filesystem news that is not an edit.
+//!
+//! The two halves of a reconcile live here rather than in one call so that the disk can be asked **outside the
+//! writer**: see [`Session::prepare_a_reconcile`] for why, and [`ReconcileAnswer`] for what crosses between them.
+
 use super::*;
+
+/// **What a reconcile found on disk** — the answer [`Session::prepare_a_reconcile`] hands to
+/// [`Session::commit_a_reconcile`], and the only thing that crosses between the two phases.
+///
+/// Paths rather than events: the events are a wire-format detail of [`Session::changed`], and a caller that wants to
+/// log "N files moved" would otherwise have to count them back out of an enum.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconcileAnswer {
+    /// Files whose modification time or size moved since the session read them.
+    pub modified: Vec<PathBuf>,
+    /// Files the project listed and the disk no longer has, or the listing no longer names.
+    pub removed: Vec<PathBuf>,
+    /// Files the listing found that the project did not have.
+    pub new: Vec<PathBuf>,
+}
+
+impl ReconcileAnswer {
+    /// Is there nothing to apply? The ordinary answer, and the one a caller logs as "nothing moved".
+    pub fn is_empty(&self) -> bool {
+        self.modified.is_empty() && self.removed.is_empty() && self.new.is_empty()
+    }
+
+    /// How many files the answer is about, for a log line.
+    pub fn len(&self) -> usize {
+        self.modified.len() + self.removed.len() + self.new.len()
+    }
+}
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
@@ -226,25 +258,55 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A file the analysis is holding as a **buffer** is skipped: the client's text is the text, and the client is
     /// the authority for its own edits.
     ///
+    /// # Why `listing` is a parameter
+    ///
+    /// Because the listing is what costs: on a 3 000-file project, `list_the_project` re-reads
+    /// `compile_commands.json` (3 000 entries of JSON) and asks `exists` for every one of them, which measured **1.3 s**
+    /// against the 300 ms a stamp-only look takes — and a reconcile runs under the write lock, so that is a request's
+    /// latency. A **database** project's list cannot change without the database changing (a file the database does not
+    /// name is not a project file; a header joins the index through an `#include`, not through this list), so a lost-event
+    /// report — the common case — asks for the stamps only. A **directory** that appeared, vanished or moved is the
+    /// case that needs the listing: files may have arrived wholesale, and only a walk can see the one nobody includes
+    /// yet. A project with no database is walked either way: its list *is* the tree.
+    ///
     /// Returns the same [`Response`] [`Session::changed`] does, so a caller can say how much moved — an answer that
     /// reconciles nothing is the ordinary one, and saying so is what keeps a rescan out of the log's warnings.
-    pub fn reconcile(&mut self) -> Response {
-        let listed = self.list_the_project();
+    ///
+    /// The work is split so that the disk is asked **before** the caller takes the writer
+    /// ([`Session::prepare_a_reconcile`] and [`Session::commit_a_reconcile`]): the stats are the expensive half —
+    /// measured at 400–850 ms for 3 000 files on Windows, dominated by the listings — and holding the write lock for
+    /// them delays every request in flight for that long. This form does both halves in one call, for a caller that
+    /// already holds the writer.
+    pub fn reconcile(&mut self, listing: bool) -> Response {
+        let answer = self.prepare_a_reconcile(listing);
+        self.commit_a_reconcile(answer)
+    }
+
+    /// **Phase one of a reconcile: what the disk has to be asked**, read without changing anything.
+    ///
+    /// Two `stat`s per project file when a listing is needed (the listing checks each database entry exists, and then
+    /// the stamp is read) and one when it is not. That is the cost a caller keeps out of the writer: read this under
+    /// the read lock (queries are unaffected), then take the writer only for [`Session::commit_a_reconcile`], which
+    /// touches nothing but the session.
+    pub fn prepare_a_reconcile(&self, listing: bool) -> ReconcileAnswer {
+        let relist = listing || self.discovery.database.is_none();
+        let listed = if relist {
+            self.list_the_project()
+        } else {
+            self.project.clone()
+        };
         let listed_keys: std::collections::HashSet<String> =
             listed.iter().map(|path| queue_key(path)).collect();
 
-        let mut events = Vec::new();
+        let mut answer = ReconcileAnswer::default();
 
         // **Gone**: the project no longer names it, or the file is not on disk any more. Both are one answer — the
         // index must forget the summary and re-read what resolved to it — and the difference is only who said so.
-        let mut removed = Vec::new();
-        let mut moved = Vec::new();
         for path in &self.project {
             let key = queue_key(path);
             let stamp = crate::file::FileStamp::of(path);
             if stamp.is_none() || !listed_keys.contains(&key) {
-                removed.push(key);
-                events.push(FileEvent::removed(path.clone()));
+                answer.removed.push(path.clone());
                 continue;
             }
             if self.documents.is_open(path) {
@@ -253,30 +315,48 @@ impl<F: FileProvider + Clone> Session<F> {
             if let Some(stamp) = stamp
                 && self.stamps.get(&key).is_none_or(|known| *known != stamp)
             {
-                moved.push(path.clone());
-                events.push(FileEvent::modified(path.clone()));
+                answer.modified.push(path.clone());
             }
         }
 
         // **New**: a file the listing has and the project did not — a header somebody just added to the tree.
-        let new: Vec<PathBuf> = listed
+        answer.new = listed
             .into_iter()
             .filter(|path| !self.project_paths.contains_key(&queue_key(path)))
             .collect();
+        answer
+    }
+
+    /// **Phase three of a reconcile: the facts go into the session**, under the writer and with no disk work.
+    ///
+    /// The answer [`Session::prepare_a_reconcile`] produced is applied here — the project list follows the disk, the
+    /// stamps of the files that moved are dropped so the next read records a new one, and the events go through
+    /// [`Session::changed`] like any other change.
+    pub fn commit_a_reconcile(&mut self, answer: ReconcileAnswer) -> Response {
+        let ReconcileAnswer {
+            modified,
+            removed,
+            new,
+        } = answer;
+
+        let mut events: Vec<FileEvent> = Vec::with_capacity(modified.len() + removed.len());
+        events.extend(removed.iter().cloned().map(FileEvent::removed));
+        events.extend(modified.iter().cloned().map(FileEvent::modified));
+
         if !new.is_empty() {
             self.add_project_files(new.clone());
         }
 
         // The removed files leave the project list too: a listing that keeps a deleted file would ask about it on
         // every reconcile, and a stat of a missing path is the one answer that never changes.
-        for key in removed {
-            if let Some(path) = self.project_paths.remove(&key) {
+        for path in &removed {
+            let key = queue_key(path);
+            if self.project_paths.remove(&key).is_some() {
                 self.project.retain(|held| queue_key(held) != key);
-                self.stamps.remove(&key);
-                let _ = path;
             }
+            self.stamps.remove(&key);
         }
-        for path in &moved {
+        for path in &modified {
             self.stamps.remove(&queue_key(path));
         }
 

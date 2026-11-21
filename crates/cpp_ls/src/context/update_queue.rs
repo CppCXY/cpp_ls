@@ -82,7 +82,13 @@ pub enum UpdateEvent {
     /// compiler run, a full index and a whole-program read — ten seconds on a Linux kernel tree, and the log showed
     /// four of them in fifty seconds while 332 overflow reports arrived), and it now asks the session to
     /// [`reconcile`](cpp_code_analysis::Session::reconcile) instead, which is a `stat` per project file.
-    Reconcile,
+    ///
+    /// `listing` says whether the project's file list has to be read again: a **directory** that appeared, vanished
+    /// or moved may have brought whole files with it, while lost events alone cannot add one to a database project
+    /// (and reading the database again measured 1.3 s against 300 ms for the stamps alone).
+    Reconcile {
+        listing: bool,
+    },
 }
 
 impl UpdateEvent {
@@ -93,7 +99,7 @@ impl UpdateEvent {
             Self::Saved(_) => "saved",
             Self::Closed(_) => "closed",
             Self::WatchedFilesChanged(_) => "watched files changed",
-            Self::Reconcile => "reconcile",
+            Self::Reconcile { .. } => "reconcile",
         }
     }
 
@@ -103,7 +109,7 @@ impl UpdateEvent {
             Self::Changed(params) => Some(&params.text_document.uri),
             Self::Saved(params) => Some(&params.text_document.uri),
             Self::Closed(params) => Some(&params.text_document.uri),
-            Self::WatchedFilesChanged(_) | Self::Reconcile => None,
+            Self::WatchedFilesChanged(_) | Self::Reconcile { .. } => None,
         }
     }
 
@@ -111,7 +117,7 @@ impl UpdateEvent {
         match self {
             Self::Saved(params) => params.text.is_some(),
             Self::WatchedFilesChanged(params) => !params.changes.is_empty(),
-            Self::Reconcile => true,
+            Self::Reconcile { .. } => true,
             _ => true,
         }
     }
@@ -369,8 +375,8 @@ async fn process(snapshot: &ServerContextSnapshot, event: UpdateEvent) {
         UpdateEvent::WatchedFilesChanged(params) => {
             handlers::process_did_change_watched_files(snapshot.clone(), params).await;
         }
-        UpdateEvent::Reconcile => {
-            handlers::process_reconcile(snapshot.clone()).await;
+        UpdateEvent::Reconcile { listing } => {
+            handlers::process_reconcile(snapshot.clone(), listing).await;
         }
     }
 }

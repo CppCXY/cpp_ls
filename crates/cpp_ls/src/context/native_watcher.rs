@@ -122,6 +122,10 @@ async fn watch_events(
     // take the question over. (Measured on the storm fixture: the first reconcile saw 61 of 120 rewritten files,
     // because the rest were written while it was running.)
     let mut pending_at: Option<std::time::Instant> = None;
+    // **Whether the next ask needs the project's file list read again**, which is the expensive half of a reconcile:
+    // a directory that appeared, vanished or moved may have brought whole files with it. Lost events alone cannot add
+    // a file to a database project, so the common report pays for the stamps only.
+    let mut listing_pending = false;
     loop {
         // **The armed window, fired by the timeout rather than by an event.** Nothing else in this task has a timer, so
         // the wait below is where the window is closed.
@@ -134,7 +138,12 @@ async fn watch_events(
                 "{folded} lost-event report(s) folded since the last look; asking the disk what moved (no reload)"
             );
             folded = 0;
-            context.enqueue(UpdateEvent::Reconcile).await;
+            context
+                .enqueue(UpdateEvent::Reconcile {
+                    listing: listing_pending,
+                })
+                .await;
+            listing_pending = false;
         }
 
         let first = if let Some(at) = pending_at {
@@ -162,13 +171,16 @@ async fn watch_events(
         if rescan {
             folded += 1;
         }
+        let mut listing = false;
         {
             let filter = filter
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             for event in events {
                 match event {
-                    Ok(event) => collect_event(event, &filter, &mut changes, &mut rescan),
+                    Ok(event) => {
+                        collect_event(event, &filter, &mut changes, &mut rescan, &mut listing)
+                    }
                     Err(error) => {
                         log::error!("native file watcher error: {error}");
                         rescan = true;
@@ -176,6 +188,7 @@ async fn watch_events(
                 }
             }
         }
+        listing_pending |= listing;
 
         if !changes.is_empty() {
             context
@@ -198,7 +211,12 @@ async fn watch_events(
                     "{folded} lost-event report(s) since the last look; asking the disk what moved (no reload)"
                 );
                 folded = 0;
-                context.enqueue(UpdateEvent::Reconcile).await;
+                context
+                    .enqueue(UpdateEvent::Reconcile {
+                        listing: listing_pending,
+                    })
+                    .await;
+                listing_pending = false;
             } else {
                 log::debug!("a reconcile just ran; the next window will answer this report");
                 pending_at = last_reconcile.map(|last| last + RECONCILE_INTERVAL);
@@ -212,6 +230,7 @@ fn collect_event(
     filter: &WatchFilter,
     changes: &mut Vec<FileEvent>,
     rescan: &mut bool,
+    listing: &mut bool,
 ) {
     if event.need_rescan() {
         log::warn!("the native file watcher reported lost events");
@@ -257,6 +276,7 @@ fn collect_event(
             // A directory appeared or went away: files may have arrived or vanished wholesale, and only a listing
             // can say which. That is the reconcile's job, not a change event's.
             *rescan = true;
+            *listing = true;
             continue;
         }
         // **Whether this is a directory is asked only when the event's kind does not say** — a `stat` per event is
@@ -267,6 +287,7 @@ fn collect_event(
             && (path.is_dir() || (kind == FileChangeType::DELETED && path.extension().is_none()))
         {
             *rescan = true;
+            *listing = true;
             continue;
         }
         if let Some(uri) = path_to_uri(path) {
@@ -291,6 +312,7 @@ mod tests {
         let new = root.join("new.h");
         let mut changes = Vec::new();
         let mut rescan = false;
+        let mut listing = false;
         collect_event(
             Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
                 .add_path(old.clone())
@@ -298,6 +320,7 @@ mod tests {
             &filter,
             &mut changes,
             &mut rescan,
+            &mut listing,
         );
         collect_event(
             Event::new(EventKind::Create(CreateKind::File))
@@ -305,6 +328,7 @@ mod tests {
             &filter,
             &mut changes,
             &mut rescan,
+            &mut listing,
         );
         assert_eq!(
             changes,
@@ -313,22 +337,39 @@ mod tests {
                 FileEvent::new(path_to_uri(&new).unwrap(), FileChangeType::CREATED),
             ]
         );
-        assert!(!rescan);
+        // **A file's rename is changes, not a listing**: both halves are named, so no walk is needed. A *directory*
+        // rename is the case that cannot name its children, and that one asks for the listing.
+        assert!(
+            !rescan,
+            "both halves are named, so the change events carry the whole answer"
+        );
+        assert!(!listing, "and the project list is still right");
     }
 
     #[test]
     fn lost_events_and_directory_changes_trigger_a_rescan() {
         let root = std::env::temp_dir().join("cpp-ls-native-watch-test");
         let filter = WatchFilter::new(&root);
-        for event in [
-            Event::new(EventKind::Any).set_flag(Flag::Rescan),
-            Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join("new-dir")),
-            Event::new(EventKind::Remove(RemoveKind::Any)).add_path(root.join("old-dir")),
+        // **Lost events and directory changes are both reconciles, but only one needs the listing.** A lost-event
+        // report is about files that moved — their names are already in the project — while a directory that appeared
+        // or went away may have brought whole files with it, which only a listing can find.
+        for (event, wanted_listing) in [
+            (Event::new(EventKind::Any).set_flag(Flag::Rescan), false),
+            (
+                Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join("new-dir")),
+                true,
+            ),
+            (
+                Event::new(EventKind::Remove(RemoveKind::Any)).add_path(root.join("old-dir")),
+                true,
+            ),
         ] {
             let mut changes = Vec::new();
             let mut rescan = false;
-            collect_event(event, &filter, &mut changes, &mut rescan);
+            let mut listing = false;
+            collect_event(event, &filter, &mut changes, &mut rescan, &mut listing);
             assert!(rescan);
+            assert_eq!(listing, wanted_listing);
         }
     }
 

@@ -1908,6 +1908,7 @@ mod diagnostics;
 /// **What a documentation comment refers to** --- the names a hover draws as links.
 pub mod doc;
 mod edits;
+pub use edits::ReconcileAnswer;
 /// **The regions a file can hide** --- folds, read from the tree and the directives.
 pub mod folding;
 /// **The format string** --- which {...} and %... of a literal is what, for the hover that explains it.

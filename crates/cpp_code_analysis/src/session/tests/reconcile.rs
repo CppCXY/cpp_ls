@@ -49,7 +49,7 @@ pub(crate) fn a_reconcile_with_nothing_changed_does_nothing() {
         ],
     );
 
-    let nothing = session.reconcile();
+    let nothing = session.reconcile(true);
     assert!(
         nothing.is_empty(),
         "no file moved, so a reconcile is no work at all: {nothing:?}"
@@ -100,7 +100,7 @@ pub(crate) fn a_reconcile_reads_what_moved_and_only_that() {
         "#include \"base.h\"\nint third(void) { return base(); }\n",
     );
 
-    let moved = session.reconcile();
+    let moved = session.reconcile(true);
     assert!(
         moved.reindex.iter().any(|path| path == &first),
         "the rewritten file is re-read: {moved:?}"
@@ -159,7 +159,7 @@ pub(crate) fn a_reconcile_leaves_an_open_buffer_alone() {
     std::fs::write(&path, "int on_the_disk(void) { return 0; }\n")
         .expect("the fixture is writable");
 
-    let moved = session.reconcile();
+    let moved = session.reconcile(true);
     assert!(
         !moved.reindex.iter().any(|queued| queued == &path),
         "an open document is re-read when the client says so, not when the disk moves: {moved:?}"

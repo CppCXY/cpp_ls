@@ -41,30 +41,52 @@ pub async fn on_did_change_watched_files(
 ///
 /// The coalescing is the watcher's (`a reconcile is already in flight` in `native_watcher`): this handler runs once per
 /// window whatever the storm's size.
-pub async fn process_reconcile(context: ServerContextSnapshot) -> Option<()> {
+///
+/// # Why the disk is asked before the writer is taken
+///
+/// Because the stats are the expensive half — 400–850 ms for 3 000 files on Windows, the listing being most of it — and
+/// a write hold that long is a request's latency (the very complaint the reload was removed for). So
+/// [`Session::prepare_a_reconcile`] runs under the **read** lock (queries unaffected), the answer crosses to
+/// [`Session::commit_a_reconcile`] under the writer, and the writer is held for the session's own bookkeeping only.
+pub async fn process_reconcile(context: ServerContextSnapshot, listing: bool) -> Option<()> {
     let started = std::time::Instant::now();
+    let Some(answer) = context
+        .analysis()
+        .with_snapshot(|session| session.prepare_a_reconcile(listing))
+    else {
+        // No workspace yet: a reconcile about a project nobody has opened is nothing.
+        return Some(());
+    };
+    let asked_for = started.elapsed();
+
+    if answer.is_empty() {
+        // The ordinary answer, and the one worth saying out loud: the storm reported "events were lost" and the disk
+        // agreed with the index. A rescan that finds nothing must not look like a rescan that ran.
+        log::info!("reconciled with the disk in {asked_for:.1?}: nothing moved");
+        return Some(());
+    }
+
+    let moved = (
+        answer.modified.len(),
+        answer.removed.len(),
+        answer.new.len(),
+    );
     let response = context
         .analysis()
-        .update_session("reconcile the project with the disk", |session| {
-            session.reconcile()
+        .update_session("apply a reconcile", move |session| {
+            session.commit_a_reconcile(answer)
         })
         .await;
 
     let Some(response) = response else {
-        // No workspace yet: a reconcile about a project nobody has opened is nothing.
         return Some(());
     };
-    let took = started.elapsed();
-
-    if response.is_empty() {
-        // The ordinary answer, and the one worth saying out loud: the storm reported "events were lost" and the disk
-        // agreed with the index. A rescan that finds nothing must not look like a rescan that ran.
-        log::info!("reconciled with the disk in {took:.1?}: nothing moved");
-        return Some(());
-    }
 
     log::info!(
-        "reconciled with the disk in {took:.1?}: {} file(s) to re-read, {} forgotten",
+        "reconciled with the disk in {asked_for:.1?} ({} changed, {} gone, {} new): {} file(s) to re-read, {} forgotten",
+        moved.0,
+        moved.1,
+        moved.2,
         response.reindex.len(),
         response.forgotten.len()
     );
