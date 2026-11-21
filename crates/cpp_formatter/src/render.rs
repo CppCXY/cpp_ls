@@ -1730,6 +1730,20 @@ fn case_label_indent(
     None
 }
 
+/// **Is the line before the one starting at `index` a preprocessor directive?**
+///
+/// The declaration that follows a directive is what clang-format keeps apart from its template head (`template <typename
+/// T>` then `#if …` then the struct), and its **empty body stays split** where the same declaration without the directive
+/// is one line — measured on nlohmann json's `binary_reader.hpp`.
+fn previous_line_is_a_directive(stream: &tokens::Stream<'_>, index: usize) -> bool {
+    let line = line_start(stream, index);
+    if line == 0 {
+        return false;
+    }
+    let previous = line_start(stream, line - 1);
+    stream.tokens[previous].kind == cpp_parser::CppTokenKind::Hash
+}
+
 /// **Does the line that ends at `index` start with a `#`?** — an include's `>` is not a template continuation.
 fn the_line_starts_with_a_directive(stream: &tokens::Stream<'_>, index: usize) -> bool {
     let start = line_start(stream, index);
@@ -2002,6 +2016,17 @@ fn wrapping_lines(
             if a_block
                 || never_one_line
                 || (wraps && crate::wrapping::split_empty_body(style, kind))
+                // **A declaration that follows a directive keeps its empty body split**: clang-format writes
+                //
+                //     template <typename T>
+                //     #if defined(__cpp_char8_t)
+                //     struct X : std::is_same<T, char8_t> {
+                //     };
+                //
+                // (measured on nlohmann json's `binary_reader.hpp` and on a fixture) while the same declaration without
+                // the `#if` between the head and it is `struct X : … {};` — the directive keeps clang-format from joining
+                // the pair, and this is the shape to reproduce rather than the join.
+                || (reflows && previous_line_is_a_directive(stream, index))
             {
                 split[index + 1] = true;
                 wrapped[index + 1] = true;

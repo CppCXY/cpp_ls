@@ -310,3 +310,17 @@ fn blocks_31_a_case_label_statement_starts_a_line() {
         "void f(int x) {\n  switch (x) {\n  case 1: {\n    g();\n    break;\n  }\n  }\n}\n";
     assert_eq!(cpp_formatter::format_file(path, braced, &llvm), braced);
 }
+
+/// **A declaration after a directive keeps its empty body split**: clang-format writes `template <typename T>` then
+/// `#if …` then `struct X : … {` / `};`, while the same declaration without the directive between the head and it is
+/// `struct X : … {};` (measured on nlohmann json's `binary_reader.hpp` and on this fixture, byte for byte).
+#[test]
+fn blocks_32_an_empty_body_after_a_directive_stays_split() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "template <typename T>\n#if defined(__cpp_char8_t)\nstruct X : std::is_same<T, char8_t> {\n};\n#else\nstruct X : std::false_type {\n};\n#endif\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+    // Without the directive the body joins: the oracle writes `template <typename T> struct Y … {};`.
+    let joined = "template <typename T> struct Y : std::is_same<T, char8_t> {};\n";
+    assert_eq!(cpp_formatter::format_file(path, joined, &llvm), joined);
+}
