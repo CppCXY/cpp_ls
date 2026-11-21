@@ -289,3 +289,19 @@ fn wrapping_21_a_braced_case_body_after_a_comment() {
     let input = "void f(int x)\n{\n    switch (x)\n    {\n    case 1:\n        break;\n    default: // end\n    {\n        goto endLoop;\n    }\n    }\n}\n";
     assert_eq!(cpp_formatter::format_file(path, input, &microsoft), input);
 }
+
+/// **No break inside an empty pair of brackets**: `std::unique_ptr<frame[]>` is one type, and the over-long member line
+/// (its `// NOLINT(…)` comment is what overflows) must break **before the declarator**, not between `[` and `]` — the
+/// `frame[` / `]>` split is a shape clang-format never produces (measured on nlohmann json's `json_sax.hpp`).
+#[test]
+fn wrapping_22_no_break_inside_empty_brackets() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let long = "x".repeat(70);
+    let input = format!("void f() {{\n    std::unique_ptr<frame[]> heap{{}}; // {long}\n}}\n");
+    let actual = cpp_formatter::format_file(path, &input, &llvm);
+    assert!(
+        !actual.contains("frame[\n"),
+        "a break inside the empty brackets: {actual}"
+    );
+}

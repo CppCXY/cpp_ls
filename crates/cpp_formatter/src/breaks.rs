@@ -565,9 +565,18 @@ pub fn is_breakable(
     if roles.is_declarator(start) || roles.is_template_angle(start) {
         return false;
     }
+    // **A break after a template argument list's `>` was tried and reverted**: it is what clang-format does for
+    // `std::unique_ptr<frame[]>` then `heap{};` (measured), but adding it as a candidate moved the whole-file columns the
+    // wrong way by a lot — nlohmann json 20 426 → 20 536 `LLVM` and 20 512 → 20 580 `Google`, EmmyLuaCodeStyle 1 434 →
+    // 1 442 — because the search then breaks after every template closer where the author's line already fitted. See
+    // `docs/formatter-diff.md` ("What the remaining difference is", item 3).
     match current {
         // Before a member access and after an opening bracket.
         Dot | Arrow => true,
+        // **Never between an empty pair of brackets**: `std::unique_ptr<frame[]>` is one type, and breaking before the
+        // `]` wrote `frame[` then `]>` — a shape clang-format never produces (measured on nlohmann json's
+        // `json_sax.hpp`, where the member's long `// NOLINT(…)` comment is what makes the line overflow).
+        _ if previous == LeftBracket && current == RightBracket => false,
         _ if matches!(previous, LeftParen | LeftBracket) => true,
         // A conditional's `?`/`:` still breaks before itself.
         Question => true,
