@@ -218,6 +218,13 @@ Three kinds, in the order they cost lines on the corpus:
    what is left when the bracket's own column would overflow. A rule per shape would be guessing at the optimizer's
    order, which is the reason this is recorded rather than patched.
 
+   **Measured attempt**: the range-for break was added to the search as a candidate (priced like an assignment break, so
+   the optimizer would prefer it to a break inside the call) and the output did **not** change. The reason is the policy
+   above the table: `break_over_long_pieces` re-cuts a source piece **only when that piece overflows**, and the piece
+   `for (auto expr : forNumber.GetChildSyntaxNodes(` is 54 columns — it fits, so the search never sees the statement and
+   the author's break (right after the `(`) survives. Making clang-format's answer here needs the whole logical line
+   handed to the search — the unwrapped-line model, item 1 of the plan — not another penalty.
+
 ## The plan
 
 ```text
