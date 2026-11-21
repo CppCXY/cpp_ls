@@ -274,6 +274,40 @@ REDEFINED
 REDEFINED
 ";
 
+/// **A parameter may be spelled with a keyword** — the preprocessor's grammar has no keywords at all.
+///
+/// `#define createBoolConfig(name, alias, flags, config_addr, default, is_valid, apply) …` is redis 8.x's
+/// `src/config.c`, and `default` is a keyword by then. Read as an identifier only, the parameter list was cut there,
+/// the rest of it became the macro's **body**, and the macro became object-like — so redis's `standardConfig
+/// static_configs[]` stayed unexpanded text and reported **952 syntax errors** (`docs/c-support.md` §8).
+///
+/// The compiler is the oracle: `gcc -E` expands both the params and the invocation, so the whole token stream is
+/// comparable.
+#[test]
+fn a_parameter_spelled_with_a_keyword_expands_as_the_compiler_says() {
+    let Some(compiler) = the_compiler() else {
+        eprintln!("skipped: no C++ compiler on this machine (set CPPLS_TEST_CXX to name one)");
+        return;
+    };
+    let source = "\
+#define KEYWORD_PARAMETERS(a, default, struct) ((a) + (default) + (struct))
+#define NESTED_ONE(name, default) \\
+    .name = (name), \\
+    .value = (default),
+KEYWORD_PARAMETERS(1, 2, 3)
+NESTED_ONE(one, 2)
+";
+    let fixture = Fixture::new("keyword-parameters", source);
+    let theirs = the_tokens_of(&the_compilers_answer(&compiler, &fixture.path));
+    let ours = the_tokens_of(&our_answer(source));
+    assert_eq!(
+        ours,
+        theirs,
+        "\nthe tokens this crate produces are not the ones `{}` produces\n  ours:   {ours:?}\n  theirs: {theirs:?}",
+        compiler.display()
+    );
+}
+
 #[test]
 fn what_an_invocation_expands_to_is_what_the_compiler_says() {
     let Some(compiler) = the_compiler() else {

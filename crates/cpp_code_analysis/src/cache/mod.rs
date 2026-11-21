@@ -422,7 +422,15 @@ use std::path::{Path, PathBuf};
 /// continues past the comma the macro's body writes, so `include/uv.h`'s summary went from 21 declarations of 563 to
 /// 788 — and a stored summary keeps the 21. The same version covers the declarator's second parameter list
 /// (`typedef unsigned __LONG32 (WSAAPI *F)(const char *)`, where `__LONG32` is a macro) — see `docs/c-support.md` §7.1.
-pub const FORMAT_VERSION: u32 = 45;
+/// # Why this moved to 46
+///
+/// **A macro parameter may be spelled with a keyword, and the definition reader now accepts one.**
+/// `#define createBoolConfig(name, alias, flags, config_addr, default, is_valid, apply) …` is redis 8.x's
+/// `src/config.c`, where `default` is a keyword; read as an identifier only, the parameter list was cut there, the
+/// rest of it became the macro's *body*, and the macro became object-like — so redis's whole `standardConfig
+/// static_configs[]` table stayed unexpanded text and reported **952 syntax errors** (`docs/c-support.md` §8). A
+/// stored summary carries that wreckage, and only the version reaches it.
+pub const FORMAT_VERSION: u32 = 46;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

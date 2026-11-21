@@ -246,3 +246,72 @@ Measured: libuv's Windows build went from **12 errors to 11** (0 syntax errors, 
 `if (!handle) return UV_EINVAL;`). Fixtures: `sema/types.rs`'s `deducing_specifiers` (the `typeof` family spells no
 type, `auto` keeps its spelling, an `int` is still `int`) and `sema/check/test/assign_type_check.rs` (a string in an
 `int` is still reported; the assignment half still judges what the file wrote).
+
+## 8. The second project: redis 8.x, with no compilation database
+
+`c_diagnostics_probe` now **scans a project that has no `compile_commands.json`** (the server does the same: a checkout
+nobody built is the ordinary case), so redis is a measurement rather than an excuse. 240 `.c`/`.h` files under
+`E:\corpora\redis`, `didOpen` + `textDocument/diagnostic` each, with `languageId: "c"`.
+
+### 8.1 The first measurement, and the one file that owned it
+
+| | |
+| --- | --- |
+| reports answered | 240 of 240 |
+| errors | **904**, of which **501 syntax errors** |
+| warnings | 642 |
+| hints | 924 |
+
+**952 of the 1002 syntax errors were in `src/config.c` alone.** The first is at line 4197,
+`standardConfig static_configs[] = {`, and the rendering shows why:
+
+```text
+... static_configs[] = { default, is_valid, apply) { .name = (name), .alias = (alias), ... } ( "rdbchecksum", ... )
+```
+
+The macro is redis's own:
+
+```c
+#define createBoolConfig(name, alias, flags, config_addr, default, is_valid, apply) { \
+    embedCommonConfig(name, alias, flags) \
+    embedConfigConverterConfig(boolConfigInit, boolConfigSet, ...) \
+    ...
+```
+
+`parse_parameters` accepted an `Identifier` as a parameter name and nothing else. `default` is a **keyword**, so the
+parameter list was cut there, the rest of the list became the macro's *body*, and the macro became **object-like** —
+every `createBoolConfig(…)` in the file then stayed unexpanded text. The preprocessor's grammar has no keywords at all
+(C11 §6.10.3: a parameter is an *identifier*, and `default` is one at that phase), and `could_be_a_macro_name` — the
+rule the **macro's own name** already used for `#define true 1` — is the right test for a parameter too.
+
+Fixed in `preprocess/macros.rs::parse_parameters`; `FORMAT_VERSION` moved 45 → 46, because the wreckage is what a
+stored summary holds. Differential fixture:
+`crates/cpp_toolchain/tests/preprocessor_against_the_compiler.rs::a_parameter_spelled_with_a_keyword_expands_as_the_compiler_says`
+(compared against `gcc -E`'s own token stream).
+
+### 8.2 The second measurement
+
+| | before | after |
+| --- | --- | --- |
+| errors | 904 | **427** |
+| syntax errors | **501** | **4** |
+| warnings | 642 | 646 |
+| hints | 924 | 977 |
+
+What is left, by class, and where each one stands — none of these is skipped, and the ones that are not fixed yet say
+what would settle them:
+
+| code | count | what it is |
+| --- | --- | --- |
+| `undefined-name` | 391 | **Not a defect yet**: no compilation database means no `-I` and no defines, so `va_list`, `pthread_*` and the system headers are invisible. The next step is a synthesized database from redis's own `Makefile` flags (`-std=gnu11 -Isrc -I../deps/…`), which is what `bear` would write. |
+| `missing-include` / `include-not-found` | 273 / 216 | The same absence, seen from the include edge. |
+| `cstyle-cast` | 73 | **Every instance is in a `.h`.** A header's family is unknown when nothing configures it, and `DiagnosticCode::is_cpp_only`'s rule is "not told is not C" — so a C++ rule fires in a C project's headers. The principled fix is the header's **includers** (or the editor's `languageId`, which `didOpen` carries and the server ignores today); it is the next round's work, and it is recorded here rather than worked around by guessing from the extension. |
+| `macro-parentheses` | 71 | A real style finding about redis's own macros (`atomicvar.h`), matched against gcc's `-Wparentheses` behaviour in §7's spirit. Not yet triaged line by line. |
+| `assign-type-check` | 18 | All in `src/eval.c`. The rule was fixed for libuv in §7.2 and this is a **different** shape; triage next round. |
+| `assignment-in-condition` | 12 | gcc says `-Wparentheses` here too; not triaged. |
+| `return-type-mismatch` / `param-type-check` / `dangling-return` / `macro-redefined` | 8 / 5 / 1 / 1 | Not triaged. |
+| `syntax-error` | 4 | Two files: `src/connection.h:431`, `src/sentinel.c:26` (plus two in `server.c`/`server.h`). Next round. |
+
+The point of the table is that the **next** measurement is a database-shaped one: redis without include paths cannot
+distinguish "the analysis missed a name" from "nobody told it where the name is", and the numbers above say so
+explicitly instead of counting them as defects.

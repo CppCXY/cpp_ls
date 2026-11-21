@@ -32,7 +32,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 
 fn project() -> Option<PathBuf> {
     let root = std::env::var_os("CPPLS_C_PROJECT").map(PathBuf::from)?;
-    root.join("compile_commands.json").is_file().then_some(root)
+    root.is_dir().then_some(root)
 }
 
 fn uri_of(path: &Path) -> String {
@@ -43,12 +43,16 @@ fn uri_of(path: &Path) -> String {
     format!("file://{text}")
 }
 
-/// The files the project's build compiles, from its own database.
+/// The files the project's build compiles, from its own database — `None` when it has none.
 ///
 /// A `file` that does not exist on this machine is skipped and counted: a checked-in database written somewhere else
 /// is the ordinary case, and a list of files that are not here would measure nothing.
-fn database_files(root: &Path) -> (Vec<PathBuf>, usize) {
-    let text = std::fs::read_to_string(root.join("compile_commands.json")).expect("a database");
+///
+/// **A project with no database is scanned**, because that is what the server does: a redis or nginx checkout has no
+/// `compile_commands.json` until it is configured, and "we cannot measure it" would be a claim about the probe rather
+/// than about the analysis. The scan is the same one [`sources_under`] does.
+fn database_files(root: &Path) -> Option<(Vec<PathBuf>, usize)> {
+    let text = std::fs::read_to_string(root.join("compile_commands.json")).ok()?;
     let entries: Vec<Value> = serde_json::from_str(&text).expect("a JSON database");
     let mut files = Vec::new();
     let mut missing = 0;
@@ -65,7 +69,48 @@ fn database_files(root: &Path) -> (Vec<PathBuf>, usize) {
             missing += 1;
         }
     }
-    (files, missing)
+    Some((files, missing))
+}
+
+/// Every `.c`/`.h` under `root`, skipping the directories a source tree keeps that are not the project's own:
+/// `.git`, a build tree, and the tests (a test fixture is written to break a parser, which is not what a usability
+/// number should be made of).
+fn sources_under(root: &Path) -> Vec<PathBuf> {
+    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if path.is_dir() {
+                let skipped = name.starts_with('.')
+                    || matches!(
+                        name.as_str(),
+                        "build" | "tests" | "test" | "deps" | "vendor" | "third_party"
+                    );
+                if !skipped {
+                    walk(&path, found);
+                }
+                continue;
+            }
+            let extension = path
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if extension == "c" || extension == "h" {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, &mut found);
+    found.sort();
+    found
 }
 
 struct Client {
@@ -189,12 +234,26 @@ fn the_diagnostics_a_c_project_gets() {
         eprintln!("no project with a compile_commands.json: set CPPLS_C_PROJECT");
         return;
     };
-    let (files, missing) = database_files(&root);
-    println!(
-        "[c] {} file(s) from the database ({} entries named files that are not here)",
-        files.len(),
-        missing
-    );
+    // **The database when there is one, the tree when there is not** — the server makes the same choice, and a
+    // project that has not been configured is the ordinary case for a checkout nobody built.
+    let files = match database_files(&root) {
+        Some((files, missing)) => {
+            println!(
+                "[c] {} file(s) from the database ({} entries named files that are not here)",
+                files.len(),
+                missing
+            );
+            files
+        }
+        None => {
+            let files = sources_under(&root);
+            println!(
+                "[c] {} source file(s) scanned: no compile_commands.json in the project",
+                files.len()
+            );
+            files
+        }
+    };
 
     let mut client = Client::start(&root);
     client.ask(

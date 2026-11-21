@@ -556,7 +556,14 @@ fn parse_parameters(tokens: &[Token], index: &mut usize) -> Option<Vec<Parameter
                 *index += 1;
                 return Some(params);
             }
-            CppTokenKind::Identifier => {
+            // **A parameter is a word, and a keyword is a word inside a directive.** The preprocessor's grammar
+            // has no keywords: `default` is an identifier to it, and `#define m(name, default) …` is redis's
+            // `createBoolConfig`. Read as an identifier only, the parameter list was cut at `default`, the rest of
+            // the list became the macro's **body**, and the macro became *object-like* — so every invocation in the
+            // file stayed unexpanded text. Measured on redis 8.x `src/config.c`: the file's
+            // `standardConfig static_configs[]` table came out as rubble, **952 syntax errors from this one
+            // definition** (`docs/c-support.md` §8).
+            kind if could_be_a_macro_name(kind) => {
                 params.push(Parameter {
                     name: token.text.as_str().into(),
                     kind: ParameterKind::Ordinary,
