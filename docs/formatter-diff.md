@@ -225,6 +225,19 @@ Three kinds, in the order they cost lines on the corpus:
    the author's break (right after the `(`) survives. Making clang-format's answer here needs the whole logical line
    handed to the search — the unwrapped-line model, item 1 of the plan — not another penalty.
 
+   **Measured attempt 2**: aligning a forced break that lands **after a binary operator** with the statement's first
+   operand (`AlignOperands: Align` — `return aaaa >` then `bbb` under `aaaa` at 9, and `auto x = aaaa >` then `bbb` under
+   `aaaa` at 11) matches the oracle on both fixtures and moved the corpus the wrong way: EmmyLuaCodeStyle whole-file
+   1 434 → **1 450** while nlohmann json went 20 422 → 20 420. Reverted: the column the search charges for a piece is the
+   continuation indent, and the two disagree for every other break the same statement holds.
+
+   **Measured attempt 3** (the doc-comment column): a **wrapped trailing doc comment** continues at the column the comment
+   would have with one space, not at the column it was aligned to — clang-format writes
+   `  store   ///< …` then `        ///< with the tag …` at **8**, while this formatter keeps the source's
+   comment column (**10**). That column is produced by clang-format's comment **reflow**, which is the `ReflowComments`
+   row in the "Differences that are not going to be fixed silently" table — four implementations of it were measured and
+   reverted there, and this shape is one more of them rather than a separate rule.
+
 ## The plan
 
 ```text
