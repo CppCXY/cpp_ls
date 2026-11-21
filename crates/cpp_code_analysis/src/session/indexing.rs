@@ -291,6 +291,22 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
 
+        // **And what the disk said while this reading was taken.** One `stat` per file read — the whole cost of the
+        // cheap rescan [`Session::reconcile`] answers a watcher overflow with, paid once where the file is already in
+        // hand. A file whose text is the client's buffer records nothing: its disk mtime describes text nobody is
+        // looking at, and the client is the authority for it.
+        if !self.documents.is_open(&path) {
+            let key = queue_key(&path);
+            match crate::file::FileStamp::of(&path) {
+                Some(stamp) => {
+                    self.stamps.insert(key, stamp);
+                }
+                None => {
+                    self.stamps.remove(&key);
+                }
+            }
+        }
+
         Step {
             path,
             priority,

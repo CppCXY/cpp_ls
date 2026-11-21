@@ -12,8 +12,20 @@ use tokio::sync::{Mutex, mpsc};
 use super::{ServerContextSnapshot, UpdateEvent};
 use crate::util::path_to_uri;
 
-const CAPACITY: usize = 256;
+/// **How many events may wait for the batcher** — and the number the storm was made of.
+///
+/// At 256, `inotify` delivers a kernel tree's churn faster than one 100 ms batch drains it: measured on a Linux
+/// kernel checkout, **332 overflow reports in fifty seconds**, each of which used to re-open the whole workspace. The
+/// queue is now only a buffer in front of a batcher that coalesces lost events, so it is sized for the bursts a
+/// `make` produces rather than for a quiet editor — a few hundred kilobytes of `PathBuf`, drained one `try_recv` per
+/// event.
+const CAPACITY: usize = 8_192;
 const BATCH_DELAY: Duration = Duration::from_millis(100);
+
+/// **How often a lost-event report may turn into a reconcile.** A storm reports hundreds; asking the disk once per
+/// window answers all of them, and two seconds is short enough that a build's output is seen — and long enough that
+/// the reconcile (a `stat` per project file and a walk) is never the thing that burns a core.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct NativeFileWatcher {
@@ -97,6 +109,12 @@ async fn watch_events(
     overflow: Arc<AtomicBool>,
     filter: Arc<RwLock<WatchFilter>>,
 ) {
+    // **The coalescing of lost-event reports**, and the reason it is here rather than in the handler: this loop is
+    // the one task that sees every batch, so one counter is enough — a storm reports hundreds of overflows and the
+    // disk gets asked once per window. The window is short enough that a build's output is picked up within a couple
+    // of seconds and long enough that a kernel tree's `make` cannot turn into a rescan loop.
+    let mut last_reconcile: Option<std::time::Instant> = None;
+    let mut folded: u32 = 0;
     while let Some(first) = receiver.recv().await {
         tokio::time::sleep(BATCH_DELAY).await;
         let mut events = vec![first];
@@ -107,7 +125,7 @@ async fn watch_events(
         let mut changes = Vec::new();
         let mut rescan = overflow.swap(false, Ordering::AcqRel);
         if rescan {
-            log::warn!("native file watcher queue overflowed; the workspace will be rescanned");
+            folded += 1;
         }
         {
             let filter = filter
@@ -132,12 +150,24 @@ async fn watch_events(
                 .await;
         }
         if rescan {
-            context
-                .workspace_manager()
-                .lock()
-                .await
-                .add_rescan_task(context.clone())
-                .await;
+            folded += 1;
+            let now = std::time::Instant::now();
+            let due =
+                last_reconcile.is_none_or(|last| now.duration_since(last) >= RECONCILE_INTERVAL);
+            if due {
+                last_reconcile = Some(now);
+                // **`warn` once per window, not once per batch**: 332 of these arrived in fifty seconds on a kernel
+                // tree, and a log that repeats itself is a log nobody reads. The number says how much was folded.
+                log::warn!(
+                    "{folded} lost-event report(s) since the last look; asking the disk what moved (no reload)"
+                );
+                folded = 0;
+                context.enqueue(UpdateEvent::Reconcile).await;
+            } else {
+                log::debug!(
+                    "a reconcile just ran; folding this lost-event report into the next one"
+                );
+            }
         }
     }
 }
@@ -167,6 +197,11 @@ fn collect_event(
         event.kind,
         EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
     );
+    let renames = matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)));
+    let ambiguous_kind = matches!(
+        event.kind,
+        EventKind::Create(CreateKind::Any) | EventKind::Remove(RemoveKind::Any)
+    ) || renames;
     for (index, path) in event.paths.iter().enumerate() {
         if filter.is_ignored(path) {
             continue;
@@ -183,21 +218,20 @@ fn collect_event(
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => FileChangeType::CREATED,
             _ => FileChangeType::CHANGED,
         };
-        let ambiguous_removed_directory = kind == FileChangeType::DELETED
-            && path.extension().is_none()
-            && !matches!(event.kind, EventKind::Remove(RemoveKind::File));
-        let directory_mutation = path.is_dir()
-            && matches!(
-                event.kind,
-                EventKind::Create(_)
-                    | EventKind::Remove(_)
-                    | EventKind::Modify(ModifyKind::Name(_))
-            );
-        if folder_kind || directory_mutation || ambiguous_removed_directory {
+        if folder_kind {
+            // A directory appeared or went away: files may have arrived or vanished wholesale, and only a listing
+            // can say which. That is the reconcile's job, not a change event's.
             *rescan = true;
             continue;
         }
-        if path.is_dir() {
+        // **Whether this is a directory is asked only when the event's kind does not say** — a `stat` per event is
+        // exactly the cost that made a kernel tree's churn expensive (`inotify` reports `Create(File)` and
+        // `Create(Folder)` apart, so the ambiguous kinds are the rare ones). A directory that moved means the same
+        // thing a created one does: the listing is out of date.
+        if ambiguous_kind
+            && (path.is_dir() || (kind == FileChangeType::DELETED && path.extension().is_none()))
+        {
+            *rescan = true;
             continue;
         }
         if let Some(uri) = path_to_uri(path) {

@@ -11,6 +11,7 @@ mod disk;
 mod fixtures;
 mod names;
 mod programs;
+mod reconcile;
 mod sharing;
 mod types;
 

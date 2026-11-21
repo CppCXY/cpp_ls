@@ -207,6 +207,119 @@ impl<F: FileProvider + Clone> Session<F> {
         self.respond(&batch)
     }
 
+    /// **Whatever moved on disk since the last read, without reading anything.**
+    ///
+    /// This is the answer to a watcher that **overflowed**: the events are lost, and the honest question is not "what
+    /// did the OS report" but "what does the filesystem say now". Re-opening the workspace answers it too, and that is
+    /// what the server used to do — a full session rebuild with a compiler run, a whole-project index and a
+    /// whole-program read, which on a Linux kernel tree is ten seconds of work per overflow and, in the session this
+    /// was measured on, **four of them in fifty seconds** (332 overflow reports). The rescan it was named after costs a
+    /// `stat` per project file and a directory walk:
+    ///
+    /// ```text
+    /// the project's files, listed again     the compile database or the root's walk (the same one the session opened with)
+    /// a file whose stamp moved              re-read it                                        (Session::index_one records the stamp)
+    /// a file the listing no longer has      forget it, and re-read what resolved to it
+    /// a file the listing has that we do not  add it to the project and read it
+    /// ```
+    ///
+    /// A file the analysis is holding as a **buffer** is skipped: the client's text is the text, and the client is
+    /// the authority for its own edits.
+    ///
+    /// Returns the same [`Response`] [`Session::changed`] does, so a caller can say how much moved — an answer that
+    /// reconciles nothing is the ordinary one, and saying so is what keeps a rescan out of the log's warnings.
+    pub fn reconcile(&mut self) -> Response {
+        let listed = self.list_the_project();
+        let listed_keys: std::collections::HashSet<String> =
+            listed.iter().map(|path| queue_key(path)).collect();
+
+        let mut events = Vec::new();
+
+        // **Gone**: the project no longer names it, or the file is not on disk any more. Both are one answer — the
+        // index must forget the summary and re-read what resolved to it — and the difference is only who said so.
+        let mut removed = Vec::new();
+        let mut moved = Vec::new();
+        for path in &self.project {
+            let key = queue_key(path);
+            let stamp = crate::file::FileStamp::of(path);
+            if stamp.is_none() || !listed_keys.contains(&key) {
+                removed.push(key);
+                events.push(FileEvent::removed(path.clone()));
+                continue;
+            }
+            if self.documents.is_open(path) {
+                continue;
+            }
+            if let Some(stamp) = stamp
+                && self.stamps.get(&key).is_none_or(|known| *known != stamp)
+            {
+                moved.push(path.clone());
+                events.push(FileEvent::modified(path.clone()));
+            }
+        }
+
+        // **New**: a file the listing has and the project did not — a header somebody just added to the tree.
+        let new: Vec<PathBuf> = listed
+            .into_iter()
+            .filter(|path| !self.project_paths.contains_key(&queue_key(path)))
+            .collect();
+        if !new.is_empty() {
+            self.add_project_files(new.clone());
+        }
+
+        // The removed files leave the project list too: a listing that keeps a deleted file would ask about it on
+        // every reconcile, and a stat of a missing path is the one answer that never changes.
+        for key in removed {
+            if let Some(path) = self.project_paths.remove(&key) {
+                self.project.retain(|held| queue_key(held) != key);
+                self.stamps.remove(&key);
+                let _ = path;
+            }
+        }
+        for path in &moved {
+            self.stamps.remove(&queue_key(path));
+        }
+
+        // **The new files are part of the answer**: `changed` reports what the *store* has to re-read, and a file the
+        // index has never held is not the store's — it is the queue's. Reporting it here is what lets a caller say
+        // how much the reconcile found, and a reconcile that quietly added a file would be silent about the one thing
+        // a lost-event report is most likely to have missed.
+        let mut response = self.changed(events);
+        response.reindex.extend(new);
+        response
+    }
+
+    /// **The project's files, listed again** — the same compile database or walk the session was opened with.
+    ///
+    /// Used by [`Session::reconcile`] and by nothing else: the listing is the *input* to a rescan, and every other
+    /// question in this module is about files whose names the session already has.
+    pub(crate) fn list_the_project(&self) -> Vec<PathBuf> {
+        let config = &self.discovery.config.config;
+        let mut extra_extensions = config.workspace.source_extensions.clone();
+        if self.config.cuda() {
+            extra_extensions.extend(["cu".to_string(), "cuh".to_string()]);
+        }
+        let database = self
+            .discovery
+            .database
+            .as_ref()
+            .map(|database| &database.commands);
+        let mut project = super::project_files(
+            &self.files,
+            &self.filter,
+            &self.root,
+            database,
+            &extra_extensions,
+            config.index.max_files.unwrap_or(super::MAX_PROJECT_FILES),
+        );
+        for file in super::library_files_to_read(&config.libraries, &self.root) {
+            if !project.contains(&file) {
+                project.push(file);
+            }
+        }
+        project
+    }
+
     /// The effective watch filter, including project configuration and cache exclusions.
     pub fn watch_filter(&self) -> WatchFilter {
         self.filter.clone()

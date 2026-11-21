@@ -164,6 +164,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .collect(),
             project: project.clone(),
             queue: Work::default(),
+            stamps: HashMap::new(),
             parsed_since_the_last_pass: Vec::new(),
             refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
             refinement_misses: std::sync::Mutex::new(std::collections::HashSet::new()),

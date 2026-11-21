@@ -724,6 +724,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     project: Vec<PathBuf>,
     project_paths: HashMap<String, PathBuf>,
     queue: Work,
+    /// **What the disk said when each file was last read** — the whole of [`Session::reconcile`]'s cheap half.
+    ///
+    /// Keyed like everything else that names a file ([`queue_key`]) and recorded by [`Session::index_one`], which is
+    /// the one place a file's summary enters the index. A file the analysis is holding as a **buffer** has no entry:
+    /// the client's text is the text, and the disk's mtime says nothing about it.
+    stamps: HashMap<String, crate::file::FileStamp>,
     /// The files this session has **parsed** since the last body pass — the candidates for
     /// [`SummaryStore::re_read_where_a_body_decides`], which may only run once the closure is in hand.
     ///

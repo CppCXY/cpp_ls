@@ -194,5 +194,8 @@ impl FileAnalysis {
 pub use cpp_toolchain::{paths, token};
 
 pub mod coordinates;
+pub mod stamp;
 pub mod vfs;
 pub mod view;
+
+pub use stamp::FileStamp;

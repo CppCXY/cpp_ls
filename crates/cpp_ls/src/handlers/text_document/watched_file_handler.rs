@@ -30,6 +30,50 @@ pub async fn on_did_change_watched_files(
     Some(())
 }
 
+/// **The native watcher lost events, or the tree changed shape** — answer by asking the disk what moved.
+///
+/// This is the replacement for what used to happen (a full workspace reload) and the reason it exists: a lost-event
+/// report is common on a large tree, and a reload is a compiler run, a whole-project index and a whole-program read.
+/// Measured on a Linux kernel checkout, the log held **332 overflow reports and four reloads in fifty seconds** —
+/// each reload re-read 361 files and committed them under the write lock for five seconds, which is exactly the
+/// window in which the diagnostic pulls took 4.9 s each. [`Session::reconcile`] answers the same question with a
+/// `stat` per project file and a walk.
+///
+/// The coalescing is the watcher's (`a reconcile is already in flight` in `native_watcher`): this handler runs once per
+/// window whatever the storm's size.
+pub async fn process_reconcile(context: ServerContextSnapshot) -> Option<()> {
+    let response = context
+        .analysis()
+        .update_session("reconcile the project with the disk", |session| {
+            session.reconcile()
+        })
+        .await;
+
+    let Some(response) = response else {
+        // No workspace yet: a reconcile about a project nobody has opened is nothing.
+        return Some(());
+    };
+
+    if response.is_empty() {
+        // The ordinary answer, and the one worth saying out loud: the storm reported "events were lost" and the disk
+        // agreed with the index. A rescan that finds nothing must not look like a rescan that ran.
+        log::info!("reconciled with the disk: nothing moved");
+        return Some(());
+    }
+
+    log::info!(
+        "reconciled with the disk: {} file(s) to re-read, {} forgotten",
+        response.reindex.len(),
+        response.forgotten.len()
+    );
+    context.analysis().wake();
+    context
+        .diagnostics()
+        .schedule_open_files(context.clone())
+        .await;
+    Some(())
+}
+
 pub async fn process_did_change_watched_files(
     context: ServerContextSnapshot,
     params: DidChangeWatchedFilesParams,

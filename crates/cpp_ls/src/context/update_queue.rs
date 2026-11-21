@@ -76,6 +76,13 @@ pub enum UpdateEvent {
     Saved(DidSaveTextDocumentParams),
     Closed(DidCloseTextDocumentParams),
     WatchedFilesChanged(DidChangeWatchedFilesParams),
+    /// **The native watcher lost events, or saw the tree change shape** — ask the filesystem what moved.
+    ///
+    /// The variant is the answer to a rescan storm: a lost-event report used to re-open the whole workspace (a
+    /// compiler run, a full index and a whole-program read — ten seconds on a Linux kernel tree, and the log showed
+    /// four of them in fifty seconds while 332 overflow reports arrived), and it now asks the session to
+    /// [`reconcile`](cpp_code_analysis::Session::reconcile) instead, which is a `stat` per project file.
+    Reconcile,
 }
 
 impl UpdateEvent {
@@ -86,6 +93,7 @@ impl UpdateEvent {
             Self::Saved(_) => "saved",
             Self::Closed(_) => "closed",
             Self::WatchedFilesChanged(_) => "watched files changed",
+            Self::Reconcile => "reconcile",
         }
     }
 
@@ -95,7 +103,7 @@ impl UpdateEvent {
             Self::Changed(params) => Some(&params.text_document.uri),
             Self::Saved(params) => Some(&params.text_document.uri),
             Self::Closed(params) => Some(&params.text_document.uri),
-            Self::WatchedFilesChanged(_) => None,
+            Self::WatchedFilesChanged(_) | Self::Reconcile => None,
         }
     }
 
@@ -103,6 +111,7 @@ impl UpdateEvent {
         match self {
             Self::Saved(params) => params.text.is_some(),
             Self::WatchedFilesChanged(params) => !params.changes.is_empty(),
+            Self::Reconcile => true,
             _ => true,
         }
     }
@@ -359,6 +368,9 @@ async fn process(snapshot: &ServerContextSnapshot, event: UpdateEvent) {
         }
         UpdateEvent::WatchedFilesChanged(params) => {
             handlers::process_did_change_watched_files(snapshot.clone(), params).await;
+        }
+        UpdateEvent::Reconcile => {
+            handlers::process_reconcile(snapshot.clone()).await;
         }
     }
 }

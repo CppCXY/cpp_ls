@@ -131,9 +131,21 @@ impl WorkspaceManager {
             .await;
     }
 
-    pub async fn add_rescan_task(&self, context: ServerContextSnapshot) {
-        self.add_debounced_reload(context, "native watcher requested a rescan".into())
-            .await;
+    /// **A full re-open of the workspace** — no longer what a watcher's lost-event report does.
+    ///
+    /// It used to be: a single overflow re-opened the session (a compiler run, a full index and a whole-program read),
+    /// and on a Linux kernel tree that was **four reloads in fifty seconds** while 332 overflow reports arrived — each
+    /// reload re-indexed 3 200 files and held the write lock for five seconds while it committed the program reading,
+    /// which is the window every diagnostic pull waited in. A lost-event report now asks the analysis to
+    /// [`reconcile`](cpp_code_analysis::Session::reconcile) with the disk instead (`UpdateEvent::Reconcile`), and a
+    /// reload stays what a **configuration** change is: `compile_commands.json`, which is what the reload's own
+    /// debounce (`RELOAD_DEBOUNCE`) was written for.
+    pub async fn reload_for_a_configuration_change(
+        &self,
+        context: ServerContextSnapshot,
+        reason: String,
+    ) {
+        self.add_debounced_reload(context, reason).await;
     }
 
     async fn add_debounced_reload(&self, context: ServerContextSnapshot, reason: String) {
