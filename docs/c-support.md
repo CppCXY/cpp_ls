@@ -252,9 +252,13 @@ type, `auto` keeps its spelling, an `int` is still `int`) and `sema/check/test/a
 ### 8.4 The instruments, after the cleanup
 
 The measurement probes this document and `docs/open-questions.md` name were **deleted**, and the remaining test files
-were merged into one target per crate: 244 test binaries linked in ~431 s of gate time became 7 linked in **30 s**,
-while the tests themselves (≈4 900) run in under 25 s. That is the whole reason: a probe marked `#[ignore]` still costs
-a **link**, and there were 91 of them.
+were merged into one target per crate: 244 test binaries became **7**, and a `cargo test --release --workspace` with
+nothing changed went from **431 s to 21.6 s** (of which ~25 s is the tests themselves, ≈4 900 of them). That is the
+whole reason: a probe marked `#[ignore]` still costs a **link**, and there were 91 of them.
+
+**What it did not fix, measured**: after an edit to `cpp_code_analysis` a full gate is still **101.6 s**, and ~90 s of
+that is the crate's own release codegen. The links are ~11 s of it now instead of ~200 s. A cheaper test profile, or
+`--lib` while iterating (**2.8 s** warm), is the next lever.
 
 What is left:
 
