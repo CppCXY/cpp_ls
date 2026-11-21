@@ -1,0 +1,1379 @@
+//! The typed AST layer.
+//!
+//! These tests do two things at once: they check that the accessors find what they claim, and they
+//! pin down that the layer is *usable* — that a caller can get from a source string to a declaration's
+//! name without touching the untyped tree.
+//!
+//! Every accessor returns `Option`, so the tests also run over broken input: an editor parses files
+//! mid-edit, and an accessor that panicked on a half-written declaration would turn a typo into a
+//! crash.
+
+use cpp_parser::{
+    CppAstNode, CppAstToken, CppDeclaration, CppExpr, CppParser, CppStat, CppSyntaxKind,
+    CppTranslationUnit, ParserConfig,
+};
+
+/// Parse and hand back the typed root.
+fn unit(source: &str) -> (CppTranslationUnit, cpp_parser::CppSyntaxTree) {
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let root = CppTranslationUnit::cast(tree.get_red_root()).expect("root is a translation unit");
+    (root, tree)
+}
+
+/// **A directive where the right operand goes does not end the expression** — `a || #if … b #endif`.
+///
+/// The shape `bits/shared_ptr_base.h:639` writes, reduced to the four lines that matter:
+///
+/// ```cpp
+///   if (&__ti == &_Sp_make_shared_tag::_S_ti()
+///       ||
+/// #if __cpp_rtti
+///       __ti == typeid(_Sp_make_shared_tag)
+/// #else
+///       _Sp_make_shared_tag::_S_eq(__ti)
+/// #endif
+///      )
+/// ```
+///
+/// Measured before the operand seam, on this fixture: the `#` was refused as an operand, the recovery took the `)` for
+/// part of the expression, and the class body ended at the `if` — every declaration after the member became a member of
+/// the class. On the real header that made `__shared_ptr` a member of `_Sp_counted_ptr_inplace`, cost it its base
+/// clause, and took `shared_ptr`'s `operator*`/`operator->` with it (they live on `__shared_ptr_access`).
+#[test]
+fn a_directive_can_stand_where_the_right_operand_goes() {
+    let source = "\
+namespace std {
+class Impl {
+ public:
+  void f() {
+    if (1 == 2
+        ||
+#if A
+        3 == 4
+#else
+        5 == 6
+#endif
+       )
+      return;
+  }
+  int m;
+};
+class Following { };
+}
+";
+    let (root, tree) = unit(source);
+    assert_eq!(tree.get_errors(), [], "the fixture parses cleanly");
+
+    // **`Following` is a class of the namespace, not a member of `Impl`**: no class-like definition encloses it.
+    let following = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppClassDef::cast)
+        .find(|definition| definition.get_name_text().as_deref() == Some("Following"))
+        .expect("`Following` is a class");
+    let enclosing = following
+        .syntax()
+        .ancestors()
+        .skip(1)
+        .filter(|node| cpp_parser::CppClassDef::cast(node.clone()).is_some())
+        .count();
+    assert_eq!(
+        enclosing, 0,
+        "a class written after the member is not inside it"
+    );
+}
+
+/// The names of the top-level declarations.
+fn decl_names(source: &str) -> Vec<String> {
+    let (root, _) = unit(source);
+    root.get_declarations()
+        .map(|decl| decl.get_name_text().unwrap_or_else(|| "<anon>".to_string()))
+        .collect()
+}
+
+#[test]
+fn finds_top_level_declarations() {
+    let source = concat!(
+        "int counter;\n",
+        "void reset();\n",
+        "struct Point { int x; int y; };\n",
+        "namespace ns { int inner; }\n",
+    );
+
+    let (root, _) = unit(source);
+    let kinds: Vec<&str> = root.get_declarations().map(|it| it.kind_name()).collect();
+
+    assert_eq!(kinds, vec!["variable", "function", "class"]);
+    // A namespace is a `NamespaceDecl`, not a `Declaration`, so it is not in that list.
+    assert_eq!(root.get_namespaces().count(), 1);
+    assert_eq!(decl_names(source), vec!["counter", "reset", "Point"]);
+}
+
+/// An **export or attribute macro** in front of the type is part of the type, and the declarator is the *third*
+/// name — not the second.
+///
+/// A macro is not expanded here, so `MY_API` is an ordinary name to this parser: `MY_API Widget *p;` puts two
+/// names where a declaration has its type. The rule that decides how many names may join the type refused the
+/// second one, made it the declarator, and left the real declarator (`p`) with nowhere to go — the declaration
+/// failed and the line came back as an expression statement, reported against the return type. Every real C++
+/// project with a DLL or export boundary writes this, and it is how `CodeFormatCLib.cpp` in the first real C++
+/// project put in front of this parser failed.
+///
+/// Asked through the typed layer on purpose: the answer that matters to a consumer is **the name of the
+/// declaration**, and "it parses" is exactly what the wrong tree also said.
+#[test]
+fn an_export_macro_before_the_type_leaves_the_declarator_last() {
+    assert_eq!(decl_names("MY_API Widget *p;\n"), vec!["p"]);
+    assert_eq!(decl_names("EMMY_API Result f(int x);\n"), vec!["f"]);
+    assert_eq!(decl_names("EXPORT std::string g();\n"), vec!["g"]);
+    assert_eq!(decl_names("MY_API Vector<int> *make();\n"), vec!["make"]);
+
+    // The shapes around it are untouched: one name is the type and the next is the declarator, and a keyword type
+    // never needed the rule at all.
+    assert_eq!(decl_names("Widget w;\n"), vec!["w"]);
+    assert_eq!(decl_names("Widget *p;\n"), vec!["p"]);
+    assert_eq!(decl_names("MY_API int f();\n"), vec!["f"]);
+    assert_eq!(decl_names("std::string name;\n"), vec!["name"]);
+}
+
+/// A **class-like definition followed by its declarator**: the body is the type, and the name after it is what
+/// the declaration declares.
+///
+/// `type_is_already_complete` walks *backwards* from the name, and a `}` makes it answer "no type yet" — right for
+/// the other meaning of a `}`, the end of an enclosing block, and wrong for this one, where the brace closes a
+/// body that is part of this very declaration. Read that way the name joined the type and the declaration named
+/// nothing: silently for `struct S { … } x;`, and loudly as `expected a declarator name` once the declarator
+/// carried an initializer or an array bound. `LuaDefine.h`'s
+/// `static const struct { … } priority[] = { … };` is the shape, 45 diagnostics from one declaration.
+#[test]
+fn a_class_definition_leaves_the_name_to_the_declarator() {
+    // The **unnamed** spellings, where the declaration's name can only be the declarator's: a named class reports
+    // its own name through `get_name_text` (the class *is* what the declaration is about), which is why the named
+    // cases are pinned on the tree instead — in `gaps.rs`, where the `InitDeclarator` is the assertion.
+    assert_eq!(decl_names("struct { int a; } x;\n"), vec!["x"]);
+    assert_eq!(decl_names("union { int a; } u;\n"), vec!["u"]);
+    assert_eq!(
+        decl_names("static const struct { int a; } priority[] = { { 1 } };\n"),
+        vec!["priority"]
+    );
+}
+
+#[test]
+fn variable_declaration_exposes_type_and_initializer() {
+    let (root, _) = unit("int counter = 42;\n");
+    let decl = root.get_declarations().next().unwrap();
+
+    assert_eq!(decl.get_name_text().as_deref(), Some("counter"));
+    assert_eq!(
+        decl.get_decl_specifiers().unwrap().get_type_text(),
+        "int",
+        "the specifier sequence should report the written type"
+    );
+
+    let initializer = decl.get_initializer().expect("initializer");
+    let value = initializer.get_expr().expect("initializer expression");
+    let literal = match value {
+        CppExpr::LiteralExpr(literal) => literal,
+        other => panic!("expected a literal, got {other:?}"),
+    };
+    assert_eq!(literal.get_literal_text().as_deref(), Some("42"));
+    assert!(!root.get_declarations().next().unwrap().is_function_def());
+}
+
+#[test]
+fn function_definition_exposes_params_and_body() {
+    let (root, _) = unit("int add(int a, int b) { return a + b; }\n");
+    let decl = root.get_declarations().next().unwrap();
+
+    assert!(
+        decl.is_function_def(),
+        "should be recognised as a definition"
+    );
+    assert_eq!(decl.get_name_text().as_deref(), Some("add"));
+
+    let declarator = decl.get_declarator().expect("declarator");
+    assert!(declarator.is_function());
+    let params = declarator.get_param_list().expect("parameter list");
+    let names: Vec<String> = params
+        .get_params()
+        .filter_map(|param| param.get_name().map(|it| it.get_name_text().to_string()))
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+
+    let body = decl.get_body().expect("body");
+    let stats: Vec<CppStat> = body.get_stats().collect();
+    assert!(
+        stats.iter().any(|it| matches!(it, CppStat::ReturnStat(_))),
+        "body should contain the return statement"
+    );
+}
+
+/// **A `return` with no `;` is an error, and it was the only statement that said nothing.**
+///
+/// Reported from an editor: `return 0` written without a semicolon produced no diagnostic, and no amount of waiting
+/// helped — because the analysis was right to be silent. The parser had reported nothing:
+///
+/// ```text
+/// int f() { int x }        errors=1   the declaration rule reports it
+/// int f() { return 0 }     errors=0   and the return rule did not
+/// ```
+///
+/// `parse_return_statement` emitted a zero-width `MissingNode` and returned `Ok`, which keeps the tree well-formed
+/// and leaves `get_errors` empty. Every other statement that ends in a `;` reports it —
+/// `parse_keyword_statement` (`break`, `continue`), `parse_goto_statement`, `parse_throw_statement` — so this is the
+/// odd one out rather than a deliberate leniency, and the assertion is that all four agree.
+///
+/// The second case is why it is not merely cosmetic: without an error the rule stopped at the newline, so the next
+/// statement was read as part of the `return` and a file with a missing `;` produced **one** construct fewer than it
+/// has.
+#[test]
+fn a_return_without_a_semicolon_is_an_error() {
+    for (what, source) in [
+        ("at the end of a body", "int f() { return 0 }\n"),
+        (
+            "before another statement",
+            "int f() { return 0\n int x; }\n",
+        ),
+        // The three statements that already reported it, so the four cannot drift apart again.
+        ("a `break`", "void f() { while (1) { break } }\n"),
+        ("a `continue`", "void f() { while (1) { continue } }\n"),
+        ("a `goto`", "void f() { goto done }\n"),
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{what}: a missing `;` is an error in {source:?}"
+        );
+    }
+
+    // …and the correct spelling stays clean, which is what makes the above a statement about the `;` rather than
+    // about `return`.
+    let tree = CppParser::parse("int f() { return 0; }\n", ParserConfig::default());
+    assert!(
+        tree.get_errors().is_empty(),
+        "and `return 0;` is not an error"
+    );
+}
+
+#[test]
+fn function_definition_with_trailing_return_type() {
+    let (root, _) = unit("auto begin() -> int* { return nullptr; }\n");
+    let decl = root.get_declarations().next().unwrap();
+
+    assert!(decl.is_function_def());
+    let declarator = decl.get_declarator().unwrap();
+    let trailing = declarator
+        .get_trailing_return_type()
+        .expect("trailing return type");
+    // The pointer belongs to the return type, and the `->` does not.
+    assert_eq!(trailing.get_type_text(), "int*");
+}
+
+#[test]
+fn class_definition_exposes_members_and_access() {
+    let source =
+        "class Foo : public Base {\npublic:\n    void method();\nprivate:\n    int value_;\n};\n";
+    let (root, _) = unit(source);
+    let decl = root.get_declarations().next().unwrap();
+
+    let class = decl.get_class_def().expect("class definition");
+    assert_eq!(class.get_name_text().as_deref(), Some("Foo"));
+    assert!(!class.is_struct());
+
+    let bases: Vec<String> = class
+        .get_base_specifiers()
+        .filter_map(|it| it.get_name().map(|n| n.get_qualified_name()))
+        .collect();
+    assert_eq!(bases, vec!["Base"]);
+
+    let body = class.get_body().expect("class body");
+    let members: Vec<String> = body
+        .get_members()
+        .filter_map(|it| it.get_name_text())
+        .collect();
+    assert_eq!(members, vec!["method", "value_"]);
+
+    let access: Vec<&'static str> = body
+        .get_access_specifiers()
+        .iter()
+        .map(|it| match CppSyntaxKind::from(it.syntax().kind()) {
+            CppSyntaxKind::PublicAccess => "public",
+            CppSyntaxKind::PrivateAccess => "private",
+            _ => "protected",
+        })
+        .collect();
+    assert_eq!(access, vec!["public", "private"]);
+}
+
+#[test]
+fn enum_definition_exposes_enumerators() {
+    let (root, _) = unit("enum class Color : unsigned char { Red, Green = 2 };\n");
+    let decl = root.get_declarations().next().unwrap();
+    let enum_def = decl.get_enum_def().expect("enum definition");
+
+    assert_eq!(
+        enum_def
+            .get_name()
+            .map(|it| it.get_name_text().to_string())
+            .as_deref(),
+        Some("Color")
+    );
+    assert!(enum_def.is_scoped(), "`enum class` is a scoped enum");
+
+    let names: Vec<String> = enum_def
+        .get_enumerators()
+        .filter_map(|it| it.get_name().map(|n| n.get_name_text().to_string()))
+        .collect();
+    assert_eq!(names, vec!["Red", "Green"]);
+}
+
+#[test]
+fn modules_are_typed() {
+    let (root, _) = unit("export module my.mod:part;\n");
+
+    let module = root.get_module_decl().expect("module declaration");
+    assert!(
+        module.is_interface(),
+        "`export module` is an interface unit"
+    );
+    assert_eq!(
+        module.get_name().map(|it| it.get_name_text()).as_deref(),
+        Some("my.mod")
+    );
+    let partition = module.get_partition().expect("partition");
+    assert_eq!(
+        partition.get_name().map(|it| it.get_name_text()).as_deref(),
+        Some("part")
+    );
+}
+
+#[test]
+fn imports_cover_all_three_forms() {
+    let source = "import std;\nexport import :part;\nimport <iostream>;\n";
+    let (root, _) = unit(source);
+
+    let imports: Vec<_> = root
+        .get_declarations()
+        .filter_map(|decl| match CppStat::cast(decl.syntax().clone()) {
+            Some(CppStat::ImportDecl(node)) => Some(node),
+            _ => None,
+        })
+        .collect();
+
+    // The import declarations are statement-level nodes, so reach them through `CppStat`.
+    let tree_imports: Vec<_> = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppImportDecl::cast)
+        .collect();
+    assert_eq!(
+        tree_imports.len(),
+        3,
+        "expected three imports, got {imports:?}"
+    );
+
+    assert_eq!(
+        tree_imports[0]
+            .get_name()
+            .map(|it| it.get_name_text())
+            .as_deref(),
+        Some("std")
+    );
+    assert!(tree_imports[1].is_reexport());
+    assert!(tree_imports[2].is_header_unit());
+    assert_eq!(
+        tree_imports[2]
+            .get_header_name()
+            .map(|it| it.get_name_text())
+            .as_deref(),
+        Some("iostream")
+    );
+}
+
+#[test]
+fn expressions_are_walkable() {
+    let (root, _) = unit("int x = a + b * c;\n");
+    let decl = root.get_declarations().next().unwrap();
+    let initializer = decl.get_initializer().unwrap();
+    let expr = initializer.get_expr().unwrap();
+
+    // `a + b * c` parses as `a + (b * c)`.
+    let binary = match expr {
+        CppExpr::BinaryExpr(node) => node,
+        other => panic!("expected a binary expression, got {other:?}"),
+    };
+    assert_eq!(binary.get_operator_text().as_deref(), Some("+"));
+    assert!(matches!(binary.get_lhs(), Some(CppExpr::NameExpr(_))));
+    let rhs = binary.get_rhs().expect("rhs");
+    assert!(
+        matches!(rhs, CppExpr::BinaryExpr(_)),
+        "`b * c` should bind tighter than `+`"
+    );
+}
+
+#[test]
+fn call_expression_exposes_callee_and_args() {
+    let (root, _) = unit("void f() { g(1, 2); }\n");
+    let call = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppCallExpr::cast)
+        .next()
+        .expect("call expression");
+
+    let callee = call.get_callee().expect("callee");
+    assert!(matches!(callee, CppExpr::NameExpr(_)));
+    assert_eq!(call.get_args().len(), 2);
+}
+
+/// **A cast is an expression, and an argument list that holds one has not lost it.**
+///
+/// `CppExpr` had no `CastExpr` variant, so `can_cast` refused the kind and `CppCallExpr::get_args` —
+/// `children::<CppExpr>()` — **silently dropped every cast from an argument list**: `three((int)x, 2, 3)` counted two
+/// arguments. That is not only about this accessor: `argument-count` asks it how many arguments a call passes, so it
+/// reported a three-argument call as "needs 3 argument(s) and this call passes fewer" — measured on neovim's
+/// `arglist.c` (`do_arg_all((int)eap->line2, eap->forceit, eap->cmdidx == CMD_drop)`), the last finding in that file
+/// and a false one.
+#[test]
+fn a_cast_argument_is_counted() {
+    let (root, _) = unit("void f(int x) { three((int)x, 2, 3); }\n");
+    let call = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppCallExpr::cast)
+        .next()
+        .expect("call expression");
+
+    let args = call.get_args();
+    assert_eq!(
+        args.len(),
+        3,
+        "three arguments, one of them a cast: {args:?}"
+    );
+    assert!(
+        matches!(args.first(), Some(CppExpr::CastExpr(_))),
+        "and the cast is the first of them: {args:?}"
+    );
+}
+
+#[test]
+fn names_report_qualification() {
+    let (root, _) = unit("std::vector<int> v;\n");
+    let decl = root.get_declarations().next().unwrap();
+    let name = decl
+        .get_decl_specifiers()
+        .and_then(|it| it.get_type_name())
+        .expect("type name");
+
+    assert!(name.is_qualified());
+    assert_eq!(name.get_qualified_name(), "std::vector<int>");
+}
+
+#[test]
+fn preprocessor_directives_are_typed() {
+    let (root, _) = unit("#include <vector>\n#define N 3\n");
+    let directives: Vec<_> = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppPreprocessorDirective::cast)
+        .collect();
+
+    assert_eq!(directives.len(), 2);
+    assert_eq!(
+        directives[0].get_directive_name().as_deref(),
+        Some("include")
+    );
+    assert_eq!(
+        directives[0].get_header_name_text().as_deref(),
+        Some("vector")
+    );
+    assert_eq!(
+        directives[1].get_directive_name().as_deref(),
+        Some("define")
+    );
+}
+
+#[test]
+fn comments_report_their_kind() {
+    let source = "// ordinary\n\n/// documented\n/** block doc */\nint x;\n";
+    let (root, tree) = unit(source);
+
+    let comments: Vec<_> = tree
+        .get_red_root()
+        .descendants_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter_map(cpp_parser::CppCommentToken::cast)
+        .collect();
+
+    // One token per comment *marker*, now that the doc layer has taken over the grouping: the three
+    // comments are three openers, and the text between them is doc tokens rather than a comment token.
+    let openers: Vec<_> = comments
+        .iter()
+        .filter(|comment| {
+            matches!(
+                comment.get_comment_kind(),
+                cpp_parser::CppCommentKind::Line | cpp_parser::CppCommentKind::Block
+            )
+        })
+        .collect();
+    assert!(
+        !openers.is_empty(),
+        "the comment markers must still be in the tree: {:#?}",
+        tree.get_red_root()
+    );
+
+    // What a consumer asks is which *documentation blocks* a file has, and the doc layer answers it.
+    let doc_comments: Vec<_> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocComment)
+        .collect();
+
+    assert_eq!(
+        doc_comments.len(),
+        2,
+        "the blank line separates the header from the documented declaration: {:#?}",
+        tree.get_red_root()
+    );
+    assert_eq!(root.get_declarations().count(), 1);
+}
+
+/// The layer has to survive input that does not parse, because an editor sees it constantly.
+#[test]
+fn accessors_never_panic_on_broken_input() {
+    let broken = [
+        "",
+        "int",
+        "int x =",
+        "void f(",
+        "class {",
+        "void f() { if (",
+        "struct S { public:",
+        "namespace",
+        "template <",
+        "export module",
+        "import",
+        "int x = a + ;",
+        "#include",
+    ];
+
+    for source in broken {
+        let (root, _) = unit(source);
+
+        // Walk everything and touch every accessor a consumer plausibly would.
+        for decl in root.get_declarations() {
+            let _ = decl.kind_name();
+            let _ = decl.get_name_text();
+            let _ = decl.get_body();
+            let _ = decl.get_class_def();
+            let _ = decl.get_enum_def();
+            let _ = decl.get_namespace_decl();
+            let _ = decl.get_initializer();
+            let _ = decl.is_function_def();
+            let _ = decl.is_exported();
+
+            if let Some(specs) = decl.get_decl_specifiers() {
+                let _ = specs.get_type_text();
+                let _ = specs.is_const();
+                let _ = specs.is_static();
+            }
+            if let Some(declarator) = decl.get_declarator() {
+                let _ = declarator.get_name_text();
+                let _ = declarator.get_declarator_text();
+                let _ = declarator.is_function();
+                let _ = declarator.is_array();
+                let _ = declarator.get_trailing_return_type();
+            }
+            if let Some(body) = decl.get_body() {
+                for stat in body.get_stats() {
+                    let _ = stat.syntax().text().to_string();
+                }
+            }
+        }
+
+        // The same for expressions, which is where a half-written file hurts most.
+        for expr in root.syntax().descendants().filter_map(CppExpr::cast) {
+            match expr {
+                CppExpr::BinaryExpr(node) => {
+                    let _ = node.get_lhs();
+                    let _ = node.get_rhs();
+                    let _ = node.get_operator_text();
+                }
+                CppExpr::CallExpr(node) => {
+                    let _ = node.get_callee();
+                    let _ = node.get_args();
+                }
+                CppExpr::UnaryExpr(node) => {
+                    let _ = node.is_prefix();
+                    let _ = node.get_operand();
+                }
+                CppExpr::NameExpr(node) => {
+                    let _ = node.get_qualified_name();
+                    let _ = node.is_qualified();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `CppAst` dispatches on a node without the caller knowing what it is.
+#[test]
+fn cpp_ast_dispatches_on_node_kind() {
+    use cpp_parser::CppAst;
+
+    let (root, tree) = unit("int x = 1;\n");
+
+    let mut seen_declaration = false;
+    let mut seen_expr = false;
+    for node in tree.get_red_root().descendants() {
+        match CppAst::cast(node) {
+            Some(CppAst::Declaration(_)) => seen_declaration = true,
+            Some(CppAst::Expr(_)) => seen_expr = true,
+            _ => {}
+        }
+    }
+
+    assert!(seen_declaration, "should find a declaration");
+    assert!(seen_expr, "should find the initializer expression");
+    assert_eq!(root.get_declarations().count(), 1);
+}
+
+/// A declaration's accessors are the same whichever way it is reached.
+#[test]
+fn accessors_agree_across_entry_points() {
+    let (root, tree) = unit("int counter = 1;\n");
+
+    let by_child = root.get_declarations().next().unwrap();
+    let by_descendant = tree
+        .get_red_root()
+        .descendants()
+        .find_map(CppDeclaration::cast)
+        .unwrap();
+
+    assert_eq!(
+        by_child.get_name_text(),
+        by_descendant.get_name_text(),
+        "the same declaration must look the same however it is found"
+    );
+    assert_eq!(
+        by_child.syntax().text_range(),
+        by_descendant.syntax().text_range()
+    );
+}
+
+/// A module unit written the way a real one is, with a namespace around it.
+///
+/// The other tests each pin down one construct. This one uses the layer for its actual purpose —
+/// getting the declarations out of a file — and it is the test that catches a regression in the
+/// *interaction* between constructs, which per-construct tests cannot see. `real_world.cpp` is
+/// written the way a person writes C++ rather than the way a grammar is written: blank lines,
+/// blank-line-separated sections, and a namespace wrapping everything.
+#[test]
+fn a_realistic_module_unit_yields_its_declarations() {
+    let source = include_str!("../real_world.cpp");
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    assert_eq!(
+        tree.get_errors(),
+        [],
+        "the parser reports valid code as broken; the errors are {:?}",
+        tree.get_errors()
+    );
+    assert_eq!(
+        tree.to_source_text(),
+        source,
+        "the tree must reproduce the file exactly"
+    );
+
+    let root = CppTranslationUnit::cast(tree.get_red_root()).unwrap();
+
+    // The unit itself is a module: `module;` ... `export module shapes;`
+    let module = root.get_module_decl().expect("module declaration");
+    assert_eq!(
+        module.get_name().map(|it| it.get_name_text()),
+        Some("shapes".to_string())
+    );
+
+    // `export int helper();` is a top-level declaration, outside the namespace. The `export using
+    // Point = ...;` before it is a `UsingDecl`, which `CppDeclaration::cast` accepts (it declares a
+    // name) even though `get_declarations` never yields one — so both are here, and the alias
+    // reports itself as one rather than as a nameless variable.
+    let top_level: Vec<String> = root
+        .get_declarations()
+        .map(|decl| {
+            format!(
+                "{} {}",
+                decl.kind_name(),
+                decl.get_name_text().unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(top_level, vec!["alias Point", "function helper"]);
+
+    let namespace = root.get_namespaces().next().expect("namespace shapes");
+    assert_eq!(
+        namespace.get_name().and_then(|it| it.get_name_text()),
+        Some("shapes".to_string())
+    );
+
+    let members: Vec<String> = namespace
+        .get_declarations()
+        .map(|stat| match stat {
+            CppStat::Declaration(decl) => {
+                format!(
+                    "{} {}",
+                    decl.kind_name(),
+                    decl.get_name_text().unwrap_or_default()
+                )
+            }
+            other => format!("{other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        members,
+        vec![
+            "variable kMax",
+            "enum Kind",
+            "class Point",
+            "class Grid",
+            "class Shape",
+            "function distance",
+        ]
+    );
+}
+
+// ============================================================================
+// Structured bindings
+// ============================================================================
+
+/// The names of the structured bindings in a source, in order.
+fn binding_names(source: &str) -> Vec<Vec<String>> {
+    let (root, _) = unit(source);
+
+    root.get_declarations()
+        .filter_map(|declaration| declaration.get_init_declarator())
+        .filter_map(|init| init.get_structured_binding())
+        .map(|binding| binding.get_name_texts())
+        .collect()
+}
+
+/// A binding pattern is its own node, and the names in it are the ones a consumer indexes by.
+///
+/// The alternative the tree could have had — one declarator named `[a, b]` — would make "what does
+/// `auto [a, b] = pair;` declare?" answer with a string that is not a name at all.
+#[test]
+fn a_structured_binding_reports_its_names() {
+    assert_eq!(
+        binding_names("auto [a, b] = pair;\n"),
+        vec![vec!["a".to_string(), "b".to_string()]]
+    );
+}
+
+/// The reference forms put the pattern after an abstract declarator, which is a different position in
+/// the grammar — and the one that needed its own entry point in the declarator rule.
+#[test]
+fn a_structured_binding_survives_a_reference_prefix() {
+    for source in [
+        "auto& [k, v] = map;\n",
+        "auto&& [k, v] = map;\n",
+        "const auto& [k, v] = map;\n",
+    ] {
+        assert_eq!(
+            binding_names(source),
+            vec![vec!["k".to_string(), "v".to_string()]],
+            "{source:?}"
+        );
+    }
+}
+
+/// A pack expansion binds the names it names; the `...` is a token, not a name.
+#[test]
+fn a_pack_expansion_binding_reports_its_name() {
+    assert_eq!(
+        binding_names("auto [... xs] = rest;\n"),
+        vec![vec!["xs".to_string()]]
+    );
+    assert_eq!(
+        binding_names("auto [a, ...] = rest;\n"),
+        vec![vec!["a".to_string()]]
+    );
+}
+
+/// An ordinary declarator is not a structured binding, and says so rather than answering with an
+/// empty pattern.
+#[test]
+fn an_ordinary_declarator_is_not_a_structured_binding() {
+    let (root, _) = unit("int arr[3];\nauto [a, b] = pair;\n");
+
+    let kinds: Vec<bool> = root
+        .get_declarations()
+        .filter_map(|declaration| declaration.get_init_declarator())
+        .map(|init| init.is_structured_binding())
+        .collect();
+
+    assert_eq!(kinds, vec![false, true]);
+}
+
+// ============================================================================
+// consteval if
+// ============================================================================
+
+/// `if consteval` parses, and its body is a real block rather than an error.
+///
+/// The form takes no condition, which is what makes it worth a test: a parser that asks for one
+/// reports `expected (` against the `{` that is really the body, and C++23 code then looks broken.
+#[test]
+fn consteval_if_has_a_body_and_no_condition() {
+    for source in [
+        "void f() { if consteval { g(); } }\n",
+        "void f() { if !consteval { g(); } }\n",
+        "void f() { if consteval { g(); } else { h(); } }\n",
+    ] {
+        let (root, tree) = unit(source);
+        assert_eq!(tree.get_errors(), [], "{source:?} must parse cleanly");
+
+        let if_stat = root
+            .get_declarations()
+            .filter_map(|declaration| declaration.get_body())
+            .flat_map(|body| body.get_stats())
+            .find_map(|stat| match stat {
+                CppStat::IfStat(if_stat) => Some(if_stat),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source:?} has an if statement"));
+
+        let text = if_stat.syntax().text().to_string();
+        assert!(
+            text.contains("consteval"),
+            "the keyword is part of the statement: {text:?}"
+        );
+    }
+}
+
+/// An attribute list consumes **both** of its closing brackets.
+///
+/// The off-by-one this pins was invisible in the error list and showed up as damage to the *following*
+/// token instead: `[[nodiscard]] int f();` left the last `]` unconsumed, so the enclosing rule met `]`
+/// where it wanted `int` and produced an `ErrorNode` — a stray syntax error in perfectly ordinary code,
+/// pointing at a token that had nothing wrong with it.
+///
+/// Written as a property over many placements rather than one case, because the same rule parses
+/// attributes everywhere they can appear and the bug was in the rule, not in any one caller.
+///
+/// # Placements that are not covered here
+///
+/// Attributes are allowed in more positions than these, and a few of them do not parse yet — see
+/// `known_unparsed_attribute_positions` below. They are absent from this list deliberately: a failing
+/// case in a passing test says nothing about the bug being pinned, and these gaps are a separate piece
+/// of work from the bracket accounting.
+#[test]
+fn attribute_lists_consume_both_closing_brackets() {
+    let sources = [
+        "[[nodiscard]] int f();\n",
+        "[[noreturn]] void g();\n",
+        "class C [[deprecated]] { int x; };\n",
+        "enum class E [[deprecated]] { A };\n",
+        "struct S { [[maybe_unused]] int x; };\n",
+        "[[nodiscard, deprecated]] int i();\n",
+        "[[gnu::always_inline]] inline void j();\n",
+        "void k([[maybe_unused]] int x);\n",
+        "[[nodiscard]] int l() { return 1; }\n",
+        "int m [[gnu::aligned(16)]];\n",
+        "struct A { [[nodiscard]] virtual int q() const; };\n",
+        "export module mod [[deprecated]];\n",
+        "import std [[deprecated]];\n",
+        // After the declarator and before the `;` — a member function, a variable, and a parameter.
+        "int h() [[carries_dependency]];\n",
+        "void r() [[noreturn]] { for (;;) {} }\n",
+        "void s(int x [[maybe_unused]]);\n",
+        "void t(int x [[maybe_unused]] = 1);\n",
+        // On an alias's name, and between a template head and the declaration it wraps.
+        "using T [[deprecated]] = int;\n",
+        "template <typename T> [[nodiscard]] T p();\n",
+        // On an enumerator.
+        "enum class F { A [[deprecated]] = 1, B };\n",
+        // Between a `namespace` keyword and its name — the last position that did not parse, and the one the
+        // standard's `namespace attribute-specifier-seq(opt) identifier` grammar writes. See
+        // `known_unparsed_attribute_positions`, which listed it until it started working.
+        "namespace [[deprecated]] n { int x; }\n",
+        "namespace [[deprecated(\"STL4002\")]] tr1 { int x; }\n",
+        "inline namespace [[deprecated]] v1 { int x; }\n",
+    ];
+
+    for source in sources {
+        let (_, tree) = unit(source);
+
+        assert_eq!(tree.get_errors(), [], "{source:?} must parse cleanly");
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless"
+        );
+
+        // Every `[[` in the source is matched by a `]]` inside an `AttributeList`, so none is left over for
+        // an enclosing rule to trip over.
+        let attribute_text: String = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+            .map(|node| node.text().to_string())
+            .collect();
+
+        let opened = source.matches("[[").count();
+        let closed = attribute_text.matches("]]").count();
+        assert_eq!(
+            closed, opened,
+            "{source:?}: {opened} attribute list(s) opened but {closed} closed — got {attribute_text:?}"
+        );
+    }
+}
+
+/// Attribute positions that do **not** parse yet, recorded so the gap is visible rather than rediscovered.
+///
+/// **Empty, and that is the point of keeping it.** Every position this test listed is read now — after the
+/// declarator, on an alias, between a template head and the declaration it wraps, on a parameter, on an
+/// enumerator, and last the one between the `namespace` keyword and its name — and they all moved into
+/// `attribute_lists_consume_both_closing_brackets` above, which is where the edit the list's own message asks for
+/// was made.
+///
+/// The list stays rather than being deleted with its last entry, because the next gap found has a home and
+/// because "there are none" is itself a measurement that a future reader should be able to check: an empty list
+/// passes, and adding a line to it is how the next position gets recorded.
+#[test]
+fn known_unparsed_attribute_positions() {
+    let still_broken: [&str; 0] = [];
+
+    for source in still_broken {
+        let (_, tree) = unit(source);
+
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{source:?} now parses cleanly — move it into `attribute_lists_consume_both_closing_brackets`"
+        );
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless even while it does not parse"
+        );
+    }
+}
+
+/// A nested attribute list balances too, and the brackets inside it are counted rather than the rule
+/// stopping at the first `]`.
+#[test]
+fn a_nested_attribute_list_balances_its_brackets() {
+    let source = "[[outer([[inner]])]] int f();\n";
+    let (_, tree) = unit(source);
+
+    assert_eq!(tree.get_errors(), [], "must parse cleanly");
+    assert_eq!(tree.to_source_text(), source);
+
+    let text: String = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+        .map(|node| node.text().to_string())
+        .collect();
+
+    assert_eq!(text.matches("]]").count(), 2, "both lists closed: {text:?}");
+}
+
+/// An attribute list opened and never closed is reported, and the rest of the file does not become
+/// declarations.
+///
+/// Recorded as the behaviour rather than as a defect, because the alternative is worse. `[[nodiscard` at
+/// the start of a line is genuinely ambiguous — `[[` also opens a **lambda capture list**, and `[[x](int
+/// y){...}]` and `[[nodiscard]]` agree on everything up to the first identifier. So there is no point at
+/// which a recovery could say where the attribute was meant to end, and a wrong guess turns one half-typed
+/// `[[` into a cascade of spurious errors on code that is fine.
+///
+/// The two things that do matter are asserted instead: the parse stays lossless, and an error is reported.
+/// The message is deliberately *not* pinned — which rule ends up reporting the ambiguity is an
+/// implementation detail, and the useful property is that the input is not silently accepted.
+#[test]
+fn an_unterminated_attribute_list_is_reported_and_consumes_the_rest() {
+    let source = "[[nodiscard\nint f();\nint g;\n";
+    let (root, tree) = unit(source);
+
+    assert_eq!(tree.to_source_text(), source, "still lossless");
+    assert!(
+        !tree.get_errors().is_empty(),
+        "the input is not silently accepted"
+    );
+
+    // Nothing after the `[[` is a declaration, because all of it was taken by the construct that opened
+    // there. This is the part worth pinning: a broken attribute must not leave the *following* code
+    // looking well-formed when it was never parsed as code at all.
+    let declarations: Vec<String> = root
+        .get_declarations()
+        .map(|decl| decl.get_name_text().unwrap_or_default())
+        .collect();
+
+    assert!(
+        declarations.is_empty(),
+        "the rest of the file is inside the unclosed construct: {declarations:?}"
+    );
+}
+/// **A function definition holds its body**, whichever way the body is written.
+///
+/// Three spellings, and they reach the tree by two different routes:
+///
+/// ```text
+/// int g() { … }                the declaration rule reads the body itself
+/// struct A { void g() { … } }; the same rule, one class deeper
+/// struct A { A(int f) : x(f) { … } };   a constructor, which has a member-initializer list between
+/// ```
+///
+/// The third is the one that was wrong, and it is what this test is for. A constructor does not go through the
+/// declaration rule at all — the grammar has `parse_constructor_declaration`, because a constructor's name is also
+/// its type — and that path read the body with the declaration's marker still open and then returned
+/// `CompleteMarker::empty()`, dropping the marker. So the declaration closed before the `{` and the body landed
+/// **beside** it: measured, `Declaration@11..26` with `CompoundStat@26..42` as its following sibling.
+///
+/// What a consumer sees is `CppDeclaration::get_body` answering `None` for every constructor — and the parameters
+/// being invisible in the constructor's own body, because the function scope a constructor opened never reached the
+/// statements that used them.
+///
+/// # The fix, and why the shape is asserted rather than the symptom
+///
+/// The declaration is complete before its body is read — the name, the parameter list and the initializer list are
+/// all in — so the body is wrapped **around** it with `CompleteMarker::precede`, which opens a node whose `NodeStart`
+/// stands before events already emitted. That is the parser's own mechanism for exactly this, used by the expression
+/// rules and now by this one.
+///
+/// A reparenting pass in the tree builder was tried first and is worse: it moves the body's *range*, which still
+/// holds the tail of the declaration, so the elements come out in the wrong text order and the file stops being
+/// reconstructable. Asserting the shape here is what keeps the correction at the layer that can make it.
+#[test]
+fn a_function_definition_holds_its_body() {
+    for (what, source) in [
+        ("a plain function", "int g() { return 1; }\n"),
+        (
+            "a member function",
+            "struct A {\n    void g() { return; }\n};\n",
+        ),
+        (
+            "a constructor with an initializer list",
+            "struct A {\n    A(int f) : x(f) { int q = f; }\n    int x;\n};\n",
+        ),
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let declaration = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                    && node.descendants().any(|inner| {
+                        CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CompoundStat
+                    })
+            })
+            // The **innermost** holder: a member function's body is also inside the class's own declaration, and
+            // the question here is about the function's, not the class's.
+            .min_by_key(|node| {
+                usize::from(node.text_range().end()) - usize::from(node.text_range().start())
+            })
+            .unwrap_or_else(|| panic!("{what}: no declaration holds a body in {source:?}"));
+
+        let body = declaration
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}: the body is not a child of the declaration: {:?}",
+                    declaration
+                        .children()
+                        .map(|child| format!("{:?}", CppSyntaxKind::from(child.kind())))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert!(
+            body.text().to_string().contains('{'),
+            "{what}: the body is the `{{ … }}` it was written as"
+        );
+    }
+}
+
+/// **An incomplete `x->` must not delete the declaration written after it** — the shape a reader is in the middle of
+/// typing produces on every keystroke.
+///
+/// `a->` on its own is an expression statement whose member name is missing; the expression rule answers that with a
+/// `MissingNode` rather than a failure (a cursor is not a syntax error), and the statement then wants its `;` where it
+/// finds `int`. The **recovery** for that skipped to the following `;` — which is the `;` of `int second = 1;`, so the
+/// declaration was consumed as rubble and never entered the tree:
+///
+/// ```text
+/// before the fix:  CompoundStat holds Declaration "a->" and ExpressionStat "second = 2;"   — no `second` at all
+/// ```
+///
+/// Everything downstream reads the tree, so while a reader types `obj->` the declarations below the cursor go dark:
+/// their types are unknown, their members cannot be completed, and their uses are reported as undeclared names.
+#[test]
+fn a_declaration_after_an_incomplete_member_access_is_still_a_declaration() {
+    let source = "\
+struct Widget { int size; };
+int f() {
+    Widget* a = nullptr;
+    a->
+    int second = 1;
+    second = 2;
+}
+";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let declarations: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+        .map(|node| node.text().to_string().trim().to_string())
+        .collect();
+
+    assert!(
+        declarations
+            .iter()
+            .any(|declaration| declaration == "int second = 1;"),
+        "the declaration after the cursor is in the tree: {declarations:?}"
+    );
+    assert!(
+        declarations
+            .iter()
+            .any(|declaration| declaration == "Widget* a = nullptr;"),
+        "and so is the one before it: {declarations:?}"
+    );
+}
+
+/// **A parameter's type is the spelling without its name**, for the shapes real code writes.
+///
+/// `int*` was the defect that made this accessor necessary: the pointer lives under a **nested** declarator
+/// (`Parameter > Declarator > Declarator > PointerType`), and a walk that looked one level down answered `int`. The
+/// reference and array shapes are here for the same reason — each puts its operator somewhere else in the tree.
+#[test]
+fn a_parameters_type_is_its_spelling_without_its_name() {
+    let source =
+        "void f(int a, int* b, const std::string& c, unsigned char d, int e[3], auto f);\n";
+    let (root, _) = unit(source);
+    let declaration = root
+        .get_declarations()
+        .next()
+        .expect("the function declares");
+    let parameters: Vec<(String, String)> = declaration
+        .descendants::<cpp_parser::CppParam>()
+        .filter_map(|parameter| Some((parameter.get_name_text()?, parameter.get_type_text())))
+        .collect();
+
+    assert_eq!(
+        parameters,
+        vec![
+            ("a".to_string(), "int".to_string()),
+            ("b".to_string(), "int*".to_string()),
+            ("c".to_string(), "const std::string&".to_string()),
+            ("d".to_string(), "unsigned char".to_string()),
+            ("e".to_string(), "int[3]".to_string()),
+            ("f".to_string(), "auto".to_string()),
+        ],
+        "every parameter's type, as the file writes it"
+    );
+}
+
+/// **A function's parameters are its own**, not those of a lambda written in its body.
+///
+/// The declaration's subtree contains the body, so a descendants() walk for Parameter answered  **and**  — measured,
+/// uto f(int a) { auto g = [](int b) { return b; }; } gave  two parameters. The parameter list is a direct child of the
+/// function's declarator, which is what get_param_list asks for.
+#[test]
+fn a_functions_parameters_are_its_own_and_not_a_lambdas() {
+    let source = "auto f(int a) { auto g = [](int b) { return b; }; return a; }\n";
+    let (root, _) = unit(source);
+    let declaration = root.get_declarations().next().expect("f is declared");
+    let list = declaration
+        .get_param_list()
+        .expect("f has a parameter list");
+    let names: Vec<String> = list
+        .get_params()
+        .filter_map(|parameter| parameter.get_name_text())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["a".to_string()],
+        "the lambda's  belongs to the lambda"
+    );
+}
+
+/// **A decorated constructor and a decorated destructor name themselves and promise no return.**
+///
+/// `explicit A(int x) : x_(x) {}` parses `explicit A` as the specifiers, and the declarator is `(int x)`, which names
+/// nothing — so `get_name` answered `None` and the index made no fact for the constructor at all. `missing-return` then
+/// read the declaration as a function with a return type and reported it (and `virtual ~A() {}`, whose specifier
+/// sequence is `virtual` with the name in the declarator, for the same reason: the check never asked for a name).
+///
+/// The four shapes below are the ones measured: the decorated constructor and destructor, the undecorated pair that
+/// always worked, and a real function that must stay a function.
+#[test]
+fn a_decorated_constructor_and_destructor_name_themselves() {
+    let source = "\
+struct A {
+    explicit A(int x) : x_(x) {}
+    virtual ~A() {}
+    A() {}
+    ~A() {}
+    int f() { return 0; }
+    int x_;
+};
+template <class T>
+struct Box {
+    Box<T>();
+};
+";
+    let (root, tree) = unit(source);
+    assert_eq!(tree.get_errors(), [], "the fixture parses cleanly");
+    let declarations: Vec<cpp_parser::CppDeclaration> = root
+        .syntax()
+        .descendants()
+        .filter_map(cpp_parser::CppDeclaration::cast)
+        .filter(|declaration| declaration.get_body().is_some())
+        .collect();
+    // **The name is there and the promise is not.** A destructor's *token* is the identifier `A` — the tilde is a
+    // separate token, which is why [`promises_no_return`] asks the token stream rather than the name's text — so the
+    // test asks whether a name was found at all, and the question the rule actually has.
+    let said: Vec<(bool, bool)> = declarations
+        .iter()
+        .map(|declaration| {
+            (
+                declaration.get_name_text().is_some(),
+                declaration.promises_no_return(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, false)
+        ],
+        "every declaration names itself; the four constructors and destructors promise no return, the function does: \
+         {said:?}"
+    );
+    // The decorated constructor is the one that had no name at all before this: `explicit A(int x)` keeps `A` in its
+    // specifier sequence, and every declarator-based arm answered `None`.
+    assert_eq!(
+        declarations[0].get_name_text().as_deref(),
+        Some("A"),
+        "the decorated constructor names itself"
+    );
+}
+
+/// **A using-declaration ends at its own `;`**, however its name is spelled — `using Base<T>::f;`, and C++26's pack
+/// expansion `using Base<T>::f...;`.
+///
+/// The shape that measured the defect is libstdc++'s, in `<variant>`'s `_Build_FUNs` specialization:
+///
+/// ```cpp
+/// template<typename _Tp, typename... _Ti, size_t... _Ind>
+///   struct _Build_FUNs<_Tp, variant<_Ti...>, index_sequence<_Ind...>>
+///   : _Build_FUN<_Ind, _Tp, _Ti>...
+///   {
+///     using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;
+///   };
+/// ```
+///
+/// A name with a **template-id** in its qualifier does not match the branch that reads `Identifier :: …` as one name,
+/// so this one reached the *alias* path, which expects `= <type> ;`. The declaration was reported broken and the class
+/// body never closed: the `struct` swallowed the two braces that close `namespace __variant` and `namespace __detail`,
+/// so every declaration after line 811 — `class variant` and `holds_alternative` among them — was filed inside
+/// `std::__detail::__variant`. That is a *scope* answer, so `variant.index()` hovered as "has no member `index`" and
+/// `std::holds_alternative` had no card at all. The raw text balances (four braces deep at 1130, one at 1135, one at
+/// the class), which is what said the defect was the parse rather than the text.
+#[test]
+fn a_using_declaration_ends_at_its_own_semicolon() {
+    let pack = concat!(
+        "template <typename T> struct Base { void f(); };\n",
+        "template <typename... T> struct D : Base<T>... {\n",
+        "    using Base<T>::f...;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(pack),
+        vec!["Base", "D", "g"],
+        "a pack expansion in a using-declaration does not leave the class body open"
+    );
+
+    let template_id = concat!(
+        "template <typename T> struct Base { void f(); };\n",
+        "template <typename T> struct D : Base<T> {\n",
+        "    using Base<T>::f;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(template_id),
+        vec!["Base", "D", "g"],
+        "and neither does a template-id in the qualifier"
+    );
+
+    let plain = concat!(
+        "namespace ns { void f(); }\n",
+        "struct D {\n",
+        "    using ns::f;\n",
+        "};\n",
+        "void g() { }\n",
+    );
+    assert_eq!(
+        decl_names(plain),
+        vec!["D", "g"],
+        "and the shape that already worked still does — `ns::f` is one name, so `f` is not a top-level declaration"
+    );
+}
+
+/// **A parenthesised declarator names its parameter list as a child** — `void (foo) (int a, char *b);`.
+///
+/// The shape is how Lua 5.5.0 writes its entire public API (`LUA_API void (lua_setfield) (lua_State *L, int idx,
+/// const char *k);`). The grammar's rule is `noptr-declarator: ( ptr-declarator ) suffix*`, so the list belongs to the
+/// declarator that opens at the `(`:
+///
+/// ```text
+/// InitDeclarator  "(foo) (int a, char *b)"
+///   Declarator    "(foo) (int a, char *b)"
+///     Declarator  "(foo)"
+///       Declarator "foo"
+///     ParameterList "(int a, char *b)"
+/// ```
+///
+/// It was a **sibling** of the declarator until the grammar was fixed, which is why `get_param_list` carried a "look at
+/// my parent" rule; see `docs/declarator-shapes.md`. The function-pointer **variable** (`void (*bar)(int a);`) names
+/// its list too — the pointed-to type's — and the distinction between it and a function is the *name's* declarator,
+/// which is the analysis's question (`crates/cpp_code_analysis/tests/c_declarators.rs`), not this accessor's.
+#[test]
+fn a_parenthesised_declarator_names_its_parameter_list_as_a_child() {
+    let (root, _tree) = unit("void (foo) (int a, char *b);\nvoid (*bar)(int a);\n");
+    let declarations: Vec<CppDeclaration> = root.descendants::<CppDeclaration>().collect();
+    assert_eq!(declarations.len(), 2, "two declarations");
+
+    let list = declarations[0]
+        .get_param_list()
+        .expect("a parenthesised declarator declares a function");
+    assert_eq!(list.syntax().text().to_string(), "(int a, char *b)");
+    // …and it is that declarator's **child**, not its sibling.
+    let declarator = declarations[0]
+        .get_init_declarator()
+        .and_then(|init| init.child::<cpp_parser::CppDeclarator>())
+        .expect("a declarator");
+    assert_eq!(
+        declarator.syntax().text().to_string(),
+        "(foo) (int a, char *b)",
+        "the declarator's own text covers the list"
+    );
+
+    // The function pointer's list is the pointed-to type's, and it is still a child of the declarator that spells
+    // `(*bar)` — which is what makes "is this a function" a question about the *name's* declarator.
+    assert_eq!(
+        declarations[1]
+            .get_param_list()
+            .map(|list| list.syntax().text().to_string()),
+        Some("(int a)".to_string())
+    );
+}

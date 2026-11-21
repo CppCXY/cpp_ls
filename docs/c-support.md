@@ -136,13 +136,15 @@ cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=gcc \
 # -std=gnu11 -Iinclude -Isrc -DBUILDING_UV_SHARED=1 -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00
 ```
 
-Two probes ask the two questions, over the protocol against the real binary:
+Two instruments ask the two questions: the probe below for a whole project's findings, and `cpp_inspect` for one
+question at a time (the hover and definition rates in the table were measured by a probe that has since been deleted —
+`cpp_inspect hover`/`define` answer the same questions, one position per run or many through `batch`):
 
 ```text
 $env:CPPLS_C_PROJECT = "E:\corpora\libuv"
 cargo test --release -p cpp_ls --test c_diagnostics_probe -- --ignored --nocapture   # findings, file by file
-$env:CPPLS_NEOVIM = "E:\corpora\libuv"; $env:CPPLS_USABILITY_FILES = "92"
-cargo test --release -p cpp_ls --test neovim_usability -- --ignored --nocapture     # hover / definition rates
+
+cargo run --release -p cpp_inspect -- --project E:\corpora\libuv --file src/win/core.c hover --needle WSAGetLastError
 ```
 
 | Question | Answer on libuv 1.53.1 (Windows build, 40 files) |
@@ -246,6 +248,24 @@ Measured: libuv's Windows build went from **12 errors to 11** (0 syntax errors, 
 `if (!handle) return UV_EINVAL;`). Fixtures: `sema/types.rs`'s `deducing_specifiers` (the `typeof` family spells no
 type, `auto` keeps its spelling, an `int` is still `int`) and `sema/check/test/assign_type_check.rs` (a string in an
 `int` is still reported; the assignment half still judges what the file wrote).
+
+### 8.4 The instruments, after the cleanup
+
+The measurement probes this document and `docs/open-questions.md` name were **deleted**, and the remaining test files
+were merged into one target per crate: 244 test binaries linked in ~431 s of gate time became 7 linked in **30 s**,
+while the tests themselves (≈4 900) run in under 25 s. That is the whole reason: a probe marked `#[ignore]` still costs
+a **link**, and there were 91 of them.
+
+What is left:
+
+* `cpp_ls/tests/c_diagnostics_probe.rs` and `cpp_code_analysis/tests/c_name_lookup_probe.rs` — the two C-project
+  instruments this document's §7 and §8 are measured with, kept as their own targets because they are run explicitly
+  (`--ignored`) and their output is a report rather than an assertion;
+* `crates/cpp_inspect` — one question per run, as JSON, for the hover/definition/members/type/facts questions the
+  deleted probes used to compile a file for. See its README.
+
+A document that names a probe path is therefore naming the instrument **as it was when the number was taken**. The
+numbers stand; the command no longer compiles.
 
 ## 8. The second project: redis 8.x, with no compilation database
 
