@@ -153,36 +153,41 @@ cargo test --release -p cpp_ls --test neovim_usability -- --ignored --nocapture 
 | Hints | 85 `braces-around-statements`, 12 `else-after-return` — libuv writes `if (!handle) return UV_EINVAL;` by choice, so these are opinions the registry already marks Hint |
 | Errors | **12, and they are false positives** — 11 `undefined-name` and 1 `assign-type-check`, below |
 
-### 7.1 `undefined-name` on a name a header declares
+### 7.1 `undefined-name` on a name a header declares — fixed
 
-`src/win/tcp.c:1627` says `` `uv_translate_sys_error` is not declared: nothing this file can see names it `` — and
-`include/uv.h:452` declares it at file scope, on a line `src/win/tcp.c` reaches through its own `#include "uv.h"`.
+`src/win/tcp.c:1627` said `` `uv_translate_sys_error` is not declared: nothing this file can see names it `` — and
+`include/uv.h:452` declares it at file scope. `crates/cpp_code_analysis/tests/c_name_lookup_probe.rs` showed the
+header was indexed and its summary held **21 declarations of 563**, all from lines 69–103.
 
-Measured, not inferred (`crates/cpp_code_analysis/tests/c_name_lookup_probe.rs`):
+The parser was not the cause: `cpp_dump` on the file's own bytes reported 0 errors in both dialects. The **enum** was:
 
-```text
-[probe] index holds a summary for include/uv.h: true
-[probe] that summary: 20 declaration(s), 9 include(s), 61 macro(s)
-[probe] first 12 names: ["uv_addrinfo_t", "uv_addrinfo_s", "uv_sockaddr_t", ..., "sockaddr"]
-[probe] does the summary name uv_translate_sys_error: false
+```c
+typedef enum {
+#define XX(code, _) UV_ ## code = UV__ ## code,
+  UV_ERRNO_MAP(XX)
+#undef XX
+  UV_ERRNO_MAX = UV__EOF - 1
+} uv_errno_t;
 ```
 
-So the header is indexed and its summary holds **20 declarations of the ~800 it has** — all of them from lines 69–79.
-The parser is not the fault: `cpp_dump` on `include/uv.h` reports **0 errors**, and the name is in the tree at offset
-20306. What the index parses is the **rendering**, and that rendering **starts at line 75** (the `#else` branch of
-`#if defined(UV_FREERTOS)`): everything before it, from the include guard to `UV_EXTERN`'s definition, is missing from the
-text — and the summary stops right after those typedefs.
+Two rules were missing, and both are the X-macro spelling every C library writes:
 
-```text
-[probe] E:\corpora\libuv\src\win\core.c can see uv_translate_sys_error: Unknown(NotDeclaredHere("uv_translate_sys_error"))
-[probe] uv_translate_sys_error (from the header's own file): Unknown(NotDeclaredHere("uv_translate_sys_error"))
-```
+* **an enumerator whose name takes an argument list** — `UV_ERRNO_MAP(XX)` is one enumerator *here* and many after
+  expansion; without consuming the group the `(` ended the enumerator and the enum body ended there;
+* **no comma between that invocation and the next enumerator** — the commas live in the macro's body, not in this
+  file, so the token stream has `UV_ERRNO_MAP(XX)` `#undef` `UV_ERRNO_MAX` with no `,`; the loop now continues when
+  the enumerator it just read took an argument list and the next token is a name.
 
-A reduced fixture does **not** reproduce it (a header with a guard, an `#if` with two branches and declarations after it
-resolves), so the trigger is in `uv.h`'s own structure: a guard, `UV_EXTERN` defined under `#ifndef UV_EXTERN` +
-`#ifdef _WIN32`, then `#if defined(UV_FREERTOS) … #else … #endif`, then `#elif defined(_WIN32) # include "uv/win.h"`.
-That is the next thing to fix, and this section is the measurement it will be checked against.
+Measured on `include/uv.h`: the summary went from **21 declarations to 788** (locals dropped) / 1 464 (kept), and
+`uv_translate_sys_error` is among them. libuv 1.53.1's Windows build went from **11 errors to 3**, all three of them
+`WSAGetLastError`.
 
+Fixture: `crates/cpp_parser/tests/c_language.rs::an_x_macro_enum_parses_as_one_enumeration`.
+
+**What is left, and where it is**: `WSAGetLastError` is declared in MinGW's `winsock2.h:1049`, and that file's summary
+holds **206 of 313** declarations — the walk stops after line 899, at
+`typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);`, the first of a run of function-pointer typedefs
+with a calling convention. That is the next measurement, and it is the same shape of defect one construct along.
 ### 7.2 `assign-type-check` and a type the compiler deduces — fixed
 
 `src/uv-common.c:576` said `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` ``.

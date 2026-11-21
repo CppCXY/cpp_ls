@@ -247,3 +247,55 @@ fn an_extern_c_block_in_c_does_not_hide_what_follows_it() {
         );
     }
 }
+
+/// **An X-macro's enum parses as one enum, not as rubble.**
+///
+/// Every C library writes its error list this way — the enumerators are a macro's expansion, so the **token stream**
+/// has no comma between the invocation and the enumerator after it, and the invocation itself is an enumerator whose
+/// name takes an argument list:
+///
+/// ```c
+/// typedef enum {
+/// #define XX(code, _) UV_ ## code = UV__ ## code,
+///   UV_ERRNO_MAP(XX)
+/// #undef XX
+///   UV_ERRNO_MAX = UV__EOF - 1
+/// } uv_errno_t;
+/// ```
+///
+/// Measured on libuv 1.53.1's `include/uv.h`: without the two rules this file's summary held **21 declarations of
+/// 563** — the enum came out as one `DeclSpecifierSeq` that stopped at the `(` of `UV_ERRNO_MAP(XX)`, and every
+/// declaration after it in the file was rubble. Eleven `undefined-name` findings pointed at the header's own
+/// functions (`docs/c-support.md` §7.1).
+#[test]
+fn an_x_macro_enum_parses_as_one_enumeration() {
+    let source = "\
+typedef enum {
+#define XX(code, _) UV_ ## code = UV__ ## code,
+  UV_ERRNO_MAP(XX)
+#undef XX
+  UV_ERRNO_MAX = UV__EOF - 1
+} uv_errno_t;
+int uv_translate_sys_error(int sys_errno);
+";
+    let tree = CppParser::parse(source, ParserConfig::default().with_language(c11()));
+    assert_eq!(tree.get_errors(), [], "{source} parses");
+    let root = CppTranslationUnit::cast(tree.get_red_root()).expect("a translation unit");
+    let declared: Vec<String> = root
+        .syntax()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    for name in ["uv_errno_t", "uv_errno_t", "uv_translate_sys_error"] {
+        assert!(
+            declared.iter().any(|found| found == name),
+            "`{name}` is declared at file scope in the text: {declared:?}"
+        );
+    }
+    // The enumerators the file writes outside the macro are enumerators, not declarations at file scope.
+    assert!(
+        declared.iter().all(|found| found != "UV_ERRNO_MAX"),
+        "an enumerator is not a file-scope declaration: {declared:?}"
+    );
+}

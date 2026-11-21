@@ -17,7 +17,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let filename = args.iter().skip(1).find(|arg| !arg.starts_with("--"));
     let Some(filename) = filename else {
-        eprintln!("Usage: cpp_dump <filename> [--tree] [--errors-only]");
+        eprintln!("Usage: cpp_dump <filename> [--tree] [--errors-only] [--c] [--cpp]");
         return;
     };
     let with_tree = args.iter().any(|arg| arg == "--tree");
@@ -26,9 +26,20 @@ fn main() {
     // 1.2-million-line string and writes it out. A check that wants *the number of diagnostics* — which is most
     // of them — was paying for all of it and throwing the string away.
     let errors_only = args.iter().any(|arg| arg == "--errors-only");
+    // **Which language the file is read as.** `default()` is C++23, and the analysis reads a `.c` file (or a header
+    // with `-std=gnu11`) as **C**: a construct that is only C++'s — `extern "C" {`, `__declspec` in a position C has
+    // no grammar for — therefore parses here and fails there, which is a difference this tool has to be able to
+    // reproduce. `--c` is that half; `--cpp` is the default written out, for a script that wants to be explicit.
+    let language = if args.iter().any(|arg| arg == "--c") {
+        cpp_parser::features::LanguageConfig::new()
+            .with_standard(cpp_parser::features::Standard::C11)
+    } else {
+        cpp_parser::features::LanguageConfig::new()
+            .with_standard(cpp_parser::features::Standard::Cpp23)
+    };
 
     let content = std::fs::read_to_string(filename).expect("Failed to read the file");
-    let tree = CppParser::parse(&content, ParserConfig::default());
+    let tree = CppParser::parse(&content, ParserConfig::default().with_language(language));
     let errors = tree.get_errors();
 
     if errors_only {

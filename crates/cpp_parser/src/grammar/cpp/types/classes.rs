@@ -566,6 +566,36 @@ pub(crate) fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 
         let enumerator = p.mark(CppSyntaxKind::EnumeratorDecl);
         p.bump();
+        let mut took_an_argument_list = false;
+
+        // **An enumerator whose name is a macro invocation** — the X-macro spelling every C library writes:
+        //
+        // ```c
+        // typedef enum {
+        // #define XX(code, _) UV_ ## code = UV__ ## code,
+        //   UV_ERRNO_MAP(XX)
+        // #undef XX
+        // } uv_errno_t;
+        // ```
+        //
+        // `UV_ERRNO_MAP` is the enumerator's name and `(XX)` is what the macro takes. Without this the `(` ended the
+        // enumerator, the loop wanted a `,` or a `}` there, and the whole `typedef enum … } uv_errno_t;` came out as
+        // rubble: measured on libuv 1.53.1's `include/uv.h`, the six declarations up to this point were indexed and
+        // the file's other **543 vanished** — which is why eleven `undefined-name` findings pointed at a header that
+        // declares them (`docs/c-support.md` §7.1).
+        //
+        // A **balanced group**, not an expression: the arguments of an X-macro are not enumerators, and a rollback
+        // leaves the `(` to the ordinary path (an unterminated group is not this shape).
+        if p.current_token() == CppTokenKind::LeftParen {
+            let checkpoint = p.checkpoint();
+            if super::super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)
+                .is_err()
+            {
+                p.rollback(checkpoint);
+            } else {
+                took_an_argument_list = true;
+            }
+        }
 
         // Attributes on the enumerator: `enum E { A [[deprecated]] = 1, B };`. Written after the name and
         // before the `=`, so the initializer rule below would otherwise meet a `[[` it has no rule for.
@@ -623,6 +653,14 @@ pub(crate) fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 
         if p.current_token() == CppTokenKind::Comma {
             p.bump();
+        } else if took_an_argument_list && p.current_token() == CppTokenKind::Identifier {
+            // **The comma an X-macro's arguments write is not in this file.** `UV_ERRNO_MAP(XX)` is one enumerator
+            // here and *many* after expansion, so the token stream has no `,` between it and the enumerator after
+            // it — measured on libuv 1.53.1's `include/uv.h`, where breaking here ended the enum body at the macro
+            // and left the rest of the file as rubble. Continuing is safe in exactly this case, and only in this
+            // one: an enumerator that took an argument list is a macro invocation, and the next name is the next
+            // enumerator rather than a suffix of this one.
+            continue;
         } else {
             break;
         }
