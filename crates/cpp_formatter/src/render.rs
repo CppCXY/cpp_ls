@@ -1674,7 +1674,13 @@ fn case_label_indent(
     // **The brace must follow the label's colon directly**: walking back from an `if (…)` inside a case body found
     // the label and put the `if`'s brace at the label's column (measured on nlohmann json under `Microsoft`, where
     // clang-format puts it at the `if`).
-    if index == 0 || stream.tokens[index - 1].kind != cpp_parser::CppTokenKind::Colon {
+    // **Only a brace**: this answers where a **braced** case body's `{` goes; a statement after the label takes the
+    // block layout's level (one in), and returning the label's column for it put `case 1: g();` at the label's own
+    // indent when the statement was moved to its own line (measured on the case-label fixture).
+    if index == 0
+        || stream.tokens[index].kind != cpp_parser::CppTokenKind::LeftBrace
+        || stream.tokens[index - 1].kind != cpp_parser::CppTokenKind::Colon
+    {
         return Option::None;
     }
     let mut earlier = index;
@@ -2165,6 +2171,52 @@ fn wrapping_lines(
             if stream.gaps[body].newlines == 0 {
                 wrapped[body] = true;
                 body_wrapped[body] = true;
+            }
+        }
+    }
+
+    // **`AllowShortCaseLabelsOnASingleLine` is `false` in all three styles**: `case 1: g(); break;` comes back as three
+    // lines — the label, its statement and the `break` — under `LLVM`, `Google` and `Microsoft` (measured on the
+    // oracle). The label itself stays at the switch's level (`case_extra` in the layout) and its statements one level
+    // in, which the block layout already answers for a body on its own line. An **access specifier** is not a case
+    // label and is left alone (wrapping the member after `public:` broke a constructor fixture).
+    if !style.flag(StyleOption::AllowShortCaseLabelsOnASingleLine) {
+        for index in 0..count.saturating_sub(1) {
+            if stream.tokens[index].kind != K::Colon
+                || !crate::breaks::is_a_case_label(stream, index)
+                || stream.gaps[index + 1].newlines > 0
+            {
+                continue;
+            }
+            let first = index + 1;
+            if matches!(
+                stream.tokens[first].kind,
+                K::LeftBrace | K::RightBrace | K::Semicolon
+            ) {
+                continue;
+            }
+            wrapped[first] = true;
+            // **Each statement of the body starts its own line**, up to the next label or the switch's closer.
+            let mut depth = 0isize;
+            for at in first..count {
+                match stream.tokens[at].kind {
+                    K::LeftBrace | K::LeftParen | K::LeftBracket => depth += 1,
+                    K::RightBrace | K::RightParen | K::RightBracket => depth -= 1,
+                    K::CaseKeyword | K::DefaultKeyword if depth == 0 => break,
+                    K::Semicolon if depth == 0 => {
+                        let next = at + 1;
+                        if next >= count
+                            || matches!(
+                                stream.tokens[next].kind,
+                                K::Semicolon | K::RightBrace | K::CaseKeyword | K::DefaultKeyword
+                            )
+                        {
+                            break;
+                        }
+                        wrapped[next] = true;
+                    }
+                    _ => {}
+                }
             }
         }
     }

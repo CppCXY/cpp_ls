@@ -159,6 +159,23 @@ pub(crate) fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
     false
 }
 
+/// **Is the colon at `index` the end of a `case`/`default` label?** — the variant of [`is_a_label`] that leaves an access
+/// specifier out: `public:` is placed by its own rules, and wrapping the member after it broke a constructor fixture.
+pub(crate) fn is_a_case_label(stream: &Stream<'_>, index: usize) -> bool {
+    use CppTokenKind::*;
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        match stream.tokens[cursor].kind {
+            CaseKeyword | DefaultKeyword => return true,
+            PublicKeyword | PrivateKeyword | ProtectedKeyword | Semicolon | LeftBrace
+            | RightBrace | Question => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Does the `)` at `index` close the condition of an `if`/`for`/`while`/`switch` whose body starts on the next line?
 pub(crate) fn starts_a_control_statement(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;

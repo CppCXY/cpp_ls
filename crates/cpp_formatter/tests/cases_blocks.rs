@@ -292,3 +292,19 @@ fn blocks_30_a_two_statement_body_is_split() {
     let llvm = Style::preset("LLVM").expect("LLVM is a preset");
     assert_eq!(cpp_formatter::format_file(path, one, &llvm), one);
 }
+
+/// **A case label's statement starts its own line**: `AllowShortCaseLabelsOnASingleLine` is `false` in `LLVM`, `Google`
+/// and `Microsoft`, so `case 1: g(); break;` comes back as the label, `g();` and `break;` — the statements one level in
+/// from the label (measured on the oracle under all three styles). An **access specifier** is not a case label and is
+/// left alone; a braced case body keeps its `{` at the label's column.
+#[test]
+fn blocks_31_a_case_label_statement_starts_a_line() {
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f(int x) {\n  switch (x) {\n    case 1: g(); break;\n    default: break;\n  }\n}\n";
+    let expected = "void f(int x) {\n  switch (x) {\n  case 1:\n    g();\n    break;\n  default:\n    break;\n  }\n}\n";
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
+    // A braced case body keeps the oracle's shape: the brace at the label's column, its statements one level in.
+    let braced = "void f(int x) {\n  switch (x) {\n  case 1: {\n    g();\n    break;\n  }\n  }\n}\n";
+    assert_eq!(cpp_formatter::format_file(path, braced, &llvm), braced);
+}
