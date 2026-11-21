@@ -69,6 +69,37 @@ return type (`int (*)(int b)`) still wins, and the text keeps the shapes the tre
 
 Fixture: `declarations::a_function_records_what_it_returns_and_nothing_else_does`'s `conventional` case.
 
+### 5. The two syntax errors: diagnosed, not fixed — `sentinel.c:26`, `server.c:2620`
+
+Both files fail at their **first declaration after the includes**, and both report `expected ), but get identifier`:
+
+```
+sentinel.c:26      extern char **environ;
+server.c:2620      extern char **environ;
+```
+
+The line is not the problem — `extern char **environ;` parses in isolation, in both dialects, and the *whole file* reads
+clean through `cpp_inspect` (`--file src/sentinel.c diagnostics --cook` → no findings; the same for `server.h` and
+`connection.h` read as roots). Two headers carry the real trigger, and both use a **C++ keyword as a parameter name**:
+
+```
+server.h:3467      int validateProcTitleTemplate(const char *template);
+connection.h:431   int connectionIndexByType(const char *typename);
+```
+
+In **C** those are ordinary identifiers and the declarations parse (0 errors); in **C++** they are keywords and the parse
+reports exactly `expected primary expression` at those two lines — reproduced with `cpp_dump` on a two-line fixture in
+both dialects. So the failing parse is one that read those headers with a **C++/permissive** language, and the damage
+lands on the includer's next line.
+
+What is **not** the cause, checked: the file's own language (`sentinel.c` is in the database with `-std=gnu11`); the
+header's per-file language when asked directly (it answers C and the fact is recorded correctly); a stale summary (a cold
+cache reproduces it). The failing path is the **unit render** — the concatenation of the root's and its includes'
+renderings — and this round did not find where its language comes from. That is the next thing to instrument, and it is
+why the two are recorded here rather than closed.
+
+### What is left, and whose defect it is
+
 ### What is left, and whose defect it is
 
 | What | Count | Whose |
@@ -78,7 +109,7 @@ Fixture: `declarations::a_function_records_what_it_returns_and_nothing_else_does
 | `missing-include` | 19 | Follows from the same absent headers. |
 | `undefined-name` | 15 | `ae_epoll.c`/`ae_kqueue.c`/`ae_evport.c` are **platform files** this build would not compile; my database listed every `src/*.c`. Correct findings about the wrong platform. |
 | `assignment-in-condition` | 12 | gcc's `-Wparentheses` says the same. Not triaged line by line. |
-| `syntax-error` | 2 | `src/connection.h:431`, `src/sentinel.c:26`. **Open** — the next measurement. |
+| `syntax-error` | 2 | `sentinel.c:26`, `server.c:2620` — **open**, diagnosed above: the real trigger is `template`/`typename` used as parameter names in `server.h`/`connection.h`, and the failing parse is the unit render. |
 | `return-type-mismatch` | 1 | `src/dict.c:1156`, `unsigned long long integers[6], hash = 0;` then `return hash;`. **Open** — the multi-declarator shape, not reproducible from its own snippet yet. |
 | `dangling-return` | 1 | `src/t_hash.c:4194` — a pointer into a local struct member. Plausible; not triaged. |
 
