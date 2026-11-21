@@ -649,6 +649,9 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
         // is exactly how `TEST(A, B) { }` came to work while `TEST(A, 1) { }` did not.
         || super::super::decls::a_macro_definition_follows(p, declarator_from)
     {
+        // **How many parameter lists the suffixes have read.** See the `(` arm: a second group after one is another
+        // suffix, while a group straight after the name is a call the expression grammar should have read.
+        let mut parameter_lists_read = 0usize;
         loop {
             match p.current_token() {
                 CppTokenKind::LeftParen => {
@@ -659,6 +662,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                         p.close_marks_above(base);
                         return Err(err);
                     }
+                    parameter_lists_read += 1;
                     // A `(` that is neither a parameter list nor an initializer belongs to whatever comes next.
                     //
                     // For a declarator **without** a name this loop must stop rather than fail: `g(1, 2);` reaches
@@ -666,7 +670,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                     // parentheses. An abstract declarator's real reason to exist is a type-id such as
                     // `int(void)`, and that is reached through `parse_type_id`, not here.
                     if p.current_token() == CppTokenKind::LeftParen {
-                        if named {
+                        if named && parameter_lists_read == 0 {
                             // For a declarator **with** a name, stopping is not an option: `Widget w(g())` would
                             // leave the declarator parsed, the parentheses unread, and the declaration to fail
                             // later at its `;` — turning a statement the expression grammar could have read into
@@ -678,7 +682,19 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                                 p.current_token_range(),
                             ));
                         }
-                        break;
+                        // **A group *after* a parameter list is one more suffix.** The grammar of C has no
+                        // `T name(a)(b)`, but the text here is **unpreprocessed** and a macro standing for a type
+                        // makes exactly that shape out of a legal declaration — MinGW's `winsock2.h:899` is
+                        // `typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);`, where `__LONG32`
+                        // is `long`. Failing there rewound the whole declaration and the **recovery** then ate the
+                        // declarations after it: measured on libuv 1.53.1, every file that includes `winsock2.h`
+                        // lost the header's declarations from `WSAGetLastError` on, three `undefined-name` findings
+                        // (`docs/c-support.md` §7.1). The `Widget w(g())` shape above is untouched: its group comes
+                        // straight after the name, with no parameter list in between.
+                        if !named {
+                            break;
+                        }
+                        continue;
                     }
                 }
                 // A `[[` here is an **attribute**, not an array bound: `int x [[maybe_unused]];`.
@@ -893,9 +909,19 @@ pub fn parse_declarator_function_suffixes(
         match p.current_token() {
             CppTokenKind::LeftParen => {
                 super::super::decls::parse_function_suffix_or_initializer(p, declarator_from)?;
-                if p.current_token() == CppTokenKind::LeftParen {
-                    break;
-                }
+                // **And a *second* parameter list is another suffix**, not the end of this declarator. The grammar
+                // of a function returning a function is not legal C++ — but the text this parser reads is
+                // **unpreprocessed**, and a macro standing in for a type makes `X(a)(b)` out of a perfectly legal
+                // declaration: MinGW's `winsock2.h:899` writes
+                //
+                // ```c
+                // typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);
+                // ```
+                //
+                // where `__LONG32` is `long`. Breaking here made the declaration fail, and the **recovery** then ate
+                // the declarations after it: measured on libuv 1.53.1, every file that includes `winsock2.h` lost
+                // the header's 107 declarations from `WSAGetLastError` on — three `undefined-name` findings with the
+                // whole rest of the enum-era fixes already in place (`docs/c-support.md` §7.1).
             }
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);

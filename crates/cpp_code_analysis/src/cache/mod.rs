@@ -415,7 +415,14 @@ use std::path::{Path, PathBuf};
 /// **A type's spelling drops a parameter list's names, and the readers now do.** `typedef int (*binary_op)(int left,
 /// int right);` names the type `int (*)(int, int)`: the names are not part of it, and a stored summary that kept them
 /// (`int (*)(int left, int right)`) answered a different spelling from the one a consumer comparing types expects.
-pub const FORMAT_VERSION: u32 = 44;
+/// # Why this moved to 45
+///
+/// **The enumerator body reads the X-macro spelling, and a stored summary was built without it.** `UV_ERRNO_MAP(XX)`
+/// inside an `enum { … }` is one enumerator here and many after expansion: the reader now takes its argument list and
+/// continues past the comma the macro's body writes, so `include/uv.h`'s summary went from 21 declarations of 563 to
+/// 788 — and a stored summary keeps the 21. The same version covers the declarator's second parameter list
+/// (`typedef unsigned __LONG32 (WSAAPI *F)(const char *)`, where `__LONG32` is a macro) — see `docs/c-support.md` §7.1.
+pub const FORMAT_VERSION: u32 = 45;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

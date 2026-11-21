@@ -151,7 +151,7 @@ cargo test --release -p cpp_ls --test neovim_usability -- --ignored --nocapture 
 | Hover | 466 / 526 (89 %), p50 12 ms, p95 4.3 s |
 | Definition | 403 / 526 (77 %), p50 0 ms, p95 1.5 s |
 | Hints | 85 `braces-around-statements`, 12 `else-after-return` — libuv writes `if (!handle) return UV_EINVAL;` by choice, so these are opinions the registry already marks Hint |
-| Errors | **12, and they are false positives** — 11 `undefined-name` and 1 `assign-type-check`, below |
+| Errors | **0** — the twelve false positives this table used to carry are §7.1 and §7.2 below, both fixed |
 
 ### 7.1 `undefined-name` on a name a header declares — fixed
 
@@ -184,10 +184,42 @@ Measured on `include/uv.h`: the summary went from **21 declarations to 788** (lo
 
 Fixture: `crates/cpp_parser/tests/c_language.rs::an_x_macro_enum_parses_as_one_enumeration`.
 
-**What is left, and where it is**: `WSAGetLastError` is declared in MinGW's `winsock2.h:1049`, and that file's summary
-holds **206 of 313** declarations — the walk stops after line 899, at
-`typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);`, the first of a run of function-pointer typedefs
-with a calling convention. That is the next measurement, and it is the same shape of defect one construct along.
+**And the same shape one construct along** — `WSAGetLastError`, declared in MinGW's `winsock2.h:1049`, was still
+missing: that file's summary held **206 of 313** declarations and the walk stopped at line 899,
+
+```c
+typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);
+```
+
+which is `typedef unsigned long (__stdcall *F)(const char *)` before the macros are expanded. Read **unpreprocessed**,
+`unsigned __LONG32` is a builtin and a name, the `(...)` that follows is that name's parameter list, and the second
+`(...)` was refused — `Widget w(g())` is the same shape and *must* be refused, because there it is a call. The rule now
+distinguishes them by what came before: a group **straight after the declarator's name** still fails the declaration
+(so the expression grammar reads `w(g())`), while a group **after a parameter list** is one more suffix. Measured:
+`winsock2.h`'s summary went from **206 declarations to 809** (the file ends at line 1324), and `WSAGetLastError`
+resolves.
+
+**The cache had to be told.** A stored summary is keyed by `READING_FINGERPRINT`, a hash of `cpp_parser::VERSION`,
+the crate version, `FORMAT_VERSION` and the codec version — none of which move for a **grammar edit in a working tree**,
+so the first re-measurement after the fix still read the old 206. That is what `FORMAT_VERSION` is for (its own module
+comment says so); it moved **44 → 45** with this change, which invalidates every summary built by the old grammar
+rather than only this project's.
+
+**Final measurement of the objective on libuv 1.53.1's Windows build (40 files from the CMake database)**:
+
+| Question | Answer |
+| --- | --- |
+| Does it parse? | **yes** — 0 `syntax-error`, 40 of 40 reports answered |
+| Errors | **0** (was 12) |
+| Warnings | **0** |
+| Hints | 97 — 85 `braces-around-statements`, 12 `else-after-return`, both `Hint` by the registry's own table |
+| Hover / definition | 466/526 (89 %), 403/526 (77 %) — unchanged by these fixes, still the next usability question |
+
+Fixtures: `sema/types.rs`'s `deducing_specifiers`, `sema/check/test/assign_type_check.rs`,
+`crates/cpp_parser/tests/c_language.rs`'s `an_x_macro_enum_parses_as_one_enumeration` and
+`a_second_parameter_list_after_a_macro_type_is_one_declarator`. `c_name_lookup_probe` grew the "late facts" print that
+found both stopping points: a summary that holds a prefix of its declarations is a construct the walk gave up at, and
+the construct is the **last fact's line**. 
 ### 7.2 `assign-type-check` and a type the compiler deduces — fixed
 
 `src/uv-common.c:576` said `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` ``.

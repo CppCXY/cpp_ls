@@ -91,6 +91,16 @@ fn a_name_a_header_declares() {
             "[probe] first 12 names: {:?}",
             &names[..names.len().min(12)]
         );
+        // **Where the reading stops**, which is what a missing name is usually about: the last facts and the line
+        // each was written on. A header whose summary holds a prefix of its declarations has a construct the walk
+        // gave up at, and that construct is the last fact's own line rather than the missing name's.
+        if let Ok(text) = std::fs::read_to_string(&header) {
+            for fact in summary.declarations.iter().rev().take(6) {
+                let at = fact.name_range.start_offset.min(text.len());
+                let line = text[..at].matches('\n').count() + 1;
+                println!("[probe] late fact {:?} at line {line}", fact.name.as_str());
+            }
+        }
         for wanted in [
             "uv_translate_sys_error",
             "uv_strerror",

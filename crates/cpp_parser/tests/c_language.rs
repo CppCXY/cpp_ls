@@ -299,3 +299,38 @@ int uv_translate_sys_error(int sys_errno);
         "an enumerator is not a file-scope declaration: {declared:?}"
     );
 }
+
+/// **A macro standing in for a type makes two parameter lists one declarator.**
+///
+/// The text this parser reads is **unpreprocessed**, and `typedef unsigned __LONG32 (WSAAPI *F)(const char *)` is what
+/// MinGW's `winsock2.h:899` says when `__LONG32` is `long` and `WSAAPI` is `__stdcall`. Without the second group being
+/// read as one more suffix, the declaration failed and the **recovery** swallowed the declarations after it: measured
+/// on libuv 1.53.1, every file that includes `winsock2.h` lost the header's declarations from `WSAGetLastError` on —
+/// three `undefined-name` findings, and the header's own summary went from **206 declarations to 809** once the group
+/// was read (`docs/c-support.md` §7.1).
+///
+/// The other reading of the same tokens — `Widget w(g())`, a direct-initialisation whose argument is a call — is
+/// untouched: its group comes straight after the declarator's name, with no parameter list in between.
+#[test]
+fn a_second_parameter_list_after_a_macro_type_is_one_declarator() {
+    let source = "\
+typedef unsigned __LONG32 (WSAAPI *LPFN_INET_ADDR)(const char *cp);
+int after_the_typedef(void);
+void f(void) {
+    Widget w(g());
+}
+";
+    let tree = CppParser::parse(source, ParserConfig::default().with_language(c11()));
+    assert_eq!(tree.get_errors(), [], "{source} parses");
+    let root = CppTranslationUnit::cast(tree.get_red_root()).expect("a translation unit");
+    let declared: Vec<String> = root
+        .syntax()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        declared.iter().any(|name| name == "after_the_typedef"),
+        "the declaration after the typedef is still a file-scope declaration: {declared:?}"
+    );
+}
