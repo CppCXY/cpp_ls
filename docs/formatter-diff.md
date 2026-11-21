@@ -238,6 +238,25 @@ Three kinds, in the order they cost lines on the corpus:
    row in the "Differences that are not going to be fixed silently" table — four implementations of it were measured and
    reverted there, and this shape is one more of them rather than a separate rule.
 
+### Where the remaining line structure differs
+
+A measurement of the spacing pass that separates **line structure** from **columns**: clang-format's own output is fed
+back, the two outputs' line counts are compared (after stripping the trailing newline artifact of the harness), and the
+files are counted by direction. It says which half the remaining difference is in, per corpus:
+
+| corpus | same line count | we produce **fewer** lines (we join) | we produce **more** (we split) |
+| --- | --- | --- | --- |
+| EmmyLuaCodeStyle (27 files, `LLVM`) | **27** | 0 | 0 |
+| Lua 5.5 (34 files) | 26 | 5 | 3 |
+| nlohmann json (40 files) | 15 | **31** | 9 |
+
+* **EmmyLuaCodeStyle keeps every line**: on clang-format's own output this formatter never moves a break, so its 62
+  spacing lines are **column** differences — the operand alignment and the comment column measured in the rows above.
+* **nlohmann json is the other way** (`binary_reader.hpp` alone loses 31 lines): on text clang-format laid out, this
+  formatter **joins** lines clang-format keeps broken. The join pass sees a line that fits and takes it, while the break
+  is one clang-format's optimizer made for a reason the width does not capture — a template head, a doc comment's
+  continuation, a string chain. That is the next thing to look at, and it is the same unwrapped-line gap from the other
+  side.
 ## The plan
 
 ```text
