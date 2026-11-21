@@ -201,6 +201,23 @@ Three kinds, in the order they cost lines on the corpus:
    `int wideCharSize = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);`: clang-format breaks after `=`
    and indents the call; `cppfmt` keeps `= MultiByteToWideChar(CP_UTF8,` and breaks inside the argument list.
 
+   **The last measurement of the stage**: with every token-level rule above fixed, EmmyLuaCodeStyle's `LLVM` spacing
+   column holds **31 pairs** of differing lines, and every one of them is this item — the break point inside a nested
+   call, not a spacing rule. Two shapes, both measured:
+
+   ```text
+          for (auto expr : forNumber.GetChildSyntaxNodes(        clang-format: breaks after the `:`,
+                   LuaSyntaxMultiKind::Expression, t)) {           continuation aligned inside the `for`
+                                                                   paren (the first argument);
+          for (auto expr : forNumber.GetChildSyntaxNodes(        cppfmt: breaks inside the call, one
+              LuaSyntaxMultiKind::Expression, t)) {                continuation past the statement
+   ```
+
+   The same pair appears as `19` vs `14` in `NameStyleChecker.cpp` and as `26` vs `22` in `CodeSpellChecker.cpp`: the
+   break *point* decides the column, and the fallback column (`ContinuationIndentWidth` past the bracket's line) is
+   what is left when the bracket's own column would overflow. A rule per shape would be guessing at the optimizer's
+   order, which is the reason this is recorded rather than patched.
+
 ## The plan
 
 ```text
