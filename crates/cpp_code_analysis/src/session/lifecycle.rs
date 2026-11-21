@@ -208,6 +208,7 @@ impl<F: FileProvider + Clone> Session<F> {
             cooked_or_wanted: std::sync::Mutex::new(std::collections::HashSet::new()),
             renderings_asked: std::sync::Mutex::new(std::collections::HashSet::new()),
             focused_document: std::sync::Mutex::new(None),
+            client_says_c: std::sync::Mutex::new(std::collections::HashSet::new()),
             stored_cooks: std::sync::atomic::AtomicUsize::new(0),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -292,8 +293,29 @@ impl<F: FileProvider + Clone> Session<F> {
             return std::sync::Arc::clone(held);
         }
         let config = std::sync::Arc::new(self.config().for_file(file));
+        // **The client's language mode, when the project states none.** A header is the case this is for: its
+        // family is deliberately nobody's guess (`for_file`), and "not told is not C" then lets C++-only rules fire
+        // in a C project's `.h` files — 73 `cstyle-cast` findings on redis 8.x, all of them in headers
+        // (`docs/c-support.md` §8). What the client said when it opened the document is a statement about the file,
+        // and it is used only where the project said nothing.
+        let mut language = config.language_for(file);
+        // **The client's language mode, when the project has not stated this file's.** A header is the case this is
+        // for: with no `-std=` of its own it inherits the project-wide default (`c++23` in the editor's settings),
+        // so an unconfigured C project's `.h` files are read as C++ and "not told is not C" turns C++ rules on —
+        // measured on redis 8.x: **73 `cstyle-cast` findings, every one in a `.h`** (`docs/c-support.md` §8).
+        //
+        // The database's own command is a fact and wins: a header it names has a stated language. The project-wide
+        // default is not a fact about this file, and the editor's mode for the document the reader has open is.
+        if !config.is_in_the_database(file)
+            && self
+                .client_says_c
+                .lock()
+                .is_ok_and(|said| said.contains(&queue_key(file)))
+        {
+            language = cpp_parser::features::LanguageConfig::c();
+        }
         let worked_out = std::sync::Arc::new(PerFileConfig {
-            language: config.language_for(file),
+            language,
             cuda: config.cuda(),
             config,
         });

@@ -170,6 +170,46 @@ impl<F: FileProvider + Clone> Session<F> {
         self.buffer_changed(path.as_ref(), text);
     }
 
+    /// **The same, told what the client says the file is** — `didOpen`'s `languageId`, reduced to a family.
+    ///
+    /// The client's language mode is the only statement about a **header** nobody configured: `for_file` refuses to
+    /// guess one from `.h` (a header is included by whichever language includes it), and the rule for C++-only
+    /// findings is "not told is not C". So a C project's `.h` files were answered with C++ rules — measured on redis
+    /// 8.x, **73 `cstyle-cast` findings, every one of them in a `.h`** (`docs/c-support.md` §8). What the client says
+    /// wins over the absence of a configuration, and only over the absence of one: a `-std=` in the database still
+    /// decides.
+    ///
+    /// `None` is "the client did not say" — and it is **not** "the client said something else": a caller that has no
+    /// `languageId` (every re-application of a buffer, and [`Session::did_open`] itself) leaves whatever the last
+    /// `didOpen` said alone. Only a close forgets it.
+    pub fn did_open_as(
+        &mut self,
+        path: impl AsRef<Path>,
+        text: &str,
+        family: Option<cpp_parser::features::Family>,
+    ) {
+        let path = path.as_ref();
+        if let Some(family) = family
+            && let Ok(mut said) = self.client_says_c.lock()
+        {
+            // **Only C is recorded**: it is the answer that turns rules off, and a client saying `cpp` changes
+            // nothing this session would otherwise do. The key is the session's own normalization — the same one
+            // `config_for_file` is asked with, which is a `Path` the store handed out rather than the client's string.
+            let key = queue_key(path);
+            if family == cpp_parser::features::Family::C {
+                said.insert(key);
+            } else {
+                said.remove(&key);
+            }
+        }
+        // The language was just decided differently from whatever the memo answered before it, so the memo's entry
+        // goes: see [`Session::config_for_file`], which is where the client's answer is read.
+        if let Ok(mut known) = self.config_for_file.lock() {
+            known.remove(path);
+        }
+        self.buffer_changed(path, text);
+    }
+
     /// The client changed an open document's buffer.
     ///
     /// The same work as [`Session::did_open`] — one method exists per protocol event because a server matches on
@@ -209,6 +249,14 @@ impl<F: FileProvider + Clone> Session<F> {
             *focused = None;
         }
         self.forget_refinement(path);
+        // **The client's language mode goes with the document** — a closed file is not one the reader is looking at,
+        // and the next question about it is a project question again.
+        if let Ok(mut said) = self.client_says_c.lock() {
+            said.remove(&queue_key(path));
+        }
+        if let Ok(mut known) = self.config_for_file.lock() {
+            known.remove(path);
+        }
         self.documents.close(path);
         // The text the analysis was holding was the *buffer's*, and the disk may never have seen it. Dropping the
         // entry is what makes the next question read the file again — a closed buffer is not a text this session

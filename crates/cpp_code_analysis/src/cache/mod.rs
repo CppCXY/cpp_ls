@@ -430,7 +430,14 @@ use std::path::{Path, PathBuf};
 /// rest of it became the macro's *body*, and the macro became object-like — so redis's whole `standardConfig
 /// static_configs[]` table stayed unexpanded text and reported **952 syntax errors** (`docs/c-support.md` §8). A
 /// stored summary carries that wreckage, and only the version reaches it.
-pub const FORMAT_VERSION: u32 = 46;
+/// # Why this moved to 47
+///
+/// **A file's language can now be stated per open document**, and a stored summary was built under the language the
+/// project defaulted to. A header in an unconfigured C project was read as `c++23` — the editor's default — so its
+/// summary holds a C++ reading, and the client's `languageId: "c"` (redis 8.x: **73 `cstyle-cast` findings, all in
+/// `.h` files**, `docs/c-support.md` §8) changes the reading rather than only the rules. `context_hash` covers the
+/// configuration, and the client's answer is not part of it.
+pub const FORMAT_VERSION: u32 = 47;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

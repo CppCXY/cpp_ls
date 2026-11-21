@@ -232,6 +232,18 @@ impl CompilerConfig {
     ///
     /// No stored field: a cached copy would go stale the moment the database or `extra_args` changed, and the database is
     /// already the one place the answer comes from.
+    /// **Does the compilation database have a command for this file?** — the first question `language_for` asks,
+    /// and the one that says whether a file's language was *stated* rather than defaulted.
+    ///
+    /// A caller that has a stronger statement about one file — the editor's `languageId` for the document the reader
+    /// has open — can then tell "nobody configured this" from "the project says C++20", which is the difference
+    /// between overriding a default and overriding a fact.
+    pub fn is_in_the_database(&self, file: &Path) -> bool {
+        self.database
+            .as_ref()
+            .is_some_and(|database| database.command_for(file).is_some())
+    }
+
     pub fn language_for(&self, file: &Path) -> cpp_parser::features::LanguageConfig {
         let from_the_command = self
             .database

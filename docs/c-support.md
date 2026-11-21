@@ -312,6 +312,32 @@ what would settle them:
 | `return-type-mismatch` / `param-type-check` / `dangling-return` / `macro-redefined` | 8 / 5 / 1 / 1 | Not triaged. |
 | `syntax-error` | 4 | Two files: `src/connection.h:431`, `src/sentinel.c:26` (plus two in `server.c`/`server.h`). Next round. |
 
+### 8.3 A header the client calls C is not judged by C++ rules — fixed
+
+The 73 `cstyle-cast` findings in the table above were **all in `.h` files**, and none of them was about a cast the
+language wants rewritten: `(int)p` is a C-style cast in C++ and *the* cast in C. The mechanism was a chain of two
+defaults:
+
+* `CompilerConfig::for_file` deliberately does not decide a **header's** family from its extension — a header is
+  included by whichever language includes it — so a `.h` takes the **project-wide** standard, and an editor's default
+  for that is `c++23`;
+* `DiagnosticCode::is_cpp_only`'s rule is therefore "not told is not C", which was true of the project and false of
+  the file: `redis` is a C project, and its headers are included by C files only.
+
+The missing statement is one the client already sends: `didOpen`'s **`languageId`**, the editor's own language mode,
+which the server was discarding. It is now kept per open document (`Session::did_open_as`, and `did_close` forgets it),
+and `Session::config_for_file` uses it for a file the **compilation database does not name** — a database entry is a
+fact about the file and still wins, while the project-wide default is not. `didOpen` is the only handler with a
+`languageId`; a change or a save carries text, not a language, and leaves the answer alone.
+
+Measured on redis 8.x (cold cache, 240 files): **`cstyle-cast` 73 → 0**, warnings 648 → 573, errors unchanged at 427
+(the rest are the absent database's, §8.2). Fixture:
+`crates/cpp_ls/tests/a_header_language.rs` — the same header opened twice, `languageId: "cpp"` (finding present) and
+`languageId: "c"` (absent), both through the real server.
+
+`FORMAT_VERSION` moved 46 → 47: a summary built while the header was read as C++ is a different reading, and
+`context_hash` does not cover the client's answer.
+
 The point of the table is that the **next** measurement is a database-shaped one: redis without include paths cannot
 distinguish "the analysis missed a name" from "nobody told it where the name is", and the numbers above say so
 explicitly instead of counting them as defects.

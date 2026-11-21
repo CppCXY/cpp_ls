@@ -1116,6 +1116,18 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// expensive thing this session does, and a background tab is not a reason to do it — the same trade
     /// `the_program_to_read` already states for files nobody has open.
     focused_document: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// **What the client said each open document is** — `didOpen`'s `languageId`, reduced to a family.
+    ///
+    /// The client knows something no configuration in this session does: the *editor's* language mode for the file
+    /// the reader is looking at. A `.h` is the case that matters — it is included by whichever language includes it,
+    /// so `CompilerConfig::language_for` deliberately refuses to guess from the extension, and a header nobody has
+    /// configured was read as **not told**. `DiagnosticCode::is_cpp_only`'s rule is "not told is not C", so a C++
+    /// rule then fires in a C project's headers: measured on redis 8.x, **73 `cstyle-cast` findings, every one of
+    /// them in a `.h`** (`docs/c-support.md` §8).
+    ///
+    /// Only the C answer is kept: it is the one that turns rules *off*, and a client saying `cpp` changes nothing
+    /// this session would otherwise do.
+    client_says_c: std::sync::Mutex<std::collections::HashSet<String>>,
     /// **How many cooks the disk answered** --- a cook that rendered, parsed and indexed nothing, because the file's
     /// record was already on the disk with its rendering. The number the per-file cache is judged by.
     stored_cooks: std::sync::atomic::AtomicUsize,

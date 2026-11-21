@@ -499,8 +499,11 @@ impl<F: FileProvider + Clone> Session<F> {
             view,
             config,
             // **The language this file is compiled as**, which is what makes a C-only rule quiet in C: the compile flags say
-            // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all.
-            self.config_for(key).language_for(key),
+            // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all. Asked through
+            // [`Session::config_for_file`], which is also where **the client's `languageId`** is consulted for a file
+            // the project says nothing about — a header — so that a C project's `.h` files are not answered with
+            // C++ rules (`docs/c-support.md` §8).
+            self.config_for_file(key).language,
             // **Whether the project is Unreal Engine code** — see `[unreal] enable`. Read here rather than inside a
             // check so that the switch has one home.
             self.project_config()

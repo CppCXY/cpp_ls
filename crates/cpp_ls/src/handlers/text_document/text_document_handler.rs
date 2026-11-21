@@ -45,6 +45,9 @@ pub async fn process_did_open_text_document(
     let uri = params.text_document.uri;
     let version = params.text_document.version;
     let text = params.text_document.text;
+    // **What the client says the file is** — the editor's language mode, which is the only statement about a header
+    // nobody configured. See [`family_of`] and `Session::did_open_as`.
+    let family = family_of(&params.text_document.language_id);
     let path = uri_to_file_path(&uri)?;
 
     // What the client has open is recorded whether or not a workspace is open yet: the buffer is the editor's, and
@@ -70,7 +73,7 @@ pub async fn process_did_open_text_document(
         crate::handlers::register_files_watch(context.clone()).await;
     }
 
-    apply_buffer(&context, path, text).await;
+    apply_buffer_as(&context, path, text, family).await;
     context
         .diagnostics()
         .schedule_open_files(context.clone())
@@ -202,15 +205,42 @@ pub async fn process_did_close_document(
     Some(())
 }
 
+/// **What the client's `languageId` says the file is**, reduced to a family.
+///
+/// The client is the only party that knows the *editor's* language mode, and it is what settles a **header** nobody
+/// configured: `.h` is included by whichever language includes it, so the analysis refuses to guess a family from the
+/// extension, and `DiagnosticCode::is_cpp_only`'s rule is "not told is not C" — which put C++ rules on a C project's
+/// headers (measured on redis 8.x: **73 `cstyle-cast` findings, every one in a `.h`**; `docs/c-support.md` §8).
+///
+/// Anything that is not plainly C maps to `None`, which changes nothing: a client saying `cpp` is not a statement
+/// this session has any use for.
+fn family_of(language_id: &str) -> Option<cpp_parser::features::Family> {
+    match language_id.to_ascii_lowercase().as_str() {
+        "c" | "objective-c" => Some(cpp_parser::features::Family::C),
+        _ => None,
+    }
+}
+
 /// Tell the session what a path's text is now.
 ///
 /// The caller schedules push diagnostics or a pull refresh after the update has been recorded.
 async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: String) {
+    apply_buffer_as(context, path, text, None).await
+}
+
+/// **[`apply_buffer`], saying what the client says the file is** — `didOpen`'s `languageId`, and only `didOpen` has
+/// one: a change or a save is about the text, not about which language the text is.
+async fn apply_buffer_as(
+    context: &ServerContextSnapshot,
+    path: PathBuf,
+    text: String,
+    family: Option<cpp_parser::features::Family>,
+) {
     let analysis: &AnalysisState = context.analysis();
     let for_session = path.clone();
     let applied = analysis
         .update_session("didOpen", move |session| {
-            session.did_open(&for_session, &text);
+            session.did_open_as(&for_session, &text, family);
         })
         .await;
 
