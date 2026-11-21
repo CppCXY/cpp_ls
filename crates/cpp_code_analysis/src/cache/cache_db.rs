@@ -325,7 +325,13 @@ fn open_a_database(path: &Path) -> std::result::Result<Database, redb::DatabaseE
 /// outlives a call and a query that reads two rows cannot deadlock against a slice that writes one.
 pub struct CacheDb {
     database: Database,
+    /// The directory the cache lives in — what a log line prints, and what a second database beside the server's
+    /// shares.
     directory: PathBuf,
+    /// **The file itself.** [`DATABASE_FILE`] unless a caller asked for another name: a tool that indexes a project
+    /// for its own questions must not write into the server's database, because the two would then invalidate each
+    /// other's `generation` and evict rows the other is using. See `CacheDb::open_named`.
+    file: PathBuf,
 }
 
 impl CacheDb {
@@ -336,8 +342,21 @@ impl CacheDb {
     /// *readers* (the summary codec's meaning), which `SCHEMA_VERSION` cannot see because they do not change the
     /// table layout.
     pub fn open(directory: &Path, reading_fingerprint: u64) -> Result<CacheDb> {
+        CacheDb::open_named(directory, DATABASE_FILE, reading_fingerprint)
+    }
+
+    /// **[`CacheDb::open`] in a file of the caller's naming** — the second database a tool keeps beside the server's.
+    ///
+    /// The directory is shared (it is the project's cache directory, and it travels with the checkout); the **file** is
+    /// what says whose rows these are. A schema or fingerprint mismatch in a named database deletes that file and no
+    /// other.
+    pub fn open_named(
+        directory: &Path,
+        file_name: &str,
+        reading_fingerprint: u64,
+    ) -> Result<CacheDb> {
         std::fs::create_dir_all(directory)?;
-        let path = directory.join(DATABASE_FILE);
+        let path = directory.join(file_name);
 
         let want_schema = SCHEMA_VERSION.to_le_bytes();
         let want_fingerprint = reading_fingerprint.to_le_bytes();
@@ -408,6 +427,7 @@ impl CacheDb {
         Ok(CacheDb {
             database,
             directory: directory.to_path_buf(),
+            file: path,
         })
     }
 
@@ -929,7 +949,7 @@ impl CacheDb {
             units: count(read.open_table(UNITS)?.len()? as usize),
             unit_indices: count(read.open_table(UNIT_INDICES)?.len()? as usize),
             contributions: count(read.open_table(CONTRIBUTIONS)?.len()? as usize),
-            bytes: std::fs::metadata(self.directory.join(DATABASE_FILE))
+            bytes: std::fs::metadata(&self.file)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         })
@@ -971,17 +991,37 @@ fn open_handles()
 /// **The one handle for a cache directory**, opened on first use. `None` when it cannot be opened — the file cache is
 /// still there, so a cache that cannot open is not a session that cannot start.
 pub fn shared(directory: &Path, reading_fingerprint: u64) -> Option<std::sync::Arc<SummaryCache>> {
+    shared_named(directory, DATABASE_FILE, reading_fingerprint)
+}
+
+/// **[`shared`] in a file of the caller's naming** — see [`CacheDb::open_named`].
+///
+/// The handle table is keyed by **directory and file**, because two databases can live in one directory and two
+/// handles on one file is the bug [`shared`] exists to prevent.
+pub fn shared_named(
+    directory: &Path,
+    file_name: &str,
+    reading_fingerprint: u64,
+) -> Option<std::sync::Arc<SummaryCache>> {
     // **Lexically, not canonically**: the first caller may be holding a directory that does not exist yet, so
     // `canonicalize` would fail for it and succeed for the next caller — which is exactly the two-handles bug this
     // function exists to prevent (measured as twenty failing tests, each asking the same question with two stores).
-    let key = directory.to_string_lossy().to_lowercase();
+    let key = format!(
+        "{}/{}",
+        directory.to_string_lossy().to_lowercase(),
+        file_name
+    );
     let Ok(mut handles) = open_handles().lock() else {
         return None;
     };
     if let Some(handle) = handles.get(key.as_str()) {
         return Some(std::sync::Arc::clone(handle));
     }
-    let opened = std::sync::Arc::new(SummaryCache::open(directory, reading_fingerprint)?);
+    let opened = std::sync::Arc::new(SummaryCache::open_named(
+        directory,
+        file_name,
+        reading_fingerprint,
+    )?);
     handles.insert(key, std::sync::Arc::clone(&opened));
     Some(opened)
 }
@@ -990,7 +1030,16 @@ impl SummaryCache {
     /// Open the database next to the file cache it replaces, and answer `None` when it cannot be opened — the file
     /// cache is still there, so a cache that cannot open is not a session that cannot start.
     pub fn open(directory: &Path, reading_fingerprint: u64) -> Option<SummaryCache> {
-        match CacheDb::open(directory, reading_fingerprint) {
+        SummaryCache::open_named(directory, DATABASE_FILE, reading_fingerprint)
+    }
+
+    /// **[`SummaryCache::open`] in a file of the caller's naming** — see [`CacheDb::open_named`].
+    pub fn open_named(
+        directory: &Path,
+        file_name: &str,
+        reading_fingerprint: u64,
+    ) -> Option<SummaryCache> {
+        match CacheDb::open_named(directory, file_name, reading_fingerprint) {
             Ok(database) => Some(SummaryCache {
                 database,
                 pending: std::sync::Mutex::new((Vec::new(), Vec::new())),

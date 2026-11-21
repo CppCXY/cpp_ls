@@ -1308,6 +1308,20 @@ impl Session<DiskFiles> {
         Session::open_with_config_file(root.into(), files, filter, None)
     }
 
+    /// **Write this session's summaries to another file in the cache directory** — the server's is
+    /// [`crate::cache::cache_db::DATABASE_FILE`], and a tool that indexes a project *beside* a running editor must not
+    /// share it: each writer's `generation` is its own, and a collection on one side would evict rows the other is
+    /// using. `cpp_inspect` writes `inspect.db`.
+    ///
+    /// Only before this session answers anything — see [`crate::SummaryStore::set_cache_file`].
+    ///
+    /// The **directory** stays the project's, because it travels with the checkout and the rows are as expensive to
+    /// rebuild from the tool as from the server.
+    pub fn with_cache_file(mut self, file_name: &'static str) -> Self {
+        self.store.set_cache_file(file_name);
+        self
+    }
+
     /// [`Session::open`] for a caller that knows where the configuration file is (`--config`).
     ///
     /// A named file that is not there is reported rather than ignored — an instruction is not a convention — and

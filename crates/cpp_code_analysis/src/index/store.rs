@@ -122,6 +122,8 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
     summary_database: std::sync::OnceLock<Option<std::sync::Arc<cache::cache_db::SummaryCache>>>,
+    /// **Which file in the cache directory the rows live in** — see [`SummaryStore::with_cache_file`].
+    cache_file: &'static str,
     /// The generation a write is recorded under — bumped when the store opens, so a collection can tell this run's
     /// rows from the previous one's.
     generation: u64,
@@ -604,6 +606,7 @@ impl<F: FileProvider> SummaryStore<F> {
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
             refined_marks: std::sync::Mutex::new(std::collections::HashSet::new()),
             summary_database: std::sync::OnceLock::new(),
+            cache_file: cache::cache_db::DATABASE_FILE,
             generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
             walk_cache: crate::index::walk_cache::WalkCache::new(),
@@ -627,10 +630,44 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.cache
     }
 
+    /// **Write the rows to another file in the cache directory** — [`cache::cache_db::DATABASE_FILE`] unless a caller
+    /// says otherwise.
+    ///
+    /// The case is a tool that indexes a project for its own questions while an editor has the same project open: one
+    /// database per writer keeps each side's `generation` its own, and a collection on one side cannot evict rows the
+    /// other is using. `cpp_inspect` writes `inspect.db` beside the server's `cache.redb`.
+    ///
+    /// Only before the database is opened: the handle is a `OnceLock`, and a session that has answered a question has
+    /// already opened it.
+    pub fn with_cache_file(mut self, file_name: &'static str) -> Self {
+        if !file_name.is_empty() {
+            self.cache_file = file_name;
+        }
+        self
+    }
+
+    /// **[`SummaryStore::with_cache_file`] on a store that already exists** — for a caller that assembles the session
+    /// before it knows whose database this is (see [`crate::Session::with_cache_file`]).
+    ///
+    /// Refused once the database has been opened: the handle is a `OnceLock`, and a second file name after the first
+    /// answer would mean two databases under one store's counters.
+    pub fn set_cache_file(&mut self, file_name: &'static str) {
+        if file_name.is_empty() || self.summary_database.get().is_some() {
+            return;
+        }
+        self.cache_file = file_name;
+    }
+
     /// **The summary database, opened on first use and used always** — see [`SummaryStore::database`].
     fn summary_database(&self) -> Option<std::sync::Arc<cache::cache_db::SummaryCache>> {
         self.summary_database
-            .get_or_init(|| cache::cache_db::shared(&self.cache, crate::READING_FINGERPRINT))
+            .get_or_init(|| {
+                cache::cache_db::shared_named(
+                    &self.cache,
+                    self.cache_file,
+                    crate::READING_FINGERPRINT,
+                )
+            })
             .clone()
     }
 
