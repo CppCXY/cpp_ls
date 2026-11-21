@@ -2038,6 +2038,17 @@ fn wrapping_lines(
         let loops_join = style.flag(StyleOption::AllowShortLoopsOnASingleLine);
         for index in 0..count {
             let keyword = stream.tokens[index].kind;
+            // **A directive's `if`/`while`/`for` is not a control statement**: the `if` of `#if defined(…)` is an
+            // `IfKeyword`, and looking for its `(` found the next real one — a function's parameter list — and moved the
+            // token after it (`noexcept`, `{`, `,`) to its own line. Measured on nlohmann json's spacing column: 2 572 →
+            // 2 620 before this guard.
+            if matches!(
+                keyword,
+                K::IfKeyword | K::WhileKeyword | K::ForKeyword | K::DoKeyword
+            ) && the_line_starts_with_a_directive(stream, index)
+            {
+                continue;
+            }
             // **`do`'s `while` starts its own line when the body is unbraced**, whatever the loop option says: the oracle
             // writes `do g();` then `while (a);` under `Google` (where the body joins) and `do` / `g();` / `while (a);`
             // under `LLVM` (where it does not). A braced body's `while` follows its `}` and is the brace table's.
