@@ -300,11 +300,13 @@ fn blocks_30_a_two_statement_body_is_split() {
 #[test]
 fn blocks_31_a_case_label_statement_starts_a_line() {
     let path = std::path::Path::new("snippet.cpp");
-    let input = "void f(int x) {\n  switch (x) {\n    case 1: g(); break;\n    default: break;\n  }\n}\n";
+    let input =
+        "void f(int x) {\n  switch (x) {\n    case 1: g(); break;\n    default: break;\n  }\n}\n";
     let expected = "void f(int x) {\n  switch (x) {\n  case 1:\n    g();\n    break;\n  default:\n    break;\n  }\n}\n";
     let llvm = Style::preset("LLVM").expect("LLVM is a preset");
     assert_eq!(cpp_formatter::format_file(path, input, &llvm), expected);
     // A braced case body keeps the oracle's shape: the brace at the label's column, its statements one level in.
-    let braced = "void f(int x) {\n  switch (x) {\n  case 1: {\n    g();\n    break;\n  }\n  }\n}\n";
+    let braced =
+        "void f(int x) {\n  switch (x) {\n  case 1: {\n    g();\n    break;\n  }\n  }\n}\n";
     assert_eq!(cpp_formatter::format_file(path, braced, &llvm), braced);
 }

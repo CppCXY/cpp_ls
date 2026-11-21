@@ -62,8 +62,8 @@ pub fn definitions(stream: &Stream<'_>, roles: &Roles) -> Vec<Definition> {
                     start: definition_start(stream, open_index),
                     open: open_index,
                     close: index,
-                    single_statement: single_statement(stream, open_index, index),
-                    nested_block: has_a_nested_block(stream, open_index, index),
+                    single_statement: single_statement(stream, roles, open_index, index),
+                    nested_block: has_a_nested_block(stream, roles, open_index, index),
                     inside_a_record: open.iter().flatten().any(|(_, kind)| {
                         matches!(
                             kind,
@@ -120,11 +120,14 @@ fn definition_start(stream: &Stream<'_>, open: usize) -> usize {
 }
 
 /// **Is there a block inside the body?** — the second reason a body cannot become one line.
-fn has_a_nested_block(stream: &Stream<'_>, open: usize, close: usize) -> bool {
-    use cpp_parser::CppTokenKind as K;
-    stream.tokens[open + 1..close]
-        .iter()
-        .any(|token| token.kind == K::LeftBrace)
+fn has_a_nested_block(stream: &Stream<'_>, roles: &Roles, open: usize, close: usize) -> bool {
+    // **Only a *block* is a nested block**: `{ return {}; }` holds an **initializer**, and counting it refused the join
+    // (`std::shared_ptr<Config> p() { return {}; }` stayed three lines while clang-format writes one — measured). The
+    // roles know which braces are blocks and which are lists.
+    stream.tokens[open + 1..close].iter().any(|token| {
+        token.kind == cpp_parser::CppTokenKind::LeftBrace
+            && roles.brace_kind.contains_key(&token.start)
+    })
 }
 
 /// **Does the body hold at most one statement?**
@@ -132,7 +135,7 @@ fn has_a_nested_block(stream: &Stream<'_>, open: usize, close: usize) -> bool {
 /// clang-format joins `{ g(); }` and refuses `{ g(); h(); }` (measured). The count is token-level: a statement at the
 /// body's own depth ends with `;`, and a nested block is a statement of its own — so `{ if (x) { g(); } }` is one
 /// statement (`0` semicolons plus one block) and `{ while (x) { a(); } b(); }` is two.
-fn single_statement(stream: &Stream<'_>, open: usize, close: usize) -> bool {
+fn single_statement(stream: &Stream<'_>, roles: &Roles, open: usize, close: usize) -> bool {
     use cpp_parser::CppTokenKind as K;
     let mut depth = 0usize;
     let mut statements = 0usize;
@@ -144,7 +147,9 @@ fn single_statement(stream: &Stream<'_>, open: usize, close: usize) -> bool {
             K::LeftParen | K::LeftBracket | K::LeftBrace => {
                 if depth == 0 {
                     tokens_at_the_top += 1;
-                    if token.kind == K::LeftBrace {
+                    // **A `{` is a statement only when it opens a block**: `return {};` is one statement whose initializer
+                    // brace used to count as a second (`{ return {}; }` then refused the short-function join — measured).
+                    if token.kind == K::LeftBrace && roles.brace_kind.contains_key(&token.start) {
                         statements += 1;
                     }
                 }

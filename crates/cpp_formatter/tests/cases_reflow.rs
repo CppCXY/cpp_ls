@@ -82,3 +82,18 @@ fn a_labeled_statement_is_not_joined() {
     let input = "int f() {\nendLoop:\n  return words;\n}\n";
     check(input, input);
 }
+
+/// **An initializer's brace is not a statement and not a nested block**: `{ return {}; }` is **one** statement, so the
+/// short-function join applies and `std::shared_ptr<Config> p() { return {}; }` is one line (the oracle's answer under
+/// `LLVM`, `Google` and `Microsoft`). Both tests that refused it — `single_statement` and `has_a_nested_block` — counted
+/// every `{`, initializer or not; they now ask the roles, which know which braces open blocks.
+#[test]
+fn a_body_holding_an_initializer_still_joins() {
+    for text in [
+        "std::shared_ptr<Config> p() { return {}; }\n",
+        "std::vector<int> v() { return {}; }\n",
+        "Config *q() { return {}; }\n",
+    ] {
+        check(text, text);
+    }
+}
