@@ -60,18 +60,12 @@ fn a_statement_with_a_small_initializer_joins() {
         "int values[] = {1,\n                2};\n",
         "int values[] = {1, 2};\n",
     );
-    // A list with many cells is left to the table layout (its rows are that pass's business, covered by
-    // `cases_tables.rs`): the join must not collapse it into one line.
-    let table = "static const int n[] = {1111111,\n                          2222222,\n                          3333333,\n                          4444444,\n                          5555555};\n";
-    assert!(
-        !cpp_formatter::format_file(std::path::Path::new("snippet.cpp"), table, &style())
-            .lines()
-            .all(|line| line.contains("{"))
-            || cpp_formatter::format_file(std::path::Path::new("snippet.cpp"), table, &style())
-                .lines()
-                .count()
-                > 1,
-        "a many-cell list must not collapse into one line"
+    // **A many-cell list that fits joins too**: the oracle writes `static const int n[] = {1111111, 2222222, 3333333,
+    // 4444444, 5555555};` on one line. A list the **table layout** would own (its one-line form overflows) keeps its
+    // rows, and that shape is covered by `cases_tables.rs`.
+    check(
+        "static const int n[] = {1111111,\n                        2222222,\n                        3333333,\n                        4444444,\n                        5555555};\n",
+        "static const int n[] = {1111111, 2222222, 3333333, 4444444, 5555555};\n",
     );
 }
 

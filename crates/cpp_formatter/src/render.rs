@@ -285,34 +285,70 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             }
             // **A block brace refuses the join; a small initializer's does not**: clang-format joins
             // `int v[] = {1, 2};`, `std::vector<int> w{1, 2};` and `auto s = std::string{"x"};` when they fit, and a
-            // statement holding a **body** never joins. A list with more than **three** cells is left to the table
-            // layout instead: joining it collapses the rows that layout produces (measured: whole-file +873 on
-            // nlohmann json when every fitting initializer joined, the table pass losing its `{ … }`).
-            let mut cells = 0usize;
-            let mut nested = false;
+            // statement holding a **body** never joins. A list the **table layout would own** is left to it: joining it
+            // collapses the rows that layout produces (measured: whole-file +873 on nlohmann json when every fitting
+            // initializer joined). The table's own test is `tables::layout`, so the question is asked of it rather than
+            // approximated by a cell count: the first cell's column is where it would land if the statement joined.
+            let mut a_table = false;
             let mut depth = 0isize;
-            for token in &stream.tokens[first..line.end] {
+            let indent = blocks[first].unwrap_or(0);
+            for (offset, token) in stream.tokens[first..line.end].iter().enumerate() {
+                let index = first + offset;
                 match token.kind {
-                    cpp_parser::CppTokenKind::LeftBrace
-                        if roles.init_brace.contains(&token.start) =>
-                    {
+                    cpp_parser::CppTokenKind::LeftBrace if depth == 0 => {
+                        if !roles.init_brace.contains(&token.start) {
+                            // A **block** brace: the statement never joins.
+                            a_table = true;
+                            break;
+                        }
                         depth += 1;
-                        if depth > 1 {
-                            nested = true;
+                        if let Some(close) = pairs[index]
+                            && let Some(cells) = crate::tables::cells_of(&stream, index, close)
+                        {
+                            let widths: Vec<usize> = cells
+                                .iter()
+                                .enumerate()
+                                .map(|(at, cell)| {
+                                    crate::tables::cell_width(
+                                        &stream,
+                                        &roles,
+                                        style,
+                                        cell,
+                                        at + 1 == cells.len(),
+                                    )
+                                })
+                                .collect();
+                            // The column the first cell would start at if the statement were on one line.
+                            let mut first_column = indent;
+                            for at in first..=index {
+                                if at > first {
+                                    first_column += space::between(&stream, at, &roles, style);
+                                }
+                                first_column += stream.tokens[at].text.chars().count();
+                            }
+                            if crate::tables::layout(
+                                &widths,
+                                first_column + 1,
+                                style.count(StyleOption::ColumnLimit),
+                            )
+                            .is_some()
+                            {
+                                a_table = true;
+                                break;
+                            }
                         }
                     }
                     cpp_parser::CppTokenKind::RightBrace if depth > 0 => depth -= 1,
                     cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
                         if depth == 0 =>
                     {
-                        // A **block** brace: the statement never joins.
-                        nested = true;
+                        a_table = true;
+                        break;
                     }
-                    cpp_parser::CppTokenKind::Comma if depth == 1 => cells += 1,
                     _ => {}
                 }
             }
-            if nested || cells > 2 {
+            if a_table {
                 continue;
             }
             // **A template head is a line of its own**: `template <typename T>` then `class lexer_base {` is what
