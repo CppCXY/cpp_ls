@@ -112,6 +112,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         mut split,
         namespace_comments,
         namespace_long,
+        body_wrapped,
         closers,
         pairs,
     } = wrapping_lines(&stream, &roles, style);
@@ -278,6 +279,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             }
             let first = line.start;
             if stream.tokens[first].kind == cpp_parser::CppTokenKind::Hash {
+                continue;
+            }
+            // **A short control body this pass moves to its own line is not joined back**: the join half runs after the
+            // wrapping table and would undo it (`if (a) g();` is two lines under `LLVM`, one under `Google`).
+            if (first..line.end).any(|at| body_wrapped[at]) {
                 continue;
             }
             if (first + 1..line.end).any(|index| !stream.gaps[index].comments.is_empty()) {
@@ -624,6 +630,14 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     let indent = case_label_indent(&stream, &blocks, index)
                         .or_else(|| blocks[index])
                         .unwrap_or(statement_indent);
+                    // **A short control body this pass moved to its own line is one level in**: the block layout does
+                    // not know the level for a body the author wrote on the control's line, so it is added here
+                    // (`if (a)` then `g();` at the control's indent plus `IndentWidth`, measured on the oracle).
+                    let indent = if body_wrapped[index] {
+                        indent + style.count(StyleOption::IndentWidth)
+                    } else {
+                        indent
+                    };
                     Some((indent, true))
                 } else if let Some(open) = closers[index]
                     && roles.brace_kind.get(&stream.tokens[open].start)
@@ -1753,6 +1767,9 @@ struct WrappingLines {
     /// **Whether each namespace body is longer than `ShortNamespaceLines`** — the gate for adding a missing closing
     /// comment (`FixNamespaceComments`); an existing one is fixed whatever the length.
     namespace_long: Vec<bool>,
+    /// **A short control body that the style moves to its own line**: its indent is one level in from the control, which
+    /// the block layout does not know for a body the author wrote on the control's line.
+    body_wrapped: Vec<bool>,
     closers: Vec<Option<usize>>,
     /// **Which `}` each `{` closes** — a flat initializer list needs its extent to be laid out as a table.
     pairs: Vec<Option<usize>>,
@@ -1779,6 +1796,8 @@ fn wrapping_lines(
     let reflows = style.count(crate::options::StyleOption::ColumnLimit) > 0;
     let count = stream.tokens.len();
     let mut wrapped = vec![false; count];
+    // **A short control body this pass moved to its own line**, which needs the indent the layout cannot give it.
+    let mut body_wrapped = vec![false; count];
     let mut attached = vec![false; count];
     let mut split = vec![false; count];
     // **`FixNamespaceComments`**: the name to write after the closing brace of a namespace, per closer.
@@ -2002,12 +2021,115 @@ fn wrapping_lines(
         }
     }
 
+    // **A short control body moves to its own line when the style says so**: `AllowShortIfStatementsOnASingleLine` is
+    // `Never` in `LLVM` and `Microsoft` (`WithoutElse` in `Google`) and `AllowShortLoopsOnASingleLine` is `false` there
+    // (`true` in `Google`), so the oracle writes
+    //
+    //     if (a)
+    //       g();
+    //
+    // for LLVM and `if (a) g();` for Google (measured). A body the author wrote on the control's line is marked
+    // `body_wrapped`, which is also what gives it the one-level-deeper indent the block layout cannot know.
+    {
+        let if_joins = !matches!(
+            style.text(StyleOption::AllowShortIfStatementsOnASingleLine),
+            "Never"
+        );
+        let loops_join = style.flag(StyleOption::AllowShortLoopsOnASingleLine);
+        for index in 0..count {
+            let keyword = stream.tokens[index].kind;
+            // **`do`'s `while` starts its own line when the body is unbraced**, whatever the loop option says: the oracle
+            // writes `do g();` then `while (a);` under `Google` (where the body joins) and `do` / `g();` / `while (a);`
+            // under `LLVM` (where it does not). A braced body's `while` follows its `}` and is the brace table's.
+            if keyword == K::DoKeyword {
+                let body = index + 1;
+                if body < count && !matches!(stream.tokens[body].kind, K::LeftBrace) {
+                    if stream
+                        .gaps
+                        .get(body + 1)
+                        .is_some_and(|gap| gap.newlines > 0)
+                        || stream.gaps.get(body + 1).is_some_and(|gap| gap.at_end)
+                    {
+                        // An empty body (`do;`) has nothing to split.
+                        continue;
+                    }
+                    if let Some(semicolon) = (body..count).find(|at| {
+                        stream.tokens[*at].kind == K::Semicolon
+                            && stream.gaps[*at].newlines == 0
+                            && stream.gaps.get(at + 1).is_some_and(|gap| gap.newlines == 0)
+                    }) && semicolon + 1 < count
+                        && stream.tokens[semicolon + 1].kind == K::WhileKeyword
+                    {
+                        wrapped[semicolon + 1] = true;
+                    }
+                }
+                if !loops_join
+                    && body < count
+                    && !matches!(
+                        stream.tokens[body].kind,
+                        K::LeftBrace | K::Semicolon | K::RightBrace
+                    )
+                    && stream.gaps[body].newlines == 0
+                {
+                    wrapped[body] = true;
+                    body_wrapped[body] = true;
+                }
+                continue;
+            }
+            let joins = match keyword {
+                K::IfKeyword => if_joins,
+                K::WhileKeyword | K::ForKeyword => loops_join,
+                _ => continue,
+            };
+            if joins {
+                continue;
+            }
+            // **The body follows the condition's `)`**, or the `do` keyword itself.
+            let body = if keyword == K::DoKeyword {
+                Some(index + 1)
+            } else {
+                let mut depth = 0isize;
+                let mut found = None;
+                for (offset, token) in stream.tokens[index..].iter().enumerate() {
+                    match token.kind {
+                        K::LeftParen => depth += 1,
+                        K::RightParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                found = Some(index + offset + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                found
+            };
+            let Some(body) = body else {
+                continue;
+            };
+            if body >= count
+                || matches!(
+                    stream.tokens[body].kind,
+                    K::LeftBrace | K::Semicolon | K::RightBrace
+                )
+            {
+                continue;
+            }
+            if stream.gaps[body].newlines == 0 {
+                wrapped[body] = true;
+                body_wrapped[body] = true;
+            }
+        }
+    }
+
     WrappingLines {
         wrapped,
         attached,
         split,
         namespace_comments,
         namespace_long,
+        body_wrapped,
         closers,
         pairs,
     }

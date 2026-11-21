@@ -241,3 +241,24 @@ fn blocks_28_a_control_block_is_never_one_line() {
         empty_expected
     );
 }
+
+/// **Short control bodies follow the style's option**: `AllowShortIfStatementsOnASingleLine` is `Never` in `LLVM`/`Microsoft`
+/// (`WithoutElse` in `Google`) and `AllowShortLoopsOnASingleLine` is `false` there (`true` in `Google`), and `do`'s
+/// `while` starts its own line when the body is unbraced whatever the loop option says. The oracle's six shapes, under all
+/// three styles, byte for byte.
+#[test]
+fn blocks_29_a_short_control_body_follows_the_option() {
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "void f(int a) {\n  if (a) g();\n  while (a) g();\n  for (;;) g();\n  do g(); while (a);\n}\n";
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    assert_eq!(
+        cpp_formatter::format_file(path, input, &llvm),
+        "void f(int a) {\n  if (a)\n    g();\n  while (a)\n    g();\n  for (;;)\n    g();\n  do\n    g();\n  while (a);\n}\n"
+    );
+    // Google joins the bodies but still splits `do`'s tail onto its own line.
+    let google = Style::preset("Google").expect("Google is a preset");
+    assert_eq!(
+        cpp_formatter::format_file(path, input, &google),
+        "void f(int a) {\n  if (a) g();\n  while (a) g();\n  for (;;) g();\n  do g();\n  while (a);\n}\n"
+    );
+}
