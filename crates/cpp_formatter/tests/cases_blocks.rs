@@ -262,3 +262,33 @@ fn blocks_29_a_short_control_body_follows_the_option() {
         "void f(int a) {\n  if (a) g();\n  while (a) g();\n  for (;;) g();\n  do g();\n  while (a);\n}\n"
     );
 }
+
+/// **A body with two statements is never on one line**, whatever the construct: `AllowShortLambdasOnASingleLine: All`
+/// joins a body holding **one** statement only, so `[]() { return 1; h(); }` comes back as four lines (measured on the
+/// oracle under `LLVM`, `Google` and `Microsoft`). The one-statement shapes are the short-function/lambda rule's.
+#[test]
+fn blocks_30_a_two_statement_body_is_split() {
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "auto c = []() { return 1; h(); };\n";
+    let expected = "auto c = []() {\n  return 1;\n  h();\n};\n";
+    // `LLVM` and `Google` indent with two spaces; `Microsoft` with four, so its text differs by the indent only.
+    for (preset, expected) in [
+        ("LLVM", expected),
+        ("Google", expected),
+        (
+            "Microsoft",
+            "auto c = []() {\n    return 1;\n    h();\n};\n",
+        ),
+    ] {
+        let style = Style::preset(preset).expect("a preset");
+        assert_eq!(
+            cpp_formatter::format_file(path, input, &style),
+            expected,
+            "{preset}"
+        );
+    }
+    // One statement still joins.
+    let one = "auto a = []() { return 1; };\n";
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    assert_eq!(cpp_formatter::format_file(path, one, &llvm), one);
+}

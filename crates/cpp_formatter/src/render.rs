@@ -2019,6 +2019,41 @@ fn wrapping_lines(
             wrapped[index + 1] = true;
             wrapped[closer] = true;
         }
+        // **A body with two statements is never one line**, whatever the construct: `[]() { return 1; h(); }` comes
+        // back as three lines under every style (`AllowShortLambdasOnASingleLine: All` joins a body with **one**
+        // statement only — measured on the oracle). A one-statement body is the short-function/lambda rule's business,
+        // and a control block is the rule above.
+        if matches!(
+            kind,
+            crate::roles::BraceKind::Function | crate::roles::BraceKind::Lambda
+        ) && let Some(closer) = closer
+            && closer > index + 1
+            && stream.gaps[index + 1].newlines == 0
+        {
+            let statements = (index + 1..closer)
+                .filter(|at| stream.tokens[*at].kind == K::Semicolon)
+                .count();
+            if statements > 1 {
+                wrapped[index + 1] = true;
+                wrapped[closer] = true;
+                // **Each statement after the first starts its own line**: the author wrote them on one line, and the
+                // oracle breaks between them (`[]() {` / `return 1;` / `h();` / `}` — measured).
+                let mut depth = 0isize;
+                for at in index + 1..closer {
+                    match stream.tokens[at].kind {
+                        K::LeftBrace | K::LeftParen | K::LeftBracket => depth += 1,
+                        K::RightBrace | K::RightParen | K::RightBracket => depth -= 1,
+                        K::Semicolon if depth == 0 && at + 1 < closer => {
+                            match stream.tokens[at + 1].kind {
+                                K::Semicolon | K::RightBrace => {}
+                                _ => wrapped[at + 1] = true,
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     // **A short control body moves to its own line when the style says so**: `AllowShortIfStatementsOnASingleLine` is

@@ -143,7 +143,7 @@ fn is_a_macro_name(text: &str) -> bool {
 }
 
 /// Is the colon at `index` the end of a `case`/`default`/access label?
-fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
+pub(crate) fn is_a_label(stream: &Stream<'_>, index: usize) -> bool {
     use CppTokenKind::*;
     let mut cursor = index;
     while cursor > 0 {
