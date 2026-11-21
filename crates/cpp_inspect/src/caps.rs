@@ -214,6 +214,31 @@ const COMMANDS: &[Command] = &[
         &[],
     ),
     command(
+        "sweep",
+        "A whole project's findings, tallied by code — every file cooked and diagnosed. `--all-files` is implied.",
+        false,
+        &[
+            argument(
+                "code",
+                "string",
+                "Only this code, repeatable (`undefined-name`, `syntax-error`, …).",
+                false,
+            ),
+            argument(
+                "including",
+                "string",
+                "Only files whose path contains this.",
+                false,
+            ),
+            argument(
+                "limit",
+                "number",
+                "How many findings to list per file. Default 12.",
+                false,
+            ),
+        ],
+    ),
+    command(
         "batch",
         "Read newline-delimited JSON requests on stdin and answer each on one line of stdout.",
         false,

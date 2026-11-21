@@ -811,3 +811,106 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
     });
     Ok(Answer::new(report, value))
 }
+
+/// **A whole project's findings, tallied** — the question the deleted probe tests used to answer by hand.
+///
+/// Every file the session holds is cooked and diagnosed, and the findings are grouped by code with a per-file list
+/// under them. It is the same `Session::diagnostics` the server answers a pull with, so a number here and a squiggle
+/// there are the same claim; what the sweep adds is that a *project* is measured rather than a file.
+///
+/// `only` keeps just the named codes (`undefined-name`, `syntax-error`, …) and `including` keeps just the files whose
+/// path contains a substring — the two filters every measurement in `docs/worklog.md` needed, because a project
+/// measured against a platform it was not written for has classes that are the platform's fault and are named as such
+/// rather than counted as defects.
+pub fn the_sweep(
+    opened: &mut Opened,
+    only: &[String],
+    including: Option<&str>,
+    limit: usize,
+) -> Answer {
+    let mut per_code: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let mut files: Vec<Value> = Vec::new();
+    let mut answered = 0usize;
+    let mut counted = 0usize;
+
+    let mut paths: Vec<std::path::PathBuf> = opened.session.project_files().to_vec();
+    if let Some(including) = including {
+        paths.retain(|path| path.to_string_lossy().contains(including));
+    }
+    paths.sort();
+
+    for path in &paths {
+        // **The cook the probe did with `didOpen`** — a file whose closure has not been read has no cooked reading,
+        // and `Session::diagnostics` answers `None` for it rather than a claim about a file nothing read. Cooking is
+        // the expensive half and it is paid once per file, which is what a sweep is for.
+        let _ = opened.session.cook(path);
+        let Some(found) = opened.session.diagnostics(path) else {
+            continue;
+        };
+        answered += 1;
+        let mut findings: Vec<Value> = Vec::new();
+        for finding in &found.checks {
+            let code = finding.code.name();
+            if !only.is_empty() && !only.iter().any(|wanted| wanted == code) {
+                continue;
+            }
+            *per_code.entry(code).or_default() += 1;
+            counted += 1;
+            if findings.len() < limit {
+                let (line, column) = line_col(
+                    &opened.text,
+                    finding.range.start_offset.min(opened.text.len()),
+                );
+                findings.push(json!({
+                    "code": code,
+                    "line": line,
+                    "column": column,
+                    "message": finding.message,
+                }));
+            }
+        }
+        // The parser's own errors are findings of the file and belong in the tally: `syntax-error` is one of the
+        // codes the registry lists, and a sweep that left it out would report a project as clean while it did not
+        // parse.
+        for error in &found.errors {
+            let code = "syntax-error";
+            if !only.is_empty() && !only.iter().any(|wanted| wanted == code) {
+                continue;
+            }
+            *per_code.entry(code).or_default() += 1;
+            counted += 1;
+            if findings.len() < limit {
+                let (line, column) = line_col(&opened.text, error.start.min(opened.text.len()));
+                findings.push(json!({
+                    "code": code,
+                    "line": line,
+                    "column": column,
+                    "message": error.message,
+                }));
+            }
+        }
+        if !findings.is_empty() {
+            files.push(json!({
+                "file": path.display().to_string(),
+                "findings": findings,
+            }));
+        }
+    }
+
+    let mut report = format!("sweep: {answered} file(s) answered, {counted} finding(s)\n");
+    for (code, count) in &per_code {
+        report.push_str(&format!("  {code:<28} {count}\n"));
+    }
+    let codes: Vec<Value> = per_code
+        .iter()
+        .map(|(code, count)| json!({ "code": code, "count": count }))
+        .collect();
+    let value = json!({
+        "files_answered": answered,
+        "findings": counted,
+        "codes": codes,
+        "by_file": files,
+    });
+    Answer::new(report, value)
+}

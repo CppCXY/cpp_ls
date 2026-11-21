@@ -125,7 +125,30 @@ added beside `a_second_parameter_list_after_a_macro_type_is_one_declarator`.
 
 ---
 
+## How to reproduce any number here
+
+The probes these numbers were taken with are **gone**; the instrument is `cpp_inspect` (protocol:
+[`inspect.md`](inspect.md)). A project's tally, by code:
+
+```text
+cpp_inspect --project E:\corpora\redis --file src/dict.c sweep
+cpp_inspect --project E:\corpora\libuv --file src/win/core.c sweep
+```
+
+A single question — the one that found most of the defects above:
+
+```text
+cpp_inspect --project E:\corpora\redis --file src/dict.c type --needle "return hash;" --shift 8
+cpp_inspect --project E:\corpora\libuv --file include/uv.h   facts --name uv_translate_sys_error
+```
+
+`--code` and `--including` narrow a sweep; `batch` asks many questions in one process, which is what a whole-project
+investigation actually does. A project with no `compile_commands.json` is scanned, so the first number for a new
+project is always "what the analysis says when nobody has told it anything" — the redis table above is what the second
+number looks like once a database from the project's own Makefile is supplied.
+
 ## libuv 1.53.1 — the first C project
+
 
 The first C project measured end to end, because "usable for C" is a claim about a program rather than about a grammar.
 libuv is the right first subject: C11, `typedef struct` and macros all the way down, and its Windows build is one

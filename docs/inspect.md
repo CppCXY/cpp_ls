@@ -68,6 +68,7 @@ added to the binary and not to `caps` is a command an agent cannot find.
 | `inactive` | `{file, regions:[{from, to, line, column}]}` | — |
 | `format` | `{format_version, reading_fingerprint}` | — |
 | `stats` | `{text}` — the session's counters | — |
+| `sweep` | `{files_answered, findings, codes:[{code,count}], by_file:[{file,findings:[…]}]}` | — (`--code`, `--including`) |
 | `caps` | the command list | — |
 | `batch` | one envelope per input line | — |
 
@@ -118,13 +119,34 @@ evicts rows the other is using. A tool indexing the same project an editor has o
 run. Two files, one directory, no interference — and the rows are still shared with the checkout, which is where they
 are expensive to rebuild.
 
+## 6.5 `sweep` — a whole project's findings
+
+The question the deleted probe tests answered by hand. Every file the session holds is cooked and diagnosed, and the
+findings are grouped by code with a per-file list under them:
+
+```text
+cpp_inspect --project E:\corpora\redis --file src/dict.c sweep
+cpp_inspect --project E:\corpora\redis --file src/dict.c sweep --code undefined-name --including "redis\src"
+```
+
+`--index --all-files` are **implied** — a sweep of one file is what `diagnostics` already is. `--code` keeps just the
+named codes and `--including` keeps just the files whose path contains a substring; the two filters every measurement in
+`docs/worklog.md` needs, because a project measured against a platform it was not written for has classes that are the
+platform's fault and must be named as such rather than counted as defects.
+
+The answer is the same `Session::diagnostics` the server answers a pull with, so a number here and a squiggle there are
+the same claim; what the sweep adds is that a **project** is measured rather than a file. On redis 8.x it answers 222
+files and 1 429 findings in **74 s** — the same work the probe did in 77 s, without a second client.
+
 ## 7. Why this exists
+
+
 
 Every question here used to be a `tests/tmp_*.rs` probe: write it, compile it, read four lines, delete it — and the
 compile dominated. The workspace's `#[ignore]`d probe tests were deleted for the same reason (each cost a link in every
 gate); see `docs/worklog.md` and `c-support.md` §8.4's record. A question is an argument now.
 
-The two probes that remain are the C-project **sweeps** the worklog's numbers come from
-(`cpp_ls/tests/c_diagnostics_probe.rs` for a whole project's findings, `cpp_code_analysis/tests/c_name_lookup_probe.rs`
-for one name's visibility). They are the next thing to move here as a `sweep` capability, so that this tool is the only
-instrument.
+**Nothing else measures the analysis now.** The two probe tests the worklog's earlier numbers came from —
+`cpp_ls/tests/c_diagnostics_probe.rs` (a whole project's findings, over the LSP protocol) and
+`cpp_code_analysis/tests/c_name_lookup_probe.rs` (one name's visibility) — were deleted once `sweep`, `facts` and
+`define` answered the same questions here. Every crate now has exactly **one** test target, which is what a gate links.

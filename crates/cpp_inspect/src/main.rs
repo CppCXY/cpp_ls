@@ -127,6 +127,21 @@ enum Command {
     Format,
     /// The session's own counters after the setup.
     Stats,
+    /// **A whole project's findings, tallied** — every file cooked and diagnosed, grouped by code.
+    ///
+    /// The question the deleted probe tests answered by hand; `--all-files` is implied, because a sweep of one file is
+    /// what `diagnostics` already is.
+    Sweep {
+        /// Only these codes (`undefined-name`, `syntax-error`, …). Repeatable.
+        #[arg(long = "code")]
+        codes: Vec<String>,
+        /// Only files whose path contains this.
+        #[arg(long)]
+        including: Option<String>,
+        /// How many findings to list per file.
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+    },
     /// What this tool can answer, as JSON.
     Caps,
     /// Read newline-delimited JSON requests on stdin and answer each on one line of stdout.
@@ -160,7 +175,14 @@ fn main() {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(mut cli: Cli) -> Result<(), String> {
+    // **A sweep is about the project**, so the two flags that make the session hold the whole project are implied:
+    // a sweep of one file is what `diagnostics` already is, and a caller that has to remember `--index --all-files`
+    // for the one command whose meaning is "all of them" is a caller the protocol failed.
+    if matches!(cli.command, Command::Sweep { .. }) {
+        cli.project.index = true;
+        cli.project.all_files = true;
+    }
     // **A debug build answers the same questions, minutes later.** The analysis is tree walks and inference; optimised
     // out, a project whose closure reaches the standard library takes minutes instead of a second — measured: `type` on
     // `test_cpp` did not finish in ten minutes in a debug build and answered in under a second in a release one. The
@@ -231,6 +253,16 @@ fn answer_for(
             let text = questions::the_stats(opened);
             Ok(Answer::new(text.clone(), json!({ "text": text })))
         }
+        Command::Sweep {
+            codes,
+            including,
+            limit,
+        } => Ok(questions::the_sweep(
+            opened,
+            codes,
+            including.as_deref(),
+            *limit,
+        )),
         Command::Caps | Command::Batch => unreachable!("handled by the caller"),
     }
 }
@@ -252,6 +284,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Inactive => "inactive",
         Command::Format => "format",
         Command::Stats => "stats",
+        Command::Sweep { .. } => "sweep",
         Command::Caps => "caps",
         Command::Batch => "batch",
     }
