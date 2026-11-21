@@ -232,8 +232,12 @@ fn blocks_28_a_control_block_is_never_one_line() {
             "{preset}"
         );
     }
-    // An empty body keeps its one line.
+    // **An empty control body is split too** (`{` newline `}`), which is the oracle's answer under `LLVM`.
     let empty = "void f(int a) {\n  if (a) {}\n}\n";
+    let empty_expected = "void f(int a) {\n  if (a) {\n  }\n}\n";
     let llvm = Style::preset("LLVM").expect("LLVM is a preset");
-    assert_eq!(cpp_formatter::format_file(path, empty, &llvm), empty);
+    assert_eq!(
+        cpp_formatter::format_file(path, empty, &llvm),
+        empty_expected
+    );
 }
