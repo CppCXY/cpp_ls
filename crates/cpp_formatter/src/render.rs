@@ -977,9 +977,20 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 statement_indent = indent;
                 ctor_column = None;
             } else if stream.tokens[index].kind == cpp_parser::CppTokenKind::Colon {
-                // `: member(...)` — the packed members line up two columns past the colon (`: ` is two characters).
-                ctor_column = Some(indent + 2);
-                in_ctor_init = true;
+                // **A constructor initializer's colon follows the parameter list's `)`**: `S(int a) : a_(a), …`. A base
+                // clause's colon (`struct X` then `: disjunction<…>`) does not, and treating it as one packed the base
+                // arguments at the colon + 2 (6) instead of under the first argument (18) — measured on nlohmann json's
+                // `binary_reader.hpp`.
+                let follows_a_parameter_list = index > 0
+                    && matches!(
+                        stream.tokens[index - 1].kind,
+                        cpp_parser::CppTokenKind::RightParen
+                            | cpp_parser::CppTokenKind::NoexceptKeyword
+                    );
+                if follows_a_parameter_list {
+                    ctor_column = Some(indent + 2);
+                    in_ctor_init = true;
+                }
             }
         } else if let Some(comment) = gap.comments.last().filter(|comment| {
             // **A block comment in the middle of a line is spaced like a token**: one space on each side, none after an
@@ -1576,9 +1587,16 @@ fn planned_indent(
     {
         return Some((column, false));
     }
-    if let Some(column) = angle_column
-        && blocks[index].is_some()
-    {
+    // **A continuation inside a template argument list aligns after its `<`**, whether or not the line is a block line:
+    // clang-format writes
+    //
+    //     struct X
+    //         : disjunction<std::is_same<T, bool>, std::is_same<T, char>,
+    //                       std::is_same<T, signed char>, …>
+    //
+    // — the arguments under the first one (18), not one continuation past the statement (6). The block test that used to
+    // be here skipped exactly these continuation lines (measured on nlohmann json's `binary_reader.hpp`).
+    if let Some(column) = angle_column {
         return Some((column, false));
     }
     // **A declaration whose type runs onto the next line continues the declaration**: clang-format writes

@@ -224,3 +224,15 @@ fn classes_26_a_declarator_after_its_return_type() {
         "static const std::map<std::string, std::vector<int>> some_global_name_table =\n    {};\n";
     assert_eq!(cpp_formatter::format_file(path, variable, &llvm), variable);
 }
+
+/// **A continuation inside a template argument list aligns after its `<` — and a base clause is not a constructor
+/// initializer**: clang-format writes the base arguments under the first one (18 columns) and the colon at `struct X` +
+/// four; the constructor-initializer column (colon + 2) used to win because every `:` that starts a line was treated as
+/// one (measured on nlohmann json's `binary_reader.hpp`, byte for byte).
+#[test]
+fn classes_27_a_base_clause_is_not_a_constructor_initializer() {
+    let llvm = Style::preset("LLVM").expect("LLVM is a preset");
+    let path = std::path::Path::new("snippet.cpp");
+    let input = "template <typename T>\nstruct valueless_elements_rate_is_char_or_bool\n    : disjunction<std::is_same<T, bool>, std::is_same<T, char>,\n                  std::is_same<T, signed char>, std::is_same<T, unsigned char>,\n                  std::is_same<T, wchar_t>, std::is_same<T, char16_t>,\n                  std::is_same<T, char32_t>,\n                  valueless_elements_rate_is_char8<T>> {};\n";
+    assert_eq!(cpp_formatter::format_file(path, input, &llvm), input);
+}
