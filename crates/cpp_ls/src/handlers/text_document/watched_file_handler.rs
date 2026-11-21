@@ -42,6 +42,7 @@ pub async fn on_did_change_watched_files(
 /// The coalescing is the watcher's (`a reconcile is already in flight` in `native_watcher`): this handler runs once per
 /// window whatever the storm's size.
 pub async fn process_reconcile(context: ServerContextSnapshot) -> Option<()> {
+    let started = std::time::Instant::now();
     let response = context
         .analysis()
         .update_session("reconcile the project with the disk", |session| {
@@ -53,16 +54,17 @@ pub async fn process_reconcile(context: ServerContextSnapshot) -> Option<()> {
         // No workspace yet: a reconcile about a project nobody has opened is nothing.
         return Some(());
     };
+    let took = started.elapsed();
 
     if response.is_empty() {
         // The ordinary answer, and the one worth saying out loud: the storm reported "events were lost" and the disk
         // agreed with the index. A rescan that finds nothing must not look like a rescan that ran.
-        log::info!("reconciled with the disk: nothing moved");
+        log::info!("reconciled with the disk in {took:.1?}: nothing moved");
         return Some(());
     }
 
     log::info!(
-        "reconciled with the disk: {} file(s) to re-read, {} forgotten",
+        "reconciled with the disk in {took:.1?}: {} file(s) to re-read, {} forgotten",
         response.reindex.len(),
         response.forgotten.len()
     );

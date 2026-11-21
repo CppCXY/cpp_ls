@@ -115,7 +115,42 @@ async fn watch_events(
     // of seconds and long enough that a kernel tree's `make` cannot turn into a rescan loop.
     let mut last_reconcile: Option<std::time::Instant> = None;
     let mut folded: u32 = 0;
-    while let Some(first) = receiver.recv().await {
+    // **When a report was folded, not dropped.** An overflow that arrives while the window is still open cannot be
+    // answered by the reconcile that just ran — the files it was about may not have existed yet — and a report that is
+    // simply discarded is a change nobody ever reads. So the folded report arms a timer: the loop waits for the
+    // channel, but no longer than the window, and asks the disk again when the window closes and nothing arrived to
+    // take the question over. (Measured on the storm fixture: the first reconcile saw 61 of 120 rewritten files,
+    // because the rest were written while it was running.)
+    let mut pending_at: Option<std::time::Instant> = None;
+    loop {
+        // **The armed window, fired by the timeout rather than by an event.** Nothing else in this task has a timer, so
+        // the wait below is where the window is closed.
+        if let Some(at) = pending_at
+            && std::time::Instant::now() >= at
+        {
+            pending_at = None;
+            last_reconcile = Some(std::time::Instant::now());
+            log::warn!(
+                "{folded} lost-event report(s) folded since the last look; asking the disk what moved (no reload)"
+            );
+            folded = 0;
+            context.enqueue(UpdateEvent::Reconcile).await;
+        }
+
+        let first = if let Some(at) = pending_at {
+            let wait = at.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(wait, receiver.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                // The window closed with nothing arriving: the reconcile above is this iteration's work.
+                Err(_) => continue,
+            }
+        } else {
+            match receiver.recv().await {
+                Some(event) => event,
+                None => break,
+            }
+        };
         tokio::time::sleep(BATCH_DELAY).await;
         let mut events = vec![first];
         while let Ok(event) = receiver.try_recv() {
@@ -156,6 +191,7 @@ async fn watch_events(
                 last_reconcile.is_none_or(|last| now.duration_since(last) >= RECONCILE_INTERVAL);
             if due {
                 last_reconcile = Some(now);
+                pending_at = None;
                 // **`warn` once per window, not once per batch**: 332 of these arrived in fifty seconds on a kernel
                 // tree, and a log that repeats itself is a log nobody reads. The number says how much was folded.
                 log::warn!(
@@ -164,9 +200,8 @@ async fn watch_events(
                 folded = 0;
                 context.enqueue(UpdateEvent::Reconcile).await;
             } else {
-                log::debug!(
-                    "a reconcile just ran; folding this lost-event report into the next one"
-                );
+                log::debug!("a reconcile just ran; the next window will answer this report");
+                pending_at = last_reconcile.map(|last| last + RECONCILE_INTERVAL);
             }
         }
     }

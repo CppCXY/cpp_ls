@@ -209,8 +209,16 @@ impl Server {
 /// can carry (so it reports lost events) and a **directory** appearing in the tree. Both now ask the disk what moved.
 #[test]
 fn a_watcher_storm_reconciles_instead_of_reloading() {
+    // **The size is the measurement's** — the default keeps the test quick, and `CPPLS_WATCH_STORM_FILES=3000` is
+    // what a kernel-sized tree looks like (the machine's own project was 3 200 files from a 2 978-entry database).
+    let count: usize = std::env::var("CPPLS_WATCH_STORM_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(120);
     let project = Project::new("storm");
-    let files: Vec<String> = (0..120).map(|index| format!("src/f{index:03}.c")).collect();
+    let files: Vec<String> = (0..count)
+        .map(|index| format!("src/f{index:03}.c"))
+        .collect();
     project.write("include/base.h", "#pragma once\nint base(void);\n");
     for file in &files {
         project.write(
@@ -225,6 +233,7 @@ fn a_watcher_storm_reconciles_instead_of_reloading() {
     server.initialize(&project);
 
     // Wait for the first index to drain: that is the state the storm arrives in.
+    let indexing_started = Instant::now();
     let deadline = Instant::now() + INDEX_TIMEOUT;
     while Instant::now() < deadline {
         if project.log().contains("the workspace is indexed") {
@@ -237,9 +246,16 @@ fn a_watcher_storm_reconciles_instead_of_reloading() {
         "the fixture project is indexed within {INDEX_TIMEOUT:?}"
     );
 
+    eprintln!(
+        "[storm] {count} file(s) indexed in {:.2?}",
+        indexing_started.elapsed()
+    );
+
     // **The storm**: every file rewritten, a directory created with files in it, and files deleted. Written as fast as
     // the process can write them, which is what a build's output looks like to a watcher.
-    for round in 0..3 {
+    // **Six rounds over more than a window (2 s)**: the reports from rounds that arrive while a reconcile is running
+    // must arm the next one rather than being dropped — the folded half is the change nobody would ever read.
+    for round in 0..6 {
         for (index, file) in files.iter().enumerate() {
             project.write(
                 file,
@@ -283,6 +299,18 @@ fn a_watcher_storm_reconciles_instead_of_reloading() {
         .lines()
         .filter(|line| line.contains("reloading the workspace"))
         .collect();
+    for line in log
+        .lines()
+        .filter(|line| line.contains("reconciled") || line.contains("asking the disk"))
+    {
+        eprintln!("[storm] {line}");
+    }
+    eprintln!("[storm] reload(s): {}", reloads.len());
+    let reconciles = log
+        .lines()
+        .filter(|line| line.contains("reconciled with the disk"))
+        .count();
+    eprintln!("[storm] reconcile(s): {reconciles}");
     assert!(
         reloads.is_empty(),
         "a watcher storm must not reload the workspace; the log holds {} reload(s):\n{}",
