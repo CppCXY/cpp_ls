@@ -208,6 +208,20 @@ pub struct WorkspaceSection {
     /// list is what `exclude` is for, one file at a time.
     #[serde(default)]
     pub source_extensions: Vec<String>,
+    /// **Whether the server watches the tree itself** — `native_watch = false` turns its own watcher off.
+    ///
+    /// The server only watches when the **client does not** (`workspace.didChangeWatchedFiles` dynamic
+    /// registration, which Neovim does not advertise), and on a very large tree the watcher is the part with the
+    /// least to offer and the most to cost: a Linux kernel checkout reported **332 lost-event reports in fifty
+    /// seconds** from a tree a build was writing to, and every one of them used to re-open the whole workspace.
+    /// A lost-event report now reconciles with the disk instead (`Session::reconcile`: a `stat` per project file),
+    /// so the cost is bounded — but a project that would rather trust its own editor, or a checkout on a filesystem
+    /// whose events are noise (`inotify` over a network mount, a build directory inside the tree), can say so here.
+    ///
+    /// `None` is the default and means "watch", which is also what a client that watches for itself gets: the
+    /// watcher is not started for a client that registered `didChangeWatchedFiles`.
+    #[serde(default)]
+    pub native_watch: Option<bool>,
 }
 
 /// `[compile]` — how this project is built, when the discovered answer is not the right one.

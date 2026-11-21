@@ -72,11 +72,20 @@ section at its defaults.
 [workspace]
 exclude = ["**/build/**", "third_party/**"]   # globs the analysis must not read
 source_extensions = ["cuh", "cppm"]           # extensions *added* to the engine's own list
+native_watch = false                          # no OS watcher of the server's own (see below)
 ```
 
 `exclude` is the same list an editor uses to hide files. `source_extensions` is **additive**: the engine's own list is
 what a C/C++ project is made of, and writing this says "and also these" — a CUDA `.cuh`, a module `.cppm`. To read fewer
 files, use `exclude`.
+
+`native_watch` turns off the watcher the **server** starts. It only starts at all for a client that does not watch for
+itself (no `workspace.didChangeWatchedFiles` dynamic registration — Neovim's configuration), and on a very large tree it
+is the part with the least to offer and the most to cost: a Linux kernel checkout produced **332 lost-event reports in
+fifty seconds** from a tree a build was writing to, and each one used to re-open the whole workspace. That is bounded
+now — a lost-event report reconciles with the disk (one `stat` per project file, `Session::reconcile`) and a directory
+appearing in the tree does the same — but a checkout whose events are noise (a build directory inside the tree, a
+network mount) can turn the watcher off here. Absent means "watch".
 
 The engine's own list: `c cc cpp cxx c++ h hh hpp hxx h++ ipp inl tpp tcc cppm ixx`, plus `def mpp cuh` for headers
 reached through an `#include`.

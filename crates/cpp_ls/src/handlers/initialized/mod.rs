@@ -131,8 +131,26 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                 }
             }
             // **`CPPLS_NO_WATCH` is an A/B switch, not a setting**: with it set no OS watcher runs, which is how a
-            // run can tell whether the watcher's own loop is what burns a core and grows the process.
-            if crate::probes::no_watch() {
+            // run can tell whether the watcher's own loop is what burns a core and grows the process. The project's
+            // own answer is `[workspace] native_watch = false`, which is a decision rather than a probe — a checkout
+            // whose events are noise, or a reader who would rather trust the editor.
+            let watching_off = context
+                .analysis()
+                .with_snapshot(|session| {
+                    session
+                        .project_config()
+                        .config
+                        .workspace
+                        .native_watch
+                        .is_some_and(|wanted| !wanted)
+                })
+                .unwrap_or(false);
+            if watching_off {
+                log::info!(
+                    "the native watcher is off: the project's own configuration says \
+                     `[workspace] native_watch = false`"
+                );
+            } else if crate::probes::no_watch() {
                 log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
