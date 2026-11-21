@@ -33,6 +33,16 @@ use crate::tokens::Stream;
 /// Every token belongs to exactly one range (the ranges are contiguous and cover `0..tokens.len()`), so a caller can
 /// sum widths without checking for gaps.
 pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
+    logical_lines_with(stream, None)
+}
+
+/// **The logical lines, with an initializer`s braces kept inside their statement**: a brace that opens an initializer
+/// does not end a logical line, so `int v[] = {1, 2};` can be put on one line by the join pass — clang-format writes it
+/// that way when it fits. Without the roles (a caller that has none) every brace splits, which is the old behaviour.
+pub fn logical_lines_with(
+    stream: &Stream<'_>,
+    roles: Option<&crate::roles::Roles>,
+) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut start = 0usize;
     let mut parens = 0isize;
@@ -40,6 +50,8 @@ pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
     // splitting there glued the macro's last line to the declaration after it (`lu_byte tt_ typedef struct TValue {`,
     // measured on Lua 5.5's `lobject.h`). The directive ends at the first newline in the gap after a token.
     let mut in_directive = false;
+    // The `{` of each open brace, so an initializer's closer can be told from a block's (only with roles).
+    let mut braces: Vec<usize> = Vec::new();
 
     for index in 0..stream.tokens.len() {
         let kind = stream.tokens[index].kind;
@@ -78,8 +90,23 @@ pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
             CppTokenKind::RightParen | CppTokenKind::RightBracket => parens -= 1,
             _ => {}
         }
-        // **A brace is a line of its own**: the code before it ends the previous line, and the brace ends this one.
-        if matches!(kind, CppTokenKind::LeftBrace | CppTokenKind::RightBrace) && parens == 0 {
+        // **A block brace is a line of its own**: the code before it ends the previous line, and the brace ends this
+        // one. **An initializer's brace stays inside the statement** when the roles are known, which is what lets the
+        // join pass put a fitting `int v[] = {1, 2};` on one line (clang-format does).
+        let an_initializer = match (kind, roles) {
+            (CppTokenKind::LeftBrace, Some(roles)) => {
+                braces.push(index);
+                roles.init_brace.contains(&stream.tokens[index].start)
+            }
+            (CppTokenKind::RightBrace, Some(roles)) => braces
+                .pop()
+                .is_some_and(|open| roles.init_brace.contains(&stream.tokens[open].start)),
+            _ => false,
+        };
+        if matches!(kind, CppTokenKind::LeftBrace | CppTokenKind::RightBrace)
+            && parens == 0
+            && !an_initializer
+        {
             if start < index {
                 lines.push(start..index);
             }

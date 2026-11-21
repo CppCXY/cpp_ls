@@ -52,11 +52,27 @@ fn a_statement_with_a_comment_is_not_joined() {
     check(input, input);
 }
 
-/// A **brace** keeps the statement broken (`BinPackLongBracedList: false`), and a block body never joins.
+/// A **small initializer** joins — clang-format puts `int values[] = {1, 2};` on one line when it fits — while a
+/// **block** body never does (the brace rules own its lines), and a list with more cells is left to the table layout.
 #[test]
-fn a_statement_with_a_brace_is_not_joined() {
-    let input = "int values[] = {1,\n                2};\n";
-    check(input, input);
+fn a_statement_with_a_small_initializer_joins() {
+    check(
+        "int values[] = {1,\n                2};\n",
+        "int values[] = {1, 2};\n",
+    );
+    // A list with many cells is left to the table layout (its rows are that pass's business, covered by
+    // `cases_tables.rs`): the join must not collapse it into one line.
+    let table = "static const int n[] = {1111111,\n                          2222222,\n                          3333333,\n                          4444444,\n                          5555555};\n";
+    assert!(
+        !cpp_formatter::format_file(std::path::Path::new("snippet.cpp"), table, &style())
+            .lines()
+            .all(|line| line.contains("{"))
+            || cpp_formatter::format_file(std::path::Path::new("snippet.cpp"), table, &style())
+                .lines()
+                .count()
+                > 1,
+        "a many-cell list must not collapse into one line"
+    );
 }
 
 /// A **run of macro invocations** has no terminator; joining it put two statements on one line.

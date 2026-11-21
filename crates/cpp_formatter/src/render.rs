@@ -89,7 +89,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // are kept: this pass adds breaks, it does not re-flow).
     let mut forced_breaks = vec![false; stream.tokens.len()];
     if style.count(StyleOption::ColumnLimit) > 0 {
-        for line in crate::breaks::logical_lines(&stream) {
+        for line in crate::breaks::logical_lines_with(&stream, Some(&roles)) {
             // **Only the source lines are searched**: a statement that is already spread over several lines is
             // short per line, and breaking it by its *whole* length adds breaks clang-format never makes (measured:
             // 28 of 43 files changed when clang-format`s own 80-column output was fed back through us).
@@ -272,7 +272,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // * a statement that does not fit (the breaker owns it, and the fitting model it uses is not complete yet);
     // * a statement already on one line.
     if style.count(StyleOption::ColumnLimit) > 0 {
-        for line in crate::breaks::logical_lines(&stream) {
+        for line in crate::breaks::logical_lines_with(&stream, Some(&roles)) {
             if line.end <= line.start + 1 {
                 continue;
             }
@@ -283,12 +283,36 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             if (first + 1..line.end).any(|index| !stream.gaps[index].comments.is_empty()) {
                 continue;
             }
-            if (first..line.end).any(|index| {
-                matches!(
-                    stream.tokens[index].kind,
+            // **A block brace refuses the join; a small initializer's does not**: clang-format joins
+            // `int v[] = {1, 2};`, `std::vector<int> w{1, 2};` and `auto s = std::string{"x"};` when they fit, and a
+            // statement holding a **body** never joins. A list with more than **three** cells is left to the table
+            // layout instead: joining it collapses the rows that layout produces (measured: whole-file +873 on
+            // nlohmann json when every fitting initializer joined, the table pass losing its `{ … }`).
+            let mut cells = 0usize;
+            let mut nested = false;
+            let mut depth = 0isize;
+            for token in &stream.tokens[first..line.end] {
+                match token.kind {
+                    cpp_parser::CppTokenKind::LeftBrace
+                        if roles.init_brace.contains(&token.start) =>
+                    {
+                        depth += 1;
+                        if depth > 1 {
+                            nested = true;
+                        }
+                    }
+                    cpp_parser::CppTokenKind::RightBrace if depth > 0 => depth -= 1,
                     cpp_parser::CppTokenKind::LeftBrace | cpp_parser::CppTokenKind::RightBrace
-                )
-            }) {
+                        if depth == 0 =>
+                    {
+                        // A **block** brace: the statement never joins.
+                        nested = true;
+                    }
+                    cpp_parser::CppTokenKind::Comma if depth == 1 => cells += 1,
+                    _ => {}
+                }
+            }
+            if nested || cells > 2 {
                 continue;
             }
             // **A template head is a line of its own**: `template <typename T>` then `class lexer_base {` is what
