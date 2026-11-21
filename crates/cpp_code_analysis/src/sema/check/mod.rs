@@ -393,6 +393,27 @@ impl<'a> CheckContext<'a> {
         self.language.family() == Some(cpp_parser::features::Family::C)
     }
 
+    /// **Is this a string literal in a `char *` position, in C?** — the one conversion C answers differently.
+    ///
+    /// In C a string literal's type is `char[N]` — **no `const`** (C11 6.4.5p6: "the multibyte character sequence is
+    /// then used to initialize an array of static storage duration and length just sufficient to contain the
+    /// sequence"). So `char *p = "…";` is an exact conversion there, where in C++ it is a discarded qualifier. The
+    /// type layer spells a literal `const char*` in **both** languages, because a spelling is one answer for two; the
+    /// language is known here and the expression is in hand, so the rules can say what C says.
+    ///
+    /// Only a **literal** expression counts: a `const char *` *variable* dropped into a `char *` is a
+    /// discarded qualifier in C too, and the compilers warn about it (`-Wdiscarded-qualifiers`).
+    ///
+    /// Measured on redis 8.x: eleven `assign-type-check`, eight `return-type-mismatch` and one `param-type-check`
+    /// finding, every one of them this pair — `char *cset = "…";` is how that code was written (`docs/c-support.md`
+    /// §8).
+    pub fn a_string_literal_in_a_char_pointer_position(
+        &self,
+        expression: &cpp_parser::CppSyntaxNode,
+        written: &str,
+    ) -> bool {
+        self.is_c() && is_a_string_literal(expression) && is_a_char_pointer_spelling(written)
+    }
     /// **The comment and literal ranges of the file as written**, for the rules that read the *text* rather than the tree.
     ///
     /// A rule that scans `written` — `cstyle_cast`, `use_auto` — is scanning prose and data as well as code, and the
@@ -1333,6 +1354,40 @@ pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<Strin
 /// with a pointer or reference to a non-arithmetic type: `MyString(const char*)` cannot be built from `1231`, which
 /// is the whole of the `std::string x = 123;` case. Everything else — a class parameter, a name this cannot classify
 /// — answers `None`, because a conversion this layer cannot see is not a conversion the program does not have.
+/// **Is this expression a string literal?** — the first significant token is one, which is what a literal *is* in
+/// this grammar (a concatenated literal is several tokens, and its first is the string one).
+///
+/// Asked of the node rather than of its text: `"0"` is a string and `0` is a number, and a comment that contains
+/// either is neither.
+fn is_a_string_literal(expression: &cpp_parser::CppSyntaxNode) -> bool {
+    expression
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| {
+            !matches!(
+                cpp_parser::CppTokenKind::from(token.kind()),
+                cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
+            )
+        })
+        .is_some_and(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::StringLiteral
+        })
+}
+
+/// **Is this spelling `char *`**, once the top-level qualifiers and the whitespace are off? `const char *` converts
+/// already, and `unsigned char *` is a different target that a string literal does not convert to in any language.
+fn is_a_char_pointer_spelling(written: &str) -> bool {
+    let mut spelling = String::new();
+    for word in written.split_whitespace() {
+        if matches!(word, "const" | "volatile") {
+            continue;
+        }
+        spelling.push_str(word);
+    }
+    // A reference or an array is not a pointer target: `char *&` and `char[]` are different questions.
+    spelling == "char*"
+}
+
 pub fn a_class_can_be_built_from(
     context: &CheckContext<'_>,
     class: &str,

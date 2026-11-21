@@ -212,6 +212,13 @@ fn check_the_arguments(
                 every_candidate_disagrees = false;
                 break;
             }
+            // **C's string-literal rule** — the same one the other two rules ask, see
+            // [`CheckContext::a_string_literal_in_a_char_pointer_position`]: a literal is `char[]` in C, so a
+            // `char *` parameter takes it exactly.
+            if context.a_string_literal_in_a_char_pointer_position(argument.syntax(), parameter) {
+                every_candidate_disagrees = false;
+                break;
+            }
             let target = crate::sema::types::parse_type_spelling(parameter);
             match from.convertible_to(&target) {
                 crate::Known::No => {

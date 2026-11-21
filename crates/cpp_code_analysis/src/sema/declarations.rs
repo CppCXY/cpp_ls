@@ -3216,13 +3216,13 @@ pub(crate) fn declared_returns_of_with(
     // fixed (`docs/declarator-shapes.md`): the declarator's own spelling is `(*maker(int a))(int b)` — the `(` before
     // the `*` is the return type's, `(int a)` is the function's own list, and `(int b)` describes the pointed-to
     // function. [`a_parenthesised_return_type`] reads exactly that.
-    let before_the_name = match declarator
+    let parenthesised = declarator
         .as_ref()
-        .and_then(|declarator| a_parenthesised_return_type(declarator, binding.name_range))
-    {
+        .and_then(|declarator| a_parenthesised_return_type(declarator, binding.name_range));
+    let from_the_text = match parenthesised {
         // A parenthesised return type is a *whole* spelling — `(*)(int b)` — so it is not put through the operator
         // filter below, which is there to reject text that is not purely operators.
-        Some(spelling) => spelling,
+        Some(_) => None,
         None => declarator
             .as_ref()
             .map(|declarator| {
@@ -3258,8 +3258,51 @@ pub(crate) fn declared_returns_of_with(
                 operators
                     .chars()
                     .all(|c| c == '*' || c == '&' || c.is_whitespace())
+            }),
+    };
+
+    // **A calling convention is written *inside* the pointer**, so the text above carries its name and the operator
+    // filter refuses the whole thing. `char *__cdecl strchr(const char *, int)` is MinGW's own spelling: the tree is
+    // `Declarator { Declarator { PointerType { Star, Identifier "__cdecl" } }, NameExpr "strchr", … }`, so the text
+    // before the name is `*__cdecl` — not "purely operators" — and the fact recorded `returns: char`. Every caller
+    // then read `strchr` as returning a `char`, and redis's `char *pch = strrchr(path, '/')` was reported as a
+    // conversion that does not exist (`docs/c-support.md` §8).
+    //
+    // The operators are therefore read from the **tree** as well: one `*` per `PointerType` before the name, one `&`
+    // per `ReferenceType`. A word inside the pointer node — the convention, or a macro standing in for one
+    // (`APIENTRY`) — has no effect, because it is not a node of those kinds.
+    let pointer_operators = {
+        let mut operators = String::new();
+        let mut nodes: Vec<CppSyntaxNode> = declarator
+            .as_ref()
+            .map(|declarator| {
+                declarator
+                    .descendants()
+                    .filter(|node| {
+                        usize::from(node.text_range().start()) < binding.name_range.start_offset
+                    })
+                    .collect()
             })
-            .unwrap_or_default(),
+            .unwrap_or_default();
+        nodes.sort_by_key(|node| node.text_range().start());
+        for node in nodes {
+            match cpp_parser::CppSyntaxKind::from(node.kind()) {
+                cpp_parser::CppSyntaxKind::PointerType => operators.push('*'),
+                cpp_parser::CppSyntaxKind::ReferenceType => operators.push('&'),
+                cpp_parser::CppSyntaxKind::RValueReferenceType => operators.push_str("&&"),
+                _ => {}
+            }
+        }
+        operators
+    };
+
+    // **Which reading wins, and in what order.** A parenthesised return type is a whole spelling the operators alone
+    // cannot express (`int (*)(int b)`), so it is first. Then the tree's operators, which survive a calling
+    // convention. Then the text's own filtered reading, which is what a shape with none of the above has.
+    let before_the_name = match parenthesised {
+        Some(spelling) => spelling,
+        None if !pointer_operators.is_empty() => pointer_operators,
+        None => from_the_text.unwrap_or_default(),
     };
 
     // **The specifiers are read as syntax, not as text**, which is the rule [`crate::sema::types::read_specifiers`]
@@ -6875,6 +6918,7 @@ void f(int value);
         auto unclearable() { return make(); }\n\
              const char *(paren_name) (void);\n\
              int (*through_pointer)(int);\n\
+             char *__cdecl conventional(int);\n\
              void plain();\n",
         );
 
@@ -6952,6 +6996,16 @@ void f(int value);
             "a return this layer cannot type is still refused rather than guessed"
         );
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
+        // **A calling convention sits inside the pointer**, so the text before the name is `*__cdecl` and the
+        // operator filter used to refuse it — recording `char` for MinGW's own `char *__cdecl strchr(…)`. Every
+        // caller then read `strchr` as returning a `char`, and redis's `char *pch = strrchr(path, '/')` was reported
+        // as a conversion that does not exist (`docs/c-support.md` §8). The operators now come from the tree, where
+        // the convention is a word beside the `*` rather than part of it.
+        assert_eq!(
+            of("conventional").returns.as_deref(),
+            Some("char *"),
+            "a pointer whose calling convention stands before the name is still a pointer"
+        );
     }
 }
 

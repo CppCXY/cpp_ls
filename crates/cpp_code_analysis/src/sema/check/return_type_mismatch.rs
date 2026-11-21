@@ -93,6 +93,14 @@ impl Check for ReturnTypeMismatch {
                             // check invents a problem.
                             continue;
                         };
+                        // **C's string-literal rule** — see
+                        // [`CheckContext::a_string_literal_in_a_char_pointer_position`].
+                        if context.a_string_literal_in_a_char_pointer_position(
+                            expression.syntax(),
+                            &declared,
+                        ) {
+                            continue;
+                        }
                         // **The shared facility**, the same one `param-type-check` and `assign-type-check` ask: it normalises
                         // the spelling (a return type written `const std::string&` is a reference, and `class_name()` answers
                         // `None` for one), asks the type relation first and the index only for the class question. Only

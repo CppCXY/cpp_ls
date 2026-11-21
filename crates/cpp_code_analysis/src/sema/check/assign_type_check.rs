@@ -301,6 +301,10 @@ fn report_if_it_does_not_convert(
     // **One facility, shared with `param-type-check`** — `sema::convert` normalises the spelling (a `const std::string&`
     // assignment target is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a reference), asks the type
     // relation first and the index only for the class question, and answers `Unknown` — silence — when neither can speak.
+    // **C's string-literal rule** — see [`CheckContext::a_string_literal_in_a_char_pointer_position`].
+    if context.a_string_literal_in_a_char_pointer_position(expression, written) {
+        return;
+    }
     if crate::sema::convert::conversion(&from, written, |class| {
         super::a_class_can_be_built_from(context, class, &from)
     }) == crate::sema::convert::Conversion::Refused
