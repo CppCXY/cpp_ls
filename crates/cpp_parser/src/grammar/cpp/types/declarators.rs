@@ -187,6 +187,31 @@ pub(crate) fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> b
         return true;
     }
 
+    // **A group whose inner declarator is a function** — `(*f())`, and not the `(*f)(int)` shape above.
+    //
+    // This is what a macro standing for a variable produces: MinGW's `#define environ (*__p__environ())` turns
+    // redis's `extern char **environ;` into `extern char **(*__p__environ());`, and the group closes on `;` rather
+    // than on a parameter list. Refused here, the group was read as an *abstract* pointer-to-function type, whose
+    // reading wants a parameter list after the `)` — there is none, the whole declaration failed ("expected primary
+    // expression"), and because the damage lands on the line after the includes it looked like the includer's fault
+    // (`sentinel.c:26`, `server.c:2620`; `docs/worklog.md`). `gcc -std=gnu11` accepts the shape.
+    //
+    // The `(` after the name is the whole test, and it is also what keeps `(*f)(int)` on the arm above: there the
+    // token after the name is the group's `)`.
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Star
+                | CppTokenKind::Ampersand
+                | CppTokenKind::LogicalAnd
+                | CppTokenKind::Caret,
+            CppTokenKind::Identifier,
+            CppTokenKind::LeftParen
+        ]
+    ) {
+        return true;
+    }
+
     // **A bare name whose group is followed by a parameter list** — the declarator spelling neovim's
     // `src/lpeg/lptree.c:1308` writes, as a parameter of a callback-taking function:
     //
@@ -767,6 +792,9 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
 /// one read suffixes would take both.
 pub(crate) fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::Declarator);
+    // The inner parameter list's suffixes are read by the same loop the outer declarator uses, which asks "has this
+    // declarator named anything yet?" of the events from this offset — see `parse_declarator_function_suffixes`.
+    let declarator_from = p.current_event_count();
 
     expect_token(p, CppTokenKind::LeftParen)?;
 
@@ -866,6 +894,14 @@ pub(crate) fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     // unaffected: their cursor is on the name, not on the `)`.
     if p.current_token() != CppTokenKind::RightParen {
         parse_name(p)?;
+        // **The name's own parameter list, when it is written inside the group** — `(*f())`, the shape a macro
+        // standing for a variable makes out of a declaration (`docs/worklog.md`, redis's `environ`). Without this
+        // the group ended at the name and the `(` was left for the outer declarator's suffix loop, which wanted the
+        // `)` here; `(*f)(int)` is unaffected because there the group closes on `)` and the list belongs to the
+        // pointer.
+        if p.current_token() == CppTokenKind::LeftParen {
+            parse_declarator_function_suffixes(p, declarator_from)?;
+        }
     }
     expect_token(p, CppTokenKind::RightParen)?;
 

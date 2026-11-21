@@ -22,6 +22,7 @@ about POSIX headers rather than about redis.
 | scan only, no database (§8.1 below in the old numbering) | 427 (4 syntax) | 573 | 975 |
 | with the synthesized database | 38 (2 syntax) | 181 | 850 |
 | … and C's string-literal rule (`e023c54e`) | 19 (2 syntax) | 181 | 829 |
+| … and a parenthesised function declarator (`4b6c8f1a`-era) | **17 (0 syntax)** | 181 | 902 |
 
 ### 1. A macro parameter may be spelled with a keyword — `d0de833f`
 
@@ -69,34 +70,43 @@ return type (`int (*)(int b)`) still wins, and the text keeps the shapes the tre
 
 Fixture: `declarations::a_function_records_what_it_returns_and_nothing_else_does`'s `conventional` case.
 
-### 5. The two syntax errors: diagnosed, not fixed — `sentinel.c:26`, `server.c:2620`
+### 5. The two syntax errors: a macro standing for a variable — fixed
 
-Both files fail at their **first declaration after the includes**, and both report `expected ), but get identifier`:
+Both files failed at their first declaration after the includes, with `expected ), but get identifier`:
 
 ```
 sentinel.c:26      extern char **environ;
 server.c:2620      extern char **environ;
 ```
 
-The line is not the problem — `extern char **environ;` parses in isolation, in both dialects, and the *whole file* reads
-clean through `cpp_inspect` (`--file src/sentinel.c diagnostics --cook` → no findings; the same for `server.h` and
-`connection.h` read as roots). Two headers carry the real trigger, and both use a **C++ keyword as a parameter name**:
+`extern char **environ;` parses on its own in either dialect, and the whole file read clean through `cpp_inspect`, so
+the line was not the problem. The **rendering** was: `CPPLS_DUMP_RENDERING_DIR` showed the cooked stream starting with
 
-```
-server.h:3467      int validateProcTitleTemplate(const char *template);
-connection.h:431   int connectionIndexByType(const char *typename);
+```c
+extern char **(*__p__environ());
 ```
 
-In **C** those are ordinary identifiers and the declarations parse (0 errors); in **C++** they are keywords and the parse
-reports exactly `expected primary expression` at those two lines — reproduced with `cpp_dump` on a two-line fixture in
-both dialects. So the failing parse is one that read those headers with a **C++/permissive** language, and the damage
-lands on the includer's next line.
+which is MinGW's own `#define environ (*__p__environ())` expanding — correctly — inside redis's declaration. The shape
+is a **parenthesised declarator whose inner declarator is a function**, and `gcc -std=gnu11 -fsyntax-only` accepts it.
+Our parser did not: `a_parenthesised_declarator_with_a_name_follows` claims a group only when it is `( <op> name )`,
+so this group was read as an *abstract* pointer-to-type, whose reading wants a parameter list after the `)` — there is
+none, the declaration failed, and the damage landed on the line after the includes (which is what made it look like the
+includer's fault).
 
-What is **not** the cause, checked: the file's own language (`sentinel.c` is in the database with `-std=gnu11`); the
-header's per-file language when asked directly (it answers C and the fact is recorded correctly); a stale summary (a cold
-cache reproduces it). The failing path is the **unit render** — the concatenation of the root's and its includes'
-renderings — and this round did not find where its language comes from. That is the next thing to instrument, and it is
-why the two are recorded here rather than closed.
+Two changes, both in `types/declarators.rs`:
+
+* the guard also claims `( <op> name (` — a group whose inner declarator is a function (`(*f())`), while `(*f)(int)`
+  stays on the arm that already had it;
+* `parse_parenthesised_declarator` reads that inner name's own parameter list before the group's `)`, so the suffix
+  belongs to the function inside rather than to the pointer outside.
+
+Measured: redis **19 → 17 errors, 2 → 0 syntax errors** (hints 829 → 902 — the two files now parse in full), and libuv
+unchanged at **0**. The C++ shapes are untouched: `int (*fp)(int)`, `int (*maker(int a))(int b)`,
+`void (*signal(int, void (*)(int)))(int)` and `typedef int (*binary_op)(int, int)` all parse, and the parser's
+501 tests pass.
+
+Fixture: `char **(*p__environ2(void));` and `char **(*f());` in `target/bench/environ2.c`'s shape — a parser test is
+added beside `a_second_parameter_list_after_a_macro_type_is_one_declarator`.
 
 ### What is left, and whose defect it is
 
@@ -109,8 +119,8 @@ why the two are recorded here rather than closed.
 | `missing-include` | 19 | Follows from the same absent headers. |
 | `undefined-name` | 15 | `ae_epoll.c`/`ae_kqueue.c`/`ae_evport.c` are **platform files** this build would not compile; my database listed every `src/*.c`. Correct findings about the wrong platform. |
 | `assignment-in-condition` | 12 | gcc's `-Wparentheses` says the same. Not triaged line by line. |
-| `syntax-error` | 2 | `sentinel.c:26`, `server.c:2620` — **open**, diagnosed above: the real trigger is `template`/`typename` used as parameter names in `server.h`/`connection.h`, and the failing parse is the unit render. |
-| `return-type-mismatch` | 1 | `src/dict.c:1156`, `unsigned long long integers[6], hash = 0;` then `return hash;`. **Open** — the multi-declarator shape, not reproducible from its own snippet yet. |
+| `syntax-error` | 0 | Fixed above: a macro standing for a variable made a parenthesised function declarator out of `extern char **environ;`. |
+| `return-type-mismatch` | 1 | `src/dict.c:1156` — **open, diagnosed**: `unsigned long long integers[6], hash = 0;` followed by `return hash;`. The **fact** for `hash` is right (`unsigned long long`, `cpp_inspect facts`), while the **expression type** of `hash` is `unsigned long long[6]` (`cpp_inspect type --needle "return hash;" --shift 8`) — the second declarator inheriting the first one's array suffix somewhere between the scope tree and the type engine. Reproduced minimally in four lines; the search is where a name's type is answered, not where facts are built. |
 | `dangling-return` | 1 | `src/t_hash.c:4194` — a pointer into a local struct member. Plausible; not triaged. |
 
 ---

@@ -334,3 +334,27 @@ void f(void) {
         "the declaration after the typedef is still a file-scope declaration: {declared:?}"
     );
 }
+
+/// **A parenthesised declarator whose inner declarator is a function** — `(*f())`.
+///
+/// This is what a macro standing for a variable produces: MinGW writes `#define environ (*__p__environ())`, so redis's
+/// `extern char **environ;` is read as `extern char **(*__p__environ());`. `gcc -std=gnu11` accepts the shape; the
+/// parser read the group as an *abstract* pointer-to-function type, whose reading wants a parameter list after the `)`
+/// — there is none — and the declaration failed, taking the line after the includes with it (`sentinel.c:26`,
+/// `server.c:2620`, two syntax errors; `docs/worklog.md`).
+///
+/// The other reading of the same tokens is `(*f)(int)`, a pointer to a function: there the group closes on `)` and the
+/// parameter list belongs to the pointer, which is why the guard for this shape keys on the `(` **after** the name.
+#[test]
+fn a_parenthesised_function_declarator_parses() {
+    let source = "\
+extern char **(*p__environ(void));
+char **(*f());
+char **(*g(int));
+int (*fp)(int);
+int (*maker(int a))(int b);
+void (*signal(int, void (*)(int)))(int);
+int after_the_shapes(void);
+";
+    assert_eq!(errors_in(source, LanguageConfig::c()), Vec::<String>::new());
+}
