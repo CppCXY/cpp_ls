@@ -183,14 +183,29 @@ resolves), so the trigger is in `uv.h`'s own structure: a guard, `UV_EXTERN` def
 `#ifdef _WIN32`, then `#if defined(UV_FREERTOS) … #else … #endif`, then `#elif defined(_WIN32) # include "uv/win.h"`.
 That is the next thing to fix, and this section is the measurement it will be checked against.
 
-### 7.2 `assign-type-check` inside a macro's expansion — fixed
+### 7.2 `assign-type-check` and a type the compiler deduces — fixed
 
-`src/uv-common.c:576` said `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` `` —
-the name comes from the expansion of `atomic_exchange_explicit(…)` in the project's own macro, so the declaration the
-rule judged is one this layer made up. The rule now uses the exemption `undefined-name` has had since the C corpus: a
-name the **implementation** reserves (`__atomic_*`, `__builtin_*`, `__sync_*`, `_Interlocked*`, `_mm*`) is not the
-reader's declaration, and a declaration this layer invented deserves the same silence.
+`src/uv-common.c:576` said `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` ``.
+The name is not the reader's: GCC's `atomic_exchange_explicit` expands a statement expression whose second line is
 
-Measured: libuv's Windows build went from **12 errors to 11** (0 warnings, 97 hints unchanged; the 33-second pull run
-became 108 s on the machine, which is noise between runs rather than a regression — the same run measured 30 s once).
-Fixture: `sema/check/test/assign_type_check.rs` (three reserved spellings silent, a string in an `int` still reported).
+```c
+__typeof__ ((void)0, *__atomic_exchange_ptr) __atomic_exchange_val = (VAL);
+```
+
+and the **type reader** spelled that type `void` — the `BuiltinType` inside the `typeof`'s own argument won the walk
+(`read_specifiers_named`) — so the declaration was judged against a type nobody wrote. Measured with a probe on the
+reader itself: `__typeof__ ((void)0, *p)` → `Builtin { spelling: "void" }`, `__typeof__(p)` and `decltype(p)` →
+`Builtin { spelling: "__typeof__(p)" }`.
+
+The fix is in the layer that was wrong, and it is a question about a **keyword kind** rather than about a spelling:
+`read_specifiers_named` answers "no written type" (the empty spelling, which records `type_of: None`) when the
+specifier sequence begins with [`CppTokenKind::DecltypeKeyword`] — the kind the lexer already gives `decltype`,
+`typeof`, `typeof_unqual`, `__typeof__` and `__typeof`. `auto` keeps its spelling on purpose: it is the marker the
+deduction path reads (`is_a_deduced_type`), and a declaration that answered "no type" instead lost its deduction —
+measured, two session tests went red when the rule included `AutoKeyword`.
+
+Measured: libuv's Windows build went from **12 errors to 11** (0 syntax errors, 0 warnings, 97 hints, of which 85
+`braces-around-statements` and 12 `else-after-return` — the registry marks both Hint, and libuv earns them by writing
+`if (!handle) return UV_EINVAL;`). Fixtures: `sema/types.rs`'s `deducing_specifiers` (the `typeof` family spells no
+type, `auto` keeps its spelling, an `int` is still `int`) and `sema/check/test/assign_type_check.rs` (a string in an
+`int` is still reported; the assignment half still judges what the file wrote).

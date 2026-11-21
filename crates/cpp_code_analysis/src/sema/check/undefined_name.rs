@@ -244,7 +244,7 @@ fn is_a_keyword_construct(name: &str) -> bool {
 /// The double underscore (and MSVC's leading underscore plus a capital) is the standard's own mark for "this belongs to
 /// the implementation", and a project that uses one has no way to declare it: the compiler supplies it. "Nothing this
 /// file can see names it" is therefore true of every such name and says nothing about the program.
-pub(super) fn is_the_implementations_builtin(name: &str) -> bool {
+fn is_the_implementations_builtin(name: &str) -> bool {
     name.starts_with("__builtin_")
         || name.starts_with("__sync_")
         || name.starts_with("__atomic_")

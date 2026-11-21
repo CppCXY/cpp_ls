@@ -167,17 +167,14 @@ impl Check for AssignTypeCheck {
                 continue;
             };
 
-            // **A name the implementation reserves is not the reader's declaration.** The compiler supplies
-            // `__atomic_*`, `__builtin_*`, `__sync_*`, `_Interlocked*` and `_mm*`, and a *macro body* in a system
-            // header expands into declarations of the form `void __atomic_exchange_val = …` — a shape this layer reads
-            // as an initialisation and judges against `void`. Measured on libuv 1.53.1's Windows build:
-            // `src/uv-common.c:576` reported `` `__atomic_exchange_val` is initialised with a value that does not
-            // convert to `void` `` from the expansion of `atomic_exchange_explicit(…)` in the project's own macro
-            // (`docs/c-support.md` §7). The `undefined-name` rule has had this exemption since the C corpus; a
-            // declaration this layer made up deserves the same silence.
-            if super::undefined_name::is_the_implementations_builtin(&name) {
-                continue;
-            }
+            // **A name the implementation reserves is not the reader's declaration** — asked of the reading rather
+            // than of the spelling. The compiler supplies `__atomic_*`, `__builtin_*`, `__sync_*`, `_Interlocked*`
+            // and `_mm*`, and a *macro body* in a system header expands into declarations of the shape
+            // `void __atomic_exchange_val = …`. The tell is not the name: it is that **the file did not write it** —
+            // the rendering's span has no `written` place, because the spelling came from another file's macro body.
+            // Measured on libuv 1.53.1's Windows build: `src/uv-common.c:576` reported `` `__atomic_exchange_val` is
+            // initialised with a value that does not convert to `void` `` from the expansion of
+            // `atomic_exchange_explicit(…)` (`docs/c-support.md` §7), code the reader never wrote.
 
             // **A parameter's default value is not this check's question.** Measured on EmmyLuaCodeStyle:
             // `Range(Position _start = Position(0, 0), Position _end = Position(0, 0));` produced two findings — the

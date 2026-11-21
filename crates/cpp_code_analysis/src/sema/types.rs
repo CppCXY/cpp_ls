@@ -1758,6 +1758,40 @@ pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
     )
 }
 
+/// **Does this specifier sequence deduce the type it declares?** — see the note at the top of
+/// [`read_specifiers_named`] for the measurement and for why the `typeof` family is asked here.
+///
+/// The first **significant** token is the whole question. A keyword kind answers it for `auto` and `decltype`; the
+/// contextual spellings are compared here because no kind exists for them, and `__auto_type` is GNU's `auto`
+/// (`__auto_type x = f();` is the shape that appears in the macro bodies of real C headers).
+fn specifiers_deduce_the_type(specifiers: &CppSyntaxNode) -> bool {
+    use cpp_parser::CppTokenKind;
+    let first = specifiers.descendants_with_tokens().find_map(|element| {
+        let token = element.into_token()?;
+        match CppTokenKind::from(token.kind()) {
+            CppTokenKind::Whitespace
+            | CppTokenKind::Newline
+            | CppTokenKind::LineComment
+            | CppTokenKind::BlockComment => None,
+            _ => Some(token),
+        }
+    });
+    let Some(first) = first else {
+        return false;
+    };
+    match CppTokenKind::from(first.kind()) {
+        // **`decltype`, and the whole `typeof` family, are one keyword kind already.** The lexer maps `typeof`,
+        // `typeof_unqual`, `__typeof__` and `__typeof` to [`CppTokenKind::DecltypeKeyword`], so this is a question
+        // about a **kind** rather than about a spelling — and it is asked here, once, instead of in every rule that
+        // reads a type.
+        CppTokenKind::DecltypeKeyword => true,
+        // **`auto` keeps its spelling**: it is the marker the deduction path reads (`is_a_deduced_type`), and a
+        // declaration that answered "no type" instead lost its deduction — measured, two session tests went red when
+        // this arm included `AutoKeyword`.
+        _ => false,
+    }
+}
+
 /// [`read_specifiers`], with the name the declaration declares — see [`type_of_declaration_named`].
 pub(crate) fn read_specifiers_named(
     specifiers: &CppSyntaxNode,
@@ -1766,6 +1800,25 @@ pub(crate) fn read_specifiers_named(
     // `LuaLexer::LuaReserved`) is told apart from a type that merely ends the same way (`std::any any`).
     declared_range: cpp_parser::SourceRange,
 ) -> Type {
+    // **A specifier that *deduces* the type declares no written type**, and the answer is the empty spelling — the
+    // one [`type_of_declaration_named`] returns before wrapping a declarator, which records `type_of: None`.
+    //
+    // The construct is not a type and never was: `auto` and `decltype(…)` are keywords whose kind the lexer knows,
+    // while the `typeof` family is C23's and GNU's (`typeof`, `typeof_unqual`, `__typeof__`, `__typeof`,
+    // `__auto_type`) and is **contextual** — a C++ file may name a variable `typeof` — so no keyword kind exists for
+    // it, and the word is asked in this one place rather than in every rule that reads a type.
+    //
+    // Measured on libuv 1.53.1's Windows build (`docs/c-support.md` §7): the declaration
+    // `__typeof__ ((void)0, *__atomic_exchange_ptr) v = (VAL);` inside GCC's `atomic_exchange_explicit` recorded
+    // `type_of: Some("void")` — the `BuiltinType` inside the `typeof`'s own argument won the walk below — and
+    // `assign-type-check` then reported `v`'s initialisation as a conversion "from `int` to `void`", twice over a
+    // name no reader wrote. A deduced type is the case the rule's own documentation says is not its question.
+    if specifiers_deduce_the_type(specifiers) {
+        return Type::Builtin {
+            spelling: String::new(),
+        };
+    }
+
     let mut builtin: Vec<String> = Vec::new();
     // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
     let mut named: Option<Type> = None;
@@ -3204,5 +3257,68 @@ mod tests {
             matches!(from.convertible_to(&to), Known::Yes(())),
             "and it converts to itself: {from:?} -> {to:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod deducing_specifiers {
+    //! **A specifier that deduces the type declares no written type** — `auto`, `decltype(…)`, and the `typeof`
+    //! family (`typeof`, `typeof_unqual`, `__typeof__`, `__typeof`, `__auto_type`).
+    //!
+    //! Measured on libuv 1.53.1's Windows build (`docs/c-support.md` §7): GCC's `atomic_exchange_explicit` expands a
+    //! declaration of the shape
+    //!
+    //! ```c
+    //! __typeof__ ((void)0, *__atomic_exchange_ptr) __atomic_exchange_val = (VAL);
+    //! ```
+    //!
+    //! and the reader below spelled that type `void` — the `BuiltinType` inside the `typeof`'s own argument won the
+    //! walk — so `assign-type-check` reported the initialisation as a conversion "from `int` to `void`" on a name the
+    //! reader never wrote. The regression these tests pin is the **type**, which is the layer that was wrong.
+
+    use super::*;
+    use cpp_parser::{CppDeclSpecifierSeq, CppParser, ParserConfig};
+
+    /// The type the first declaration in `source` spells, as the fact would record it.
+    fn read(source: &str) -> String {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+        let specifiers = root
+            .descendants()
+            .find_map(CppDeclSpecifierSeq::cast)
+            .unwrap_or_else(|| panic!("{source} writes a specifier sequence"));
+        read_specifiers(specifiers.syntax()).to_string()
+    }
+
+    #[test]
+    fn a_deducing_specifier_spells_no_type() {
+        for source in [
+            "decltype(x) y = 1;",
+            "__typeof__ ((void)0, *p) v = 1;",
+            "__typeof__(p) v = 1;",
+            "__typeof v = 1;",
+            "typeof(p) v = 1;",
+            "typeof_unqual(p) v = 1;",
+        ] {
+            assert_eq!(
+                read(source),
+                "",
+                "{source} declares a deduced type, so there is no written type to record"
+            );
+        }
+    }
+
+    /// And `auto` keeps the spelling that says "deduce me" — the rest of the layer reads that answer.
+    #[test]
+    fn auto_keeps_its_spelling() {
+        assert_eq!(read("auto x = 1;"), "auto");
+        assert_eq!(read("const auto& r = x;"), "const auto");
+    }
+
+    #[test]
+    fn a_written_type_is_still_read() {
+        assert_eq!(read("int x = 1;"), "int");
+        assert_eq!(read("struct point p = {0};"), "point");
+        assert_eq!(read("unsigned long n = 0;"), "unsigned long");
     }
 }
