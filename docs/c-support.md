@@ -121,3 +121,71 @@ run and silenced, so it costs nothing and cannot fire. Twenty-one codes can fire
 
 `[diagnostics].disable` turns one off by name, and the severities are the registry's own — a client that shows only
 errors shows exactly the rows marked Error here.
+
+## 7. Measured on a real C project: libuv 1.53.1
+
+The first C project measured end to end, because "usable for C" is a claim about a program rather than about a grammar.
+libuv is the right first subject: it is C11, it is `typedef struct` and macros all the way down, and its Windows build is
+one compile database over 40 files (`src/*.c` and `src/win/*.c`).
+
+```text
+git clone --depth 1 https://github.com/libuv/libuv          # 1.53.1
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=gcc \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLIBUV_BUILD_TESTS=OFF -DLIBUV_BUILD_BENCH=OFF
+# 80 entries (the shared and static libraries each list every file), 40 distinct files,
+# -std=gnu11 -Iinclude -Isrc -DBUILDING_UV_SHARED=1 -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00
+```
+
+Two probes ask the two questions, over the protocol against the real binary:
+
+```text
+$env:CPPLS_C_PROJECT = "E:\corpora\libuv"
+cargo test --release -p cpp_ls --test c_diagnostics_probe -- --ignored --nocapture   # findings, file by file
+$env:CPPLS_NEOVIM = "E:\corpora\libuv"; $env:CPPLS_USABILITY_FILES = "92"
+cargo test --release -p cpp_ls --test neovim_usability -- --ignored --nocapture     # hover / definition rates
+```
+
+| Question | Answer on libuv 1.53.1 (Windows build, 40 files) |
+| --- | --- |
+| Does it parse? | **yes** — 0 `syntax-error`, 40 of 40 reports answered, 33 s |
+| Hover | 466 / 526 (89 %), p50 12 ms, p95 4.3 s |
+| Definition | 403 / 526 (77 %), p50 0 ms, p95 1.5 s |
+| Hints | 85 `braces-around-statements`, 12 `else-after-return` — libuv writes `if (!handle) return UV_EINVAL;` by choice, so these are opinions the registry already marks Hint |
+| Errors | **12, and they are false positives** — 11 `undefined-name` and 1 `assign-type-check`, below |
+
+### 7.1 `undefined-name` on a name a header declares
+
+`src/win/tcp.c:1627` says `` `uv_translate_sys_error` is not declared: nothing this file can see names it `` — and
+`include/uv.h:452` declares it at file scope, on a line `src/win/tcp.c` reaches through its own `#include "uv.h"`.
+
+Measured, not inferred (`crates/cpp_code_analysis/tests/c_name_lookup_probe.rs`):
+
+```text
+[probe] index holds a summary for include/uv.h: true
+[probe] that summary: 20 declaration(s), 9 include(s), 61 macro(s)
+[probe] first 12 names: ["uv_addrinfo_t", "uv_addrinfo_s", "uv_sockaddr_t", ..., "sockaddr"]
+[probe] does the summary name uv_translate_sys_error: false
+```
+
+So the header is indexed and its summary holds **20 declarations of the ~800 it has** — all of them from lines 69–79.
+The parser is not the fault: `cpp_dump` on `include/uv.h` reports **0 errors**, and the name is in the tree at offset
+20306. What the index parses is the **rendering**, and that rendering **starts at line 75** (the `#else` branch of
+`#if defined(UV_FREERTOS)`): everything before it, from the include guard to `UV_EXTERN`'s definition, is missing from the
+text — and the summary stops right after those typedefs.
+
+```text
+[probe] E:\corpora\libuv\src\win\core.c can see uv_translate_sys_error: Unknown(NotDeclaredHere("uv_translate_sys_error"))
+[probe] uv_translate_sys_error (from the header's own file): Unknown(NotDeclaredHere("uv_translate_sys_error"))
+```
+
+A reduced fixture does **not** reproduce it (a header with a guard, an `#if` with two branches and declarations after it
+resolves), so the trigger is in `uv.h`'s own structure: a guard, `UV_EXTERN` defined under `#ifndef UV_EXTERN` +
+`#ifdef _WIN32`, then `#if defined(UV_FREERTOS) … #else … #endif`, then `#elif defined(_WIN32) # include "uv/win.h"`.
+That is the next thing to fix, and this section is the measurement it will be checked against.
+
+### 7.2 `assign-type-check` inside a macro's expansion
+
+`src/uv-common.c:576` says `` `__atomic_exchange_val` is initialised with a value that does not convert to `void` `` —
+the name comes from a GCC builtin-shaped macro in a body (`__atomic_exchange_n(&…, …)` expanded by our own preprocessor),
+so the finding is about a construct the reader never wrote. The rule's own doc says a name the implementation reserves is
+never a finding; the *assignment* half of that reading needs the same silence.
