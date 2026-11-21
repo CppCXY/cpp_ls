@@ -42,12 +42,51 @@ pub struct ProjectArgs {
     /// Report the setup's timings on stderr.
     #[arg(long, global = true)]
     pub time: bool,
+    /// **The database file inside the project's cache directory.** `inspect.db` by default.
+    ///
+    /// Not the server's `cache.redb`: two writers over one database share a `generation`, and a collection on one side
+    /// evicts rows the other is using. The tool must be safe to run while an editor has the same project open — and it
+    /// is, because its rows are its own file.
+    #[arg(long, global = true, default_value = DEFAULT_DATABASE)]
+    pub db: String,
+}
+
+/// The database this tool writes unless `--db` says otherwise — see [`ProjectArgs::db`].
+pub const DEFAULT_DATABASE: &str = "inspect.db";
+
+/// **What makes one session different from another** — the key a batch run reuses a session by.
+///
+/// Opening, indexing and cooking a project is the cost, and a series of questions about one file should pay it once.
+/// Two requests that agree on all of this can share the session; the ones that disagree cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Setup {
+    pub project: std::path::PathBuf,
+    pub file: std::path::PathBuf,
+    pub index: bool,
+    pub all_files: bool,
+    pub cook: bool,
+    pub db: String,
+    pub fixtures: Vec<String>,
+}
+
+impl Setup {
+    /// The setup a request describes.
+    pub fn of(args: &ProjectArgs) -> Setup {
+        Setup {
+            project: args.project.clone().unwrap_or_default(),
+            file: args.file.clone().unwrap_or_default(),
+            index: args.index,
+            all_files: args.all_files,
+            cook: args.cook,
+            db: args.db.clone(),
+            fixtures: args.fixtures.clone(),
+        }
+    }
 }
 
 /// **A project with one file open and (by default) indexed**, ready to be asked.
 pub struct Opened {
     pub session: Session<DiskFiles>,
-    pub root: PathBuf,
     pub file: PathBuf,
     pub text: String,
     pub view: FileView,
@@ -139,7 +178,15 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
         &root,
         SessionFiles::new(OpenDocuments::new(), DiskFiles),
         WatchFilter::new(&root),
-    );
+    )
+    .with_cache_file({
+        // **One leak per process, on purpose.** The cache file name is a `&'static str` because it is hashed into the
+        // database's key and lives in the store for the whole session; the tool is short-lived and the name is one
+        // string, so leaking it is cheaper than a lifetime parameter threaded through the session for a corner of the
+        // API that one caller uses.
+        let name: &'static str = Box::leak(args.db.clone().into_boxed_str());
+        name
+    });
     let opened = opened_at.elapsed();
     let files: Vec<PathBuf> = match args.all_files || args.index {
         // A slice keeps `--index` cheap on a big tree: the *breadth* questions are about the project, and the file
@@ -201,7 +248,6 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
 
     Ok(Opened {
         session,
-        root,
         file,
         text,
         view,

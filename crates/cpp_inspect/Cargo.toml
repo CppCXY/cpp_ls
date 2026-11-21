@@ -1,0 +1,32 @@
+[package]
+name = "cpp_inspect"
+version = "0.4.0"
+edition = "2024"
+publish = false
+description = "Ask the C++ analysis one question, as JSON, for a program rather than a person."
+
+# **Why this crate exists.** Every question about the analysis used to be a new `tests/tmp_*.rs` probe: write it,
+# compile it, read four lines, delete it. The compile was the cost and it was paid per question, while the questions
+# themselves are the same twenty over and over — the type at an offset, a class's members, the fact behind a name, the
+# hover card.
+#
+# It is a **tool for programs**, and its first client is an AI agent working on this analysis: the answers are JSON on
+# stdout by default, the capabilities are a command of their own (`caps`), and `batch` asks many questions in one
+# process so the index is built once rather than per question.
+#
+# Two properties make it safe beside a running editor:
+#
+#   * it writes its own database — `inspect.db` in the project's cache directory — so a tool's collection never
+#     evicts rows the server is using, and the server's `generation` is not the tool's;
+#   * it never writes to the project. The only files it creates are its database and, for `--fixture`, a temporary
+#     directory it removes.
+
+[dependencies]
+cpp_parser.workspace = true
+cpp_code_analysis.workspace = true
+# The hover card is the server's own rendering, and a tool that asked the analysis instead would answer a different
+# question from the one an editor asks.
+cpp_ls.workspace = true
+
+clap.workspace = true
+serde_json.workspace = true

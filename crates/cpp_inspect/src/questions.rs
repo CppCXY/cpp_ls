@@ -21,7 +21,9 @@ pub struct Answer {
 }
 
 impl Answer {
-    fn new(text: String, value: Value) -> Self {
+    /// \[`Answer::new`\] is `pub(crate)` because the two commands that answer without a tree — `caps` and `stats` —
+    /// are assembled by `main` rather than here, and they must answer the same shape as everything else.
+    pub(crate) fn new(text: String, value: Value) -> Self {
         Self { text, value }
     }
 }
