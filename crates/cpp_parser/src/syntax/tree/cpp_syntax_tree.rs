@@ -21,15 +21,35 @@ pub struct CppSyntaxTree {
     root: GreenNode,
     errors: Vec<CppParseError>,
     tokens: Vec<CppTokenData>,
+    /// Nodes the event stream left open, which [super::cpp_tree_builder::balance_events] had to close at the end of the
+    /// stream. Zero for a tree the grammar balanced; see that function for what a non-zero number costs the shape.
+    unbalanced_events: usize,
 }
 
 impl CppSyntaxTree {
-    pub fn new(root: GreenNode, errors: Vec<CppParseError>, tokens: Vec<CppTokenData>) -> Self {
+    pub fn new(
+        root: GreenNode,
+        errors: Vec<CppParseError>,
+        tokens: Vec<CppTokenData>,
+        unbalanced_events: usize,
+    ) -> Self {
         CppSyntaxTree {
             root,
             errors,
             tokens,
+            unbalanced_events,
         }
+    }
+
+    /// **How many nodes the grammar failed to close** — see [CppTreeBuilder::unbalanced_events].
+    ///
+    /// A well shaped tree answers zero, and the tests assert it. A release build that sees a non-zero answer should say
+    /// so rather than trust the tree's nesting: the nodes are still closed (the tree is well formed and lossless) but the
+    /// ones after a leaked node are inside it.
+    ///
+    /// [CppTreeBuilder::unbalanced_events]: super::cpp_tree_builder::CppTreeBuilder::unbalanced_events
+    pub fn unbalanced_events(&self) -> usize {
+        self.unbalanced_events
     }
 
     /// Every token of the file, in order, trivia included — the stream this tree was parsed from.
@@ -106,6 +126,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            0,
         );
 
         assert_eq!(tree.to_source_text(), "int x;");

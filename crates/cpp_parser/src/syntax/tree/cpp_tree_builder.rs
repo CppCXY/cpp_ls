@@ -24,6 +24,9 @@ pub struct CppTreeBuilder<'a> {
     text: &'a str,
     events: Vec<MarkEvent>,
     green_builder: CppGreenNodeBuilder<'a>,
+    /// How many nodes the event stream left open and [`balance_events`] had to close — see its note on what that means
+    /// for the shape of the tree.
+    unbalanced: usize,
 }
 
 impl<'a> CppTreeBuilder<'a> {
@@ -37,13 +40,24 @@ impl<'a> CppTreeBuilder<'a> {
                 text,
                 events,
                 green_builder: CppGreenNodeBuilder::with_cache(cache),
+                unbalanced: 0,
             },
             None => CppTreeBuilder {
                 text,
                 events,
                 green_builder: CppGreenNodeBuilder::new(),
+                unbalanced: 0,
             },
         }
+    }
+
+    /// **How many nodes the grammar left open** — the count [alance_events] had to close.
+    ///
+    /// Zero for every stream the grammar balanced, which is what the audit asserts in tests; a non-zero answer means the
+    /// tree came out with part of the file nested one level too deep, and this is how a release build can say so instead
+    /// of returning that tree as if it were fine.
+    pub fn unbalanced_events(&self) -> usize {
+        self.unbalanced
     }
 
     /// Translate the event stream into builder calls.
@@ -52,7 +66,7 @@ impl<'a> CppTreeBuilder<'a> {
     /// (`parse_cpp_unit` opens it), and adding another here would nest two roots.
     /// [`CppGreenNodeBuilder::finish`] handles the "no root at all" case.
     pub fn build(&mut self) {
-        balance_events(&mut self.events);
+        self.unbalanced = balance_events(&mut self.events);
         let event_count = self.events.len();
 
         let mut parents: Vec<CppSyntaxKind> = Vec::new();
@@ -165,7 +179,20 @@ impl<'a> CppTreeBuilder<'a> {
 ///
 /// This is a repair, not a licence to leak: [`crate::parser::EventStreamAudit`] still reports every
 /// node the grammar failed to close, and the tests assert it stays empty.
-fn balance_events(events: &mut Vec<MarkEvent>) {
+///
+/// # What a repair can and cannot do
+///
+/// It cannot undo the leak. Everything a `NodeStart` was followed by *is* that node's content from the builder's point of
+/// view — the grammar emitted those events while it was inside the node — so closing it at the end of the stream is the
+/// only end available, and a leaked node really does swallow the events after it. The fix for a leak is in the grammar
+/// (close the marker where the construct ends, error paths included), which is what [`EventStreamAudit`] enforces in
+/// tests; what this function adds is that the tree **says** it happened: [`balance_events`] counts the nodes it had to
+/// close and [`CppTreeBuilder::unbalanced_events`] reports it, so a release build can log a wrongly shaped tree instead
+/// of returning it silently (`docs/parser-toolchain-review.md` P1-4).
+///
+/// The comment here used to claim the end was "the true local end of each node". It is not, and saying so hid that this
+/// fallback is a damage report rather than a repair.
+fn balance_events(events: &mut Vec<MarkEvent>) -> usize {
     // Replay the stream against a stack of open nodes. `NodeEnd` closes the innermost open node; a
     // `NodeEnd` with nothing open is spurious and dropped. A node that closed without producing
     // anything is one `Marker::complete` would have dropped, so it is dropped here as well.
@@ -214,8 +241,87 @@ fn balance_events(events: &mut Vec<MarkEvent>) {
         }
     }
 
-    // Anything still open never got its `NodeEnd`.
-    for _ in 0..stack.len() {
+    // Anything still open never got its `NodeEnd`. Closed here, at the end of the stream, because an event stream carries
+    // no better end — see the note above. The count is what the tree reports.
+    let left_open = stack.len();
+    for _ in 0..left_open {
         events.push(MarkEvent::NodeEnd);
+    }
+    left_open
+}
+
+#[cfg(test)]
+mod tests {
+    use rowan::GreenNode;
+
+    use super::*;
+    use crate::{kind::CppTokenKind, parser::MarkEvent, text::SourceRange};
+
+    /// A stream that closes everything it opens.
+    fn a_balanced_stream() -> Vec<MarkEvent> {
+        vec![
+            MarkEvent::NodeStart {
+                kind: CppSyntaxKind::TranslationUnit,
+                parent: NO_FORWARD_PARENT,
+            },
+            MarkEvent::EatToken {
+                kind: CppTokenKind::IntKeyword,
+                range: SourceRange::new(0, 3),
+            },
+            MarkEvent::EatToken {
+                kind: CppTokenKind::Whitespace,
+                range: SourceRange::new(3, 1),
+            },
+            MarkEvent::EatToken {
+                kind: CppTokenKind::Identifier,
+                range: SourceRange::new(4, 1),
+            },
+            MarkEvent::EatToken {
+                kind: CppTokenKind::Semicolon,
+                range: SourceRange::new(5, 1),
+            },
+            MarkEvent::NodeEnd,
+        ]
+    }
+
+    /// **A balanced stream reports nothing**, which is what makes the number meaningful: a parser whose grammar closes its
+    /// markers always answers zero, and the audit in tests says the same thing.
+    #[test]
+    fn a_balanced_stream_reports_no_unbalanced_events() {
+        let mut builder = CppTreeBuilder::new("int x;", a_balanced_stream(), None);
+        builder.build();
+        assert_eq!(builder.unbalanced_events(), 0);
+    }
+
+    /// **A leaked node is closed and counted.** The builder cannot un-swallow what the grammar nested — every event after
+    /// the `NodeStart` is that node's content — so the tree is still well formed and lossless; what it must not do is
+    /// pretend nothing happened. This is the review's P1-4 in the one form a fallback can deliver.
+    #[test]
+    fn a_leaked_node_is_closed_and_reported() {
+        let mut events = a_balanced_stream();
+        // Insert an unclosed `Declaration` around the identifier: `NodeStart` with no `NodeEnd`, which is what a grammar
+        // that unwinds without completing its marker emits.
+        events.insert(
+            2,
+            MarkEvent::NodeStart {
+                kind: CppSyntaxKind::Declaration,
+                parent: NO_FORWARD_PARENT,
+            },
+        );
+
+        let mut builder = CppTreeBuilder::new("int x;", events, None);
+        builder.build();
+        assert_eq!(
+            builder.unbalanced_events(),
+            1,
+            "the fallback closes one node, and says so"
+        );
+
+        let root: GreenNode = builder.finish();
+        assert_eq!(
+            root.text_len(),
+            rowan::TextSize::new(6),
+            "the tree is still lossless — closing a leaked node loses no text"
+        );
     }
 }

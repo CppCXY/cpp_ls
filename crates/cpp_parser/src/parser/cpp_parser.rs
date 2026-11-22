@@ -642,15 +642,16 @@ impl<'a> CppParser<'a> {
         parse_cpp_unit(&mut parser);
 
         let events = std::mem::take(&mut parser.events);
-        let root = {
+        let (root, unbalanced_events) = {
             let mut builder = crate::syntax::CppTreeBuilder::new(text, events.clone(), None);
             builder.build();
-            builder.finish()
+            let unbalanced = builder.unbalanced_events();
+            (builder.finish(), unbalanced)
         };
 
         crate::parser::phases::report();
         let tokens = std::mem::take(&mut parser.tokens);
-        let tree = CppSyntaxTree::new(root, errors, tokens);
+        let tree = CppSyntaxTree::new(root, errors, tokens, unbalanced_events);
         (tree, events)
     }
 
@@ -706,14 +707,15 @@ impl<'a> CppParser<'a> {
     /// needs the tree should still go through [`CppParser::run`], which is what checks that the
     /// grammar balanced its markers before this trusts it.
     fn finish_tree(mut self) -> CppSyntaxTree {
-        let root = {
+        let (root, unbalanced_events) = {
             let mut builder = CppTreeBuilder::new(
                 self.text,
                 std::mem::take(&mut self.events),
                 self.parse_config.node_cache(),
             );
             builder.build();
-            builder.finish()
+            let unbalanced = builder.unbalanced_events();
+            (builder.finish(), unbalanced)
         };
 
         crate::parser::phases::report();
@@ -721,6 +723,7 @@ impl<'a> CppParser<'a> {
             root,
             std::mem::take(self.errors),
             std::mem::take(&mut self.tokens),
+            unbalanced_events,
         )
     }
 
