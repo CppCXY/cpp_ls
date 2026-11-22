@@ -54,10 +54,10 @@ So the failure needs **doctest + nlohmann/json + the seven std headers + doctest
 a state interaction rather than one construct, and the next step is to shrink it by one include at a time from that
 failing probe (the script is the one that produced the table: a Python loop over probe files with one CDB entry each).
 
-### The root cause of the json failures: hedley's macros are not in the cook''s table
+### The root cause of the json failures: hedley's macros are not in the cook's table
 
 Once `cpp_inspect rendering` existed, the failing unit could be read instead of guessed: `unit-conversions1.cpp` cooks
-to **240 434** bytes and parses with exactly **eight** errors, all `expected `;` after expression`, all at three
+to **240 434** bytes and parses with exactly **eight** errors, all `expected ; after expression`, all at three
 places — the bodies of `equal_general`, `less_general` and `equal_leaf`:
 
 ```text
@@ -68,11 +68,17 @@ places — the bodies of `equal_general`, `less_general` and `equal_leaf`:
 with **no `;`**, so a parser that reads it as a call expression reports the error against the *declaration after it* —
 which is exactly what the eight errors are. Two separate defects then:
 
-* **the cook leaves hedley''s function-like macros unexpanded** — the rendering still spells `JSON_HEDLEY_PRAGMA(…)`,
+* **the cook leaves hedley's function-like macros unexpanded** — the rendering still spells `JSON_HEDLEY_PRAGMA(…)`,
   `JSON_HEDLEY_DIAGNOSTIC_PUSH` and `JSON_HEDLEY_UNLIKELY(…)` (61 occurrences) — so whatever the parser does, the
-  stream it reads is not the compiler''s. Why the table lacks them is the open question: the guard around
-  `#define JSON_HEDLEY_PRAGMA` is `defined(__GNUC__) && …`, and `__GNUC__` **is** known to the cook (a fixture printing
-  `gnuc_seen` in its rendering proves it), so the loss is somewhere in the include chain or in a cross-file state.
+  stream it reads is not the compiler's. **And it is not specific to the failing tests**: a four-line translation unit
+  whose whole content is `#include <nlohmann/json.hpp>`, one `JSON_HEDLEY_UNLIKELY(1)` and one
+  `JSON_HEDLEY_PRAGMA(GCC diagnostic push)` cooks to **150 534** bytes with `JSON_HEDLEY_UNLIKELY(` **62** times,
+  `JSON_HEDLEY_PRAGMA(` **4** times, and `__builtin_expect` / `_Pragma(` **zero**. So hedley's definitions never reach
+  the table at all, while `__GNUC__` does (a fixture printing `gnuc_seen` proves the guards run). The next question is
+  the one line that decides it: `hedley.hpp:17` is `#if !defined(JSON_HEDLEY_VERSION) || (JSON_HEDLEY_VERSION < 15)` —
+  if the cook already holds `JSON_HEDLEY_VERSION` when it reaches the file, the whole of hedley is skipped, and the
+  includer that gets there first is `detail/macro_scope.hpp:12`, ahead of `json.hpp:88`. That is where the next
+  session starts.
 * **the parser had no rule for a pragma operator between statements** — fixed here (`stats.rs`,
   `a_pragma_operator_between_statements_is_a_statement`), which is the *expanded* form hedley and doctest produce;
   `FORMAT_VERSION` 47 → 48 for the grammar change.
