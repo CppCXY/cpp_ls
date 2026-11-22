@@ -4,6 +4,21 @@ What this server understands about C++: how a file is identified as C++, which l
 semantic layer can answer, what each LSP feature gives, and which diagnostics exist. Configuration and the limits are in
 [`configuration.md`](configuration.md); the same reference for C is [`c-support.md`](c-support.md).
 
+## What "supported" means in this document
+
+Three different abilities, and "the parser supports X" claims only the first:
+
+| Ability | What it means | Where it is measured |
+| --- | --- | --- |
+| **Recognises the syntax** | X produces the intended tree — no error node, no fallback to another construct, lossless | `crates/cpp_parser/tests/suite/` — `gaps.rs` in particular states which constructs are read, as what node, and which are not |
+| **Resolves a target** | a name, an include, a macro or a member reaches **what the compiler would reach**: the same header, the same definition, the same overload set | `docs/configuration.md` (include resolution), the analysis's own tests, and the corpus measurements in `docs/worklog.md` |
+| **Matches a compiler's acceptance and diagnostics** | a file that a given compiler accepts is accepted here with the same reading, and the diagnostics agree | **not claimed.** The corpora in `docs/worklog.md` measure syntax errors against real projects, which is evidence about the second row and about gross agreement, not about diagnostics |
+
+The known gaps are listed where they are found rather than here: `crates/cpp_parser/tests/suite/gaps.rs` carries them as
+test data, so a gap that is closed becomes a test that fails if it comes back. The one C++ construct this document's own
+table knows is missing is the **function-try-block** (`void f() try { } catch (...) { }`): `try { } catch` as a *statement*
+is read, the same words in a function's own position are not.
+
 ## 1. Language identification
 
 | Item | Rule |
@@ -33,8 +48,14 @@ Each construct is a **feature bit** opened by `-std=` or `[compile].standard`.
 | CUDA | `__global__`/`__device__`/`__host__`, the `<<<…>>>` launch syntax, built-in vector types such as `float4` and `dim3` |
 
 `#embed` and the C++26 library facilities are **not** supported; both are read as C++23 text. The two C++26 language
-features this server does read are parsed **unconditionally**, because no earlier standard gives their tokens a
-meaning — a file that writes them is being read as C++26 whatever `-std=` says.
+features this server reads are treated differently, because their tokens are not the same kind of thing:
+
+* **static reflection's** markers (`^^`, `[: r :]`) have no meaning in any earlier standard, so they are read
+  unconditionally — a file that writes them is being read as C++26 whatever `-std=` says.
+* **contracts** are a keyword question, and `contract_assert` is an ordinary **identifier** in C++23 and every earlier
+  standard. Making it a keyword everywhere broke a valid C++23 program (`int contract_assert = 1;`), so it is a keyword
+  only under `-std=c++26` (or MSVC's `/std:c++latest`, which is the newest standard this server knows). `pre(…)` and
+  `post(…)` are context-sensitive and are read wherever they appear in a function declarator's tail.
 
 ### C++26 static reflection (P2996)
 
