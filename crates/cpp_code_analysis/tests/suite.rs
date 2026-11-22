@@ -41,6 +41,8 @@ mod cooked;
 mod definition;
 #[path = "suite/diagnostics.rs"]
 mod diagnostics;
+#[path = "suite/discovery.rs"]
+mod discovery;
 #[path = "suite/documentation.rs"]
 mod documentation;
 #[path = "suite/expand.rs"]

@@ -835,13 +835,37 @@ pub fn the_sweep(
     let mut counted = 0usize;
     // How many files the compilation database has no command for — see the note in the loop.
     let mut not_in_the_database = 0usize;
+    let mut not_in_the_database_examples: Vec<String> = Vec::new();
 
     // **Each file is read for its own line numbers.** The findings a file gets are in that file's coordinates, and
     // `--file` names only the one the session was opened around: a sweep that measured every line against it printed
     // `module.c:2453` for a file with no 2 453rd line.
     let mut paths: Vec<std::path::PathBuf> = opened.session.project_files().to_vec();
+    // **And the database's own files.** A session's project list is what the *scan* found; a `compile_commands.json`
+    // is the list of translation units, and on curl the scan's list held only headers — so a sweep measured zero files
+    // and reported 188 "not in the database" (`docs/worklog.md`). The union is the project as a reader means it.
+    if let Some(database) = opened.session.discovery().database.as_ref() {
+        paths.extend(
+            database
+                .commands
+                .commands
+                .iter()
+                .map(|command| command.file.clone()),
+        );
+        paths.sort();
+        paths.dedup();
+    }
     if let Some(including) = including {
-        paths.retain(|path| path.to_string_lossy().contains(including));
+        // **One separator for the comparison.** A database writes `E:/corpora/curl/lib/url.c` and a scan writes
+        // `E:\corpora\curl\lib\url.c`; a filter comparing the spellings as they are matches one half of the project
+        // and not the other — on curl, `--including` kept the 188 headers and dropped all 255 translation units, so
+        // the sweep measured nothing at all.
+        let wanted = including.replace('/', std::path::MAIN_SEPARATOR_STR);
+        paths.retain(|path| {
+            path.to_string_lossy()
+                .replace('/', std::path::MAIN_SEPARATOR_STR)
+                .contains(&wanted)
+        });
     }
     paths.sort();
 
@@ -851,9 +875,12 @@ pub fn the_sweep(
         // sources — and cooking one of them invents include paths, which produced 27 syntax errors that were findings
         // about the *measurement*, not about libuv (`docs/worklog.md`). Such a file is counted, not measured: a number
         // a reader can trust has to say how many files it left out and why.
-        let in_the_database = opened.session.config_for(path).is_in_the_database(path);
+        let in_the_database = opened.session.config().is_in_the_database(path);
         if !in_the_database {
             not_in_the_database += 1;
+            if not_in_the_database <= 5 {
+                not_in_the_database_examples.push(path.display().to_string());
+            }
             continue;
         }
         // **The reading the server has when it answers a pull**: the file asked for, then read, then cooked —
@@ -958,7 +985,14 @@ pub fn the_sweep(
         .collect();
     let value = json!({
         "files_answered": answered,
+        "database": opened
+            .session
+            .discovery()
+            .database
+            .as_ref()
+            .map(|database| database.path.display().to_string()),
         "not_in_the_database": not_in_the_database,
+        "not_in_the_database_examples": not_in_the_database_examples,
         "findings": counted,
         "codes": codes,
         "by_file": files,
