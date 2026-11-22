@@ -306,6 +306,8 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
         out: Vec::new(),
         diagnostics: Vec::new(),
         exhausted: false,
+        lines: None,
+        counters: None,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -322,6 +324,40 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
     expansion
 }
 
+/// **Expand a file's run with the position-dependent predefined macros answered** — `__LINE__` and `__COUNTER__`.
+///
+/// A compiler answers both from the position of the **use**: `__LINE__` is the line of the invocation, which for a
+/// token inside a macro body is the line of the *call*, and `__COUNTER__` is a count per translation unit. Neither can
+/// live in a table read from the compiler's predefines, so they are answered here instead — `lines` maps a byte offset
+/// to its line, and `counters` is the count shared by every run of the unit.
+///
+/// Without this doctest's `DOCTEST_CAT(x, __LINE__)` pasted the **name** onto `x` and every capture in a test file
+/// became the identifier `DOCTEST_CAPTURE___LINE__` — 86 `redefinition` findings across nlohmann/json's tests, all of
+/// them ours.
+pub fn expand_with_positions(
+    tokens: &[Token],
+    macros: &(impl MacroValues + ?Sized),
+    lines: &dyn Fn(usize) -> usize,
+    counters: &std::cell::Cell<usize>,
+) -> Expansion {
+    let mut expander = Expander {
+        macros,
+        active: Vec::new(),
+        invocations: Vec::new(),
+        depth: 0,
+        budget: MAX_TOKENS,
+        out: Vec::new(),
+        diagnostics: Vec::new(),
+        exhausted: false,
+        lines: Some(lines),
+        counters: Some(counters),
+    };
+
+    let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
+    let region = span_of(tokens);
+    expander.expand_into(&marked, region, None);
+    expander.finish()
+}
 /// Expand with no limit on the number of tokens, for callers that pass their own bound.
 pub fn expand_with_budget(
     tokens: &[Token],
@@ -337,6 +373,8 @@ pub fn expand_with_budget(
         out: Vec::new(),
         diagnostics: Vec::new(),
         exhausted: false,
+        lines: None,
+        counters: None,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -360,9 +398,56 @@ struct Expander<'a, M: MacroValues + ?Sized> {
     out: Vec<ExpandedToken>,
     diagnostics: Vec<Diagnostic>,
     exhausted: bool,
+    /// **Where a line number comes from**, for `__LINE__` — a byte offset in the file, answered as the 1-based line.
+    ///
+    /// `None` in an expansion with no file behind it (a condition, a fixture): `__LINE__` is then left as the name it
+    /// is, which is the honest answer rather than a made-up number.
+    lines: Option<&'a dyn Fn(usize) -> usize>,
+    /// **The `__COUNTER__` count**, shared by every run of one translation unit — a compiler counts per translation
+    /// unit, and a count that restarted per run would answer the same number twice.
+    counters: Option<&'a std::cell::Cell<usize>>,
 }
 
 impl<M: MacroValues + ?Sized> Expander<'_, M> {
+    /// **`__LINE__`, `__COUNTER__`, `__FILE__`** — the predefined macros a compiler answers from the position of the
+    /// use, and which therefore have no `#define` anywhere.
+    ///
+    /// `None` for everything else, and for all three when the expansion was given no positions
+    /// (`expand_with_positions` is the constructor that gives them).
+    fn a_position_dependent_macro(&self, token: &Token) -> Option<Token> {
+        let lines = self.lines?;
+        if token.kind != cpp_parser::CppTokenKind::Identifier {
+            return None;
+        }
+        // The call site when this token came out of a body, its own position when the file wrote it.
+        let at = match self.invocations.last() {
+            Some(invocation) => invocation.call_site.start_offset,
+            None => token.range.start_offset,
+        };
+        match token.text.as_str() {
+            "__LINE__" => Some(Token::new(
+                cpp_parser::CppTokenKind::IntegerLiteral,
+                lines(at).to_string(),
+                token.range,
+            )),
+            "__COUNTER__" => {
+                let counters = self.counters?;
+                let value = counters.get();
+                counters.set(value + 1);
+                Some(Token::new(
+                    cpp_parser::CppTokenKind::IntegerLiteral,
+                    value.to_string(),
+                    token.range,
+                ))
+            }
+            "__FILE__" => Some(Token::new(
+                cpp_parser::CppTokenKind::StringLiteral,
+                "\"\"",
+                token.range,
+            )),
+            _ => None,
+        }
+    }
     fn finish(self) -> Expansion {
         Expansion {
             tokens: self.out,
@@ -533,6 +618,18 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             // (`Lookup::DefinedWithoutAValue`) cannot say what to paste, and pasting nothing would silently
             // delete the use — the same reasoning that makes `#if NAME` unknown rather than `0`.
             let Some(definition) = self.macros.lookup(token.text()).definition() else {
+                // **`__LINE__` and `__COUNTER__` have no definition and still expand.** They are answered from the
+                // position of the use: the innermost invocation's call site when this token came out of a macro body
+                // (the standard's answer — the *call's* line, not the `#define`'s), and the token's own offset when it
+                // was written at the call site. `__FILE__` has no name to answer here, so it becomes an empty literal
+                // rather than a wrong one. See `expand_with_positions`.
+                if let Some(replacement) = self.a_position_dependent_macro(token) {
+                    if !self.push(replacement, tokens[index].origin.clone(), region) {
+                        return consumed;
+                    }
+                    index += 1;
+                    continue;
+                }
                 // Not a macro. Not a note either: most identifiers are not macros, and reporting that
                 // would bury the ones that are.
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
@@ -747,9 +844,15 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         let mut expanded = Vec::with_capacity(params.len());
         for param in params {
             let raw = trim_trivia(argument_range_for(params, arguments, plain, &param.name));
+            // **`__LINE__` and its relatives count as a macro here**, although no table holds them: the expander
+            // answers them from the position of the use (`a_position_dependent_macro`), and an argument that is not
+            // expanded is substituted as written — which is how doctest's `DOCTEST_CAT(x, __LINE__)` pasted the *name*
+            // onto `x`. The two-level indirection such a macro is written with exists precisely so the inner call's
+            // argument reaches the paste already expanded.
             let has_a_macro = raw.iter().any(|token| {
                 could_be_a_macro_name(token.kind)
-                    && self.macros.lookup(token.text()).definition().is_some()
+                    && (self.macros.lookup(token.text()).definition().is_some()
+                        || matches!(token.text(), "__LINE__" | "__COUNTER__" | "__FILE__"))
             });
             if !has_a_macro {
                 expanded.push(None);
