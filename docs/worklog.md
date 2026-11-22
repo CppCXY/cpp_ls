@@ -307,16 +307,28 @@ integration (9 ignored)**.
 * **P2-4, `undefined-name` is not an undefined check.** `void f() { missing = 1; }` produces **no finding at all** — the
   rule only looks at call callees and member receivers.
 
-**Found while building the probe, and it comes first**: `type` and `hover` answer
-**`not_an_expression: true`** for positions that hold a perfectly ordinary expression. `type --at` on `auto a = 1u;`
-answered `int` once, and has answered `not_an_expression` every time since — the answer depends on the session's index
-state rather than on the code, which is a worse failure than a wrong type: an editor asking about the token under the
-cursor is told there is no expression there. `hover` says the same (`markdown: null`), and `define` on a valid
-`later();` call has answered both a declaration and nothing, depending on the same state.
+**And a prerequisite, found by writing the probe**: every positional question in `cpp_inspect` started from
+`place.offset(&opened.text)` — an offset in **the file's own text**, which is what an editor has — and passed it to APIs
+that take a **reading** offset, the space of the text the parser saw. The two differ by a line break's worth of bytes in any
+multi-line file (the rendering collapses them), so the probe was asking about the wrong token: `type` answered
+`not_an_expression` for a literal that plainly is an expression, and `define` answered a declaration on one run and
+nothing on another. The tool now maps the offset the way the server does (`reading_of`, `questions.rs`), and the answers
+became both correct and repeatable.
 
-So the first task is not a review item but a prerequisite: **make a query answer deterministically after a file is
-written**, then re-run the probe, and only then start on P1-3 (qualifiers) and P1-4 (literal types) — the two claims this
-probe can measure directly.
+This matters beyond the probe: **a reproduction is only evidence once it is deterministic**, and several of the review's
+own `cpp_inspect` numbers were taken through a tool that could answer about the wrong offset.
+
+With the probe working, it confirms four of the review's claims and leaves one open:
+
+| claim | probe answer |
+| --- | --- |
+| P1-4 `1u` | `int` — should be `unsigned int` |
+| P1-4 `1.0f` | `double` — should be `float` |
+| P1-4 `u8"x"` | `const char*` — should be `const char8_t*` |
+| P1-4 `L'x'` | `int` — should be `wchar_t` |
+| P1-1 use before declaration | `define` picks the declaration written **after** the call |
+| P1-3 `volatile S v; auto x = v;` | still `not_an_expression` — the next thing to look at, and the row the first Stage 1 test will pin |
+
 
 ## The review's P3 list: the two thirds worth doing
 

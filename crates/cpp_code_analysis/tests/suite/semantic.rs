@@ -2668,3 +2668,31 @@ int use() {
         "the namespace stands at `std::views`, the function at the call: {found:?}"
     );
 }
+
+/// **A literal has a type where the cursor sits on it** — the question `cpp_inspect type` asks, and the one an editor
+/// asks on hover. It answered `not_an_expression` for a position that holds an ordinary expression, depending on the
+/// session's state rather than on the code; this test is the deterministic form of the same question inside the crate.
+#[test]
+fn a_literal_has_a_type_at_the_cursor() {
+    let source = "void f() {\n    auto a = 1u;\n}\n";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let at = source.rfind("1u").expect("the literal");
+
+    // **A written offset has to be mapped into the rendering first**, which is what the server does on every request:
+    // the two texts differ by a line break's worth of bytes, and asking about the written offset asks about the wrong
+    // token. With the mapping, a literal is an expression at its own position.
+    let reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(at))
+        .expect("the written offset maps into the rendering");
+    let known = session.type_at(&view, reading);
+    assert!(
+        !matches!(known, Known::No),
+        "a literal is an expression, and the answer was `No` (the view is {:?})",
+        view.path
+    );
+    assert!(
+        matches!(known, Known::Yes(_)),
+        "the type is known: {known:?}"
+    );
+}

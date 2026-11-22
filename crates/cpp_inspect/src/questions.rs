@@ -116,10 +116,26 @@ fn declaration_value(session: &Session<DiskFiles>, definition: &ProjectDefinitio
     })
 }
 
+/// **The reading offset of a written one.**
+///
+/// Every question here starts from `place.offset(&opened.text)`, which is an offset in **the file's own text** — what an
+/// editor has. The analysis answers in **reading** space: the text the parser saw, where `#include`s are inlined, macros
+/// are expanded and a line break may be a single space. For a file whose rendering differs from its text by even one byte
+/// — which is every multi-line file, because the rendering collapses line breaks — passing the written offset asks about
+/// the wrong token: `type` answered `not_an_expression` for a literal that is plainly an expression, `define` answered
+/// nothing for a call it had answered a declaration for on another run, and the answer depended on the file's shape
+/// rather than on the code. The mapping is what the server itself does on every request.
+fn reading_of(view: &cpp_code_analysis::FileView, at: usize) -> ReadingOffset {
+    view.reading_offset_of(FileOffset::new(at))
+        .unwrap_or(ReadingOffset::new(at))
+}
+
 /// **The type of the expression at the position** — `type_at`, which asks about the innermost expression there.
 pub fn the_type(opened: &Opened, place: &Place) -> Result<Answer, String> {
     let at = place.offset(&opened.text)?;
-    let known = opened.session.type_at(&opened.view, ReadingOffset::new(at));
+    let known = opened
+        .session
+        .type_at(&opened.view, reading_of(&opened.view, at));
     let where_at = at_a_place(&opened.text, at);
     let (text, value) = match &known {
         Known::Yes(found) => (
@@ -159,17 +175,17 @@ pub fn the_hover(opened: &Opened, place: &Place) -> Result<Answer, String> {
     if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
         let picked = opened
             .session
-            .definition(&opened.view, ReadingOffset::new(at));
+            .definition(&opened.view, reading_of(&opened.view, at));
         let all = opened
             .session
-            .definitions(&opened.view, ReadingOffset::new(at));
+            .definitions(&opened.view, reading_of(&opened.view, at));
         eprintln!("[hover] at {at}: picked {picked:?}");
         eprintln!("[hover] at {at}: all {all:?}");
     }
     let shown = cpp_ls::handlers::hover::hover_text(
         &opened.session,
         &opened.view,
-        ReadingOffset::new(at),
+        reading_of(&opened.view, at),
         FileOffset::new(at),
     );
     let (text, value) = match &shown {
@@ -190,8 +206,8 @@ pub fn what_it_names(opened: &Opened, place: &Place) -> Result<Answer, String> {
     let at = place.offset(&opened.text)?;
     let where_at = at_a_place(&opened.text, at);
     let session = &opened.session;
-    let picked = session.definition(&opened.view, ReadingOffset::new(at));
-    let all = session.definitions(&opened.view, ReadingOffset::new(at));
+    let picked = session.definition(&opened.view, reading_of(&opened.view, at));
+    let all = session.definitions(&opened.view, reading_of(&opened.view, at));
 
     let mut text = format!("define at {where_at}:\n");
     let mut picked_value = Value::Null;
