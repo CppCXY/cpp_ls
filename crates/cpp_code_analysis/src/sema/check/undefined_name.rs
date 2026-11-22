@@ -1,4 +1,10 @@
-//! **`undefined-name`**: a name read where nothing declares it.
+//! **`unresolved-call-or-receiver`**: a name read where nothing declares it.
+//!
+//! **The name is the whole of P2-4 of `docs/code-analysis-review.md`.** It used to be `undefined-name`, which promises a
+//! complete undefined-name check and delivers two positions: the object of a member access, and a call's callee. An
+//! ordinary assignment to a name nothing declares — `missing = 1;` — is silent here, and a reader told the code is
+//! `undefined-name` reads that silence as "the analysis believes this is declared". The check is unchanged; the code now
+//! says which question it answers.
 //!
 //! ```cpp
 //! void f() {
@@ -51,7 +57,7 @@ use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
 
-/// **`undefined-name`** — see the module documentation.
+/// **`unresolved-call-or-receiver`** — see the module documentation.
 pub struct UndefinedName;
 
 impl Check for UndefinedName {

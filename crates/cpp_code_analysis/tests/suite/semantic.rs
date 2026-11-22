@@ -2696,3 +2696,44 @@ fn a_literal_has_a_type_at_the_cursor() {
         "the type is known: {known:?}"
     );
 }
+
+/// **A namespace inside one of the same name is two segments**, not one.
+///
+/// `namespace A { namespace A { void f(); } }` is `A::A::f` to a compiler. The scope chain is collapsed with
+/// `segments.dedup()` before it is joined, because a **unit rendering** — the stitched stream a module's interface unit
+/// produces — nests one file's `namespace std` inside another's, and ten spliced headers spelled `std::std::…::format`.
+/// Collapsing every run of equal names fixed the stitching and broke the language
+/// (`docs/code-analysis-review.md` P2-3).
+#[test]
+fn a_namespace_inside_one_of_the_same_name_keeps_both_segments() {
+    use cpp_code_analysis::{
+        CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let source = "namespace A {\nnamespace A {\nvoid f();\n}\n}\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+
+    let facts = session
+        .index()
+        .summary(std::path::Path::new("/p/a.cpp"))
+        .map(|summary| summary.declarations.to_vec())
+        .unwrap_or_default();
+    let f = facts
+        .iter()
+        .find(|fact| fact.name == "f")
+        .expect("`f` is declared");
+    assert_eq!(
+        f.scope.as_deref(),
+        Some("A::A"),
+        "a compiler calls this `A::A::f`"
+    );
+}

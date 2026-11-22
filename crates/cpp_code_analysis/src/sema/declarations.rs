@@ -4640,20 +4640,17 @@ fn enclosing_namespaces_of(scopes: &ScopeTree, from: ScopeId) -> Option<String> 
     }
 
     segments.reverse();
-    // **A namespace that opens inside one of the same name is that namespace reopened.**
+    // **The chain is joined as it is.** It used to be collapsed with `segments.dedup()` — "a namespace that opens
+    // inside one of the same name is that namespace reopened" — because a *unit rendering* (the stitched stream a
+    // module's interface unit produces) nested one file's `namespace std` inside another's, and ten spliced MSVC headers
+    // spelled `std::std::…::format`. That was a bug in the stitching, and the collapse paid for it with a real name:
+    // `namespace A { namespace A { void f(); } }` is `A::A::f` to a compiler, and this answered `A::f`
+    // (`docs/code-analysis-review.md` P2-3).
     //
-    // The chain is read from the scope tree, and in a *unit rendering* — the stitched stream a module's interface unit
-    // produces — one file's `namespace std {` can land inside another's. MSVC's headers write every scope as
-    // `_STD_BEGIN`, so the standard module came out with ten of them nested and `std::format` filed under
-    // `std::std::std::std::std::std::std::std::std::std` — a scope no query asks for, while the same header read on its
-    // own is filed under `std`. Collapsing a run of the same name makes the two spellings agree.
-    //
-    // What it costs: `namespace A { namespace A { void f(); } }` is `A::A::f` to a compiler, and this answers `A::f`.
-    // That is a real name a query could ask for differently — and it is also the only reading under which a `std`
-    // reopened by ten spliced headers keeps the name the source files give it. The parser is where the nesting should
-    // have been stopped (`tests/translation_unit.rs`'s `a_namespace_whose_brace_ends_the_file` is the shape); this is
-    // the layer that has to answer until it is.
-    segments.dedup();
+    // The collapse turned out to be unnecessary: with it removed the whole suite — module and unit fixtures included —
+    // passes, so the splicing is closed where the unit is stitched. If a nested-`std` regression ever appears, the fix
+    // belongs there (or in the parser, whose `a_namespace_whose_brace_ends_the_file` covers the shape), not in the
+    // joining of two names that really are two.
     Some(segments.join("::"))
 }
 

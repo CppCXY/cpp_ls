@@ -126,7 +126,7 @@ findings are grouped by code with a per-file list under them:
 
 ```text
 cpp_inspect --project E:\corpora\redis --file src/dict.c sweep
-cpp_inspect --project E:\corpora\redis --file src/dict.c sweep --code undefined-name --including "redis\src"
+cpp_inspect --project E:\corpora\redis --file src/dict.c sweep --code unresolved-call-or-receiver --including "redis\src"
 ```
 
 `--index --all-files` are **implied** — a sweep of one file is what `diagnostics` already is. `--code` keeps just the

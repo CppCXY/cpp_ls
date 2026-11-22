@@ -3362,7 +3362,7 @@ impl ProjectIndex {
             // header's declaration is the one that makes a use **above** the definition legal — the shape a C file has
             // when its declarations live in a header: `corpus.h` declares `functions_selector` at the top, the call is
             // at line 61, the definition at line 182. Dropping the header's fact left the call with no declaration
-            // before it, and `undefined-name` reported it. Measured on a nine-file C corpus: two findings, and
+            // before it, and `unresolved-call-or-receiver` reported it. Measured on a nine-file C corpus: two findings, and
             // reproduced in `tests/checks.rs` with the declaration in a header.
             //
             // The rule above still holds for everything else: a header's `Widget` and this file's `Widget` are two

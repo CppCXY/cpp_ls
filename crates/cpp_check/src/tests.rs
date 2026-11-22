@@ -84,10 +84,13 @@ fn the_walk_takes_sources_and_skips_build_output() {
 /// **A rule name is a name the server also knows**, and a name nobody has is an error rather than an empty filter.
 #[test]
 fn a_code_filter_resolves_against_the_rules() {
-    let known = codes(&["undefined-name".to_string(), "use-after-free".to_string()])
-        .expect("both are rules");
+    let known = codes(&[
+        "unresolved-call-or-receiver".to_string(),
+        "use-after-free".to_string(),
+    ])
+    .expect("both are rules");
     let known = known.expect("a filter");
-    assert!(known.contains("undefined-name"));
+    assert!(known.contains("unresolved-call-or-receiver"));
     assert!(known.contains("use-after-free"));
 
     assert_eq!(

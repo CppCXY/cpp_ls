@@ -49,7 +49,7 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Level::Warning)]
     pub min_severity: Level,
 
-    /// Only these codes, by name — `--code=undefined-name,use-after-free`.
+    /// Only these codes, by name — `--code=unresolved-call-or-receiver,use-after-free`.
     #[arg(long, value_delimiter = ',')]
     pub code: Vec<String>,
 

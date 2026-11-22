@@ -101,7 +101,7 @@ run and silenced, so it costs nothing and cannot fire. Twenty-one codes can fire
 | `param-type-check` | Error | an argument's type cannot go to the parameter |
 | `assign-type-check` | Error | an assignment or initialisation does not fit the type |
 | `undefined-field` | Error | the member is not in the `struct`/`union` |
-| `undefined-name` | Error | the name is not declared |
+| `unresolved-call-or-receiver` | Error | the name is not declared |
 | `redefinition` | Error | the same entity is defined twice in one scope |
 | `argument-count` | Error | the call passes the wrong number of arguments |
 | `return-type-mismatch` | Error | a `return` does not fit the declared type |

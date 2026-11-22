@@ -1,4 +1,4 @@
-//! **`undefined-name`** — a name read where nothing this file can see declares it.
+//! **`unresolved-call-or-receiver`** — a name read where nothing this file can see declares it.
 //!
 //! The rule asks two narrow places: **the object of a member access written as one bare identifier**, and **the bare
 //! callee of a call**. Everything else — a keyword, a qualified spelling, an expression — is another question. The

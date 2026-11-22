@@ -319,7 +319,7 @@ use std::path::{Path, PathBuf};
 /// **A known type name followed by a name now ends the specifier sequence.** `EXTERN colnr_T dollar_vcol INIT( = -1);`
 /// used to be read as the type `EXTERN colnr_T dollar_vcol` and the declarator `INIT`, so the variable the line
 /// declares — and every declaration after it in the header — was lost. A summary or a cooked reading made before this
-/// holds the loss: neovim's `globals.h` alone is sixteen declarations, and 135 `undefined-name` findings followed.
+/// holds the loss: neovim's `globals.h` alone is sixteen declarations, and 135 `unresolved-call-or-receiver` findings followed.
 /// # Why this moved to 35
 ///
 /// **A qualified call is not a declaration.** `std::ranges::find_if(items, f);` was read as a `Declaration` whose

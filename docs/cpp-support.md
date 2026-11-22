@@ -199,7 +199,7 @@ Forty-three codes, each with a fixed severity; `[diagnostics].disable` turns one
 | `param-type-check` | Error | an argument's type cannot go to the parameter |
 | `assign-type-check` | Error | an assignment or initialisation does not fit the type |
 | `undefined-field` | Error | the member is not in the type (a class template's member list is a pattern and is skipped) |
-| `undefined-name` | Error | the name is not declared |
+| `unresolved-call-or-receiver` | Error | the name is not declared |
 | `redefinition` | Error | the same entity is defined twice in one scope |
 | `argument-count` | Error | the call passes the wrong number of arguments |
 | `return-type-mismatch` | Error | a `return` does not fit the declared type |

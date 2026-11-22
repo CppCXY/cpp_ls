@@ -43,7 +43,7 @@ tool exists for the questions the compiler does not answer. The split, by rule:
 
 | Kind | Rules | Compiler? |
 |---|---|---|
-| The compiler's own errors | `syntax-error`, `undefined-name`, `undefined-field`, `assign-type-check`, `param-type-check`, `argument-count`, `return-type-mismatch`, `missing-return`, `access-invisible`, `redefinition`, `override-nonexistent`, `override-of-final`, `final-class-derived`, `abstract-class-instantiated`, `concept-not-satisfied` | yes — if the translation unit compiles, with the right flags |
+| The compiler's own errors | `syntax-error`, `unresolved-call-or-receiver`, `undefined-field`, `assign-type-check`, `param-type-check`, `argument-count`, `return-type-mismatch`, `missing-return`, `access-invisible`, `redefinition`, `override-nonexistent`, `override-of-final`, `final-class-derived`, `abstract-class-instantiated`, `concept-not-satisfied` | yes — if the translation unit compiles, with the right flags |
 | Style and maintainability | `braces-around-statements`, `else-after-return`, `use-nullptr`, `use-auto`, `cstyle-cast`, `simplify-boolean-expr`, `implicit-bool-conversion`, `macro-parentheses`, `unused` | no (clang-tidy, but not in the editor) |
 | **Workspace-wide** | `pure-virtual-not-overridden`, `unused`, `missing-include`, `include-not-found`, `ue-naming`, `ue-specifier`, `ue-generated-header`, `ue-generate-body`, `ue-macro-scope` | **no** — a compiler sees one translation unit |
 | **Danger patterns** | `dangling-return`, `dangling-field`, `use-after-free` | no — these compile and then break |
@@ -147,7 +147,7 @@ By code, and what each one turned out to be:
 
 | code | count | verdict |
 |---|---:|---|
-| `undefined-name` | 138 | **135 false**, all in `src/nvim` — the header-context gap below |
+| `unresolved-call-or-receiver` | 138 | **135 false**, all in `src/nvim` — the header-context gap below |
 | `else-after-return` | 110 | true, style |
 | `braces-around-statements` | 81 | true, style |
 | `macro-parentheses` | 42 | true in form; the macros in `src/xxd` are used as constants |
@@ -165,7 +165,7 @@ By code, and what each one turned out to be:
 **not a CI gate yet** — but it is a scoreboard, and the list of what to fix is exactly the false positives above, in
 order of volume.
 
-## The header-context gap — why `undefined-name` fires 135 times on code that compiles
+## The header-context gap — why `unresolved-call-or-receiver` fires 135 times on code that compiles
 
 `globals.h` declares the editor's globals through two macros:
 

@@ -6,9 +6,9 @@
 //! void Widget::grow(int by) { … }     // `Widget` comes from `widget.h`, which this file never includes
 //! ```
 //!
-//! # Why this is a different rule from `undefined-name`
+//! # Why this is a different rule from `unresolved-call-or-receiver`
 //!
-//! `undefined-name` asks "does anything declare this, from here" and reports when the answer is no. This asks the
+//! `unresolved-call-or-receiver` asks "does anything declare this, from here" and reports when the answer is no. This asks the
 //! **next** question: *something* declares it — in a header the file never included — so the program compiles only
 //! because another translation unit's include order happened to pull that header in first. That state is fragile
 //! (reordering two `#include`s breaks the build) and it is exactly what the fix repairs, which is why the finding and
@@ -23,7 +23,7 @@
 //! ```text
 //!   reported      Widget w;            a type in a declaration
 //!                 void f(Widget* p);   a type in a parameter list
-//!   not reported  w.grow()             a member access — `undefined-name`'s question
+//!   not reported  w.grow()             a member access — `unresolved-call-or-receiver`'s question
 //!                 ns::Widget w;        a qualified spelling: a namespace question, not this one
 //!                 Container _hash;     a name this file's own scopes bind — a template parameter
 //! ```

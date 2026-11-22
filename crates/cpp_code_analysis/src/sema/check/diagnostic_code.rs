@@ -217,7 +217,7 @@ impl DiagnosticCode {
             DiagnosticCode::ParamTypeCheck => "param-type-check",
             DiagnosticCode::AssignTypeCheck => "assign-type-check",
             DiagnosticCode::UndefinedField => "undefined-field",
-            DiagnosticCode::UndefinedName => "undefined-name",
+            DiagnosticCode::UndefinedName => "unresolved-call-or-receiver",
             DiagnosticCode::Redefinition => "redefinition",
             DiagnosticCode::Unused => "unused",
             DiagnosticCode::UnnecessaryBranch => "unnecessary-branch",
