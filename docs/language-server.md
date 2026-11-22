@@ -24,8 +24,10 @@ statement.
 Each one is a deliberate limit rather than a defect to be fixed later; a change to any of them is a product decision.
 
 1. **One workspace root.** The session analyses the first root; additional folders are listed but not analysed, and
-   `workspace/didChangeWorkspaceFolders` is not handled. (Enforced where the session is opened; see
-   `WorkspaceManager::set_roots`.)
+   `workspace/didChangeWorkspaceFolders` is not handled. An **open buffer** in another folder is still answered for — its
+   text is the client's, and a query about it is a question about the editor's document — but it is not part of the
+   analysed project: its includes are resolved on their own and the files it names are not scanned. A log line names the
+   folders being ignored. (Enforced where the session is opened; see `WorkspaceManager::set_roots`.)
 2. **No semantic-token range or delta provider.** Only the full-token request is implemented, so an editor that supports
    deltas still asks for everything.
 3. **Full-document diagnostics only.** `textDocument/diagnostic` answers a whole file; workspace diagnostics are not

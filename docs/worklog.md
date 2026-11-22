@@ -405,6 +405,36 @@ the wire **without answering the settings**: while they are unanswered the hover
 in **0.5 s** with the configuration still outstanding, and the test fails with *"the request was answered before the
 settings it follows"*. New code: **5.4 s**, after the settings are answered and the change is applied.
 
+### P2-3: a refused watch registration falls back to the server's own watcher
+
+`client/registerCapability` was fire-and-forget, so a client answering `MethodNotFound` looked like one that agreed —
+and the server starts no watcher of its own when the client advertises dynamic registration, so nothing reported anything.
+The call is awaited now (5 s bound) and its outcome recorded on the workspace; `start_analysis` starts the native watcher
+when the registration was refused, and `initialized` registers **before** it starts the analysis so the decision reads the
+answer. Old code: the log names neither the refusal nor a watcher and the test fails; new code: both, and the test passes.
+
+### Closing the review: ten items, and how each was closed
+
+| item | how it was closed |
+| --- | --- |
+| P1-1 `scopeUri` | fixed (`c394aceb`), with the request params captured by the test client |
+| P1-2 configuration sequence | fixed (`fc3b4e3d`) — an update event, the read kept out of the worker, and a test that distinguishes the designs |
+| P1-3 inactive-region snapshot | fixed (`a27ecdbe`), one snapshot + the diagnostics gates; the race is **pinned**, not forced, and the worklog says so |
+| P1-4 open configuration file | fixed (`d32fd25f`) |
+| P1-5 `--config` watcher | fixed (`2e146816`), including the one-backslash verbatim path |
+| P1-6 CUDA watcher globs | fixed (`4d36da08`) from the analysis's own lists |
+| P1-7 idle test red | **not reproduced** — passes here (14.08 s), so the review's baseline is older than this tree |
+| P2-1 `willSaveWaitUntil` | advertised (`5e168dd5`) |
+| P2-2 `--editor` / dead switches | one identity and two switches deleted (`8cff804a`) |
+| P2-3 registration fallback | fixed; see above |
+| P2-4 `undefined-name` | renamed `unresolved-call-or-receiver` (analysis review, kept here for continuity) |
+| P2-5 multi-root | **the review's own alternative**: `docs/language-server.md` states single-root, including what an open buffer in another folder does and does not get, and `set_roots` logs the folders it ignores |
+| P2-6 malformed notifications | fixed (`3a840e9d`) |
+| P2-7 partial results | **the review's own alternative**: the capability page states that references and workspace symbols may be a partial answer and why the protocol cannot say so |
+
+Two of the seven P2 items are documentation by design (the review offers that choice for both), and one P1 is recorded as
+not reproducible rather than fixed. Everything else has a test that failed before the change.
+
 ### P2-6: a notification the server cannot read is said out loud
 
 `dispatch_notification!` read every notification with `if let Ok(params)` and no `else`: a malformed `didOpen` (or one
