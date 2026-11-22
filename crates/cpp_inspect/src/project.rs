@@ -218,7 +218,15 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
         // `diagnostics` then failed with "has no reading to diagnose" (measured on nlohmann/json's
         // `tests/src/unit-constructor1.cpp`, a header-only project opened with `--cook` and nothing else).
         session.want_cooked_reading(&file);
+        // **The whole closure, not one request's slice.** `catch_up` reads the file and eight of its includes — the
+        // slice a hover needs — while a *cook* needs every include the walk will enter, or `cooking_materials` refuses
+        // and `diagnostics` answers "has no reading to diagnose". Measured on five nlohmann/json test files whose
+        // closure is two hundred standard headers: their rendering was still built by `rendering` (206–314 kB), so the
+        // file was cookable and only the drain was short.
         session.catch_up(&file);
+        while session.needs_catching_up(&file) {
+            session.catch_up(&file);
+        }
         let _ = session.cook(&file);
     }
     let cooked = cooked.elapsed();

@@ -83,6 +83,23 @@ which is exactly what the eight errors are. Two separate defects then:
   `a_pragma_operator_between_statements_is_a_statement`), which is the *expanded* form hedley and doctest produce;
   `FORMAT_VERSION` 47 → 48 for the grammar change.
 
+### `--cook` drained eight includes, not the closure — and hedley contributes no tokens at all
+
+Two more facts, both from the `rendering` command:
+
+* **Five test files had no reading, and the tool was the reason.** `--cook` asked for the reading and then called
+  `catch_up`, which reads the file and **eight** of its includes — the slice a hover needs — while a cook needs every
+  include the walk will enter, or `cooking_materials` refuses. `unit-json_view.cpp` answered "has no reading to
+  diagnose" and yet `rendering` built its 206 680-byte text. The flag now drains until `needs_catching_up` is false,
+  and the measurement answers **126 of 126** files (it was 121) with **95** `syntax-error` — the earlier 92 plus the
+  three the five unread files were hiding.
+* **`hedley.hpp` reaches the cook as nothing.** In the four-line unit's 150 534-byte rendering, `JSON_HEDLEY_UNLIKELY(`
+  appears 62 times, and `JSON_HEDLEY_VERSION`, `JSON_HEDLEY_GNUC_VERSION`, `JSON_HEDLEY_VERSION_ENCODE` and the word
+  `hedley` appear **zero** times — the header is either not found (no `include-not-found` finding mentions it, so it is
+  found) or its whole body is skipped by its first line, `#if !defined(JSON_HEDLEY_VERSION) || (JSON_HEDLEY_VERSION < 15)`.
+  That is the next thing to read: who defines `JSON_HEDLEY_VERSION` before `detail/macro_scope.hpp:12` reaches the
+  file, and whether the walk marks a header read and drops its second, *first* contribution.
+
 ### The probe files were measured on a rendering of nothing — the bisect below is void
 
 
