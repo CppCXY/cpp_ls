@@ -136,6 +136,50 @@ impl serde::Serialize for CppSyntaxId {
     }
 }
 
+/// **Read the `kind:start:end` spelling**, which is what [`CppSyntaxId`] serialises to.
+///
+/// Fallible, and every way it can fail is a value that a *reader* must reject rather than act on: this is the shape a
+/// cache file or another process hands over, so a malformed string is input and not a bug in the program. The three
+/// things that used to be unchecked here were
+///
+/// ```text
+/// kind   CppKind::from_raw panics for a discriminant outside the kind space
+/// range  TextRange::new panics when the end is before the start
+/// shape  a string with the wrong number of fields
+/// ```
+///
+/// — the first two inside a `serde` deserialiser, which is to say a malformed cache entry could take the reader process
+/// down instead of returning an error (`docs/parser-toolchain-review.md` P1-5).
+fn from_hex(value: &str) -> Result<CppSyntaxId, String> {
+    let mut parts = value.split(':');
+    let (Some(kind), Some(start), Some(end), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!("expected 'kind:start:end', got {value:?}"));
+    };
+
+    let kind = u16::from_str_radix(kind, 16).map_err(|error| format!("invalid kind: {error}"))?;
+    let start =
+        u32::from_str_radix(start, 16).map_err(|error| format!("invalid start: {error}"))?;
+    let end = u32::from_str_radix(end, 16).map_err(|error| format!("invalid end: {error}"))?;
+
+    // A range is an ordered pair; anything else would make `TextRange::new` panic.
+
+    if start > end {
+        return Err(format!(
+            "a range that ends before it starts: {start:x}..{end:x}"
+        ));
+    }
+
+    let kind = CppKind::try_from_raw(kind)
+        .ok_or_else(|| format!("no kind with discriminant {kind:#06x}"))?;
+
+    Ok(CppSyntaxId {
+        kind,
+        range: TextRange::new(TextSize::new(start), TextSize::new(end)),
+    })
+}
+
 impl<'de> serde::Deserialize<'de> for CppSyntaxId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -154,22 +198,7 @@ impl<'de> serde::Deserialize<'de> for CppSyntaxId {
             where
                 E: serde::de::Error,
             {
-                let parts: Vec<&str> = value.split(':').collect();
-                if parts.len() != 3 {
-                    return Err(E::custom("expected format 'kind:start:end'"));
-                }
-
-                let kind = u16::from_str_radix(parts[0], 16)
-                    .map_err(|e| E::custom(format!("invalid kind: {e}")))?;
-                let start = u32::from_str_radix(parts[1], 16)
-                    .map_err(|e| E::custom(format!("invalid start: {e}")))?;
-                let end = u32::from_str_radix(parts[2], 16)
-                    .map_err(|e| E::custom(format!("invalid end: {e}")))?;
-
-                Ok(CppSyntaxId {
-                    kind: CppKind::from_raw(kind),
-                    range: TextRange::new(TextSize::new(start), TextSize::new(end)),
-                })
+                from_hex(value).map_err(E::custom)
             }
         }
 
@@ -180,6 +209,40 @@ impl<'de> serde::Deserialize<'de> for CppSyntaxId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The serialised spelling round-trips, and every malformed one is an error rather than a panic.**
+    ///
+    /// The input is what a cache file or another process hands over — see `from_hex` — so each of these used to be a
+    /// way to take the reader down: an unknown discriminant (which `from_raw` panics on) and a range that ends before it
+    /// starts (which `TextRange::new` panics on).
+    #[test]
+    fn a_serialised_id_is_read_or_refused_without_panicking() {
+        let id = CppSyntaxId::new(
+            CppKind::Syntax(CppSyntaxKind::TranslationUnit),
+            TextRange::new(TextSize::new(0x10), TextSize::new(0x20)),
+        );
+        assert_eq!(
+            from_hex(&id.to_string()).expect("its own spelling reads back"),
+            id
+        );
+
+        for (value, why) in [
+            ("", "an empty string"),
+            ("1:2", "two fields"),
+            ("1:2:3:4", "four fields"),
+            ("zz:0:1", "a kind that is not hex"),
+            ("1:zz:2", "a start that is not hex"),
+            ("1:2:zz", "an end that is not hex"),
+            ("ffff:0:1", "a discriminant outside the kind space"),
+            ("1:2:1", "a range that ends before it starts"),
+        ] {
+            let refused = from_hex(value);
+            assert!(
+                refused.is_err(),
+                "{why} is refused, not parsed: {value:?} -> {refused:?}"
+            );
+        }
+    }
 
     #[test]
     fn id_roundtrips_through_text() {
