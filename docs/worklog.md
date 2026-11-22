@@ -294,7 +294,7 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
 
 ## The review's P1 list: what is confirmed, and what is fixed
 
-`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Three of its findings were
+`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Seven of its findings were
 reproduced and fixed in this round; the rest were checked by reading the code it points at, and its line references and
 claims held everywhere I looked.
 
