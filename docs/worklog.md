@@ -10,6 +10,48 @@ The protocol for asking one question at a time is [`inspect.md`](inspect.md).
 
 ---
 
+## nlohmann/json 3.12.0 — the first **C++** library measured
+
+A header-only library, so the measurement is not one project but three questions: the library's own code, its test
+suite, and the shape of the framework the tests are written with. The tree is `E:\corpora\json` (3.12.0):
+`include/nlohmann/**` (84 modular headers), `single_include/nlohmann/json.hpp` (the 25 000-line amalgamation), and
+`tests/src/unit-*.cpp` (126 translation units using doctest).
+
+The database is synthesized, because a header-only library has no build of its own:
+
+```text
+g++ -std=c++17 -I include -I tests/src -I tests/thirdparty/doctest -c tests/src/unit-<name>.cpp
+```
+
+| Question | Answer | Findings |
+| --- | --- | --- |
+| the library, through the **amalgamation** (`probe_amalgamation.cpp`: `#include <nlohmann/json.hpp>`, `-I single_include`, an object literal, `dump()`, `get<int>()`) | **Cooked, clean** | **0** |
+| the **test suite**, one `cpp_inspect` process per TU (121 of 126 answered) | 19 of 121 TUs do not parse | **92 `syntax-error`** |
+| 5 TUs the tool could not answer | "has no reading to diagnose" | — |
+
+So the library reads clean; what does not is a **macro shape inside the test framework's use**: every failing TU's
+first error is reported at its first `TEST_CASE("…")` line (`unit-conversions1.cpp:53`, `unit-binary_formats.cpp:27`,
+`unit-bjdata.cpp:4480`, …), and the errors after it fall inside that case's body. A probe carrying the file's own
+preamble (16 lines of includes and defines) plus `TEST_CASE("x") { CHECK(1 == 1); }` is **clean**, and so are nested
+braced initialisers (`std::map<std::string, std::vector<int>> m = {{"a", {1, 2}}};`) and the exact
+`json::object_t o = {{"object", json::object()}, {"array", {1, 2, 3, 4}}};`. The trigger is therefore inside the
+bodies the tests write — **open**, with the file list and the repro command in `target/bench/json-sweep.json`, and it
+is the next thing to bisect (a prefix bisect has to close the braces it truncates, which the first attempt did not).
+
+### Two tool fixes the measurement needed
+
+* **`--cook` cooked nothing.** `Session::cook` answers `None` for a file the index has no summary of, and the flag did
+  nothing for a file that was not also indexed: `diagnostics` then failed with "has no reading to diagnose" on every
+  nlohmann test file. The flag now asks for the file's reading and drains it (`want_cooked_reading` + `catch_up`)
+  before cooking.
+* **`sweep` measured a different reading than a client's pull.** The sweep implied `--index`, and
+  `Session::diagnostics` *prefers a stored cooked reading* over the one just cooked — which is the index's reading,
+  built without the file's own include path in a header-only project: doctest's
+  `CHECK_THROWS_WITH_AS(…, json::out_of_range&)` stayed unexpanded and the sweep reported **2 457** syntax errors over
+  151 files where the per-file path reports **92 over 19**. The sweep now seeds the files (`--all-files`) without
+  indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
+  reports.
+
 ## curl 8.x — the third C project, and the cleanest so far
 
 Cloned at `E:\corpora\curl`, configured with its own CMake and MinGW's gcc — a **real** database, not a synthesized one:

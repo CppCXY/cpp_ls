@@ -844,9 +844,13 @@ pub fn the_sweep(
     paths.sort();
 
     for path in &paths {
-        // **The cook the probe did with `didOpen`** — a file whose closure has not been read has no cooked reading,
-        // and `Session::diagnostics` answers `None` for it rather than a claim about a file nothing read. Cooking is
-        // the expensive half and it is paid once per file, which is what a sweep is for.
+        // **The reading the server has when it answers a pull**: the file asked for, then read, then cooked —
+        // `want_cooked_reading` + `catch_up` is the same pair `--cook` uses, and without it `Session::cook` answered
+        // from a rendering built before this file's environment was known (measured: nlohmann/json's
+        // `unit-32bit.cpp` reported ten syntax errors in its `CHECK_THROWS_WITH_AS(…)` lines here and **none** through
+        // `diagnostics --cook`, which is the path a client takes).
+        opened.session.want_cooked_reading(path);
+        opened.session.catch_up(path);
         let _ = opened.session.cook(path);
         // **A finding's range is in the reading's coordinates, not the file's.** A check walks the tree of the
         // *rendering* — the file with its includes collapsed — so an offset into it is not a byte of this file: a

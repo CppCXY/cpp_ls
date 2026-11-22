@@ -180,7 +180,12 @@ fn run(mut cli: Cli) -> Result<(), String> {
     // a sweep of one file is what `diagnostics` already is, and a caller that has to remember `--index --all-files`
     // for the one command whose meaning is "all of them" is a caller the protocol failed.
     if matches!(cli.command, Command::Sweep { .. }) {
-        cli.project.index = true;
+        // **Every file under the root is *seeded*, not indexed up front.** `index` would make the pump build a
+        // stored cooked reading for each file, and `Session::diagnostics` prefers a stored reading over the one this
+        // command cooks — which is the *index's* reading rather than the one a client's pull gets. Measured on
+        // nlohmann/json (a header-only project): the stored reading had no `-I` for `tests/thirdparty/doctest`, so
+        // `CHECK_THROWS_WITH_AS(…, json::out_of_range&)` stayed unexpanded and ten syntax errors appeared per test
+        // file, where `diagnostics --cook` on the same file answered none.
         cli.project.all_files = true;
     }
     // **A debug build answers the same questions, minutes later.** The analysis is tree walks and inference; optimised

@@ -212,6 +212,13 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
 
     let cooked = Instant::now();
     if args.cook {
+        // **The file has to have been read before it can be cooked.** `Session::cook` starts by looking the file's
+        // summary up and answers `None` when the index has none — which is the state a session is in until something
+        // asks for the file. Without this the flag silently did nothing for a file that was not also indexed, and
+        // `diagnostics` then failed with "has no reading to diagnose" (measured on nlohmann/json's
+        // `tests/src/unit-constructor1.cpp`, a header-only project opened with `--cook` and nothing else).
+        session.want_cooked_reading(&file);
+        session.catch_up(&file);
         let _ = session.cook(&file);
     }
     let cooked = cooked.elapsed();
