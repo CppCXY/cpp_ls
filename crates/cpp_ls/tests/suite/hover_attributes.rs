@@ -12,10 +12,7 @@ use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFi
 
 /// The card for the declaration `needle` names, from a one-file project.
 fn the_card(source: &str, needle: &str) -> String {
-    let root: PathBuf =
-        std::env::temp_dir().join(format!("cppls-hover-attributes-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("a project directory");
+    let root: PathBuf = crate::common::a_temp_directory("hover-attributes");
     let file = root.join("a.cpp");
     std::fs::write(&file, source).expect("the fixture writes");
 

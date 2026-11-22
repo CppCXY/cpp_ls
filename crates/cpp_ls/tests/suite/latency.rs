@@ -535,7 +535,7 @@ struct Project {
 
 impl Project {
     fn new(name: &str) -> Project {
-        let root = std::env::temp_dir().join(format!("cppls-{name}-{}", std::process::id()));
+        let root = crate::common::a_temp_directory(name);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the test project");
         Project { root }
