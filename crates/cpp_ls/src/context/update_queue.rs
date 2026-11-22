@@ -89,6 +89,20 @@ pub enum UpdateEvent {
     Reconcile {
         listing: bool,
     },
+    /// **The client's settings changed** — the review's P1-2.
+    ///
+    /// This used to be a `tokio::spawn` from the notification handler: the read of the client's configuration, the
+    /// manager's update and the reload it may schedule ran *beside* the queue rather than through it, so a request
+    /// arriving immediately after `didChangeConfiguration` was answered against whatever configuration was in force
+    /// before — and nothing told an in-flight request that the world had changed. Through the queue it gets both
+    /// properties the document events have: a request's barrier waits for it (`record_request` / `wait_until_applied`),
+    /// and `started_change` cancels a request already running with `ContentModified`
+    /// (`docs/language-server-review.md` P1-2).
+    ///
+    /// It carries the configuration the client **already reported**, not the params of the notification: the read is a
+    /// server→client round trip, and awaiting one here would hold the queue's apply lock across a wait for a client that
+    /// may be waiting for an answer queued behind the same lock. The handler reads; this event is the application.
+    Configuration(crate::handlers::ClientConfig),
 }
 
 impl UpdateEvent {
@@ -100,6 +114,7 @@ impl UpdateEvent {
             Self::Closed(_) => "closed",
             Self::WatchedFilesChanged(_) => "watched files changed",
             Self::Reconcile { .. } => "reconcile",
+            Self::Configuration(_) => "configuration changed",
         }
     }
 
@@ -109,7 +124,7 @@ impl UpdateEvent {
             Self::Changed(params) => Some(&params.text_document.uri),
             Self::Saved(params) => Some(&params.text_document.uri),
             Self::Closed(params) => Some(&params.text_document.uri),
-            Self::WatchedFilesChanged(_) | Self::Reconcile { .. } => None,
+            Self::WatchedFilesChanged(_) | Self::Reconcile { .. } | Self::Configuration(_) => None,
         }
     }
 
@@ -118,6 +133,9 @@ impl UpdateEvent {
             Self::Saved(params) => params.text.is_some(),
             Self::WatchedFilesChanged(params) => !params.changes.is_empty(),
             Self::Reconcile { .. } => true,
+            // **A request answered from the old configuration is stale the moment the settings change**, which is the
+            // ContentModified the review asks for (docs/language-server-review.md P1-2).
+            Self::Configuration(_) => true,
             _ => true,
         }
     }
@@ -377,6 +395,9 @@ async fn process(snapshot: &ServerContextSnapshot, event: UpdateEvent) {
         }
         UpdateEvent::Reconcile { listing } => {
             handlers::process_reconcile(snapshot.clone(), listing).await;
+        }
+        UpdateEvent::Configuration(config) => {
+            handlers::apply_the_clients_configuration(snapshot.clone(), config).await;
         }
     }
 }

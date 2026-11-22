@@ -12,9 +12,10 @@ use lsp_types::{
 };
 
 use crate::context::ServerContext;
+use crate::context::UpdateEvent;
 
 use super::{
-    configuration::on_did_change_configuration,
+    configuration,
     text_document::{
         on_did_change_text_document, on_did_change_watched_files, on_did_close_document,
         on_did_open_text_document, on_did_save_text_document, on_set_trace,
@@ -64,10 +65,18 @@ pub async fn on_notification_handler(
         if let Ok(params) =
             notification.extract::<DidChangeConfigurationParams>(DidChangeConfiguration::METHOD)
         {
+            log::debug!(
+                "configuration changed: {}",
+                serde_json::to_string(&params).unwrap_or_else(|_| "<unserializable>".to_string())
+            );
+            // **Read here, apply in the queue.** The read is a server→client round trip and the queue worker must never
+            // await the client — it holds the apply lock a request's barrier waits on, so the two would wait for each
+            // other. The **application** is an update event, which is what gives a following request the barrier and an
+            // in-flight one `ContentModified` (`docs/language-server-review.md` P1-2).
             let snapshot = server_context.snapshot();
-            tokio::spawn(async move {
-                on_did_change_configuration(snapshot, params).await;
-            });
+            if let Some(config) = configuration::the_clients_configuration(&snapshot).await {
+                snapshot.enqueue(UpdateEvent::Configuration(config)).await;
+            }
         }
         return Ok(());
     }

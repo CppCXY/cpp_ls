@@ -786,6 +786,12 @@ struct Server {
     /// **The `workspace/configuration` requests the server made**, by params. Kept because the *scope* the server asks
     /// under is part of the answer and `null` — what an unconfigured client replies — says nothing about it.
     configuration_requests: Vec<Value>,
+    /// **How many of those the client has answered** — the count a sequence test has to look at, because a request the
+    /// server sent is not a setting the server has applied.
+    configuration_answers: usize,
+    /// **Configuration requests the test is holding**, read but not answered — see
+    /// [`Server::read_holding_the_configuration`].
+    held_configuration_requests: Vec<Value>,
 }
 
 impl Server {
@@ -863,6 +869,8 @@ impl Server {
             log,
             within,
             configuration_requests: Vec::new(),
+            configuration_answers: 0,
+            held_configuration_requests: Vec::new(),
         }
     }
 
@@ -1001,6 +1009,55 @@ impl Server {
         self.wait_for_within(self.within, accept)
     }
 
+    /// **Read what the server sends for `within`, answering everything except `workspace/configuration`.**
+    ///
+    /// The configuration requests are kept in [`Server::held_configuration_requests`] for the caller to answer when it
+    /// decides to. That is what lets a test tell two situations apart that `wait_for` blurs: the server had not
+    /// **answered** the request yet, versus the client had not **answered the settings** yet. In the first the server is
+    /// waiting on the settings; in the second it is not. Every other server request is answered as usual, so a progress
+    /// token or a registration cannot stall the run.
+    fn read_holding_the_configuration(&mut self, within: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + within;
+        let mut read = Vec::new();
+
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            let message = match self
+                .messages
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Once the settings have been asked for, and nothing else arrives, this is the state the test
+                    // wants to look at: the server is waiting for them.
+                    if !self.held_configuration_requests.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!("the server closed its stdout"),
+            };
+
+            if message.get("method").is_some() && message.get("id").is_some() {
+                if message["method"] == json!("workspace/configuration") {
+                    self.held_configuration_requests.push(message);
+                } else {
+                    self.answer(&message);
+                }
+                continue;
+            }
+            read.push(message);
+        }
+
+        read
+    }
+
+    /// Answer the configuration requests [`Server::read_holding_the_configuration`] kept.
+    fn answer_the_held_configuration(&mut self) {
+        for request in std::mem::take(&mut self.held_configuration_requests) {
+            self.answer(&request);
+        }
+    }
+
     /// [`Server::wait_for`] with the caller's own deadline.
     fn wait_for_within(&mut self, within: Duration, accept: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + within;
@@ -1040,6 +1097,9 @@ impl Server {
             // client says and what the server's own defaults are for.
             "workspace/configuration" => {
                 self.configuration_requests.push(request["params"].clone());
+                // Counted **as answered**, after any delay the test asked for: a request in flight is not a setting in
+                // force, which is exactly the distinction the sequence test is about.
+                self.configuration_answers += 1;
                 json!([Value::Null])
             }
             _ => Value::Null,
@@ -7948,6 +8008,103 @@ fn every_inactive_regions_publication_matches_the_version_it_names() {
             "version {version} names `{text:?}`, whose dead branch is {expected_a_dead_branch}: {published}"
         );
     }
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **A request that follows `didChangeConfiguration` is answered after the new settings are in force.**
+///
+/// The notification used to be handled in a detached task: reading the client's configuration, updating the manager and
+/// scheduling the reload all ran *beside* the update queue, so the next request could be answered from the configuration
+/// that was in force before — and nothing told an in-flight request the world had changed
+/// (`docs/language-server-review.md` P1-2).
+///
+/// The observable is the client's own configuration request: the test client counts those (it answers `[null]` to each),
+/// so if the count has grown by the time the hover's answer comes back, the server finished the read **before** it
+/// answered. As an update event it is guaranteed by the request barrier; as a detached task it was a race.
+#[test]
+fn a_request_after_a_configuration_change_sees_the_new_settings() {
+    let project = Project::new("configuration-sequence");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "workspace": { "configuration": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    // One hover first, so the file is read and the answer below is about the sequence rather than the index.
+    let warm = server.ask_until(10, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 3, "character": 6 },
+            }
+        })
+    });
+    assert!(
+        !warm["result"].is_null(),
+        "the fixture's `Widget` answers: {warm}"
+    );
+
+    let answered_before = server.configuration_answers;
+    server.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": {} }),
+    );
+    // **The request by hand**, so this client can decide when to answer the settings: \Server::request\ answers every
+    // server request on the way, which blurs exactly the distinction the test is about.
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 50,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 3, "character": 6 },
+        },
+    }));
+
+    // **While the settings are unanswered, the hover must not be.** The handler is reading them, and the request queues
+    // behind that read; a server that dispatched the request from a detached task would answer it here.
+    let early = server.read_holding_the_configuration(Duration::from_secs(3));
+    assert!(
+        early.iter().all(|message| message["id"] != json!(50)),
+        "the request was answered before the settings it follows: {early:?}"
+    );
+    assert!(
+        !server.held_configuration_requests.is_empty(),
+        "the server did ask what the settings are now"
+    );
+    server.answer_the_held_configuration();
+
+    let answered = server.wait_for(|message| message["id"] == json!(50));
+    assert!(
+        answered.get("error").is_none(),
+        "the request is ordered behind the settings change rather than cancelled by it: {answered}"
+    );
+    assert!(
+        server.configuration_answers > answered_before,
+        "the new settings were **answered** before the request was, so it cannot have been served from the old ones: {:?}",
+        server.configuration_requests
+    );
 
     let _ = server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

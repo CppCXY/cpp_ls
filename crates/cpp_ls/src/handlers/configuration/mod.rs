@@ -8,25 +8,34 @@
 //!
 //! ```text
 //! didChangeConfiguration ──▶ workspace/configuration ──▶ same as before? ──▶ nothing
-//!                                                    └─ different? ──────▶ reload the workspace
+//!                                                    └─ different? ──────▶ queued → applied → reload
 //! ```
+//!
+//! The read is the handler's; the application is an [`UpdateEvent`](crate::context::UpdateEvent) so that it is ordered
+//! with the document events — see [`the_clients_configuration`] for the deadlock that keeps the two apart.
 
-use lsp_types::{ClientCapabilities, DidChangeConfigurationParams, ServerCapabilities};
+use lsp_types::{ClientCapabilities, ServerCapabilities};
 
 use crate::context::ServerContextSnapshot;
 use crate::handlers::initialized::get_client_config;
 
 use super::RegisterCapabilities;
 
-pub async fn on_did_change_configuration(
-    context: ServerContextSnapshot,
-    params: DidChangeConfigurationParams,
-) -> Option<()> {
-    log::debug!(
-        "configuration changed: {}",
-        serde_json::to_string(&params).unwrap_or_else(|_| "<unserializable>".to_string())
-    );
-
+/// **Read the client's configuration after it said something changed** — the read, and not the application.
+///
+/// The two halves are deliberately separate, and the reason is a deadlock rather than tidiness: reading is a
+/// **server→client round trip**, so it must not happen inside the update queue's worker. The worker holds the queue's
+/// apply lock while it applies an event, and a request's barrier waits on that lock — a worker awaiting the client
+/// would therefore wait for a client that is itself waiting for an answer queued behind the same lock
+/// (`docs/language-server-review.md` P1-2). The notification handler reads (its own async context, no queue lock); the
+/// queue applies the result, which is what gives the change the barrier and the `ContentModified` cancellation.
+///
+/// `None` when the client cannot be asked, or when what it says is what was already in force — the second is the rule
+/// the handler has always had: VS Code sends this notification whenever *any* setting changes, including settings this
+/// server has never heard of, and re-opening a project because somebody changed their font size is a visible waste.
+pub async fn the_clients_configuration(
+    context: &ServerContextSnapshot,
+) -> Option<crate::handlers::ClientConfig> {
     let (client_id, current) = {
         let workspace_manager = context.workspace_manager().lock().await;
         (
@@ -38,12 +47,35 @@ pub async fn on_did_change_configuration(
     let supports_config_request = context.lsp_features().supports_config_request();
     if !supports_config_request {
         log::info!("the client cannot be asked what changed; nothing to reload for");
-        return Some(());
+        return None;
     }
 
-    let new_config = get_client_config(&context, client_id, supports_config_request).await;
-    if new_config == current {
-        log::debug!("the client's configuration is unchanged; not reloading");
+    let new_config = get_client_config(context, client_id, supports_config_request).await;
+    match new_config == current {
+        true => {
+            log::debug!("the client's configuration is unchanged; not reloading");
+            None
+        }
+        false => Some(new_config),
+    }
+}
+
+/// **Apply a configuration the client reported**, inside the update sequence.
+///
+/// Idempotent against the manager's current value, which is what makes it safe for the event to be applied by whichever
+/// party gets there first (the worker, or a request that drains the queue ahead of it).
+pub async fn apply_the_clients_configuration(
+    context: ServerContextSnapshot,
+    new_config: crate::handlers::ClientConfig,
+) -> Option<()> {
+    let unchanged = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.client_config == new_config
+    };
+    if unchanged {
+        log::debug!(
+            "the client's configuration was applied by somebody else; nothing to reload for"
+        );
         return Some(());
     }
 

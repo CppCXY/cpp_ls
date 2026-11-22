@@ -56,6 +56,7 @@ pub mod type_hierarchy;
 mod workspace_symbol;
 
 use crate::context::ServerContextSnapshot;
+pub use configuration::{apply_the_clients_configuration, the_clients_configuration};
 pub use initialized::{ClientConfig, initialized_handler, start_analysis};
 use lsp_types::{ClientCapabilities, ServerCapabilities};
 pub use notification_handler::on_notification_handler;
