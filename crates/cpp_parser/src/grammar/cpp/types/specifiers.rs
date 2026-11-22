@@ -802,6 +802,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
         // `__interface I : IUnknown { … };` reported ``expected `;` after expression`` at the `:`.
         CppTokenKind::Identifier
             if p.current_token_text() == THE_KEYWORD_INTERFACE_IS_SPELLED
+                && p.language().support(crate::features::Feature::Interface)
                 && a_body_follows_the_class_head(p) =>
         {
             return parse_class_like_head(p);

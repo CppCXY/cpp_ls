@@ -121,16 +121,3 @@ run and silenced, so it costs nothing and cannot fire. Twenty-one codes can fire
 
 `[diagnostics].disable` turns one off by name, and the severities are the registry's own — a client that shows only
 errors shows exactly the rows marked Error here.
-
-## Where the numbers are
-
-This document is the **map**: what C is read as, and which rules can fire. What was measured, what was wrong and what
-fixed it is a record and lives beside it:
-
-* [worklog.md](worklog.md) — every measurement this work was driven by, the root cause behind each defect, and the
-  commit that fixed it (libuv 1.53.1, redis 8.x, and the C corpus before them);
-* [inspect.md](inspect.md) — the protocol of cpp_inspect, the one-question binary the measurements are taken with,
-  and the replacement for the probe tests that used to carry them.
-
-The thirteen C rules above are the current state; a measurement that changes the answer belongs in the worklog, not
-here.

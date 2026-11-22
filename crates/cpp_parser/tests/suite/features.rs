@@ -967,3 +967,143 @@ fn a_strict_standard_refuses_the_vendor_spellings() {
         "C++23 lexes it as one token"
     );
 }
+
+/// **Every vendor extension has a negative row**: the construct parses in the configuration that names its compiler, and a
+/// strict standard reports it. The matrix the review asks for (`docs/parser-toolchain-review.md` P3-2), because the P1-2
+/// defect was exactly a rule that matched a token shape and never asked the configuration — one construct at a time is
+/// how that comes back.
+///
+/// A row is `(what, source, the vendor that accepts it)`. The accepting configuration is a strict C++23 plus that vendor,
+/// so a row cannot pass by being permissive in some other way.
+#[test]
+fn a_strict_standard_refuses_every_vendor_extension() {
+    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
+    use cpp_parser::{CppParser, ParserConfig};
+
+    let strict = LanguageConfig::new().with_standard(Standard::Cpp23);
+    let with = |vendor: Vendor| strict.with_vendor(vendor);
+
+    let rows: [(&str, &str, Vendor); 7] = [
+        (
+            "MSVC's structured exception handling",
+            "void f() { __try { } __finally { } }\n",
+            Vendor::Msvc,
+        ),
+        (
+            "Clang's block literal",
+            "auto b = ^(int v) { return v; };\n",
+            Vendor::Clang,
+        ),
+        (
+            "GNU statement expression",
+            "int f() { return ({ int x = 1; x; }); }\n",
+            Vendor::Gnu,
+        ),
+        ("GNU `typeof`", "typeof(1) n = 1;\n", Vendor::Gnu),
+        (
+            "GNU `asm` block",
+            "void f() { __asm__ volatile(\"nop\"); }\n",
+            Vendor::Gnu,
+        ),
+        (
+            "GNU's elvis operator",
+            "int f(int a) { return a ?: 0; }\n",
+            Vendor::Gnu,
+        ),
+        (
+            "MSVC's `__interface`",
+            "__interface I { void f(); };\n",
+            Vendor::Msvc,
+        ),
+    ];
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (what, source, vendor) in rows {
+        // The accepting configuration must read it, or the row says nothing about the gate.
+        let accepted =
+            CppParser::parse(source, ParserConfig::default().with_language(with(vendor)));
+        if accepted.has_syntax_errors() {
+            wrong.push(format!(
+                "  {what}: `{vendor}` does not accept it: {:?}",
+                accepted.get_errors()
+            ));
+        }
+
+        // And the strict standard must refuse it: an error, or - for a construct whose tokens are legal as something
+        // else - no node of its own. An error is what a compiler without the extension reports.
+        let refused = CppParser::parse(source, ParserConfig::default().with_language(strict));
+        if !refused.has_syntax_errors() {
+            wrong.push(format!(
+                "  {what}: a strict C++23 parse accepted it, and no configuration was asked"
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} of {} vendor extensions do not have a strict negative:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
+    );
+}
+
+/// **A strict parse of `int* __restrict__ p` is a declaration with a name, not an error** — the one row the error-based
+/// matrix above cannot express, kept apart so the difference is stated rather than hidden.
+///
+/// `__restrict` is gated (`Feature::RestrictGnu`), so a strict C++23 parse does not read it as a qualifier; but two
+/// identifiers in a parameter list are still a declaration, so the strict reading is a **silently wrong tree** — the
+/// parameter is named `__restrict__` and `p` has no type. That is the declaration heuristic's business rather than the
+/// feature gate's, and it is recorded here because a matrix that only asks "does it error" would have called this row
+/// green.
+#[test]
+fn a_strict_parse_reads_gnu_restrict_as_a_name() {
+    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
+    use cpp_parser::{CppParser, ParserConfig};
+
+    let source = "void f(int* __restrict__ p) { }\n";
+
+    let strict = CppParser::parse(
+        source,
+        ParserConfig::default().with_language(LanguageConfig::new().with_standard(Standard::Cpp23)),
+    );
+    let names_in_the_strict_tree: Vec<String> = strict
+        .get_red_root()
+        .descendants()
+        .filter_map(|node| {
+            use cpp_parser::CppAstNode as _;
+            cpp_parser::CppDeclaration::cast(node)
+        })
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        !names_in_the_strict_tree.is_empty(),
+        "it is read as a declaration, which is what makes it silent"
+    );
+
+    let gnu = CppParser::parse(
+        source,
+        ParserConfig::default().with_language(
+            LanguageConfig::new()
+                .with_standard(Standard::Cpp23)
+                .with_vendor(Vendor::Gnu),
+        ),
+    );
+    assert!(!gnu.has_syntax_errors(), "{:?}", gnu.get_errors());
+    assert_eq!(gnu.to_source_text(), source, "the tree stays lossless");
+    // The difference is what the declaration **names**: with the vendor it is the qualifier it means, so no declaration
+    // is called __restrict__; strict, the same tokens are a declaration of that name.
+    let gnu_names: Vec<String> = gnu
+        .get_red_root()
+        .descendants()
+        .filter_map(|node| {
+            use cpp_parser::CppAstNode as _;
+            cpp_parser::CppDeclaration::cast(node)
+        })
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        !gnu_names.iter().any(|name| name == "__restrict__"),
+        "with the vendor named it is a qualifier, not a name: {gnu_names:?}"
+    );
+}

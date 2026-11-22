@@ -552,6 +552,11 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 /// That shape has no competitor at statement position: a name followed by a parenthesised group is otherwise a
 /// *call*, and a call is read — the difference is the spelling, and the three spellings are the compilers' own.
 fn at_an_asm_statement(p: &CppParser) -> bool {
+    // **`asm` is a GNU extension**, so the spelling only means the construct where the configuration says so: in a
+    // strict C++23 parse it is an identifier, and `asm (…) ;` is the call an identifier followed by parentheses is.
+    if !p.language().support(crate::features::Feature::AsmBlock) {
+        return false;
+    }
     if p.current_token() != CppTokenKind::Identifier
         || !matches!(p.current_token_text(), "asm" | "__asm" | "__asm__")
     {

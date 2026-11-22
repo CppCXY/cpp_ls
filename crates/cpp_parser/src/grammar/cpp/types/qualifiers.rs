@@ -205,7 +205,13 @@ pub(crate) fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationK
 /// before it asks whether the unit is CUDA.
 pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
     Some(match p.current_token_text() {
-        "__restrict" | "__restrict__" => ImplementationKeyword::Qualifier,
+        // **GNU's spelling of C99's `restrict`**, and gated for the same reason as the other extensions: a strict
+        // C++23 parse has no `__restrict`, and reading it as a qualifier hides that from the reader.
+        "__restrict" | "__restrict__"
+            if p.language().support(crate::features::Feature::RestrictGnu) =>
+        {
+            ImplementationKeyword::Qualifier
+        }
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
         "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
         | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => {

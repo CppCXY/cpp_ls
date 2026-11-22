@@ -501,6 +501,22 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
     let mut expr = parse_binary_expr_with_precedence(p, 0)?;
 
     if p.current_token() == CppTokenKind::Question {
+        // **`a ?: b` is GNU's elvis operator**, and where the configuration does not have it a `:` where the true
+        // expression belongs is the error a compiler without the extension reports. Refused **before** the
+        // `TernaryExpr` node is opened, because `expr.precede` records a forward parent on the condition and undoing a
+        // marker that did so leaves the event stream pointing at an event that no longer exists — which the tree builder
+        // reports as `forward parent must point at a NodeStart, found Trivia`.
+        if p.peek_next_token() == CppTokenKind::Colon
+            && !p
+                .language()
+                .support(crate::features::Feature::ElvisOperator)
+        {
+            return Err(CppParseError::syntax_error_from(
+                &t!("expected an expression between `?` and `:`"),
+                p.current_token_range(),
+            ));
+        }
+
         // **How many conditionals were open when this conditional began** — taken here, before the true branch is
         // read, because the `# if` of the per-branch spelling is consumed *by the true expression* (its
         // operator-position seam reads it, since no operator follows it and it opens no branch). A snapshot taken
@@ -3101,8 +3117,13 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
 
-    // **The GNU statement expression**, decided at the one token that tells it apart.
-    if p.current_token() == CppTokenKind::LeftBrace {
+    // **The GNU statement expression**, decided at the one token that tells it apart — and only where the
+    // configuration says the extension exists: `({ … })` in a strict C++23 parse is a `{` where an expression belongs,
+    // which is an error rather than a construct (`docs/parser-toolchain-review.md` P3-2, found by the vendor matrix).
+    if p.current_token() == CppTokenKind::LeftBrace
+        && p.language()
+            .support(crate::features::Feature::StatementExpression)
+    {
         if let Err(err) = crate::grammar::cpp::stats::parse_compound_stat(p) {
             m.undo(p);
             return Err(err);
