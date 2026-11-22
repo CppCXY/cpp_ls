@@ -329,6 +329,31 @@ With the probe working, it confirms four of the review's claims and leaves one o
 | P1-1 use before declaration | `define` picks the declaration written **after** the call |
 | P1-3 `volatile S v; auto x = v;` | still `not_an_expression` — the next thing to look at, and the row the first Stage 1 test will pin |
 
+### P1-4, a literal's type is in its spelling (`literal_type` fixed)
+
+One function now reads it — `sema/literal.rs::a_literal_type` — where three had each read part of it and all three
+dropped the suffix. The probe before and after:
+
+| expression | before | after |
+| --- | --- | --- |
+| `1u` | `int` | `unsigned int` |
+| `1.0f` | `double` | `float` |
+| `u8"x"` | `const char*` | `const char8_t*` |
+| `L'x'` | `int` | `wchar_t` |
+
+The encoding prefixes and the integer suffixes (`u`, `l`, `ll`, `ul`, `ull`, C++23's `z`/`uz`) are read from the tail of
+the token, and the floating suffixes as **whole words** — a trailing *run* of characters does not work, because `1.0f` ends
+in `0f`, which is why the first attempt answered `double` for it.
+
+`u8` is the one answer the standard changes (`const char8_t*` from C++20, `const char*` before), so the function has a
+variant that takes the flag; the sites that cannot know the standard take the C++20 answer, which is what an editor that
+never asked means. `a_string_literals_type` — the previous, deliberately-`char` answer with a comment explaining the
+omission — is gone, and its comment went with it.
+
+Two tests: the table above plus its neighbours (radix forms, `1e5`, `0x1p3`, the four string prefixes, `true`/`nullptr`),
+and the C++17 `u8` row. The suite is **891 unit + 1137 integration** after (889 + 1136 before).
+
+
 
 ## The review's P3 list: the two thirds worth doing
 

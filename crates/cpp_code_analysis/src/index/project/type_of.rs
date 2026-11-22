@@ -424,10 +424,13 @@ pub(crate) fn type_of_expression_inner(
         })
     {
         let literal = match kind {
-            cpp_parser::CppTokenKind::IntegerLiteral | cpp_parser::CppTokenKind::CharLiteral => {
-                Some("int")
+            // **The literal's own spelling is the type** — `1u` is `unsigned int`, `1.0f` is `float`, `L'x'` is
+            // `wchar_t` — and one function reads it for every site that asks (`docs/code-analysis-review.md` P1-4).
+            cpp_parser::CppTokenKind::IntegerLiteral
+            | cpp_parser::CppTokenKind::FloatingLiteral
+            | cpp_parser::CppTokenKind::CharLiteral => {
+                crate::sema::literal::a_literal_type(&written_as)
             }
-            cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
             cpp_parser::CppTokenKind::BoolLiteral
             | cpp_parser::CppTokenKind::TrueKeyword
             | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
@@ -435,7 +438,11 @@ pub(crate) fn type_of_expression_inner(
             // the text carries: `L"…"` is `const wchar_t*`, `u8"…"` is `const char*`, and the plain form is too.
             // Answering `const char*` for every literal made `std::format(L"x {}", 1)` deduce `string` — the width
             // rule that picks between `format_string` and `wformat_string` was reading the wrong half.
-            cpp_parser::CppTokenKind::StringLiteral => Some(a_string_literals_type(&written_as)),
+            // **The encoding prefix is the element type** — `L"…"` is `const wchar_t*`, `u8"…"` is `const char8_t*` —
+            // and one function reads every literal's spelling (`docs/code-analysis-review.md` P1-4).
+            cpp_parser::CppTokenKind::StringLiteral => {
+                crate::sema::literal::a_literal_type(&written_as)
+            }
             cpp_parser::CppTokenKind::NullptrLiteral | cpp_parser::CppTokenKind::NullptrKeyword => {
                 Some("nullptr_t")
             }
@@ -507,28 +514,6 @@ pub(crate) fn type_of_expression_inner(
         }
         run.find(|character: char| character.is_ascii_alphabetic())
             .map(|at| &run[at..])
-    }
-
-    /// **The type of a string literal, from its encoding prefix** — see the literal arm of [`type_of_expression_inner`].
-    ///
-    /// `L` is `wchar_t`, `u8` is `char` (the C++20 `char8_t` is deliberately not introduced: a file that is not compiled as
-    /// C++20 spells neither, and `const char*` is what every reader means by it), `u` is `char16_t` and `U` is `char32_t`.
-    /// A raw string (`LR"(…)"`) carries the same prefix, which is why the test is a prefix rather than a quote.
-    fn a_string_literals_type(written: &str) -> &'static str {
-        let written = written.trim_start();
-        if written.starts_with("u8") {
-            return "const char*";
-        }
-        if written.starts_with('L') {
-            return "const wchar_t*";
-        }
-        if written.starts_with('u') {
-            return "const char16_t*";
-        }
-        if written.starts_with('U') {
-            return "const char32_t*";
-        }
-        "const char*"
     }
 
     // **A functional cast of a template-id is that type.** `std::vector<int>()` — the initialiser behind every

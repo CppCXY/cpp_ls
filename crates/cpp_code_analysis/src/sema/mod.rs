@@ -23,6 +23,7 @@ pub mod convert;
 pub mod declarations;
 pub mod deduce;
 pub mod layout;
+pub mod literal;
 pub mod model;
 pub mod module_info;
 pub mod modules;
