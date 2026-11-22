@@ -239,7 +239,11 @@ mod tests {
         assert_eq!(starts("a\r\nb"), [0, 3], "CRLF is one break, not two");
         assert_eq!(starts("a\rb"), [0, 2], "a lone CR is one");
         assert_eq!(starts("a\n\rb"), [0, 3], "and so is the LFCR pair");
-        assert_eq!(starts("a\nb\n"), [0, 2, 4], "a trailing break opens an empty line");
+        assert_eq!(
+            starts("a\nb\n"),
+            [0, 2, 4],
+            "a trailing break opens an empty line"
+        );
         assert_eq!(starts(""), [0], "an empty text is one empty line");
     }
 

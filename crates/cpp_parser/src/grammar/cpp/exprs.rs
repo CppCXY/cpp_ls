@@ -1383,7 +1383,16 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
     // Where the token after the group that closes the cursor's `(` stands, once it is known.
     let mut after_the_group = None;
 
-    for (index, kind) in p.peek_token_kind_at(1..128).iter().enumerate() {
+    // **To the end of the file, not to a fixed window.** The match it is looking for is the `)` that closes the cursor's
+    // `(`, and a group longer than the window used to answer "no closing parenthesis" - which is not an answer about the
+    // grammar but about the budget (`docs/parser-toolchain-review.md` P2-1). The loop already stops at that `)` and at
+    // EOF, so the file's own length bounds it.
+    let from = p.current_token_index() + 1;
+    let reach = p.token_count().saturating_sub(from);
+    for (index, kind) in (0..reach)
+        .map(|offset| p.token_kind_at(from + offset))
+        .enumerate()
+    {
         match kind {
             CppTokenKind::LeftParen => depth += 1,
             CppTokenKind::RightParen => {

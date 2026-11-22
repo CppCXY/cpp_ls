@@ -1355,7 +1355,9 @@ fn parse_command_object(object: &str) -> Option<CompileCommand> {
     // command path never matched and the header was analysed without the flags of the source beside it
     // (`docs/parser-toolchain-review.md` P2-8).
     let file = match &directory {
-        Some(directory) if Path::new(&file).is_relative() => resolve_relative(directory, Path::new(&file)),
+        Some(directory) if Path::new(&file).is_relative() => {
+            resolve_relative(directory, Path::new(&file))
+        }
         _ => PathBuf::from(file),
     };
 
