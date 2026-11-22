@@ -5,10 +5,10 @@
 //! in 4.85 s. The files live in `tests/suite/` — a subdirectory, which cargo does not treat as a target — and this
 //! file declares each of them as a module, so they keep their own names and helpers and only the linking changes.
 
-#[path = "suite/common.rs"]
-mod common;
 #[path = "suite/a_header_language.rs"]
 mod a_header_language;
+#[path = "suite/common.rs"]
+mod common;
 #[path = "suite/diagnostics_stable.rs"]
 mod diagnostics_stable;
 #[path = "suite/formatter_choice.rs"]

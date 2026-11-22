@@ -317,22 +317,28 @@ it **before** the compile command's `-I` paths. Measured in the new unit test: a
 the checkout's own `include/vector` instead of the `-I` directory's. The guard is back and the test fails without it
 (`left: include/vector`, `right: user/vector`).
 
+**Fixed — P1-8, guards as conditions** (`67b8bb33`). `decide_visit` skipped a guarded file once it had been visited,
+whatever the macro state said, so `#undef GUARDED_H` between two includes — which makes the compiler read the body again —
+was skipped here; and `has_pragma_once` counted a `#pragma once` inside `#if 0`, where the compiler never sees it. The
+guard now has to block *for that file* (the name is in the file's own `defines` and still defined at this include), and
+only a directive at condition depth 0 counts as a pragma guard. Four tests: the `#undef` case and the inactive pragma
+fail without the change, the copied-guard-name case and a live guard are the controls.
+
+**Fixed — the flaky `cpp_ls` tests** (`a3957bf1`, `3e5cbddf`). Two causes, both test-side. The fixture helpers built
+their temp directory from the **process id**, which every test in one binary shares, so one test's `remove_dir_all`
+landed in another's `fs::write` (fixed with a per-binary counter). And three assertions in `latency` answer "how much
+spare machine was there" rather than "what does the code do" — they failed only under a full-workspace run — so they now
+run under `CPPLS_LATENCY_STRICT=1 ... -- --test-threads=1`, while the fill-time bound and the steady-state median stay
+unconditional. Two full-workspace runs after both changes were clean.
+
 **Confirmed by reading, not yet fixed** — in the order this round would take them:
 
 | item | where | what the code does |
 | --- | --- | --- |
-| P1-8 | `graph.rs:894` `decide_visit` | skips a guarded file already visited **without reading the macro state**; `Guard::blocks_a_visit` exists and is not called. `has_pragma_once` also counts an inactive `#pragma once`. |
 | P1-3 | `cpp_lexer.rs:247` | `contract_assert` becomes a keyword **unconditionally**, so a C++23 identifier of that name fails to parse; `pre`/`post` are contextual and unaffected. Fixing it needs a `Standard::Cpp26` and a move of the vendor bits in `LanguageConfig` (the vendor block starts at bit 10). |
 | P1-5 | `syntax/id.rs:139` | `deserialize` calls `CppKind::from_raw` and `TextRange::new` without validating either, so a malformed cache entry can panic the reader. |
 | P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
 | P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
-
-Also worth recording, and outside the review: **four different tests in `crates/cpp_ls/tests/suite` failed under a
-full-workspace run today** (`latency` twice, `hover_attributes` once, `hover_layout` once), each passed alone, and the
-cause is found: the fixture helpers built their temp directory from the **process id**, which every test in one binary
-shares, so one test's `remove_dir_all` landed in another's `fs::write`. `a3957bf1` adds `common::a_temp_directory`
-(process id plus a per-binary counter) and switches the three suites that shared a directory. One flake remains in
-three full runs after that change and its name has not been caught yet — the review's P3-2 list is where it belongs.
 
 ## curl's last three `syntax-error`s, and the two defects behind them
 
