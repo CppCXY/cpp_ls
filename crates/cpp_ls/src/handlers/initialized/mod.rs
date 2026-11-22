@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use lsp_types::InitializeParams;
 
 use crate::cmd_args::CmdArgs;
-use crate::context::{ProgressTask, ServerContextSnapshot, get_client_id};
+use crate::context::{ProgressTask, ServerContextSnapshot};
 use crate::handlers::register_files_watch;
 use crate::logger::init_logger;
 use crate::util::uri_to_file_path;
