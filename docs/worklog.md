@@ -385,6 +385,27 @@ roughly ten milliseconds — all passed, so what the test pins is the invariant 
 The window is closed by construction (one snapshot instead of two) and by the two gates, the same shape
 `DiagnosticService::publish` uses; saying the test reproduces the race would be a claim the session did not earn.
 
+### Batch 4: a configuration change is an update event, and the read stays out of the queue
+
+`workspace/didChangeConfiguration` was handled in a detached `tokio::spawn`: the read, the manager's update and the reload
+all ran beside the queue, so a request arriving next could be answered from the configuration that was in force before it
+(`docs/language-server-review.md` P1-2).
+
+It is an `UpdateEvent` now, applied by the queue like a document event, which gives it the two properties the review asks
+for without inventing anything: a request's barrier waits for it, and `started_change` cancels an in-flight request with
+`ContentModified` (`changes_analysis` answers true).
+
+**The read is deliberately not in the worker.** Reading is a server→client round trip; the worker holds the apply lock a
+request's barrier waits on, so awaiting the client there is a deadlock — a client waiting for an answer queued behind the
+same lock. `the_clients_configuration` reads in the notification handler, the event carries the config the client reported,
+and `apply_the_clients_configuration` only applies it (idempotent against the manager's current value).
+
+**The test distinguishes the designs rather than trusting them.** The client sends the notification and a hover, then reads
+the wire **without answering the settings**: while they are unanswered the hover must not be. Old code: the hover comes back
+in **0.5 s** with the configuration still outstanding, and the test fails with *"the request was answered before the
+settings it follows"*. New code: **5.4 s**, after the settings are answered and the change is applied.
+
+
 
 
 
