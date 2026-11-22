@@ -383,11 +383,10 @@ the file plainly wrote, which breaks the guard chain of a header read on its own
 could carry the distinction to a consumer yet. The region walk's test fails with the old single-state pass (no edge at
 all); the seven guard tests and `a_macro_a_header_defines_itself_is_still_decided` stay green.
 
-**Confirmed by reading, not yet fixed** — in the order this round would take them:
-
-| item | where | what the code does |
-| --- | --- | --- |
-| P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
+What the review still asks for is its **P2 and P3 lists**: the fixed lookahead windows that are treated as grammar
+boundaries, the two header-name readers, `parse_tokens` not validating its input, the kind discriminant as an implicit
+wire format, the Windows/case-platform questions, the incremental reparse, and the compiler differential jobs. Those are
+their own rounds; the P1 list above is closed.
 
 ## curl's last three `syntax-error`s, and the two defects behind them
 
