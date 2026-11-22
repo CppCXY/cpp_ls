@@ -253,6 +253,44 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The C corpora, re-measured after the cook and parser work — and the measurement itself was wrong three ways
+
+The condition evaluator now decides `#if` the way the standard does (`Unknown || true` is true, the rule that fixed
+hedley), the cook answers `__LINE__`/`__COUNTER__`, and includes are read through the whole closure. All three change
+what a rendering contains, so every C number had to be taken again — and taking them exposed three defects **in the
+sweep**, each of which had been quietly changing the numbers:
+
+* **A file the compilation database does not name was measured against no configuration at all.** libuv's database has
+  80 commands and no `aix.c`, `ibmi.c`, `kqueue.c` or `linux.c` — other platforms' sources — and cooking one of them
+  invents include paths: that was the "27 syntax errors" the first re-measurement reported. Such files are now counted
+  (`not_in_the_database`, with the database's path and the first examples in the answer) and not measured.
+* **The loop read eight includes, not the closure.** `catch_up` is a hover's slice; libuv's `signal.c` reported a syntax
+  error there and none through `diagnostics --cook`. The sweep now takes the same whole-closure walk as `--cook`.
+* **The project list is not the build's file list.** A session's `project_files` is what the scan found; a
+  `compile_commands.json` is the list of translation units — on curl the scan's list held only the 188 headers, so the
+  sweep measured zero files. The union is taken, filtered to the extensions this analysis reads (a CMake database on
+  Windows also lists `libcurl.rc`, which is not C), and `--including` compares one separator on both sides (a database
+  writes `E:/corpora/curl/lib/url.c`, a scan writes `E:\corpora\curl\lib\url.c`, and the filter had been matching one
+  half of the project and not the other).
+
+With those fixed:
+
+| corpus | files measured | not in the database | findings | of which `syntax-error` |
+| --- | --- | --- | --- | --- |
+| libuv 1.53.1, `src` | 55 | 54 | **349** | **0** |
+| redis 8.x, `src` | 127 | 96 | **1116** | **0** |
+| curl 8.x, `lib` | 146 | 188 (headers) | **397** | **3** |
+| curl 8.x, `src` | 42 | 45 (headers) | **86** | **0** |
+
+The findings are the hint categories these projects have always produced: `braces-around-statements` (831 in redis,
+310 in curl's lib), `else-after-return`, `macro-parentheses`, `unused`, and `include-not-found` where a POSIX header is
+absent on Windows. The three `syntax-error`s left are all in curl's `lib`, and are the next triage:
+
+| file | line | construct |
+| --- | --- | --- |
+| `lib/curl_gssapi.c` | 63, 66 | `expected `;` after expression` |
+| `lib/multi.c` | 3516 | `expected primary expression` — a `struct Curl_mapi_guard guard;` local in `curl_multi_socket` |
+
 ## libuv, re-measured after the cook and parser work — **and it went from 0 syntax errors to 27**
 
 The same sweep (`cpp_inspect --project E:\corpora\libuv --file … sweep --including libuv\src`), the same corpus, the same

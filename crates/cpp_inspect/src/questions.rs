@@ -840,17 +840,29 @@ pub fn the_sweep(
     // **Each file is read for its own line numbers.** The findings a file gets are in that file's coordinates, and
     // `--file` names only the one the session was opened around: a sweep that measured every line against it printed
     // `module.c:2453` for a file with no 2 453rd line.
-    let mut paths: Vec<std::path::PathBuf> = opened.session.project_files().to_vec();
+    // **Only the sources this analysis reads**, whichever list named them: a CMake database on Windows lists resource
+    // scripts (libcurl.rc) and a session's scan may carry them too, and neither is C (docs/worklog.md).
+    let mut paths: Vec<std::path::PathBuf> = opened
+        .session
+        .project_files()
+        .iter()
+        .filter(|path| crate::project::is_a_source_file(path))
+        .cloned()
+        .collect();
     // **And the database's own files.** A session's project list is what the *scan* found; a `compile_commands.json`
     // is the list of translation units, and on curl the scan's list held only headers — so a sweep measured zero files
     // and reported 188 "not in the database" (`docs/worklog.md`). The union is the project as a reader means it.
     if let Some(database) = opened.session.discovery().database.as_ref() {
+        // **Only the sources this analysis reads.** A CMake database on Windows also lists resource scripts
+        // (libcurl.rc), which are not C and parse as nothing — measured: one .rc in curl's database came out as
+        // two syntax errors that no reader could act on.
         paths.extend(
             database
                 .commands
                 .commands
                 .iter()
-                .map(|command| command.file.clone()),
+                .map(|command| command.file.clone())
+                .filter(|file| crate::project::is_a_source_file(file)),
         );
         paths.sort();
         paths.dedup();

@@ -307,6 +307,24 @@ pub(crate) fn warm_the_closure(session: &mut cpp_code_analysis::Session, file: &
         }
     }
 }
+/// **Is this a file the analysis reads?** — the extension list the scan uses, asked of one path.
+///
+/// A compilation database may name files that are not C or C++: CMake on Windows lists resource scripts (`.rc`), and
+/// measuring one produces syntax errors about a language this crate does not parse (`docs/worklog.md`).
+pub(crate) fn is_a_source_file(path: &Path) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "ipp", "inl", "tcc",
+        "cppm", "ixx", "cu", "cuh",
+    ];
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
 fn source_files(root: &Path) -> Vec<PathBuf> {
     const EXTENSIONS: &[&str] = &[
         "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "ipp", "inl", "tcc",
