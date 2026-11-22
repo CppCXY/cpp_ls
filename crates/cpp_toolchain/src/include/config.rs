@@ -786,6 +786,15 @@ pub fn config_from_arguments(
             }
         } else if let Some(rest) = argument.strip_prefix("-std=") {
             config.standard = Some(rest.into());
+        } else if let Some(directory) = an_msvc_path_argument(argument, "/I", &mut index, arguments)
+        {
+            config.include_paths.push(IncludePath::user(directory));
+        } else if let Some(definition) =
+            an_msvc_path_argument(argument, "/D", &mut index, arguments)
+        {
+            config.defines.push(parse_define_argument(definition));
+        } else if let Some(name) = an_msvc_path_argument(argument, "/U", &mut index, arguments) {
+            config.undefines.push(name.into());
         } else if let Some(rest) = argument
             .strip_prefix("/std:")
             .or_else(|| argument.strip_prefix("-std:"))
@@ -856,6 +865,64 @@ pub fn project_config_from_flags(
 ///
 /// `-DFOO` defines `FOO` as `1` — the standard says so, and `#if FOO` depends on it. An empty value
 /// (`-DFOO=`) is *not* the same thing: it is a definition with an empty body, which `#if FOO` rejects.
+/// **MSVC's joined and separated spellings of `-I`, `-D` and `-U`** — `/Ipath`, `/I path`, `/DNAME=value`, `/UNAME`.
+///
+/// `cl.exe` commands are what an MSVC compile database holds, and this reader knew only the GNU spellings, so a Windows
+/// project lost its include directories **and** its feature macros: conditionals chose the wrong branch, generated
+/// config headers were not found, and the include closure was a fraction of the program
+/// (`docs/parser-toolchain-review.md` P1-10).
+///
+/// The supported set is written down rather than inferred, because `/D` is also the beginning of ordinary flags:
+///
+/// ```text
+/// /Ipath  /I path        an include directory            supported
+/// /DNAME  /D NAME=value  a definition                    supported
+/// /UNAME  /U NAME        an undefinition                 supported
+/// /I-                    "ignore all include paths"      refused: not a directory
+/// /DEBUG /D1 /D2 /doc    ordinary flags that begin /D    refused by name
+/// /external:Ipath        a *system* include directory    refused: a different search path, not this one
+/// ```
+///
+/// The refusals are what keep this from inventing a definition called `EBUG` out of `/DEBUG`, which would then change
+/// the branches the file is read in — a silently wrong answer in place of a missing one.
+fn an_msvc_path_argument<'a>(
+    argument: &'a str,
+    option: &str,
+    index: &mut usize,
+    arguments: &'a [String],
+) -> Option<&'a str> {
+    /// The spellings that begin like one of the three options and are **not** them. Compared against the whole
+    /// argument, and case-sensitively, because that is how cl.exe names its flags: /DEBUG is the linker's and
+    /// /doc the documentation switch, both ordinary options, while /D is a definition.
+    const NOT_THIS_OPTION: [&str; 7] = [
+        "/DEBUG",
+        "/D0",
+        "/D1",
+        "/D2",
+        "/doc",
+        "/INCREMENTAL",
+        "/IGNOREIDL",
+    ];
+
+    if NOT_THIS_OPTION.contains(&argument) {
+        return None;
+    }
+    let rest = argument.strip_prefix(option)?;
+    // /I- is "ignore all include paths", not a directory.
+    if rest.starts_with('-') {
+        return None;
+    }
+    let rest = if rest.is_empty() {
+        // The separated form: the value is the next argument.
+        let value = arguments.get(*index).map(String::as_str)?;
+        *index += 1;
+        value
+    } else {
+        rest
+    };
+    (!rest.is_empty()).then_some(rest)
+}
+
 fn parse_define_argument(argument: &str) -> CommandLineMacro {
     match argument.split_once('=') {
         Some((name, value)) => CommandLineMacro::with_value(name, value),
@@ -1574,6 +1641,59 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
 
 #[cfg(test)]
 mod tests {
+    /// **MSVC's `/I`, `/D` and `/U`, joined and separated.** A `cl.exe` database loses its include directories and its
+    /// feature macros without these, and the loss is silent: conditionals take the other branch and generated headers
+    /// are not found (`docs/parser-toolchain-review.md` P1-10).
+    #[test]
+    fn msvc_include_define_and_undef_arguments_are_read() {
+        let arguments: Vec<String> = [
+            "cl.exe",
+            "/c",
+            "/Igenerated",
+            "/I",
+            "extra/code",
+            "/DWIN32",
+            "/D",
+            "FEATURE=1",
+            "/UOLD",
+            "/U",
+            "OLDER",
+            "/I-",
+            "/DEBUG",
+            "src\\a.cpp",
+        ]
+        .iter()
+        .map(|it| it.to_string())
+        .collect();
+
+        let config = config_from_arguments(&arguments, None);
+
+        let include_directories: Vec<&str> = config
+            .include_paths
+            .iter()
+            .map(|path| path.directory.to_string_lossy().into_owned().leak() as &str)
+            .collect();
+        assert_eq!(
+            include_directories,
+            ["generated", "extra/code"],
+            "joined and separated, and `/I-` is not a directory"
+        );
+        let defines: Vec<String> = config
+            .defines
+            .iter()
+            .map(|definition| definition.name.to_string())
+            .collect();
+        assert_eq!(defines, ["WIN32", "FEATURE"], "`/DEBUG` is not `/D EBUG`");
+        assert_eq!(
+            config
+                .undefines
+                .iter()
+                .map(|name| name.as_ref())
+                .collect::<Vec<_>>(),
+            ["OLD", "OLDER"]
+        );
+    }
+
     use super::*;
 
     /// The standard is a **decision**, and the one every header asks about.
