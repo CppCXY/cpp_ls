@@ -167,10 +167,30 @@ pub fn declares_something_before_tokens(
     })
 }
 
+/// Is `#pragma once` written **where it counts**?
+///
+/// Only at the top level: a `#pragma once` inside a conditional region is not a guard at all. The ordinary spelling
+/// of that mistake is dead code —
+///
+/// ```c
+/// #if 0
+/// #  pragma once
+/// #endif
+/// ```
+///
+/// — and the compiler never sees the pragma, so a file that looks visit-once to a syntax scan is read on every
+/// include. Whether a region is taken is a question for the condition evaluator, and an *undecidable* region is not
+/// better: the honest answer for a pragma inside one is "not certainly a guard", and treating a file as unguarded
+/// costs a second analysis rather than hiding one (`docs/parser-toolchain-review.md` P1-8).
 fn has_pragma_once(directives: &[SpannedDirective]) -> bool {
-    directives.iter().any(|spanned| match &spanned.directive {
-        Directive::Pragma { tokens } => tokens.first().is_some_and(|token| token.text() == "once"),
-        _ => false,
+    directives.iter().any(|spanned| {
+        spanned.condition_depth == 0
+            && match &spanned.directive {
+                Directive::Pragma { tokens } => {
+                    tokens.first().is_some_and(|token| token.text() == "once")
+                }
+                _ => false,
+            }
     })
 }
 

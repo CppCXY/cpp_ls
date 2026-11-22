@@ -628,7 +628,7 @@ fn visit<F: FileProvider>(
                 range: spanned.range,
             }),
             Resolution::Resolved(resolved) => {
-                let visit = decide_visit(resolved.file, graph, state, depth);
+                let visit = decide_visit(resolved.file, graph, state, &macros, depth);
 
                 graph.edges.push(Edge {
                     from: file,
@@ -891,7 +891,13 @@ impl BranchAt {
 }
 
 /// What a visit to `file` should do, given where the walk has been.
-fn decide_visit(file: FileId, graph: &FileGraph, state: &WalkState, depth: usize) -> Visit {
+fn decide_visit(
+    file: FileId,
+    graph: &FileGraph,
+    state: &WalkState,
+    macros: &Marked,
+    depth: usize,
+) -> Visit {
     // Asked for one file only. The include is still *recorded* — it is a fact about the file that was read,
     // and a consumer wants it — but reading the other end was not part of the question, so the reason says
     // that rather than pretending to be one of the facts about the code.
@@ -910,12 +916,26 @@ fn decide_visit(file: FileId, graph: &FileGraph, state: &WalkState, depth: usize
     // A guarded file already read is what the guard is for. An *unguarded* one is read again, because a
     // compiler reads it again — and a consumer that did not would miss the duplicate definitions that are
     // the reason guards get written in the first place.
-    let guarded = graph
-        .entry(file)
-        .is_some_and(|entry| entry.guard.is_guarded());
-
-    if guarded && state.visited.contains(&file) {
-        return Visit::Skipped(SkipReason::AlreadyVisited);
+    //
+    // **The guard's own condition decides, not "a guard exists".** `Guard::Macro(NAME)` means the file is skipped
+    // only while `NAME` is defined *and* it was this file that defined it: two headers that happen to use the same
+    // guard name are common when projects copy each other's, and an `#undef NAME` between two includes means the
+    // compiler reads the header again. Both were skipped before (`docs/parser-toolchain-review.md` P1-8), which is the
+    // opposite of what `Guard::blocks_a_visit` documents.
+    if let Some(entry) = graph.entry(file)
+        && entry.guard.is_guarded()
+        && state.visited.contains(&file)
+    {
+        let blocks_the_visit = match &entry.guard {
+            Guard::PragmaOnce => true,
+            Guard::Macro(name) => {
+                entry.defines.iter().any(|defined| defined == name) && macros.is_defined(name)
+            }
+            Guard::None => false,
+        };
+        if blocks_the_visit {
+            return Visit::Skipped(SkipReason::AlreadyVisited);
+        }
     }
 
     Visit::Analysed
@@ -1338,7 +1358,11 @@ fn parse_define_source(source: &str) -> Option<crate::macros::MacroDef> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompilerConfig, Marked, Path, is_probably_a_header};
+    use super::{
+        CompilerConfig, FileGraph, Marked, Path, PathInterner, SkipReason, Visit,
+        is_probably_a_header,
+    };
+    use crate::paths::MemoryFiles;
 
     /// A name bound twice is in force according to its **last** binding, and `defined_names` has to resolve
     /// that before it dedupes.
@@ -1489,5 +1513,115 @@ mod tests {
                 "{source} is not a header"
             );
         }
+    }
+
+    /// **Walk a translation unit over a `MemoryFiles` fixture** — the three guard tests below share this.
+    fn walk_a_fixture(files: &MemoryFiles, source: &str, path: &str) -> FileGraph {
+        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        let config = CompilerConfig::new();
+        let mut interner = PathInterner::new(false);
+        let mut graph = super::walk(
+            source,
+            &tree,
+            Path::new(path),
+            files,
+            &config,
+            &mut interner,
+        );
+        // The graph's own `analysed` list is in entry order, which is what the tests read.
+        graph.analysed.sort_by_key(|file| file.index());
+        graph
+    }
+
+    /// **An `#undef` between two includes makes the compiler read the header again**, so the walk must too.
+    ///
+    /// A macro guard is a *condition*, not a flag: `#ifndef GUARDED_H` is true again once the name is gone, and the
+    /// header's body is compiled a second time. The walk skipped the second include anyway
+    /// (`docs/parser-toolchain-review.md` P1-8).
+    #[test]
+    fn an_undef_between_includes_reads_the_header_again() {
+        let header = "#ifndef GUARDED_H\n#define GUARDED_H\nint guarded;\n#endif\n";
+        let source = "#include \"guarded.h\"\n#undef GUARDED_H\n#include \"guarded.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file("src/guarded.h", header)
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        let visits: Vec<&Visit> = graph.edges.iter().map(|edge| &edge.visit).collect();
+        assert_eq!(visits.len(), 2, "two includes, two edges: {visits:?}");
+        assert!(
+            visits.iter().all(|visit| **visit == Visit::Analysed),
+            "both are analysed, because the guard is not in force the second time: {visits:?}"
+        );
+    }
+
+    /// **Two headers that happen to use the same guard name are both read.** Projects copy each other's headers, and
+    /// the second one's `#ifndef SAME_H` is false only if *it* defined `SAME_H` — which the first one did not.
+    #[test]
+    fn two_headers_with_the_same_guard_name_are_both_read() {
+        let source = "#include \"a.h\"\n#include \"b.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file(
+                "src/a.h",
+                "#ifndef SAME_H\n#define SAME_H\nint a;\n#endif\n",
+            )
+            .with_file(
+                "src/b.h",
+                "#ifndef SAME_H\n#define SAME_H\nint b;\n#endif\n",
+            )
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        let visits: Vec<&Visit> = graph.edges.iter().map(|edge| &edge.visit).collect();
+        assert!(
+            visits.iter().all(|visit| **visit == Visit::Analysed),
+            "the same guard name in another file guards nothing: {visits:?}"
+        );
+    }
+
+    /// **A `#pragma once` in a region nobody compiles is not a guard.** The compiler never sees the pragma, so the
+    /// header is read on every include; a syntax scan that counts it makes the file look visit-once and hides the
+    /// second read.
+    #[test]
+    fn an_inactive_pragma_once_does_not_make_a_file_visit_once() {
+        let header = "#if 0\n#  pragma once\n#endif\nint once_value;\n";
+        let source = "#include \"once.h\"\n#include \"once.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file("src/once.h", header)
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        let visits: Vec<&Visit> = graph.edges.iter().map(|edge| &edge.visit).collect();
+        assert!(
+            visits.iter().all(|visit| **visit == Visit::Analysed),
+            "an inactive `#pragma once` leaves the file unguarded: {visits:?}"
+        );
+    }
+
+    /// **The control**: a `#pragma once` at the top level, and a macro guard with no `#undef` between the includes, are
+    /// both skipped the second time — the behaviour the three tests above must not have thrown away.
+    #[test]
+    fn a_live_guard_still_skips_the_second_include() {
+        let source = "#include \"once.h\"\n#include \"once.h\"\n#include \"guarded.h\"\n#include \"guarded.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file("src/once.h", "#pragma once\nint once_value;\n")
+            .with_file(
+                "src/guarded.h",
+                "#ifndef GUARDED_H\n#define GUARDED_H\nint guarded;\n#endif\n",
+            )
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        let skipped: Vec<&Visit> = graph
+            .edges
+            .iter()
+            .map(|edge| &edge.visit)
+            .filter(|visit| matches!(visit, Visit::Skipped(SkipReason::AlreadyVisited)))
+            .collect();
+        assert_eq!(skipped.len(), 2, "one skip per guard: {skipped:?}");
     }
 }
