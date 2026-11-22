@@ -491,6 +491,23 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
         }
         // `&&` and `||` short-circuit, and that is observable: `#if defined(X) && X > 2` is legal
         // even when `X` is undefined, because the right side is never evaluated.
+        //
+        // **And an undecidable side does not make the whole expression undecidable when the other side decides
+        // it.** `Unknown || 1` is true whichever way the unknown falls, and `Unknown && 0` is false — answering
+        // `Unknown` for those was not conservative but wrong, and it is what kept hedley's definitions out of the
+        // cook: every `JSON_HEDLEY_LIKELY`/`UNLIKELY` block is guarded by
+        //
+        // ```c
+        // #if (JSON_HEDLEY_HAS_BUILTIN(__builtin_expect_with_probability) && !defined(JSON_HEDLEY_PGI_VERSION)) \
+        //     || JSON_HEDLEY_GCC_VERSION_CHECK(9,0,0) || JSON_HEDLEY_MCST_LCC_VERSION_CHECK(1,25,10)
+        // ```
+        //
+        // where `__has_builtin` is a question about the compiler that the cook answers `Unknown` (truthfully — it has
+        // no table of builtins), and the version check is a fact. The whole condition answered `Unknown`, the walk
+        // took the branch it does not take for `#else`, and 95 of nlohmann/json's test files lost `JSON_HEDLEY_LIKELY`
+        // (`docs/worklog.md`). The short circuit is kept where it matters — a side that *decides* the operator is
+        // still not read when the other side decides it — and the reading of both sides only happens where neither
+        // settles it alone.
         ConditionExpr::Binary {
             op: BinaryOp::LogicalAnd,
             left,
@@ -501,7 +518,11 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
                 Some(value) => Value::Known(i128::from(value)),
                 None => Value::Unknown,
             },
-            None => Value::Unknown,
+            // The left side is undecidable; only a definite `false` on the right settles it.
+            None => match eval(right, macros).is_true() {
+                Some(false) => Value::Known(0),
+                _ => Value::Unknown,
+            },
         },
         ConditionExpr::Binary {
             op: BinaryOp::LogicalOr,
@@ -513,7 +534,11 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
                 Some(value) => Value::Known(i128::from(value)),
                 None => Value::Unknown,
             },
-            None => Value::Unknown,
+            // The left side is undecidable; only a definite `true` on the right settles it.
+            None => match eval(right, macros).is_true() {
+                Some(true) => Value::Known(1),
+                _ => Value::Unknown,
+            },
         },
         ConditionExpr::Binary { op, left, right } => {
             let (Some(left), Some(right)) =

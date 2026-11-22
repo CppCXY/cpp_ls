@@ -114,6 +114,55 @@ Two more facts, both from the `rendering` command:
   So the defect is narrowed to **`#define` collection inside that header's guard chain** — not the condition
   evaluator, not the compiler's predefined macros, not the walk.
 
+### The first real fix: `Unknown || true` is true — the condition evaluator was not conservative, it was wrong
+
+`hedley.hpp`'s definitions are guarded by
+
+```c
+#if (JSON_HEDLEY_HAS_BUILTIN(__builtin_expect_with_probability) && !defined(JSON_HEDLEY_PGI_VERSION)) \
+    || JSON_HEDLEY_GCC_VERSION_CHECK(9,0,0) || JSON_HEDLEY_MCST_LCC_VERSION_CHECK(1,25,10)
+```
+
+`__has_builtin` is a question about the compiler and the cook answers it `Unknown` — truthfully, it has no table of
+builtins — and `JSON_HEDLEY_GCC_VERSION_CHECK(9,0,0)` is a fact (GCC 16). The evaluator answered the **whole
+disjunction** `Unknown` because its left operand was, and the cook treats an undecidable region as not compiled; so
+`JSON_HEDLEY_LIKELY` and `JSON_HEDLEY_UNLIKELY` were never defined, and every `CHECK` inside a `TEST_CASE` in
+nlohmann/json's tests became ``expected `;` after expression``.
+
+**`Unknown || true` is true whichever way the unknown falls, and `Unknown && false` is false** — the fix
+(`condition.rs`, both operators). What made it easy to miss is that the short-circuit arms *look* conservative: they
+never guess a value. They were guessing a branch instead. Four fixtures in
+`crates/cpp_toolchain/tests/suite/conditions.rs` pin the rule, including the hedley shape; `FORMAT_VERSION` 48 → 49.
+
+Measured after it: a translation unit that includes `hedley.hpp` **directly** now expands `JSON_HEDLEY_LIKELY(1)` to
+`__builtin_expect(!!(1), 1)` (it did not before), and the four-line probe goes from unexpanded to 167 bytes of exactly
+what the header writes.
+
+### Still open, and now precisely: **a header included from a header contributes nothing**
+
+Through `#include <nlohmann/json.hpp>` the same probe is still unexpanded, and a three-file probe in a project of its
+own (`E:\corpora\json-probe`) reproduces the reason without any of nlohmann's code:
+
+```text
+tests/probe.cpp  #include "x.hpp"   int probe = Y_MACRO;
+tests/x.hpp      #pragma once       #include "y.hpp"
+tests/y.hpp                         #define Y_MACRO 42
+```
+
+| outer | inner | `Y_MACRO` expanded | rendering |
+| --- | --- | --- | --- |
+| quoted | quoted | **no** | 33 bytes: `#pragma once` + the probe line |
+| quoted | angle | **no** | 33 bytes |
+| angle | quoted | **no** | 33 bytes |
+| angle | angle | **no** | 33 bytes |
+
+and `y.hpp` included **directly** by the translation unit works in all four spellings (`Y_MACRO` → `42`). A `y.hpp`
+that declares something instead of defining a macro is dropped the same way, so it is not "a header of only defines".
+`hedley.hpp` through `macro_scope.hpp` is the same shape (47 bytes, `JSON_HEDLEY_VERSION` undefined), which is why the
+json measurement still reports its 95 errors: the depth-2 includes of the whole library are gone from the rendering,
+and the parser is being asked to parse what is left. **That is the next fix** — in the include walk, a file entered at
+depth ≥ 2 from a project header.
+
 ### The probe files were measured on a rendering of nothing — the bisect below is void
 
 

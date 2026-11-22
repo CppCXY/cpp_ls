@@ -5,6 +5,8 @@
 //! in 4.85 s. The files live in `tests/suite/` — a subdirectory, which cargo does not treat as a target — and this
 //! file declares each of them as a module, so they keep their own names and helpers and only the linking changes.
 
+#[path = "suite/conditions.rs"]
+mod conditions;
 #[path = "suite/expansion_budget.rs"]
 mod expansion_budget;
 #[path = "suite/preprocessor_against_the_compiler.rs"]
