@@ -230,6 +230,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // Read before the wave's work is moved into the store, because the flag below is about which arm ran.
         let read_here = ready.is_none();
 
+        // **A wave is only worth what the text it read is worth.** A file written between `prepare_a_wave` and this
+        // commit makes the prepared summary a reading of text nobody has; committing it would record the new file's
+        // stamp beside the old file's facts, and reconciliation — which compares stamps — would never ask again
+        // (`docs/code-analysis-review.md` P1-7). A wave whose text moved is dropped, and the file is read here.
+        let ready =
+            ready.filter(|ready| self.store.the_wave_still_describes_the_file(&path, ready));
         let summary = match ready {
             // A wave prepared this file, and a wave has no unit of its own (`Session::prepare_a_wave` runs before
             // the pass that builds them), so what it produced is what it is and the second pass still looks at it.

@@ -733,3 +733,59 @@ pub(crate) fn a_second_session_does_not_trust_a_stored_include_search() {
         resolved(&second_session)
     );
 }
+
+/// **A wave prepared against one text is not committed against another.**
+///
+/// `prepare_a_wave` reads and parses a file; `commit_a_wave` applies the result and then records where the disk is
+/// *now*. A file written between the two is the one state reconciliation can never leave: the index holds the reading of
+/// the old text while the stamp describes the new one, so the next reconcile sees nothing to re-read and the stale facts
+/// stay (`docs/code-analysis-review.md` P1-7).
+#[test]
+pub(crate) fn a_wave_prepared_against_one_text_is_not_committed_against_another() {
+    let project = Project::new("wave-race");
+    project.write(
+        "a.cpp",
+        "struct FromTheOldText { int one; };\nvoid f() { FromTheOldText old_value; }\n",
+    );
+
+    let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+    let mut session = Session::with_config(
+        &project.root,
+        providers,
+        WatchFilter::new(&project.root),
+        CompilerConfig::default(),
+    );
+    let a_cpp = project.root.join("a.cpp");
+    session.add_project_files([a_cpp.clone()]);
+
+    // The wave reads and parses the old text, and does not commit it.
+    let wave = session.prepare_a_wave(4);
+
+    // The disk moves before the commit.
+    project.write(
+        "a.cpp",
+        "struct FromTheNewText { int two; };\nvoid f() { FromTheNewText new_value; }\n",
+    );
+
+    session.commit_a_wave(wave, 4);
+
+    let names: Vec<String> = session
+        .index()
+        .summary(&a_cpp)
+        .map(|summary| {
+            summary
+                .declarations
+                .iter()
+                .map(|fact| fact.name.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.iter().any(|name| name == "FromTheNewText"),
+        "the index holds the reading of the text on disk: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "FromTheOldText"),
+        "and not the one the wave prepared: {names:?}"
+    );
+}

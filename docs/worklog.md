@@ -369,6 +369,29 @@ The code is `unresolved-call-or-receiver` now (the review's own suggestion), in 
 four documents and the tests; the check is unchanged and the module doc says so. `worklog.md`'s older entries keep the old
 name on purpose: they record the past.
 
+### P1-7, a wave is only worth the text it read
+
+The review describes a race exactly: `prepare_a_wave` reads and parses a file, the file is written, `commit_a_wave`
+applies the **old** summary and then records where the disk is **now**. The index then holds facts about text nobody has
+while the stamp says the file is current — the one state reconciliation can never leave, because it compares stamps.
+
+Reproduced with the split API (`prepare_a_wave` → write the file → `commit_a_wave`): the summary was the old text's
+(`FromTheOldText` where the file said `FromTheNewText`). `Prepared` now carries the **hash of the text it was built
+from**, and `index_one` asks `SummaryStore::the_wave_still_describes_the_file` before it commits: a wave whose text moved
+is dropped and the file is read in place, which records the stamp of the text the facts were built from.
+
+The test is `session/tests/disk.rs::a_wave_prepared_against_one_text_is_not_committed_against_another`; it failed on the
+old code with the old summary in the index and passes now.
+
+### P1-5, recorded as **not reproduced**
+
+Two end-to-end tests — a header appearing earlier on the search path with the watcher re-reading the includer, and a
+second session opened after the header appeared with the first session's database on disk — both **pass today**. The
+memo is a cache of the filesystem question, not its replacement: `resolution_still_holds` asks the filesystem, and the
+`resolved` a summary carries is re-derived when the file is cooked. The tests are kept as regression pins, so a future
+change that makes the memo load-bearing fails them.
+
+
 
 
 ### P1-4, a literal's type is in its spelling (`literal_type` fixed)

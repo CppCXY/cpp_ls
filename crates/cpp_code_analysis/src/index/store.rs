@@ -326,6 +326,9 @@ pub struct Prepared {
     outcome: PreparedOutcome,
     with_environment: bool,
     rendering: Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>>,
+    /// **The text this was built from, by its hash** — what a commit compares the file against, because a wave is
+    /// prepared and committed at two different moments and the file can be written in between.
+    content_hash: Option<u64>,
 }
 
 impl Prepared {
@@ -345,6 +348,11 @@ impl Prepared {
 
     pub(crate) fn with_environment(&self) -> bool {
         self.with_environment
+    }
+
+    /// **The hash of the text this was built from** — see [`SummaryStore::the_wave_still_describes_the_file`].
+    pub(crate) fn content_hash(&self) -> Option<u64> {
+        self.content_hash
     }
 
     pub(crate) fn rendering(
@@ -408,6 +416,7 @@ impl<F: FileProvider> DetachedRead<F> {
         Prepared {
             with_environment: cooked.is_some(),
             rendering,
+            content_hash: Some(self.key.content_hash),
             outcome: PreparedOutcome::Built {
                 summary,
                 stored: false,
@@ -986,6 +995,27 @@ impl<F: FileProvider> SummaryStore<F> {
         self.commit(path, prepared)
     }
 
+    /// **Is the text this wave read still the text the file has?**
+    ///
+    /// A wave is **prepared** and **committed** at two different moments, and a file can be written in between. The
+    /// commit would then insert the summary of the old text and record where the disk is *now* — the one state
+    /// reconciliation can never leave, because the stamp matches the file, so nothing asks for a re-read and the index
+    /// keeps facts about text nobody has (`docs/code-analysis-review.md` P1-7). The wave carries the hash of the text it
+    /// was built from for exactly this question.
+    pub(crate) fn the_wave_still_describes_the_file(
+        &self,
+        path: &Path,
+        prepared: &Prepared,
+    ) -> bool {
+        let Some(written) = prepared.content_hash() else {
+            return false;
+        };
+        let Some(source) = self.files.read(path) else {
+            return false;
+        };
+        content_hash(&source) == written
+    }
+
     /// **Everything [`SummaryStore::get`] does that does not change the store**: read the file, hash it, ask the
     /// disk, and — when the disk has nothing — parse it and write the answer down.
     ///
@@ -1098,6 +1128,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 outcome: PreparedOutcome::Unreadable,
                 with_environment: false,
                 rendering: None,
+                content_hash: None,
             };
         };
         let read = entered.elapsed();
@@ -1156,6 +1187,7 @@ impl<F: FileProvider> SummaryStore<F> {
                         outcome: PreparedOutcome::Stored(stored),
                         with_environment,
                         rendering: None,
+                        content_hash: Some(key.content_hash),
                     };
                 }
             } else if tracing {
@@ -1244,6 +1276,7 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         Prepared {
+            content_hash: Some(key.content_hash),
             outcome: PreparedOutcome::Built {
                 summary,
                 stored,
