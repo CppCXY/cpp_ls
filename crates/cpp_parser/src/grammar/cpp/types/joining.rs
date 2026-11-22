@@ -233,6 +233,27 @@ pub(crate) fn name_joins_the_type(
 ///
 /// Answering at the `<` reads the second line as a type `MyType f<int>` with no declarator left, and the explicit
 /// instantiation fails — which is exactly what a first version of this rule did.
+/// **The index just past a balanced parenthesis group** that starts at open — used to step over an attribute's
+/// arguments, whose contents are never this rule's business.
+fn after_an_attribute_group(p: &CppParser, open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < p.token_count() {
+        match p.token_kind_at(index) {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    p.token_count()
+}
+
 pub(crate) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
     let mut after = super::super::decls::next_significant_index(p, p.current_token_index());
     // **A directive between the name and its declarator is transparent to this question.** libstdc++ separates a
@@ -285,6 +306,31 @@ pub(crate) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
 
     // An **identifier** after the name means the declaration has not reached its declarator yet — `unsigned
     // __int64 x`, `MY_API Widget *p`.
+    //
+    // **Unless that identifier is an attribute.** `gss_OID_desc name __attribute__((aligned(8))) = …` writes the
+    // attribute *after the declarator's own name*, and `MY_API Widget __attribute__((unused)) x;` writes it after the
+    // type — so the attribute itself says nothing; what follows it does. A declarator still has to come when another
+    // name, a `*`, a `&` or an operator name follows: that is the type's attribute, and the name at the cursor joined
+    // the type. Anything else (`=`, `;`, `,`, `{`, `(`) means the name at the cursor **is** the declarator and the
+    // attribute belongs to it. Without this, `T name __attribute__((…)) = …` joined `name` to the type and left the
+    // declarator empty, so the initializer had nothing to initialise and the whole declaration was refused:
+    // curl's `lib/curl_gssapi.c:63` (`CURL_ALIGN8` is `__attribute__((aligned(8)))`) and the two `syntax-error`s it
+    // produced (`docs/worklog.md`).
+    if p.token_kind_at(after) == CppTokenKind::Identifier
+        && matches!(p.token_text_at(after), "__attribute__" | "__declspec")
+        && p.token_kind_at(after + 1) == CppTokenKind::LeftParen
+    {
+        after = after_an_attribute_group(p, after + 1);
+        return matches!(
+            p.token_kind_at(after),
+            CppTokenKind::Identifier
+                | CppTokenKind::Star
+                | CppTokenKind::Ampersand
+                | CppTokenKind::LogicalAnd
+                | CppTokenKind::OperatorKeyword
+        );
+    }
+
     matches!(
         p.token_kind_at(after),
         CppTokenKind::Identifier

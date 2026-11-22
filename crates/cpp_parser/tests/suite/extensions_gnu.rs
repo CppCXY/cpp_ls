@@ -11,6 +11,18 @@ const CONSTRUCTS: &[(&str, &str)] = &[
         "__attribute__ after the declarator",
         "int f() __attribute__((pure));",
     ),
+    // The other position: after the declarator's **name**, before its initializer. The type here is a name no file
+    // declares, which is what a translation unit looks like when the typedef comes from a header — curl's
+    // lib/curl_gssapi.c:63 writes gss_OID_desc name CURL_ALIGN8 = { … };, where CURL_ALIGN8 is
+    // __attribute__((aligned(8))) under GCC.
+    (
+        "__attribute__ after the declarator's name, before its initializer",
+        "HeaderType value __attribute__((aligned(8))) = { 6 };",
+    ),
+    (
+        "__declspec in the same position",
+        "HeaderType value __declspec(align(8)) = { 6 };",
+    ),
     ("__typeof__", "void f() { __typeof__(1) n = 1; }"),
     ("typeof", "void f() { typeof(1) n = 1; }"),
     ("__extension__", "__extension__ typedef int T;"),
