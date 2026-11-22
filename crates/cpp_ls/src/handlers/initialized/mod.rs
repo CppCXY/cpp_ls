@@ -74,18 +74,30 @@ pub async fn initialized_handler(
         .unwrap_or_default();
     log::info!("client {client_id:?}, workspace roots {roots:?}");
 
+    // **The workspace is installed before anything is asked about it.** `workspace/configuration` takes its scope from
+    // the roots — a folder-scoped setting is asked for under a `scopeUri`, and what a client answers without one is its
+    // *global* setting, which is a different thing from the folder's — so the roots have to exist before the ask
+    // (`docs/language-server-review.md` P1-1). Measured: the request went out as
+    // `{"items": [{"section": "cppls"}]}` with no `scopeUri` at all.
+    //
+    // Nothing here needs the session: setting the roots, the log file and the `--config` path are three plain fields,
+    // which is why this ordering costs nothing.
+    {
+        let mut workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.set_roots(roots.clone());
+        workspace_manager.set_log_file(log_file);
+        // The `--config` a caller named is kept, because a reload re-opens the session and has no `CmdArgs` of its
+        // own: the file the user pointed at is part of what the workspace *is*.
+        workspace_manager.set_config_file(cmd_args.config.0.clone().map(PathBuf::from));
+    }
+
     // The client's configuration is read **before** the session is opened, because one of the things it says —
     // which files are not the project's — is part of the filter the session is opened with.
     let client_config = get_client_config(&context, client_id, supports_config_request).await;
     log::info!("client config: {client_config:?}");
     {
         let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.set_roots(roots.clone());
-        workspace_manager.set_log_file(log_file);
         workspace_manager.set_client_config(client_config);
-        // The `--config` a caller named is kept, because a reload re-opens the session and has no `CmdArgs` of its
-        // own: the file the user pointed at is part of what the workspace *is*.
-        workspace_manager.set_config_file(cmd_args.config.0.clone().map(PathBuf::from));
     }
 
     start_analysis(context.clone()).await;

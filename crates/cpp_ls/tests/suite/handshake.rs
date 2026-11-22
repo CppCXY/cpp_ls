@@ -783,6 +783,9 @@ struct Server {
     /// **How long one request waits**, which a test whose subject reads the standard library raises — see
     /// [STD_LIBRARY_TIMEOUT] and [Server::start_within].
     within: Duration,
+    /// **The `workspace/configuration` requests the server made**, by params. Kept because the *scope* the server asks
+    /// under is part of the answer and `null` — what an unconfigured client replies — says nothing about it.
+    configuration_requests: Vec<Value>,
 }
 
 impl Server {
@@ -841,6 +844,7 @@ impl Server {
             messages,
             log,
             within,
+            configuration_requests: Vec::new(),
         }
     }
 
@@ -1016,7 +1020,10 @@ impl Server {
         let result = match method {
             // One `null` per requested item: "the user has configured nothing", which is what an unconfigured
             // client says and what the server's own defaults are for.
-            "workspace/configuration" => json!([Value::Null]),
+            "workspace/configuration" => {
+                self.configuration_requests.push(request["params"].clone());
+                json!([Value::Null])
+            }
             _ => Value::Null,
         };
 
@@ -7564,6 +7571,71 @@ fn a_configuration_file_saved_from_the_editor_reloads_the_project() {
     }
 
     let _ = server.request(id + 1, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **The first `workspace/configuration` request names the workspace it is about.**
+///
+/// A folder-scoped setting can only be asked for under a `scopeUri`, and what a client answers without one is its global
+/// setting — a different thing from the folder's. The handler asked for the client's configuration **before** installing
+/// the roots, so the request went out with no `scopeUri` at all and a folder-level configuration was unreachable however
+/// the client had set it (`docs/language-server-review.md` P1-1).
+#[test]
+fn the_first_configuration_request_names_the_workspace() {
+    let project = Project::new("config-scope-uri");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    let root_uri = uri_of(project.root());
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": root_uri,
+            "capabilities": { "workspace": { "configuration": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    // **The synchronisation is the request itself**: the configuration ask happens inside `initialized` and the session
+    // is opened after it, so an answer to anything queued behind that notification means the ask was answered — and
+    // recorded by the client above.
+    let _ = server.request(
+        2,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": main_uri } }),
+    );
+
+    let asked = server.configuration_requests.clone();
+    assert!(
+        !asked.is_empty(),
+        "the client advertised `workspace.configuration`, so the server asked"
+    );
+    let scopes: Vec<String> = asked
+        .iter()
+        .flat_map(|params| params["items"].as_array().cloned().unwrap_or_default())
+        .filter_map(|item| {
+            item.get("scopeUri")
+                .and_then(|scope| scope.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(
+        scopes.iter().any(|scope| scope == &root_uri),
+        "the request names the workspace root as its scope: {asked:?}"
+    );
+
+    let _ = server.request(3, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }
