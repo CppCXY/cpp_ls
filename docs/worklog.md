@@ -347,6 +347,29 @@ order, and `parse_type_spelling` keeps the trailing ones.
 `a_volatile_object_keeps_its_qualifier` pins `volatile S`, `const volatile S` and `const S`; before the fix it answered
 `const S` for the first two. Suite: **892 unit + 1147 integration**, gate green.
 
+### P2-3, a namespace inside one of the same name is two segments
+
+The scope chain was joined after `segments.dedup()`, so `namespace A { namespace A { void f(); } }` — `A::A::f` to a
+compiler — was filed as `A::f`. The collapse existed for a **stitching** artifact: in a unit rendering one file's
+`namespace std` landed inside another's, and ten spliced MSVC headers spelled `std::std::…::format`.
+
+Removing it turned out to be the whole fix: the entire suite — module and unit fixtures included — passes without it, and
+`semantic.rs`'s `a_namespace_inside_one_of_the_same_name_keeps_both_segments` pins `A::A`. If a nested-`std` regression
+ever appears, the fix belongs in the stitching or in the parser (`a_namespace_whose_brace_ends_the_file` covers the
+shape), not in the joining of two names that really are two.
+
+### P2-4, the diagnostic says which question it answers
+
+`undefined-name` promised a complete undefined-name check and delivers two positions: the object of a member access and a
+call's callee. `void f() { missing = 1; }` is silent — confirmed with `cpp_inspect diagnostics`, which answered
+`findings: []` — and a reader told the code is `undefined-name` reads that silence as "the analysis believes this is
+declared".
+
+The code is `unresolved-call-or-receiver` now (the review's own suggestion), in the code table, both `cli` help texts,
+four documents and the tests; the check is unchanged and the module doc says so. `worklog.md`'s older entries keep the old
+name on purpose: they record the past.
+
+
 
 ### P1-4, a literal's type is in its spelling (`literal_type` fixed)
 
