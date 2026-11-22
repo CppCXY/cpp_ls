@@ -294,9 +294,36 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
 
 ## The review's P1 list: what is confirmed, and what is fixed
 
-`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Five of its findings were
-reproduced and fixed in this round; the rest were checked by reading the code it points at, and its line references and
-claims held everywhere I looked.
+`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. **Every P1 in it is now
+fixed** — each by a reproduction that fails without the change, a re-measure where the item is about numbers, and a
+commit of its own. The P2 and P3 lists at the end of the review are what is left.
+
+**Fixed — P1-7, a definition in an undecidable region is in doubt** (`68b7282e`). `Marked` has had `mark_uncertain`
+since the condition evaluator was written, and the walk never called it: a `#define` inside an `#if` nobody can decide was
+applied and every later condition on the name answered a confident true. It is applied **and** the name is marked
+uncertain now, so a later `#ifdef` answers Unknown while `is_defined` stays true (which is what keeps a guard chain
+working for a header read on its own). `FileEntry` gains `uncertain`, the names in doubt where the file was entered —
+the doubt was invisible to every consumer before. The test's observable is a second file whose two arms are both
+undecidable, so both of its includes are reached; removing the two `mark_uncertain` calls makes it fail with
+`["h.h", "taken.h"]`.
+
+**Fixed — P1-4, the unbalanced event stream** (`93220d73`). `balance_events` appends a `NodeEnd` for every node the
+grammar left open, and its comment claimed that end was "the true local end of each node". It cannot be — everything after
+a `NodeStart` is that node's content — so the comment made a damage report look like a repair. The number of nodes it
+closed is now reported: `CppTreeBuilder::unbalanced_events`, carried on `CppSyntaxTree`, and `parse_with_events` no longer
+hard-codes zero. The fix for a leak stays in the grammar (which the audit enforces in tests); what changed is that a
+release build can see one instead of returning a wrongly shaped tree silently. Two builder tests on constructed streams: a
+balanced one reports zero, a leaked `Declaration` reports one and the tree stays lossless.
+
+**Fixed — P1-2, one authoritative configuration** (`ecabaa69`). Two defects, one cause. The builders were
+order-sensitive — the index path's `with_dialect(dialect).with_language(language)` lost the dialect, because `with_language`
+replaced the whole language config and the vendor lived only inside it — and the dialect is a layer applied after the
+language now, in either order, with `dialect_was_named` so that a caller who never named a compiler keeps the vendors it
+asked for (`Dialect::default()` is GNU, but that is what a predefine table said). Naming a compiler also clears the other
+vendors. And three vendor syntaxes never asked the configuration at all: `__try` (MSVC SEH), `^(…){}` (Clang block
+literal) and `<=>` (C++20) are gated on their `Feature` now — a strict C++23 parse reports the first two as errors and
+lexes `<=>` as `<=` and `>`. The negative matrix fails when the lexer gate is stashed, which is what says it measures the
+gate.
 
 **Fixed — P1-1, local type names** (`091fc1ba`). `TypeNames` kept one entry per name with the brace depth it was
 written at, and visibility was `declared_at <= depth`, so a `typedef` in one function was a type name inside its
