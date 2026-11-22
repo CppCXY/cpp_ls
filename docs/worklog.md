@@ -292,9 +292,16 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
-## The review's P2 list, first three
+## The review's P2 list, first five
 
 The P1 list is closed; these are the P2 items small enough to take with it and clear enough to prove.
+
+**P2-2 / P2-11, a backslash in a header name** (`bd69031b`). `#include "sub\header.h"` is a Windows project's spelling,
+and **three** readers refused it with the same wrong reasoning — "an escape means a real string". A header name has no
+escapes at all, so the backslash is part of the path. The lexer's scanner, the parser's folding and the toolchain's folding
+all accept it now, and `parse_include` also reads a quoted `StringLiteral` directly so a reader that folded nothing still
+produces an include with a target rather than nothing. Measured with `--fixture` before the fix: **`includes: []`** — the
+header was never read. Four tests, the last of them the include graph reaching `sub/header.h`.
 
 **P2-3, a line index counts every line break** (`183e36b8`). `LineIndex::parse` advanced only on `\n`, while the lexer's
 `eat_newline` accepts `\n`, `\r\n`, a lone `\r` and the `\n\r` pair — so an old-Mac file was **one line** to the index and
@@ -311,7 +318,7 @@ header was analysed without the flags of the source beside it. `resolve_relative
 feeds a real CMake-shaped entry and requires both the resolved path and the flags; without the fix it fails with
 `left: "../src/a.cpp"`.
 
-**P2-1, two fixed lookahead windows** (`8acb7430`). `a_qualified_name_is_followed_by_an_equals` scanned 96 tokens and
+**P2-1, fixed lookahead windows** (`8acb7430`, `3fd93f47`). `a_qualified_name_is_followed_by_an_equals` scanned 96 tokens and
 `an_operand_follows_the_parentheses` scanned 128, and both answered **false** when the window ran out — a budget reported
 as a grammatical fact. Both read to the end of the token stream now; the file is the budget, because each already stops at
 the terminator it wants. 508 integration tests did not move, which is what removing a budget should look like.
