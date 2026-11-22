@@ -234,9 +234,9 @@ pub use scopes::{NoMacroBodies, build_scopes, declared_module_names};
 // folder the owner of the others.
 pub use inlay::{ParameterHint, TypeHint, TypeHintKind};
 pub use session::{
-    CookedReading, DiagnosticReading, ExpressionType, FileDiagnostic, FileDiagnostics,
-    ModuleImport, ModuleNote, ModuleUnitTarget, OpenDocuments, Session, SessionFiles, UnitStats,
-    WrittenAttribute,
+    CUDA_SOURCE_EXTENSIONS, CookedReading, DiagnosticReading, ExpressionType, FileDiagnostic,
+    FileDiagnostics, ModuleImport, ModuleNote, ModuleUnitTarget, OpenDocuments, Session,
+    SessionFiles, UnitStats, WrittenAttribute, cuda_source_extensions, source_extensions,
 };
 // The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
 // VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather

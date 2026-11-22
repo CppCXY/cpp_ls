@@ -357,6 +357,25 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     "cppm", "ixx",
 ];
 
+/// **The extensions a project scan takes**, as the engine's own list.
+///
+/// Public because a second list is a second thing to drift: the language server asks a client to report changes to the
+/// files the *analysis* reads, and it had its own copy — which had no `.cu`/`.cuh` and no `cppm`/`ixx` (`P1-6` of
+/// `docs/language-server-review.md`). The copy is gone; the client is asked to watch exactly these, plus
+/// [`CUDA_SOURCE_EXTENSIONS`] and the project's own `workspace.source_extensions`.
+pub fn source_extensions() -> &'static [&'static str] {
+    SOURCE_EXTENSIONS
+}
+
+/// **The extensions a CUDA project adds to the scan** — see [`source_extensions`], and `Session::open`, which adds them
+/// when the project's configuration says it is CUDA.
+pub fn cuda_source_extensions() -> &'static [&'static str] {
+    CUDA_SOURCE_EXTENSIONS
+}
+
+/// See [`cuda_source_extensions`].
+pub const CUDA_SOURCE_EXTENSIONS: &[&str] = &["cu", "cuh"];
+
 /// The files a session reads through: the editor's buffers in front of a fallback provider.
 pub type SessionFiles<F = DiskFiles> = OverlayFiles<OpenDocuments, F>;
 

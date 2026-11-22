@@ -62,4 +62,13 @@ pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 /// be a server that has to be taught every build system, and would still be wrong about the one nobody wrote an
 /// adapter for; a database is what they all agree on, and a project that generates none can say so in
 /// `.cppls.toml`.
-pub const CONFIGURATION_FILE_NAMES: &[&str] = &[PROJECT_CONFIG_FILE, "compile_commands.json"];
+/// **The names that mean "this file configures the analysis rather than being part of it".**
+///
+/// `CMakeCache.txt` is here because the language server's watcher globs already asked clients to report it — a glob and a
+/// rule that disagree leave the event delivered and treated as an edit to a source that is not one
+/// (`docs/language-server-review.md` P1-5/P1-6's shared root: two lists of the same thing).
+pub const CONFIGURATION_FILE_NAMES: &[&str] = &[
+    PROJECT_CONFIG_FILE,
+    "compile_commands.json",
+    "CMakeCache.txt",
+];

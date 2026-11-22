@@ -74,7 +74,11 @@ impl<F: FileProvider + Clone> Session<F> {
         // what the toolchain already said.
         let mut extra_extensions = project_config.config.workspace.source_extensions.clone();
         if config.cuda() {
-            extra_extensions.extend(["cu".to_string(), "cuh".to_string()]);
+            extra_extensions.extend(
+                crate::cuda_source_extensions()
+                    .iter()
+                    .map(|extension| (*extension).to_string()),
+            );
         }
         // **A library's headers and module interfaces join the project's file list**, and its `.cpp` files never do —
         // a dependency is used through what it exports, and reading its implementation would multiply the index by
