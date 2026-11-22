@@ -109,6 +109,22 @@ impl<F: FileProvider + Clone> Session<F> {
         let gathered = started.elapsed().as_millis();
         let render_started = std::time::Instant::now();
         let rendered = self.render_a_cooked(&materials)?;
+        // **The text this reading is built from**, written out when `CPPLS_DUMP_RENDERING_DIR` names a directory —
+        // the same escape hatch `index_rendering` has, for the other half of the pipeline. A parse that goes wrong only
+        // in the *cooked* reading cannot be seen in `inspect tree` (which reads the file's own text), and without the
+        // text every diagnosis is a guess about what the macros produced.
+        if let Some(directory) = crate::probes::dump_rendering_dir() {
+            let _ = std::fs::create_dir_all(directory);
+            let name = path
+                .as_ref()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unit".to_string());
+            let _ = std::fs::write(
+                directory.join(format!("{name}.cooked.rendering")),
+                &rendered.indexed.rendered.text,
+            );
+        }
         let rendered_for = render_started.elapsed().as_millis();
         let committed = self.commit_a_cooked(rendered);
         if crate::probes::cooking() {

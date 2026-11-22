@@ -127,6 +127,18 @@ enum Command {
     Format,
     /// The session's own counters after the setup.
     Stats,
+    /// **The cooked text** — what the parser reads: includes inlined, comments and line breaks gone, macros expanded.
+    ///
+    /// The one answer that makes a cook defect diagnosable, since a syntax error is reported against this text and
+    /// this text is not the file a reader has open.
+    Rendering {
+        /// A byte offset to slice from.
+        #[arg(long)]
+        at: Option<usize>,
+        /// How many bytes to answer; 0 is all of them.
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
     /// **A whole project's findings, tallied** — every file cooked and diagnosed, grouped by code.
     ///
     /// The question the deleted probe tests answered by hand; `--all-files` is implied, because a sweep of one file is
@@ -258,6 +270,7 @@ fn answer_for(
             let text = questions::the_stats(opened);
             Ok(Answer::new(text.clone(), json!({ "text": text })))
         }
+        Command::Rendering { at, limit } => Ok(questions::the_rendering(opened, *at, *limit)),
         Command::Sweep {
             codes,
             including,
@@ -289,6 +302,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Inactive => "inactive",
         Command::Format => "format",
         Command::Stats => "stats",
+        Command::Rendering { .. } => "rendering",
         Command::Sweep { .. } => "sweep",
         Command::Caps => "caps",
         Command::Batch => "batch",

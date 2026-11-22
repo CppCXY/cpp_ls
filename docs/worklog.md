@@ -54,7 +54,24 @@ So the failure needs **doctest + nlohmann/json + the seven std headers + doctest
 a state interaction rather than one construct, and the next step is to shrink it by one include at a time from that
 failing probe (the script is the one that produced the table: a Python loop over probe files with one CDB entry each).
 
+### The probe files were measured on a rendering of nothing — the bisect below is void
+
+Trying to shrink the failing shape to a fixture, every probe created as a new `.cpp` under `tests/src` answered from a
+**114-byte rendering** — the file's own tokens with the include closure collapsed to one `using` line — while
+`unit-constructor1.cpp` answers from **254 299 bytes** and `unit-binary_formats.cpp` from 245 659. The probe files are
+in the same database, with the same `-I`; the difference is the file itself, and a cold cache does not change it. So
+every probe result recorded above ("clean", "fails") was a statement about a rendering with no doctest and no library in
+it, which is why probes contradicted each other and why `TEST_CASE` was reported at one place and not another.
+
+What survives: the **measurement** itself, because it reads real translation units — the 19 failing files cook to
+200–250 kB renderings, so their 92 syntax errors are errors of parsing a fully cooked TU. What does not survive: the
+bisect table. The next step is to bisect **inside a copy of a real failing TU** (rename `unit-conversions1.cpp`'s text
+into a file that is already in the database, rather than adding new files to it), and to find out why a *new* file
+cooks without its closure — the summary cache key does not include the compilation command, or the walk gives up on a
+new path. `cpp_inspect rendering` (added here) is the command that shows it: `--limit 1` answers the size.
+
 ### Two tool fixes the measurement needed
+
 
 * **`--cook` cooked nothing.** `Session::cook` answers `None` for a file the index has no summary of, and the flag did
   nothing for a file that was not also indexed: `diagnostics` then failed with "has no reading to diagnose" on every

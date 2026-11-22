@@ -948,3 +948,63 @@ pub fn the_sweep(
     });
     Answer::new(report, value)
 }
+/// **The cooked text** — what the parser actually reads, after the includes, the conditionals and the macros.
+///
+/// The one answer that makes a cook defect diagnosable: a syntax error is reported against the rendering, and the
+/// rendering is not the file a reader has open (includes are inlined, comments and line breaks are gone, macros are
+/// expanded). Every cook bug found so far — the `typeof` type of libuv's `atomic_exchange_explicit`, the `environ`
+/// macro of redis, the doctest pragma of nlohmann/json — was diagnosed by reading this text.
+///
+/// `at` slices from a byte, `limit` bounds the answer; both are optional, and the whole text is answered when neither
+/// is given.
+pub fn the_rendering(opened: &mut Opened, at: Option<usize>, limit: usize) -> Answer {
+    // **The same pair `--cook` uses**: a file the index has no summary of cannot be cooked, and `--cook` in this tool
+    // learned that the hard way (see `docs/worklog.md`, nlohmann/json).
+    opened.session.want_cooked_reading(&opened.file);
+    opened.session.catch_up(&opened.file);
+    let _ = opened.session.cook(&opened.file);
+    // **The *unit's* rendering**, which is the text the parser reads: the file with its whole include closure
+    // inlined and every macro expanded. `rendered_text_of` answers the file's **own** rendering — its text with the
+    // directives removed and the line breaks collapsed — which is a different (much shorter) string, and it was the
+    // first thing this command got wrong: a 91-byte answer for a translation unit that cooks to megabytes.
+    let unit = opened.session.render_the_unit(&opened.file);
+    let text = match unit.map(|unit| unit.text) {
+        Some(text) => text,
+        None => match opened.session.rendered_text_of(&opened.file) {
+            Some(text) => text,
+            None => {
+                return Answer::new(
+                    format!(
+                        "no cooked rendering for {} — the file was not cooked (a header has no translation unit of its own)",
+                        opened.file.display()
+                    ),
+                    json!({ "file": opened.file.display().to_string(), "text": Value::Null }),
+                );
+            }
+        },
+    };
+    let bytes = text.len();
+    let from = at.unwrap_or(0).min(bytes);
+    // **A character boundary, never a byte in the middle of one.** `at` comes from an error offset, which is always a
+    // boundary, but the flag is a user''s number.
+    let from = (from..=bytes)
+        .find(|offset| text.is_char_boundary(*offset))
+        .unwrap_or(bytes);
+    let to = if limit == 0 {
+        bytes
+    } else {
+        (from + limit).min(bytes)
+    };
+    let to = (to..=bytes)
+        .find(|offset| text.is_char_boundary(*offset))
+        .unwrap_or(bytes);
+    let slice = &text[from..to];
+    let value = json!({
+        "file": opened.file.display().to_string(),
+        "bytes": bytes,
+        "from": from,
+        "to": to,
+        "text": slice,
+    });
+    Answer::new(slice.to_string(), value)
+}
