@@ -292,6 +292,35 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The review's P2 list, first three
+
+The P1 list is closed; these are the P2 items small enough to take with it and clear enough to prove.
+
+**P2-3, a line index counts every line break** (`183e36b8`). `LineIndex::parse` advanced only on `\n`, while the lexer's
+`eat_newline` accepts `\n`, `\r\n`, a lone `\r` and the `\n\r` pair — so an old-Mac file was **one line** to the index and
+many to the lexer, and every diagnostic in it pointed at line 0 while every LSP range was a column of a line the client
+had never heard of. The index now treats the same four spellings as one break each (a `\r` and a `\n` in a row are one
+break, not two). Three tests: the spellings against the line starts they produce, line/column in both directions on a text
+that mixes all of them, and a non-ASCII line's character-counted column.
+
+**P2-8, a compile database's relative `file`** (`996966b6`). `compile_commands.json` may write `directory` and `file` as a
+pair; this reader kept `file` verbatim while the other format already joined its own. It is not only a display path —
+header borrowing compares the command file's directory with the header's, so a relative command path never matched and a
+header was analysed without the flags of the source beside it. `resolve_relative` applies `.`/`..` lexically
+(`normalize_path` would leave `/p/build/../src/a.cpp` spelled with the `..` the comparison then never matches). The test
+feeds a real CMake-shaped entry and requires both the resolved path and the flags; without the fix it fails with
+`left: "../src/a.cpp"`.
+
+**P2-1, two fixed lookahead windows** (`8acb7430`). `a_qualified_name_is_followed_by_an_equals` scanned 96 tokens and
+`an_operand_follows_the_parentheses` scanned 128, and both answered **false** when the window ran out — a budget reported
+as a grammatical fact. Both read to the end of the token stream now; the file is the budget, because each already stops at
+the terminator it wants. 508 integration tests did not move, which is what removing a budget should look like.
+
+**Two limits found while writing those boundary tests**, and not fixed here: a `using` alias whose initializer carries
+**120** template arguments fails with ``expected `;` `` at the `S<`, and a cast whose second group holds **140** template
+arguments fails with `expected primary expression`. Both are the type-id / template-argument readers' own limits rather
+than the windows — the next round's first task.
+
 ## The review's P1 list: what is confirmed, and what is fixed
 
 `docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. **Every P1 in it is now
