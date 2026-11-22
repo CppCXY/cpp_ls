@@ -35,8 +35,24 @@ first error is reported at its first `TEST_CASE("…")` line (`unit-conversions1
 preamble (16 lines of includes and defines) plus `TEST_CASE("x") { CHECK(1 == 1); }` is **clean**, and so are nested
 braced initialisers (`std::map<std::string, std::vector<int>> m = {{"a", {1, 2}}};`) and the exact
 `json::object_t o = {{"object", json::object()}, {"array", {1, 2, 3, 4}}};`. The trigger is therefore inside the
-bodies the tests write — **open**, with the file list and the repro command in `target/bench/json-sweep.json`, and it
-is the next thing to bisect (a prefix bisect has to close the braces it truncates, which the first attempt did not).
+bodies the tests write — **open**, with the file list and the repro command in `target/bench/json-sweep.json`. The
+bisect so far, each probe a single `cpp_inspect diagnostics --cook` run on a TU that includes only what is named:
+
+| probe | content | result |
+| --- | --- | --- |
+| the file's own preamble (lines 16-53) + `TEST_CASE("x") { CHECK(1 == 1); }` | | **fails** |
+| … with the two `DOCTEST_CLANG_SUPPRESS_WARNING_*` lines removed | | **fails** |
+| … with the `#if __has_include(<optional>)` block removed | | **fails** |
+| … with `#define JSON_TESTS_PRIVATE` removed | | **fails** |
+| doctest + `json.hpp` + `using` + all seven std headers + `TEST_CASE{…}` | | clean |
+| the same, plus `JSON_TESTS_PRIVATE` (before *or* after `json.hpp`) | | clean |
+| the same, plus the `__has_include` block | | clean |
+| the same, plus the comment and **both suppress macros** | | **fails** |
+| `#include "doctest_compatibility.h"` + both suppress macros + a function | | clean |
+
+So the failure needs **doctest + nlohmann/json + the seven std headers + doctest's two pragma macros in one TU**: it is
+a state interaction rather than one construct, and the next step is to shrink it by one include at a time from that
+failing probe (the script is the one that produced the table: a Python loop over probe files with one CDB entry each).
 
 ### Two tool fixes the measurement needed
 
