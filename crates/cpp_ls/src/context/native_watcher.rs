@@ -36,6 +36,8 @@ struct WatcherState {
     _watcher: RecommendedWatcher,
     task: tokio::task::JoinHandle<()>,
     root: PathBuf,
+    /// See [`NativeFileWatcher::start`]'s `also`.
+    also: Vec<PathBuf>,
     filter: Arc<RwLock<WatchFilter>>,
     faulted: Arc<AtomicBool>,
 }
@@ -52,10 +54,15 @@ impl NativeFileWatcher {
         context: ServerContextSnapshot,
         root: PathBuf,
         filter: WatchFilter,
+        // **Files outside the root that still configure the project** — a `--config` a caller pointed elsewhere. A
+        // recursive watch of the root cannot see one, and a configuration that is only read when the session opens is
+        // exactly what this watcher exists to notice changing (`docs/language-server-review.md` P1-5).
+        also: Vec<PathBuf>,
     ) -> notify::Result<()> {
         let mut current = self.state.lock().await;
         if let Some(state) = current.as_ref()
             && state.root == root
+            && state.also == also
             && !state.faulted.load(Ordering::Acquire)
             && !state.task.is_finished()
         {
@@ -84,12 +91,19 @@ impl NativeFileWatcher {
             }
         })?;
         watcher.watch(&root, RecursiveMode::Recursive)?;
+        for path in &also {
+            // One file, non-recursively: what a caller named is a configuration file, not a second workspace.
+            if let Err(error) = watcher.watch(path, RecursiveMode::NonRecursive) {
+                log::warn!("cannot watch {}: {error}", path.display());
+            }
+        }
 
         let task = tokio::spawn(watch_events(context, receiver, overflow, filter.clone()));
         let previous = current.replace(WatcherState {
             _watcher: watcher,
             task,
             root: root.clone(),
+            also,
             filter,
             faulted,
         });
@@ -396,7 +410,12 @@ mod tests {
         let context = server.snapshot();
         let watcher = NativeFileWatcher::default();
         watcher
-            .start(context.clone(), root.clone(), WatchFilter::new(&root))
+            .start(
+                context.clone(),
+                root.clone(),
+                WatchFilter::new(&root),
+                Vec::new(),
+            )
             .await
             .unwrap();
         let first = watcher.state.lock().await.as_ref().unwrap().task.id();
@@ -406,6 +425,7 @@ mod tests {
                 context.clone(),
                 root.clone(),
                 WatchFilter::new(&root).ignore(excluded.clone()),
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -435,7 +455,7 @@ mod tests {
         .await
         .unwrap();
         watcher
-            .start(context, root.clone(), WatchFilter::new(&root))
+            .start(context, root.clone(), WatchFilter::new(&root), Vec::new())
             .await
             .unwrap();
         assert_ne!(

@@ -312,8 +312,34 @@ Two changes: the open/configuration pair is decided together, and a configuratio
 `didChange`/`didSave`/`didChangeWatchedFiles` a client sends, and asks the popup until it answers (bound 20 s). It failed
 without the change with the log showing no reload at all, and passes in **2.65 s** with it.
 
-**P1-1, P1-6, P1-5 remain open** — they are next in the batch; the review's other P1 item, the idle test it reports red,
-**passes here** (14.08 s), so its baseline is older than this tree.
+**P1-1, the workspace is installed before anything is asked about it.** The first `workspace/configuration` request
+went out as `{"items": [{"section": "cppls"}]}` — no `scopeUri` — because the handler asked for the client's configuration
+before installing the roots, and the scope comes from the root. A folder-level setting was unreachable however the client
+had set it. The roots, the log file and the `--config` path are set first now (three plain fields, no session needed), and
+the configuration is read after them. `handshake.rs::the_first_configuration_request_names_the_workspace` records every
+such request's params and asserts one names the root; it failed with the JSON above and passes now.
+
+**P1-6, the client is asked to watch exactly what the analysis reads.** The registration carried its own extension list,
+which had no `.cu`/`.cuh` and no `cppm`/`ixx`: a client using its own watcher reported nothing when a CUDA source changed.
+`cpp_code_analysis` publishes `source_extensions`, `cuda_source_extensions` and the constant behind the second, and the
+globs are **built** from them plus `CONFIGURATION_FILE_NAMES`. That also closed a gap the same way: the watcher watched
+`CMakeCache.txt` while the analysis's configuration-name list did not contain it — an event delivered and treated as an
+edit to a source that is not one. The unit test walks the authority and requires each extension and name in the globs;
+with the CUDA list out of the chain it fails naming the old glob.
+
+**P1-5, a `--config` outside the workspace is watched and reloads.** Three gaps, in the order they were found: the filter
+was built from the root alone (so the explicit path was not a configuration file to the server), the native watcher
+watched only the root (so an outside file was never seen at all), and — once both were fixed — the path an event arrives
+under and the path a command line names can differ by a **single leading backslash**: a `file:///` round trip produced
+`\?\C:\…`, and `normalize_path` recognised `\\?\` only, so the same file normalized to `/?/c:/…` on one side and
+`c:/…` on the other. All three are fixed: `mark_configuration` in the filter, a non-recursive watch of the explicit file,
+and every spelling of the verbatim prefix in `normalize_path`.
+
+`handshake.rs::a_configuration_file_outside_the_workspace_is_watched` starts the server with `--config` pointing beside
+the project, sees the popup turned off, edits the shared file, and requires the popup back; it failed in **20 s** before
+the fixes (no reload in the log at all) and passes in **2.6 s**. `watch.rs::a_verbatim_configuration_path_is_recognized`
+pins the three spellings.
+
 
 ## The analysis review: the baseline, the probe, and what it found before any fix
 

@@ -166,7 +166,18 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                 log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
-                .start(context.clone(), root.clone(), filter)
+                .start(
+                    context.clone(),
+                    root.clone(),
+                    filter,
+                    context
+                        .workspace_manager()
+                        .lock()
+                        .await
+                        .configuration_outside_the_root()
+                        .into_iter()
+                        .collect(),
+                )
                 .await
             {
                 context.native_watcher().stop().await;

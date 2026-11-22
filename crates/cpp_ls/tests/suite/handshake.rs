@@ -793,9 +793,24 @@ impl Server {
         Server::start_within(root, TIMEOUT)
     }
 
+    /// **A server started with arguments a user would pass** — `--config` above all, whose whole point is a path no
+    /// convention predicts.
+    fn start_with_args(root: &Path, arguments: &[&std::ffi::OsStr]) -> Server {
+        Server::start_within_and_args(root, TIMEOUT, arguments)
+    }
+
     /// [Server::start] with the caller's own per-request deadline, for a test whose first query waits for a
     /// standard-library closure to be read.
     fn start_within(root: &Path, within: Duration) -> Server {
+        Server::start_within_and_args(root, within, &[])
+    }
+
+    /// Both of the above.
+    fn start_within_and_args(
+        root: &Path,
+        within: Duration,
+        arguments: &[&std::ffi::OsStr],
+    ) -> Server {
         // **The server's own level and log path, under the test's control.** Both are command-line flags
         // (`--log-level`, default `info`; `--log-path`, default `none`) rather than `RUST_LOG`, so a test could not
         // ask the server to say what it did — and the first attempt to diagnose the handshake failures ended exactly
@@ -807,6 +822,9 @@ impl Server {
             .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
         if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
             command.arg("--log-level").arg(level);
+        }
+        for argument in arguments {
+            command.arg(argument);
         }
         let mut child = command
             .current_dir(root)
@@ -7636,6 +7654,103 @@ fn the_first_configuration_request_names_the_workspace() {
     );
 
     let _ = server.request(3, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **A `--config` outside the workspace is watched, so editing it reloads the project.**
+///
+/// `--config` is kept on the workspace and used when the session opens, but the watch filter was built from the root
+/// alone — the explicit path was not a configuration file to the server and, being outside the root, a recursive watch
+/// could not see it. A configuration that is only read at startup is not a live one
+/// (`docs/language-server-review.md` P1-5).
+///
+/// The client here advertises **no** dynamic registration, so the server's own watcher is the one that has to notice —
+/// the path no client-side glob could mention either.
+#[test]
+fn a_configuration_file_outside_the_workspace_is_watched() {
+    let project = Project::new("explicit-config");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+
+    // The configuration lives **beside** the project, where nothing about the tree could predict it.
+    let shared = project.root().parent().expect("a parent").join(format!(
+        "{}-shared",
+        project
+            .root()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    ));
+    std::fs::create_dir_all(&shared).expect("the shared directory");
+    let configuration = shared.join("project-cppls.toml");
+    std::fs::write(&configuration, "[hover]\nenable = false\n").expect("the configuration writes");
+    let configuration = configuration.canonicalize().unwrap_or(configuration);
+    let configuration_uri = uri_of(&configuration);
+
+    let mut server = Server::start_with_args(
+        project.root(),
+        &[std::ffi::OsStr::new("--config"), configuration.as_os_str()],
+    );
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "workspace": { "configuration": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    let hover = |server: &mut Server, id: i64| {
+        server.request(
+            id,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 3, "character": 6 },
+            }),
+        )
+    };
+    assert_eq!(
+        hover(&mut server, 2)["result"],
+        Value::Null,
+        "the explicit configuration turned the popup off, so the server read it"
+    );
+
+    // The user edits the shared configuration in another editor and saves it.
+    std::fs::write(&configuration, "[hover]\nenable = true\n").expect("the configuration writes");
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": configuration_uri, "type": 2 }] }),
+    );
+
+    // **The server's own watcher is the interesting path**, but a client that does report the change must reload too;
+    // either way the popup comes back within the bound.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut id = 10;
+    loop {
+        let answer = hover(&mut server, id);
+        if !answer["result"].is_null() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("the explicit configuration was never reloaded: {answer}");
+        }
+        id += 1;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(&shared);
+
+    let _ = server.request(id + 1, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }

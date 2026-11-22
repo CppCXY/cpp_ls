@@ -489,12 +489,23 @@ pub fn normalize_path(path: &Path, case_insensitive: bool) -> String {
     // `\\?\UNC\server\share` comes back as `\\server\share`, which is the same path in the spelling the rest of
     // this crate compares.
     let raw = path.to_string_lossy();
-    let text: String = match raw.strip_prefix(r"\\?\UNC\") {
-        Some(rest) => format!(r"\\{rest}"),
-        None => match raw.strip_prefix(r"\\?\") {
-            Some(rest) => rest.to_string(),
-            None => raw.into_owned(),
-        },
+    // **Every spelling of the verbatim prefix.** `\\?\` is what `canonicalize` returns; `\?\` — with **one**
+    // leading separator — is what a `file:///` URI round trip produced for an event path on Windows, and it is the same
+    // file. Recognising only the first spelling made a configuration path named on the command line compare unequal to
+    // the identical file's event path, so a reload was never asked for (`docs/language-server-review.md` P1-5); the
+    // normalized form of the one-backslash spelling began `/?/c:/…`.
+    let mut raw: &str = &raw;
+    let mut unc = false;
+    for prefix in [r"\\?\UNC\", r"\?\UNC\", r"\\?\", r"\?\", "//?/UNC/", "//?/"] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            unc = prefix.ends_with("UNC\\") || prefix.ends_with("UNC/");
+            raw = rest;
+            break;
+        }
+    }
+    let text: String = match unc {
+        true => format!(r"\\{raw}"),
+        false => raw.to_string(),
     };
     let text = text.as_str();
 

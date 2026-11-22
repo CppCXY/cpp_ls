@@ -283,6 +283,16 @@ impl WatchFilter {
         if normalize(path) == normalize(&self.configuration) {
             return true;
         }
+        // **The same file, spelled differently.** A configuration path a caller named (`--config`) and the path an
+        // event arrives under are produced by different layers: one is a command-line argument, the other is a URI
+        // converted back to a path, and on Windows the two routinely differ by a `\\?\` prefix, a drive letter's case
+        // or a separator. Comparing the spellings answered "not a configuration file" for the *same* file, so a reload
+        // was never asked for (`docs/language-server-review.md` P1-5).
+        if let (Ok(asked), Ok(named)) = (path.canonicalize(), self.configuration.canonicalize())
+            && asked == named
+        {
+            return true;
+        }
 
         path.file_name()
             .and_then(|name| name.to_str())
@@ -949,6 +959,28 @@ mod tests {
         assert_eq!(
             kinds(&batch),
             [("/p/new.h".to_string(), EventKind::Created)]
+        );
+    }
+
+    /// **A configuration path named as a CLI argument is recognised however the event spells it.**
+    ///
+    /// The two spellings come from different layers — a command-line argument and a URI converted back to a path — and on
+    /// Windows they differ by a verbatim prefix routinely (docs/language-server-review.md P1-5).
+    #[test]
+    fn a_verbatim_configuration_path_is_recognized() {
+        let filter = WatchFilter::new(r"C:\p").with_configuration(r"\\?\C:\p\cfg.toml");
+
+        assert!(
+            filter.is_configuration(Path::new(r"\\?\C:\p\cfg.toml")),
+            "the spelling the filter was given"
+        );
+        assert!(
+            filter.is_configuration(Path::new(r"C:\p\cfg.toml")),
+            "and the plain spelling of the same file"
+        );
+        assert!(
+            filter.is_configuration(Path::new(r"\?\C:\p\cfg.toml")),
+            "and the one-backslash form a `file:///` URI round trip produces"
         );
     }
 

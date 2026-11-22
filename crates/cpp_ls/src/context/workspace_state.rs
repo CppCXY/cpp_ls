@@ -282,7 +282,22 @@ impl WorkspaceState {
             filter = filter.ignore_pattern(pattern.clone());
         }
 
+        // **The `--config` a caller named is a configuration file too.** The filter's own default is the project's
+        // `compile_commands.json`; a session opened with `--config <somewhere else>` reads its configuration from a
+        // path no convention predicts, and without this an event about that file was classified as an edit to a source
+        // — or, outside the root, never seen at all (`docs/language-server-review.md` P1-5).
+        if let Some(configuration) = &self.config_file {
+            filter = filter.with_configuration(configuration.clone());
+        }
+
         Some(filter)
+    }
+
+    /// **A configuration file outside the workspace root**, which a recursive watch of the root cannot see.
+    pub fn configuration_outside_the_root(&self) -> Option<std::path::PathBuf> {
+        let configuration = self.config_file.as_ref()?;
+        let root = self.root()?;
+        (!configuration.starts_with(root)).then(|| configuration.clone())
     }
 }
 
