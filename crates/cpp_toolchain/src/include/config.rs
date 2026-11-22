@@ -1315,6 +1315,29 @@ fn top_level_objects(json: &str) -> Vec<String> {
 }
 
 /// Read the three fields of one entry.
+/// **`file` resolved against `directory`, with `.` dropped and `..` applied.**
+///
+/// The other database format already joins its relative `source` with its `work-directory`
+/// (`parse_translation_unit`), and a `compile_commands.json` may write the pair the same way. Lexical resolution is
+/// enough here and is the right answer: the file has to exist for the build, and `..` in a build directory is how a
+/// CMake database spells "the source tree one level up" (`directory = /p/build`, `file = ../src/a.cpp`).
+///
+/// `normalize_path` is not used because it normalises *separators*, not dot segments — `/p/build/../src/a.cpp` would
+/// still be spelled with the `..`, and the comparison header borrowing does is on the spelled path.
+fn resolve_relative(directory: &Path, file: &Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in directory.join(file).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    parts.iter().collect()
+}
+
 fn parse_command_object(object: &str) -> Option<CompileCommand> {
     let directory = string_field(object, "directory").map(PathBuf::from);
     let file = string_field(object, "file")?;
@@ -1326,8 +1349,18 @@ fn parse_command_object(object: &str) -> Option<CompileCommand> {
         None => split_command_line(&string_field(object, "command")?),
     };
 
+    // **A relative `file` is relative to `directory`**, exactly as in the other database format
+    // (`build_database.json`'s `parse_translation_unit` already joins its `source` with its `work-directory`). It is not
+    // only a display path: header borrowing compares the command file's directory with the header's, so a relative
+    // command path never matched and the header was analysed without the flags of the source beside it
+    // (`docs/parser-toolchain-review.md` P2-8).
+    let file = match &directory {
+        Some(directory) if Path::new(&file).is_relative() => resolve_relative(directory, Path::new(&file)),
+        _ => PathBuf::from(file),
+    };
+
     Some(CompileCommand {
-        file: PathBuf::from(file),
+        file,
         directory,
         arguments,
     })
@@ -1641,6 +1674,35 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
 
 #[cfg(test)]
 mod tests {
+    /// **A relative `file` in a `compile_commands.json` is relative to `directory`.** The other database format already
+    /// joined its pair, and this one did not — which is not only a display path: header borrowing compares the command
+    /// file's directory with the header's, so a relative command path never matched and a header was analysed without the
+    /// flags of the source beside it (`docs/parser-toolchain-review.md` P2-8).
+    #[test]
+    fn a_relative_command_file_is_resolved_against_its_directory() {
+        let database = crate::config::parse_compile_commands(
+            r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-DFROM_BUILD", "-c", "../src/a.cpp"]}]"#,
+        );
+
+        let command = database
+            .command_for(Path::new("/p/src/a.cpp"))
+            .expect("the command is found by the source path it builds");
+
+        assert_eq!(
+            command.file,
+            Path::new("/p/src/a.cpp"),
+            "the `..` is applied, not left spelled in the path"
+        );
+        assert!(
+            command
+                .arguments
+                .iter()
+                .any(|argument| argument == "-DFROM_BUILD"),
+            "and the flags are the ones that command carried: {:?}",
+            command.arguments
+        );
+    }
+
     /// **MSVC's `/I`, `/D` and `/U`, joined and separated.** A `cl.exe` database loses its include directories and its
     /// feature macros without these, and the loss is silent: conditionals take the other branch and generated headers
     /// are not found (`docs/parser-toolchain-review.md` P1-10).
