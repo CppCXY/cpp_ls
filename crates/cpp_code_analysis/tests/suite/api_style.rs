@@ -164,6 +164,10 @@ fn whitespace_splitting_is_a_spelling_rule() {
         "concept_not_satisfied.rs",
         "macro_parentheses.rs",
         "mod.rs",
+        // **`simplify_boolean_expr.rs` judges a spelling and nothing else**: the rule *is* "a condition written
+        // `== true`", so the words it splits are the written sentence and not a node's text. The alternative — a
+        // parsed comparison — would have to reconstruct the spelling for the message anyway.
+        "simplify_boolean_expr.rs",
     ];
     let mut offenders = Vec::new();
     for (path, text) in sema_files() {

@@ -67,6 +67,53 @@ impl<F: FileProvider + Clone> Session<F> {
             });
         }
 
+        // **The names the cook expanded away.** `__LINE__` is a number in the rendering, so the loop above cannot see
+        // the name it was written as — and the name is what an editor colours. They are five spellings and they cannot
+        // appear except as themselves, so the file's own text is where they are found: a word boundary search over a
+        // text that is already in hand, once per file, and only for names nothing has claimed yet.
+        if let Some(written) = view.written_text() {
+            for name in [
+                "__LINE__",
+                "__FILE__",
+                "__DATE__",
+                "__TIME__",
+                "__COUNTER__",
+            ] {
+                let mut from = 0usize;
+                while let Some(found) = written[from..].find(name) {
+                    let at = from + found;
+                    let end = at + name.len();
+                    from = end;
+                    let a_word_starts_here = at == 0
+                        || !written.as_bytes()[at - 1].is_ascii_alphanumeric()
+                            && written.as_bytes()[at - 1] != b'_';
+                    let a_word_ends_here = end == written.len()
+                        || !written.as_bytes()[end].is_ascii_alphanumeric()
+                            && written.as_bytes()[end] != b'_';
+                    if !a_word_starts_here || !a_word_ends_here {
+                        continue;
+                    }
+                    // **Back into the rendering's coordinates**, because the loop after this one moves every range out
+                    // of the rendering and into the file; a range already in the file would be mapped a second time.
+                    let Some(reading) =
+                        view.reading_offset_of(crate::file::coordinates::FileOffset::new(at))
+                    else {
+                        continue;
+                    };
+                    let at = reading.get();
+                    if !claimed.insert(at) {
+                        continue;
+                    }
+                    names.push(crate::semantic::Name {
+                        range: cpp_parser::SourceRange::new(at, name.len()),
+                        kind: crate::semantic::NameKind::Macro,
+                        declaration: false,
+                        modifiers: Vec::new(),
+                        provenance: crate::semantic::Provenance::Macro,
+                    });
+                }
+            }
+        }
         // **The ranges are moved out of the rendering and into the file, because that is what both consumers read.**
         //
         // The walk reads `view.root`, so every range it answers is an offset in the **rendering** — and the two
