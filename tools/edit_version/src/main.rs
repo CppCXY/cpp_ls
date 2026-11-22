@@ -26,7 +26,7 @@ const PUBLISHED: [&str; 7] = [
     "cpp_code_analysis",
     "cpp_check",
     "cpp_ls",
-    "cpp_inspect"
+    "cpp_inspect",
 ];
 
 fn main() -> ExitCode {

@@ -289,3 +289,43 @@ fn debug_initialised_variable() {
         None => println!("no declarator"),
     }
 }
+
+/// **A `typedef` in one function is not a type name in the next one.**
+///
+/// The table of local type names used to be a map from name to *the brace depth it was declared at*, and
+/// visibility was `declared_at <= depth`. Two sibling functions share a depth, so `Leaked` stayed a type name for
+/// the rest of the file, and the call below was read as a **declaration** of `Leaked` with a parameter list — no
+/// `CallExpr`, no diagnostic, and a binding that does not exist. `docs/parser-toolchain-review.md` P1-1.
+#[test]
+fn a_typedef_in_one_function_is_not_a_type_name_in_its_sibling() {
+    let text = "void first()\n{\n    typedef long Leaked;\n}\n\nvoid second()\n{\n    auto Leaked = [] {};\n    \
+                Leaked();\n}\n";
+    let tree = CppParser::parse(text, ParserConfig::default());
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+
+    let calls = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr)
+        .count();
+    assert_eq!(calls, 1, "the callable is called, not declared");
+}
+
+/// **The control**: a type the *file* declares is still a type inside every body after it, which is the reading the
+/// table exists for — `Widget w(1, 2);` is a variable initialised with two arguments, not a call.
+#[test]
+fn a_type_declared_at_file_scope_is_still_a_type_inside_a_later_body() {
+    let text = "struct Widget { Widget(int, int); };\nvoid f()\n{\n    Widget w(1, 2);\n}\n";
+    let tree = CppParser::parse(text, ParserConfig::default());
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let names: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "w"),
+        "`w` is a declared variable: {names:?}"
+    );
+}
