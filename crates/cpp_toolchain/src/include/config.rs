@@ -1201,7 +1201,16 @@ impl CompileCommands {
     /// direction — a request with a prefix the database lacks, but not a database entry with a prefix the
     /// request lacks — and the two directions are the same question asked twice.
     pub fn command_for(&self, file: &Path) -> Option<&CompileCommand> {
-        let requested = normalize_for_comparison(file);
+        // **Exact spelling first**, and case-folding only when nothing matched — a database from another machine may
+        // spell a path with a different case, but one that names both `Foo.cpp` and `foo.cpp` means both
+        // (`docs/parser-toolchain-review.md` P2-9).
+        self.command_for_with(file, false)
+            .or_else(|| self.command_for_with(file, true))
+    }
+
+    /// [`CompileCommands::command_for`] with the case policy stated — see its note.
+    fn command_for_with(&self, file: &Path, case_insensitive: bool) -> Option<&CompileCommand> {
+        let requested = normalize_for_comparison(file, case_insensitive);
         let request_tails: std::collections::HashSet<&str> =
             path_suffixes(&requested).into_iter().collect();
 
@@ -1210,7 +1219,7 @@ impl CompileCommands {
         let mut best: Option<(usize, &CompileCommand)> = None;
 
         for command in &self.commands {
-            let stored = normalize_for_comparison(&command.file);
+            let stored = normalize_for_comparison(&command.file, case_insensitive);
 
             for tail in path_suffixes(&stored) {
                 if request_tails.contains(tail) {
@@ -1241,19 +1250,30 @@ impl CompileCommands {
     /// a header is the file the source beside it is most likely to compile. `None` when the directory has no
     /// source — a header-only tree keeps the project-wide answer.
     pub fn a_command_for_a_header(&self, file: &Path) -> Option<&CompileCommand> {
+        self.a_command_for_a_header_with(file, false)
+            .or_else(|| self.a_command_for_a_header_with(file, true))
+    }
+
+    /// [`CompileCommands::a_command_for_a_header`] with the case policy stated — see
+    /// [`CompileCommands::command_for`].
+    fn a_command_for_a_header_with(
+        &self,
+        file: &Path,
+        case_insensitive: bool,
+    ) -> Option<&CompileCommand> {
         let parent = file
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())?;
-        let wanted = normalize_for_comparison(parent);
+        let wanted = normalize_for_comparison(parent, case_insensitive);
         let mut best: Option<(String, &CompileCommand)> = None;
         for command in &self.commands {
             let Some(own_parent) = command.file.parent() else {
                 continue;
             };
-            if normalize_for_comparison(own_parent) != wanted {
+            if normalize_for_comparison(own_parent, case_insensitive) != wanted {
                 continue;
             }
-            let key = normalize_for_comparison(&command.file);
+            let key = normalize_for_comparison(&command.file, case_insensitive);
             if best.as_ref().is_none_or(|(held, _)| key < *held) {
                 best = Some((key, command));
             }
@@ -1302,14 +1322,22 @@ fn path_suffixes(path: &str) -> Vec<&str> {
 /// backslashes.
 ///
 /// Case is folded for the same reason: the same file spelled two ways across platforms.
-fn normalize_for_comparison(path: &Path) -> String {
+/// **A path's spelling for comparison**, with one separator and, when asked, one case.
+///
+/// `case_insensitive` is a parameter because the filesystem decides it and this function does not: folding case on a
+/// case-sensitive volume makes `Foo.cpp` and `foo.cpp` the same translation unit, so a database that lists both answers
+/// whichever it reaches first — a plausible wrong compilation rather than a missing one
+/// (`docs/parser-toolchain-review.md` P2-9). [`CompileCommands::command_for`] asks exactly first and folds only as a
+/// fallback, which is the same order the review describes: the machine's own rule first, case-folding for a database
+/// written on another machine.
+fn normalize_for_comparison(path: &Path, case_insensitive: bool) -> String {
     let unified: String = path
         .to_string_lossy()
         .chars()
         .map(|character| if character == '\\' { '/' } else { character })
         .collect();
 
-    crate::paths::normalize_path(Path::new(&unified), true)
+    crate::paths::normalize_path(Path::new(&unified), case_insensitive)
 }
 
 /// The `{...}` objects directly inside the outermost array.
@@ -1720,6 +1748,57 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
 
 #[cfg(test)]
 mod tests {
+    /// **A database that names both `Foo.cpp` and `foo.cpp` means both.** Matching used to fold case before comparing,
+    /// so on a case-sensitive filesystem — where the two are different translation units — a request for either could
+    /// select the other's command: a plausible wrong compilation rather than a missing one
+    /// (`docs/parser-toolchain-review.md` P2-9).
+    #[test]
+    fn an_exact_case_match_wins_over_a_folded_one() {
+        let database = crate::config::parse_compile_commands(
+            r#"[
+                {"directory": "/p", "file": "/p/src/Foo.cpp", "arguments": ["clang++", "-DUPPER", "-c", "src/Foo.cpp"]},
+                {"directory": "/p", "file": "/p/src/foo.cpp", "arguments": ["clang++", "-Dlower", "-c", "src/foo.cpp"]}
+            ]"#,
+        );
+
+        let upper = database
+            .command_for(Path::new("/p/src/Foo.cpp"))
+            .expect("the upper-case entry");
+        assert!(
+            upper.arguments.iter().any(|argument| argument == "-DUPPER"),
+            "the exact spelling is the answer: {:?}",
+            upper.arguments
+        );
+
+        let lower = database
+            .command_for(Path::new("/p/src/foo.cpp"))
+            .expect("the lower-case entry");
+        assert!(
+            lower.arguments.iter().any(|argument| argument == "-Dlower"),
+            "and so is the other one: {:?}",
+            lower.arguments
+        );
+
+        // **The fallback still works**: a request whose case the database does not use matches by folding, which is what
+        // makes a database written on another machine usable. *Which* of the two it answers is not decided here - a
+        // folded comparison cannot tell them apart, and that ambiguity is exactly why the exact pass runs first.
+        let shouted = database
+            .command_for(Path::new("/p/src/FOO.CPP"))
+            .expect("a case-folded match");
+        assert!(
+            shouted
+                .arguments
+                .iter()
+                .any(|argument| argument == "-DUPPER")
+                || shouted
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "-Dlower"),
+            "either entry, by folding: {:?}",
+            shouted.arguments
+        );
+    }
+
     /// **A relative `file` in a `compile_commands.json` is relative to `directory`.** The other database format already
     /// joined its pair, and this one did not — which is not only a display path: header borrowing compares the command
     /// file's directory with the header's, so a relative command path never matched and a header was analysed without the
