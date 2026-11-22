@@ -35,6 +35,36 @@ fn two_source_keywords_keep_their_space() {
     assert!(text.contains("static constexpr int"), "{text}");
 }
 
+/// **A callee named by an expansion, called by tokens written after it, is scanned without its caller painted.**
+///
+/// The standard rescans a replacement list with the macro being replaced unavailable, but it says so about the
+/// replacement list — *"not including the rest of the source file's preprocessing tokens"* (C11 6.10.3.4). Here
+/// `TOP`'s body ends in a **name** (`E(BODY(D_, …)(…))` → `D_MEMBERS`), and the argument list that calls it is written
+/// **after** the replacement; `D_MEMBERS`'s body needs `E`, which is still being replaced. Treating the tail as part of
+/// the replacement left the inner `E` calls unexpanded — which is json's
+/// `NLOHMANN_DEFINE_TYPE_INTRUSIVE`, and its 60 syntax errors (`docs/worklog.md`).
+#[test]
+fn a_callee_named_by_an_expansion_is_scanned_without_its_caller_painted() {
+    let text = rendered(
+        "#define E(x) x\n\
+         #define GET(_1, _2, NAME, ...) NAME\n\
+         #define BODY(Prefix, ...) E(GET(__VA_ARGS__, Prefix##MEMBERS, Prefix##EMPTY, SENTINEL))\n\
+         #define D_MEMBERS(T, a) E(E(TO(a)))\n\
+         #define D_EMPTY(T)\n\
+         #define TO(a) a##_ok ;\n\
+         #define TOP(...) E(BODY(D_, __VA_ARGS__)(__VA_ARGS__))\n\
+         TOP(zz_type, zz_a)\n",
+    );
+    assert_eq!(text.trim(), "zz_a_ok;", "{text}");
+}
+
+/// The shape of the standard's example, unchanged: two macros nested in one another still work.
+#[test]
+fn a_macro_nested_in_its_own_argument_still_expands() {
+    let text = rendered("#define E(x) x\nint E(E(1) + 2) = 0;\n");
+    assert_eq!(text.trim(), "int 1 + 2 = 0;", "{text}");
+}
+
 /// And the rule's other half, which must keep working: `>` `>` has to stay separable, `::` `std` must stay joined.
 #[test]
 fn a_qualified_name_does_not_acquire_spaces() {

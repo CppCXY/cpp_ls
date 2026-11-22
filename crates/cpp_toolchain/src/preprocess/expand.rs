@@ -804,6 +804,16 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                     } else {
                         // `source` is the name, the rest of this run, and the tail up to the call's end: what it
                         // took of the tail is everything past this run's own tokens.
+                        //
+                        // **And the enclosing macro is available again for those tokens.** The standard rescans a
+                        // replacement list with the macro being replaced unavailable, but it says so about the
+                        // replacement list — *"not including the rest of the source file's preprocessing tokens"*
+                        // (C11 6.10.3.4). A callee name that ended the replacement, called by an argument list
+                        // written after it, is exactly that case; without this the callee's body was expanded with
+                        // the caller still painted, and json's `NLOHMANN_JSON_EXPAND(<a macro name>)(<args>)` left
+                        // the `NLOHMANN_JSON_EXPAND` calls of the callee's body unexpanded — the 60 `syntax-error`s
+                        // of `docs/worklog.md`.
+                        let enclosing = self.active.pop();
                         let own = tokens.len() - index;
                         let after = Tail {
                             tokens: &source[arguments.next_index..],
@@ -816,6 +826,9 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                             invocation,
                             Some(&after),
                         );
+                        if let Some(name) = enclosing {
+                            self.active.push(name);
+                        }
                         consumed = arguments.next_index - own + used;
                         index = tokens.len();
                     }
