@@ -100,6 +100,20 @@ Two more facts, both from the `rendering` command:
   That is the next thing to read: who defines `JSON_HEDLEY_VERSION` before `detail/macro_scope.hpp:12` reaches the
   file, and whether the walk marks a header read and drops its second, *first* contribution.
 
+  **Three narrower facts, from three more four-line units** (each written into a file that is in the database, under
+  its own entry, with its original text restored afterwards):
+
+  * including `hedley.hpp` **directly** still leaves `JSON_HEDLEY_UNLIKELY(` unexpanded, while its directives *are*
+    evaluated — the 169-byte rendering is exactly `#pragma once`, `_Pragma("GCC diagnostic push")`,
+    `#pragma GCC diagnostic ignored "-Wvariadic-macros"`, `_Pragma("GCC diagnostic pop")`, which is the whole of what
+    that header writes as tokens. So the file is walked end to end and only its `#define`s fail to arrive;
+  * `#if` with a **function-like macro** in it evaluates correctly (`#define V(major) …` / `#if V(3)` takes the true
+    branch), and so do `defined(__GNUC__) && CHECK(3,0,0)` and `CHECK(3,0,0) || defined(__clang__)`;
+  * `__GNUC__` and `__cplusplus` are in force (`gnuc_seen` / `cpp_seen` survive).
+
+  So the defect is narrowed to **`#define` collection inside that header's guard chain** — not the condition
+  evaluator, not the compiler's predefined macros, not the walk.
+
 ### The probe files were measured on a rendering of nothing — the bisect below is void
 
 
