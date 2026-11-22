@@ -99,8 +99,12 @@ pub async fn initialized_handler(
         workspace_manager.set_client_config(client_config);
     }
 
-    start_analysis(context.clone()).await;
+    // **The watch is registered before the analysis starts**, because whether the client took it decides whether this
+    // server watches the project itself — and `start_analysis` is where that decision is made
+    // (`docs/language-server-review.md` P2-3). On a reload the order is the same: `start_analysis` runs again and reads
+    // the answer the previous registration left.
     register_files_watch(context.clone()).await;
+    start_analysis(context.clone()).await;
 
     Some(())
 }
@@ -118,10 +122,18 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         return;
     }
 
-    if !context
+    // **The client's answer, not only its advertisement.** A client that advertises dynamic registration and then
+    // refuses the registration has no watcher, so this server starts one; `the_client_watches` is `None` when no
+    // registration was attempted (a client that never said it could watch), and `Some(true)` when it took the watch.
+    let the_client_watches = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.the_client_watches()
+    };
+    let the_client_watches = context
         .lsp_features()
         .supports_dynamic_watched_files_registration()
-    {
+        && the_client_watches != Some(false);
+    if !the_client_watches {
         let log_file = context
             .workspace_manager()
             .lock()

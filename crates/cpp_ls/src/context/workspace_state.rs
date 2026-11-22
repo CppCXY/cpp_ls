@@ -33,6 +33,8 @@ pub struct WorkspaceState {
     ///
     /// Kept here rather than passed along at `initialized`, because a **reload** re-opens the session and has no
     /// command line of its own: the file the user pointed at is part of what the workspace is, so it is state.
+    /// See [`WorkspaceState::the_client_watches`].
+    the_client_watches: Option<bool>,
     config_file: Option<PathBuf>,
     /// The client's `exclude` list, parsed once — see [`WorkspaceState::set_client_config`].
     excludes: Vec<PathPattern>,
@@ -86,6 +88,7 @@ fn edit_offset(text: &str, index: &LineIndex, position: Position) -> Option<usiz
 impl WorkspaceState {
     pub fn new(client_config: ClientConfig) -> Self {
         let mut state = Self {
+            the_client_watches: None,
             roots: Vec::new(),
             open_files: HashMap::new(),
             client_config: ClientConfig::default(),
@@ -106,6 +109,19 @@ impl WorkspaceState {
     }
 
     /// Remember a configuration file a caller named, for the reloads that follow.
+    /// **Did the client take the dynamic watch registration?**
+    ///
+    /// `None` until a registration was attempted; `Some(false)` when the client refused or never answered. The native
+    /// watcher's decision reads it: a client that advertises dynamic registration and then refuses it is a client with no
+    /// watcher at all unless this server starts one (`docs/language-server-review.md` P2-3).
+    pub fn the_client_watches(&self) -> Option<bool> {
+        self.the_client_watches
+    }
+
+    pub fn set_the_client_watches(&mut self, watches: bool) {
+        self.the_client_watches = Some(watches);
+    }
+
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
         self.config_file = config_file;
     }

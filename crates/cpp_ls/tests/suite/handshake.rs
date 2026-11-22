@@ -792,6 +792,9 @@ struct Server {
     /// **Configuration requests the test is holding**, read but not answered — see
     /// [`Server::read_holding_the_configuration`].
     held_configuration_requests: Vec<Value>,
+    /// **Answer `client/registerCapability` with an error**, the way a client that advertises the capability and then
+    /// refuses the registration does.
+    refuse_registrations: bool,
 }
 
 impl Server {
@@ -878,6 +881,7 @@ impl Server {
             configuration_requests: Vec::new(),
             configuration_answers: 0,
             held_configuration_requests: Vec::new(),
+            refuse_registrations: false,
         }
     }
 
@@ -1099,6 +1103,15 @@ impl Server {
     fn answer(&mut self, request: &Value) {
         let id = request["id"].clone();
         let method = request["method"].as_str().unwrap_or_default();
+        // **A registration the client refuses**, answered the way a client that does not implement the request does.
+        if method == "client/registerCapability" && self.refuse_registrations {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": "method not found" },
+            }));
+            return;
+        }
         let result = match method {
             // One `null` per requested item: "the user has configured nothing", which is what an unconfigured
             // client says and what the server's own defaults are for.
@@ -8182,6 +8195,77 @@ fn a_malformed_notification_is_logged_and_does_not_stop_the_server() {
     assert!(
         written.contains(&main_uri.to_string()),
         "and with the URI the raw params still carried: {written}"
+    );
+
+    let _ = server.request(3, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **A client that refuses the watch registration is not left without a watcher.**
+///
+/// The registration was fire-and-forget: the response found no waiter and was dropped, so `MethodNotFound` looked like
+/// agreement. The server then starts no watcher of its own — it believes the client reports changes — and nothing
+/// reports anything, which is a session that silently stops noticing the filesystem
+/// (`docs/language-server-review.md` P2-3).
+///
+/// The log is the observable: the refusal is named, and the native watcher starts in its place.
+#[test]
+fn a_refused_watch_registration_falls_back_to_the_native_watcher() {
+    let project = Project::new("refused-registration");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    let logs = project.root().join("logs");
+
+    let mut server = Server::start_with_args(
+        project.root(),
+        &[std::ffi::OsStr::new("--log-path"), logs.as_os_str()],
+    );
+    server.refuse_registrations = true;
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    // A round trip, so the registration and the watcher decision have both happened.
+    let _ = server.request(
+        2,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 3, "character": 6 },
+        }),
+    );
+
+    let log = std::fs::read_dir(&logs)
+        .expect("the log directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .expect("a log file");
+    let written = std::fs::read_to_string(&log).expect("the log reads");
+    assert!(
+        written.contains("refused to watch the project's files"),
+        "the refusal is named rather than dropped: {written}"
+    );
+    assert!(
+        written.contains("with the native file watcher"),
+        "and the server watches the project itself: {written}"
     );
 
     let _ = server.request(3, "shutdown", Value::Null);

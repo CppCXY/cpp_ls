@@ -116,9 +116,40 @@ impl ClientProxy {
         }
     }
 
-    pub fn dynamic_register_capability(&self, registration_param: RegistrationParams) {
+    /// **Ask the client to register, and find out whether it did.**
+    ///
+    /// This used to be fire-and-forget: the response went to `on_response`, found no waiter and was dropped, so a client
+    /// that answered `MethodNotFound` — or did not answer at all — looked exactly like one that agreed. The consequence
+    /// was the watcher disappearing: the server believes the client reports changes, so it starts none of its own, and
+    /// nothing reports anything (`docs/language-server-review.md` P2-3).
+    ///
+    /// `Err` carries the reason a caller can put in a log: the client's error message, or a timeout. A client that
+    /// answers with an error has **not** registered, which is what a fallback needs to know.
+    pub async fn dynamic_register_capability(
+        &self,
+        registration_param: RegistrationParams,
+    ) -> Result<(), String> {
         let request_id = self.next_id();
-        self.send_request_no_wait(request_id, "client/registerCapability", registration_param);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.send_request(
+                request_id,
+                "client/registerCapability",
+                registration_param,
+                cancel_token,
+            ),
+        )
+        .await;
+
+        match answer {
+            Ok(Some(response)) => match response.response_result {
+                Ok(_) => Ok(()),
+                Err(error) => Err(format!("{} (code {})", error.message, error.code)),
+            },
+            Ok(None) => Err("the client never answered".to_string()),
+            Err(_) => Err("the client did not answer within 5 s".to_string()),
+        }
     }
 
     pub fn dynamic_unregister_capability(&self, registration_param: UnregistrationParams) {

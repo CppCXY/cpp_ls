@@ -11,7 +11,7 @@
 //!
 //! Clients with dynamic registration provide the events; otherwise the server uses a native watcher.
 
-use log::info;
+use log::{info, warn};
 use lsp_types::{
     DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, Registration,
     RegistrationParams, Unregistration, UnregistrationParams, WatchKind,
@@ -72,11 +72,24 @@ pub async fn register_files_watch(context: ServerContextSnapshot) {
     }
 
     let globs = watched_globs();
-    register(context.client(), &globs);
-    info!("asked the client to watch {} globs", globs.len());
+    // **What the client said, recorded where the native watcher's decision reads it.** A client that advertises dynamic
+    // registration and then refuses it is a client with **no** watcher at all unless this server starts its own, and the
+    // decision in `start_analysis` is the one place that knows how to start one.
+    let refused = register(context.client(), &globs).await;
+    {
+        let mut workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.set_the_client_watches(refused.is_ok());
+    }
+    match &refused {
+        Ok(()) => info!("asked the client to watch {} globs", globs.len()),
+        Err(reason) => warn!(
+            "the client refused to watch the project's files ({reason}); \
+             the server will watch them itself"
+        ),
+    }
 }
 
-fn register(client: &ClientProxy, globs: &[String]) {
+async fn register(client: &ClientProxy, globs: &[String]) -> Result<(), String> {
     // Unregister first: a reload registers again, and two registrations of the same globs would report every event
     // twice — which is not a correctness problem for the analysis (the batch is idempotent) but is a doubled cost
     // in every event the user makes.
@@ -92,15 +105,17 @@ fn register(client: &ClientProxy, globs: &[String]) {
             .collect(),
     };
 
-    client.dynamic_register_capability(RegistrationParams {
-        registrations: vec![Registration {
-            id: WATCH_FILES_REGISTRATION_ID.to_string(),
-            method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: Some(
-                serde_json::to_value(options).expect("the registration options serialize"),
-            ),
-        }],
-    });
+    client
+        .dynamic_register_capability(RegistrationParams {
+            registrations: vec![Registration {
+                id: WATCH_FILES_REGISTRATION_ID.to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: Some(
+                    serde_json::to_value(options).expect("the registration options serialize"),
+                ),
+            }],
+        })
+        .await
 }
 
 fn unregister(client: &ClientProxy) {
