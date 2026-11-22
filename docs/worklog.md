@@ -362,6 +362,30 @@ neither name while `--editor` stays.
 claims (the third is not made), the boundaries themselves, and the two drifts measured in this batch with their single
 authority (the `initialize` response; `cpp_code_analysis`'s extension and configuration-name lists).
 
+### Batch 3: an inactive-region publication is one snapshot behind two gates
+
+`publish_all` read `(uri, version)` from the buffer store, and `publish` then took the **regions** and the **text** from
+two separate `with_snapshot` calls. Three reads, three moments: a keystroke between them turned one text's byte offsets
+into line/column ranges over another text — a grey band over whatever sat at those offsets — or paired a version with
+ranges from an older one, which a version-checking client drops while keeping its old decoration
+(`docs/language-server-review.md` P1-3).
+
+Both halves are fixed where the diagnostics channel already fixed its own: **one snapshot** returns the answer and the
+text together, and the send happens only if
+* the version the ranges were computed for is still the client's (`open_version`), and
+* **no update notification is queued but unapplied** (`UpdateInbox::when_caught_up`), which is the window between the
+buffer's new version and the session's old text.
+
+The test is `handshake.rs::every_inactive_regions_publication_matches_the_version_it_names`: it alternates a text with a
+dead branch and one without over four edits, and requires every publication's ranges to be the ones **its own** version's
+text produces.
+
+**And the race is not forced.** Five runs against the old code — with the fixture grown to 3,000 lines so the answer takes
+roughly ten milliseconds — all passed, so what the test pins is the invariant at settled points, not the window itself.
+The window is closed by construction (one snapshot instead of two) and by the two gates, the same shape
+`DiagnosticService::publish` uses; saying the test reproduces the race would be a claim the session did not earn.
+
+
 
 
 ## The analysis review: the baseline, the probe, and what it found before any fix

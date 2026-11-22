@@ -42,7 +42,7 @@ pub async fn publish_all(context: &ServerContextSnapshot) {
         .open_document_versions();
     let mut asked = false;
     for (uri, version) in documents {
-        asked |= publish(context, uri, Some(version));
+        asked |= publish(context, uri, version).await;
     }
     // **A file with no rendering was asked for, and the ask must wake the pump.** The query queues the cook
     // (`Session::inactive_regions` asks when the rendering is unknown), and this runs *inside* the pump's idle
@@ -65,33 +65,55 @@ pub async fn clear(context: &ServerContextSnapshot, uri: Uri) {
 ///
 /// `None` sends nothing: the file has no rendering yet, and "no news" is the honest message — the alternative is an
 /// empty list, which would tell a client that a file with a thousand dead lines has none.
-fn publish(context: &ServerContextSnapshot, uri: Uri, version: Option<i32>) -> bool {
+async fn publish(context: &ServerContextSnapshot, uri: Uri, version: i32) -> bool {
     let Some(path) = uri_to_file_path(&uri) else {
         return false;
     };
-    let answer = context
+    // **One snapshot for the answer and the text it is measured in.** These were two `with_snapshot` calls, so a
+    // keystroke between them turned the first reading's byte offsets into line/column ranges over the second reading's
+    // text — a grey band over whatever happened to be at those offsets (`docs/language-server-review.md` P1-3).
+    let Some((answer, text)) = context
         .analysis()
-        .with_snapshot(|session| session.inactive_regions(&path))
-        .flatten();
-    let Some(answer) = answer else {
+        .with_snapshot(|session| (session.inactive_regions(&path), session.text(&path)))
+    else {
+        return false;
+    };
+    let Some((answer, text)) = answer.zip(text) else {
+        // No rendering yet: the request stays queued and a later pass answers, which is why the ask is reported so the
+        // caller can wake the pump.
         return true;
     };
+
     // **A guess is not painted.** The spans are still real — a branch was dropped — but the configuration may not be
     // the one the user builds with (`assumed_undefined` counts branches decided by C's undefined-is-zero rule), and
     // the client is told "nothing" instead of told a lie.
-    if !answer.is_exact() {
-        send(context, uri, version, Vec::new());
+    let regions = match answer.is_exact() {
+        true => ranges_of(&text, &answer.spans),
+        false => Vec::new(),
+    };
+
+    // **The gates the diagnostics channel already uses**, and for the same reason — the two stores are updated in two
+    // steps (`didChange` writes the buffer, then the session), so a publication can otherwise pair one version's
+    // `textDocument` with another version's ranges:
+    //
+    // * the version the ranges were computed for must still be the client's (`open_version`);
+    // * and **no update notification may be queued but unapplied** at the moment of sending (`when_caught_up`), which
+    //   is the window between the buffer's new version and the session's old text.
+    let still_current = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.open_version(&uri) == Some(version)
+    };
+    if !still_current {
         return false;
     }
-    let text = context
-        .analysis()
-        .with_snapshot(|session| session.text(&path))
-        .flatten();
-    let Some(text) = text else {
+    let sent = context
+        .inbox()
+        .when_caught_up(|| send(context, uri, Some(version), regions))
+        .await;
+    if sent.is_none() {
+        // A newer change is queued: its own publication follows once the pump has applied it.
         return false;
-    };
-    let regions = ranges_of(&text, &answer.spans);
-    send(context, uri, version, regions);
+    }
     false
 }
 

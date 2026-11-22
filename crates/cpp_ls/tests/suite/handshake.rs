@@ -7865,3 +7865,91 @@ fn the_cli_does_not_offer_switches_nothing_reads() {
         "the identity switch is offered, because it is read: {help}"
     );
 }
+
+/// **Every publication describes the text its version names** — the gate the diagnostics channel already had.
+///
+/// `publish_all` took the version from the buffer store and the regions and text from two separate analysis snapshots,
+/// so a keystroke could pair one version's `textDocument` with another version's ranges — a client that checks the
+/// version (which the notification exists to let it do) would either drop a correct notification or paint a range over
+/// text it never described (`docs/language-server-review.md` P1-3).
+///
+/// The edits here alternate between a text with a dead branch and one without, so the expected ranges differ by version:
+/// a notification whose ranges are not the ones its own text produces is a pairing failure, whatever the interleaving.
+#[test]
+fn every_inactive_regions_publication_matches_the_version_it_names() {
+    // **Large enough that the answer takes measurable time.** The window the gate closes is between the analysis
+    // answering and the text being read; a four-line file makes it microseconds wide, and a test that cannot enter the
+    // window is a pin rather than a reproducer. Measured on this fixture: the answer takes ~10 ms, which is the width.
+    let filler: String = (0..3000)
+        .map(|line| format!("int filler_{line} = {line};\n"))
+        .collect();
+    let with_a_dead_branch =
+        format!("#define ON 1\n{filler}#if ON\nint live;\n#else\nint dead;\n#endif\n");
+    let without = filler;
+
+    let project = Project::new("inactive-regions-versions");
+    project.write("a.cpp", &with_a_dead_branch);
+    let mut server = Server::start(project.root());
+    let a_uri = uri_of(&project.root().join("a.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "initializationOptions": { "inactiveRegions": true },
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": a_uri, "languageId": "cpp", "version": 1, "text": with_a_dead_branch.clone() }
+        }),
+    );
+
+    // **Each edit is followed by the publication it deserves**, and each answer is checked against its own text: a
+    // dead branch is non-empty regions, and its absence is empty ones.
+    let mut version = 1;
+    for (index, text) in [
+        without.as_str(),
+        with_a_dead_branch.as_str(),
+        without.as_str(),
+        with_a_dead_branch.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        version += 1;
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": a_uri, "version": version },
+                "contentChanges": [{ "text": text }],
+            }),
+        );
+
+        let published = server.wait_for_within(Duration::from_secs(60), |message| {
+            message["method"] == json!("textDocument/inactiveRegions")
+                && message["params"]["textDocument"]["version"] == json!(version)
+        });
+        let regions = published["params"]["regions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("regions is a list: {published}"));
+        let expected_a_dead_branch = index % 2 == 1;
+        assert_eq!(
+            !regions.is_empty(),
+            expected_a_dead_branch,
+            "version {version} names `{text:?}`, whose dead branch is {expected_a_dead_branch}: {published}"
+        );
+    }
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
