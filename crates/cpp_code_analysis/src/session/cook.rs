@@ -124,6 +124,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 directory.join(format!("{name}.cooked.rendering")),
                 &rendered.indexed.rendered.text,
             );
+            // **And why anything was left unexpanded.** A macro the expander declined is invisible in the text — its
+            // name is still a name — so a reader asking "why is this not expanded" needs the note the expander kept.
+            // The notes are the first few (`Expander::note` bounds them), each with the position it is about.
+            let notes: Vec<String> = rendered
+                .indexed
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect();
+            let _ = std::fs::write(
+                directory.join(format!("{name}.expansion")),
+                notes.join("\n"),
+            );
         }
         let rendered_for = render_started.elapsed().as_millis();
         let committed = self.commit_a_cooked(rendered);

@@ -10,6 +10,41 @@ The protocol for asking one question at a time is [`inspect.md`](inspect.md).
 
 ---
 
+## The json `syntax-error`s, reduced to one line: json's own DEFINE body against an equivalent local one
+
+Re-measured in the current tree: **126 of 126 files answered, 190 findings** — 86 `redefinition`, 60 `syntax-error`,
+28 `use-override`, and 16 others. The 60 are all one construct, and the second measurement this round narrowed it to a
+**single line of difference**, in the same file, at the same position:
+
+```cpp
+// json's real macro, from `detail/macro_scope.hpp:687`
+#define NLOHMANN_DEFINE_TYPE_INTRUSIVE(...) \
+    NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_TYPE_BODY(NLOHMANN_JSON_DEFINE_TYPE_INTRUSIVE_, __VA_ARGS__)(__VA_ARGS__))
+
+// and an equivalent local one, written in the probe
+#define DEFINE_LOCAL(T) void to_json3(T& j) { NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_TO, a)) }
+```
+
+The local one expands **completely** (`nlohmann_json_j["a"]=nlohmann_json_t.a;`); json's own leaves its nested
+`NLOHMANN_JSON_EXPAND` calls in place:
+
+```text
+friend void to_json(…){NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_EXPAND(nlohmann_json_j["zz_a"]=nlohmann_json_t.zz_a;))}
+```
+
+The distinguishing shape is the **call whose callee name comes out of an expansion** —
+`NLOHMANN_JSON_TYPE_BODY(…)(__VA_ARGS__)` — reaching `NLOHMANN_JSON_PASTE2`'s body, which is the double
+`EXPAND(EXPAND(…))` the leftover shows. `CookedStream.diagnostics` records **no** expansion note for it (the notes are
+now dumped beside the rendering, `<file>.expansion`, under `CPPLS_DUMP_RENDERING_DIR`), so the rescan is not *declining*
+to expand it — it either never reaches those tokens or ends before them. And the same macro written in the file at the
+same position **does** expand (`int NLOHMANN_JSON_EXPAND(zz_marker) = 7;` → `int zz_marker = 7;`), so the table is not
+the problem: it is the rescan of a **nested body expansion that itself contains a computed call**.
+
+That is where the next round starts: a `cook_with` fixture with a two-level computed call and a double `EXPAND` in the
+callee's body is the smallest thing to try, and `target/bench/paste_probe2.cpp` (json's real 227-line PASTE block plus
+a local `DEFINE`) is the fixture that already expands correctly — the difference between it and json's body is the
+`(…)(__VA_ARGS__)` step.
+
 ## nlohmann/json 3.12.0 — the first **C++** library measured
 
 A header-only library, so the measurement is not one project but three questions: the library's own code, its test
