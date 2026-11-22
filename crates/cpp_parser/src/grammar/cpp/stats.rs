@@ -389,6 +389,17 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
     let _phase = crate::parser::phases::during("statement");
     let base = p.open_marks();
 
+    // **A pragma operator is a statement of its own, and it has no `;`.** doctest's assertion macros expand to
+    // `_Pragma("GCC diagnostic ignored \"-Wuseless-cast\"")static_cast<void>(…)` inside a `try` block, and reading the
+    // operator as an expression left the `static_cast` with no terminator: ``expected `;` after expression`` at the
+    // line of the macro — 63 `CHECK_THROWS_WITH_AS` calls in nlohmann/json's `unit-conversions1.cpp` alone.
+    //
+    // `parse_statement_body` has the same arm, and it is not enough: a compound statement's own items come through
+    // here, not through the body rule that a control statement uses.
+    if decls::is_a_pragma_operator(p) {
+        return decls::parse_pragma_operator(p);
+    }
+
     let result = match p.current_token() {
         // Control flow statements
         CppTokenKind::IfKeyword => parse_if_statement(p),

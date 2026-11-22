@@ -11,3 +11,5 @@ mod conditions;
 mod expansion_budget;
 #[path = "suite/preprocessor_against_the_compiler.rs"]
 mod preprocessor_against_the_compiler;
+#[path = "suite/rendering.rs"]
+mod rendering;

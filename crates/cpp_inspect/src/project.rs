@@ -217,16 +217,21 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
         // asks for the file. Without this the flag silently did nothing for a file that was not also indexed, and
         // `diagnostics` then failed with "has no reading to diagnose" (measured on nlohmann/json's
         // `tests/src/unit-constructor1.cpp`, a header-only project opened with `--cook` and nothing else).
+        //
+        // **The whole include closure, in the order the compiler would read it**, and for the same reason: a
+        // rendering inlines an `#include` from the reading the index holds for that file, so an include nobody read
+        // contributes nothing — silently, and at any depth. `catch_up` reads a file and **eight** of its includes,
+        // which is the slice a hover needs and not the closure a cook needs; this walks the include graph instead,
+        // one `catch_up` per file.
+        //
+        // Measured: on a three-file project (`probe.cpp` → `x.hpp` → `y.hpp`) the type `y.hpp` declares never
+        // arrived (33-byte rendering) until the graph was walked, and arrived afterwards (42 bytes). On
+        // nlohmann/json's `unit-conversions1.cpp` the same walk took the rendering from 240 434 bytes with
+        // `TEST_CASE(` and `JSON_HEDLEY_UNLIKELY(` unexpanded to **3 397 147** bytes with both at zero, which is the
+        // whole of doctest and hedley in the stream.
+        warm_the_closure(&mut session, &file);
         session.want_cooked_reading(&file);
-        // **The whole closure, not one request's slice.** `catch_up` reads the file and eight of its includes — the
-        // slice a hover needs — while a *cook* needs every include the walk will enter, or `cooking_materials` refuses
-        // and `diagnostics` answers "has no reading to diagnose". Measured on five nlohmann/json test files whose
-        // closure is two hundred standard headers: their rendering was still built by `rendering` (206–314 kB), so the
-        // file was cookable and only the drain was short.
         session.catch_up(&file);
-        while session.needs_catching_up(&file) {
-            session.catch_up(&file);
-        }
         let _ = session.cook(&file);
     }
     let cooked = cooked.elapsed();
@@ -272,6 +277,36 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
 }
 
 /// Every source file under a project root, skipping the directories that are not source.
+/// **Read a file's whole include closure into the index**, so a cook can inline it.
+///
+/// `catch_up` reads one file and **eight** of its includes — the slice a hover needs — while the renderer inlines an
+/// `#include` only from a reading the index already holds. A closure of two hundred standard headers therefore lost
+/// everything below the first eight, silently: nlohmann/json's `unit-conversions1.cpp` rendered 240 434 bytes with
+/// `TEST_CASE(` and `JSON_HEDLEY_UNLIKELY(` unexpanded, and 3 397 147 with both expanded once this walked the graph.
+///
+/// The walk is the include graph as the summaries resolved it, depth first, each file read with `catch_up` — the same
+/// entry point the pump uses, so a file that is already read is a cache hit. It stops at files with no resolved
+/// includes (a system header's own includes are read by `catch_up`'s own cascade) and at 4 096 files, which is more
+/// than any real closure and keeps a broken graph from looping.
+pub(crate) fn warm_the_closure(session: &mut cpp_code_analysis::Session, file: &Path) {
+    const LIMIT: usize = 4096;
+    let mut pending = vec![file.to_path_buf()];
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    while let Some(path) = pending.pop() {
+        if seen.len() >= LIMIT || !seen.insert(path.clone()) {
+            continue;
+        }
+        session.catch_up(&path);
+        let Some(summary) = session.index().summary(&path) else {
+            continue;
+        };
+        for include in &summary.includes {
+            if let Some(resolved) = &include.resolved {
+                pending.push(resolved.clone());
+            }
+        }
+    }
+}
 fn source_files(root: &Path) -> Vec<PathBuf> {
     const EXTENSIONS: &[&str] = &[
         "c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "ipp", "inl", "tcc",

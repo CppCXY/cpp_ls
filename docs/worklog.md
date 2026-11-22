@@ -138,6 +138,40 @@ Measured after it: a translation unit that includes `hedley.hpp` **directly** no
 `__builtin_expect(!!(1), 1)` (it did not before), and the four-line probe goes from unexpanded to 167 bytes of exactly
 what the header writes.
 
+### The two fixes that took the json suite from 95 syntax errors to 60, and what is left
+
+1. **A pragma operator is a statement `parse_stat` knows about.** `CHECK_THROWS_WITH_AS` expands to
+   `_Pragma("GCC diagnostic ignored \"-Wuseless-cast\"")static_cast<void>(…)` inside a `try` block; the arm added
+   earlier was in `parse_statement_body`, which a **compound statement's items do not go through**. Reading the operator
+   as an expression left the `static_cast` with no terminator — 63 findings in `unit-conversions1.cpp` alone, and that
+   file now reports **0**.
+2. **`__LINE__` and `__COUNTER__` are answered at the call site.** A compiler answers them from the position of the
+   *use*, so no table read from its predefines has them; the cook writes them into each run before expanding it. Without
+   this, doctest's `DOCTEST_CAT(x, __LINE__)` pasted the **name** onto `x` and every capture became the same identifier
+   `DOCTEST_CAPTURE___LINE__` — 86 `redefinition` findings, every one of them ours.
+
+**And a latent defect the work surfaced**: `simplify-boolean-expr` read the condition's spelling from the **rendering**
+(`node_text`), so it depended on the renderer's spacing; a separator change made it silent and its own test failed with
+"the file produced []". It now reads `node_written_text` — the range mapped back through the view into the file — with
+whitespace collapsed. Any rule that judges a *spelling* should use that and not `node_text`.
+
+**What is left in the json measurement** (126 of 126 files answered):
+
+| Code | Count | Standing |
+| --- | --- | --- |
+| `redefinition` | 86 | `DOCTEST_CAPTURE___LINE__` again: the `__LINE__` in doctest's `DOCTEST_ANONYMOUS` arrives through a **definition's body**, where this layer answers the `#define`'s line rather than the invocation's. Call-site uses are fixed; the body case is the remaining half, and it needs the invocation position handed into the rescan. |
+| `syntax-error` | 60 | three files — `unit-json_view_from_json.cpp`, `unit-regression3.cpp`, `unit-udt_macro.cpp` — all `expected `;` after expression`. |
+| `use-override` | 28 | doctest's own code: `virtual` without `override`. A style rule firing on a third-party header. |
+| others | 16 | `return-type-mismatch` 4, `assign-type-check` 3, `access-invisible` 2, `implicit-bool-conversion` 2, `include-not-found` 2, `undefined-name` 2, `macro-parentheses` 1. |
+
+And the **measurement's own database** was incomplete in a way worth recording: nlohmann/json's tests inherit three
+definitions from `tests/CMakeLists.txt` (`DOCTEST_CONFIG_SUPER_FAST_ASSERTS`, `JSON_TEST_KEEP_MACROS`,
+`JSON_TEST_USING_MULTIPLE_HEADERS=1`) and `TEST_DATA_DIRECTORY` comes from a header **generated** by
+`cmake/download_test_data.cmake`. Without them, `TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json"` is an
+identifier followed by a string literal — 97 of the 157 syntax errors that were left were the build's, not the parser's.
+`target/bench/json_cdb.py` now writes the database the project would have built.
+
+### Still open, and now precisely: **a header included from a header contributes nothing**
 ### Still open, and now precisely: **a header included from a header contributes nothing**
 
 **The reproduction, with no nlohmann code in it** (`E:\corpora\json-probe`): `probe.cpp` includes `x.hpp`, `x.hpp`

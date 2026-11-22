@@ -191,7 +191,11 @@ fn run(mut cli: Cli) -> Result<(), String> {
     // **A sweep is about the project**, so the two flags that make the session hold the whole project are implied:
     // a sweep of one file is what `diagnostics` already is, and a caller that has to remember `--index --all-files`
     // for the one command whose meaning is "all of them" is a caller the protocol failed.
-    if matches!(cli.command, Command::Sweep { .. }) {
+    if matches!(
+        cli.command,
+        Command::Sweep { .. } | Command::Rendering { .. }
+    ) || cli.project.cook
+    {
         // **Every file under the root is *seeded*, not indexed up front.** `index` would make the pump build a
         // stored cooked reading for each file, and `Session::diagnostics` prefers a stored reading over the one this
         // command cooks — which is the *index's* reading rather than the one a client's pull gets. Measured on

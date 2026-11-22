@@ -68,6 +68,12 @@ pub struct CookedStream {
     /// Only **live** ones: a message in a branch nobody compiles is not said by the compilation, and reporting it
     /// would be reporting the answer to a condition that came out the other way.
     pub messages: Vec<(DirectiveKind, String, usize)>,
+    /// **How many `__COUNTER__` uses have been answered** — the value the next one reports, minus one.
+    ///
+    /// A compiler counts them per translation unit, so this lives on the stream rather than in the expander: a cook
+    /// that restarted the count per run would hand out the same number twice, and doctest's anonymous registrations
+    /// would collide again the way `__LINE__` made them collide.
+    pub counters: usize,
     /// The spans of the regions that were **not** compiled, in source order.
     pub inactive: Vec<SourceRange>,
     /// How many conditional branches were decided by **C's rule that an identifier which is not defined
@@ -1981,7 +1987,47 @@ fn expand_run(
     live: &dyn crate::macros::MacroBindings,
     out: &mut CookedStream,
 ) {
-    let run = crate::directive::to_tokens(source, &tokens[from..to]);
+    let mut run = crate::directive::to_tokens(source, &tokens[from..to]);
+    // **The predefined macros that have no definition** — `__LINE__`, `__COUNTER__`. A compiler answers them from the
+    // position of the *use*, so they are not in any table this crate could read from the compiler's predefines; they
+    // are written here instead, before the run is expanded, which is exactly where a call site's own tokens are.
+    //
+    // Without them, doctest's `DOCTEST_CAT(x, __LINE__)` pasted the **name** onto `x` (the argument held no macro, so
+    // it was substituted as written) and every capture became the same identifier `DOCTEST_CAPTURE___LINE__` — 86
+    // `redefinition` findings across nlohmann/json's tests, every one of them ours.
+    //
+    // A definition's body is the other half and stays as it is: `#define HERE __LINE__` expanded at a use reports the
+    // line of the `#define`, because a body token carries the position it was written at. The standard wants the
+    // *invocation's* line, and getting that needs the position handed down to the rescan — recorded here rather than
+    // done, since no corpus measured so far writes it.
+    for token in &mut run {
+        if token.kind != cpp_parser::CppTokenKind::Identifier {
+            continue;
+        }
+        match token.text.as_str() {
+            "__LINE__" => {
+                let line = source[..token.range.start_offset.min(source.len())]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                token.kind = cpp_parser::CppTokenKind::IntegerLiteral;
+                token.text = line.to_string().into();
+            }
+            "__COUNTER__" => {
+                out.counters += 1;
+                token.kind = cpp_parser::CppTokenKind::IntegerLiteral;
+                token.text = (out.counters - 1).to_string().into();
+            }
+            "__FILE__" => {
+                // The name of the file is not this layer's to know — `cook_with` is handed text, not a path — so the
+                // honest answer is an empty literal rather than a wrong name.
+                token.kind = cpp_parser::CppTokenKind::StringLiteral;
+                token.text = "\"\"".into();
+            }
+            _ => {}
+        }
+    }
     let offset = token_start(tokens, from);
     let macros = crate::preprocess::PositionalMacros {
         table: live,

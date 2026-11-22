@@ -385,6 +385,33 @@ impl<'a> CheckContext<'a> {
             .unwrap_or_default()
     }
 
+    /// **What the reader wrote for this node**, in the file's own coordinates — the counterpart of
+    /// [`CheckContext::node_text`] for a rule that judges a *spelling*.
+    ///
+    /// `node_text` slices [`CheckContext::source`], which is the **rendering**: macros expanded and the tokens spaced
+    /// by the renderer's own rule (a space only where leaving it out would change a token). A rule that looks for
+    /// `"== true"` in that text is therefore depending on the renderer's spacing, which is not a fact about the
+    /// reader's code — and when the renderer stopped writing that space, nlohmann/json's `simplify-boolean-expr`
+    /// went silent and its test failed with "the file produced []". Mapping the range back through the view answers
+    /// the file's text instead.
+    ///
+    /// `None` when the node's text is not written in this file (it came out of another file's macro body) — the
+    /// caller then decides, and `node_text` is the honest fallback.
+    pub fn node_written_text(&self, node: &cpp_parser::CppSyntaxNode) -> Option<&'a str> {
+        let range = cpp_parser::source_range(node.text_range());
+        let start = self
+            .view
+            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
+                range.start_offset,
+            ))?;
+        let end = self
+            .view
+            .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(
+                range.end_offset(),
+            ))?;
+        self.written.get(start.get()..end.get())
+    }
+
     /// **Is this file compiled as C?** — the question a rule that only makes sense for C++ asks before it fires.
     ///
     /// `None` (a configuration that enables both families) answers `false`: a rule is quiet when it *knows* the language is

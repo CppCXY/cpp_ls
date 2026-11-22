@@ -30,24 +30,32 @@ impl Check for SimplifyBooleanExpr {
             let Some(condition) = statement.get_condition() else {
                 continue;
             };
-            let written = context.node_text(condition.syntax());
+            // **The file's spelling, whitespace collapsed** — not the rendering's, whose spacing is the renderer's
+            // business and not the reader's. Reading `node_text` here made the rule depend on a space the renderer
+            // happened to write: when it stopped (`ready==true`), the rule went silent and this file's own test failed
+            // with "the file produced []". `node_written_text` maps the condition's range back into the file; the
+            // fallback is the rendering, for a condition that came out of another file's macro.
+            let written = context
+                .node_written_text(condition.syntax())
+                .unwrap_or_else(|| context.node_text(condition.syntax()));
+            let collapsed = written.split_whitespace().collect::<Vec<_>>().join(" ");
             let against_a_literal = ["== true", "== false", "true ==", "false =="]
                 .iter()
-                .any(|spelling| written.contains(spelling));
+                .any(|spelling| collapsed.contains(spelling));
             if !against_a_literal {
                 continue;
             }
             context.add(
                 DiagnosticCode::SimplifyBooleanExpr,
                 cpp_parser::source_range(condition.syntax().text_range()),
-                written.to_string(),
+                collapsed.clone(),
                 format!(
-                    "`{written}` compares against a literal that is already the value — write the expression, or its negation: `if ({})` or `if (!({}))`",
-                    written
+                    "`{collapsed}` compares against a literal that is already the value — write the expression, or its negation: `if ({})` or `if (!({}))`",
+                    collapsed
                         .replace("== true", "")
                         .replace("== false", "")
                         .trim(),
-                    written.replace("== true", "").replace("== false", "").trim()
+                    collapsed.replace("== true", "").replace("== false", "").trim()
                 ),
             );
         }

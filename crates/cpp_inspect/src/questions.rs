@@ -962,26 +962,25 @@ pub fn the_rendering(opened: &mut Opened, at: Option<usize>, limit: usize) -> An
     // learned that the hard way (see `docs/worklog.md`, nlohmann/json).
     opened.session.want_cooked_reading(&opened.file);
     opened.session.catch_up(&opened.file);
+    // **The whole closure, sealed into the index** — an `#include` is inlined from the reading the index holds for
+    // that file, so an include nobody read contributes nothing. See `warm_the_closure` in `project.rs`.
+    crate::project::warm_the_closure(&mut opened.session, &opened.file.clone());
     let _ = opened.session.cook(&opened.file);
-    // **The *unit's* rendering**, which is the text the parser reads: the file with its whole include closure
-    // inlined and every macro expanded. `rendered_text_of` answers the file's **own** rendering — its text with the
-    // directives removed and the line breaks collapsed — which is a different (much shorter) string, and it was the
-    // first thing this command got wrong: a 91-byte answer for a translation unit that cooks to megabytes.
-    let unit = opened.session.render_the_unit(&opened.file);
-    let text = match unit.map(|unit| unit.text) {
+    // **The text the parser reads**, which is the file's *cooked* rendering: the file with every macro expanded and
+    // the untaken branches gone. Not `render_the_unit`, which assembles the whole closure into one string for a
+    // different question — the two are not the same text, and answering the wrong one is how a `staticconstexpr` that
+    // only the unit's assembly produces looked like a parse error in a file whose parse never saw it.
+    let text = match opened.session.rendered_text_of(&opened.file) {
         Some(text) => text,
-        None => match opened.session.rendered_text_of(&opened.file) {
-            Some(text) => text,
-            None => {
-                return Answer::new(
-                    format!(
-                        "no cooked rendering for {} — the file was not cooked (a header has no translation unit of its own)",
-                        opened.file.display()
-                    ),
-                    json!({ "file": opened.file.display().to_string(), "text": Value::Null }),
-                );
-            }
-        },
+        None => {
+            return Answer::new(
+                format!(
+                    "no cooked rendering for {} — the file was not cooked (a header has no translation unit of its own)",
+                    opened.file.display()
+                ),
+                json!({ "file": opened.file.display().to_string(), "text": Value::Null }),
+            );
+        }
     };
     let bytes = text.len();
     let from = at.unwrap_or(0).min(bytes);
