@@ -139,6 +139,16 @@ pub struct FileEntry {
     /// [`crate::condition`]'s business once expansion has run. The set is sorted, so two runs of the walk
     /// can be compared.
     pub macros: Vec<Box<str>>,
+    /// The names whose definitions are **in doubt** where this file was entered.
+    ///
+    /// A name lands here when its `#define` (or `#undef`) was written inside a conditional region the walk could not
+    /// decide: it is applied, because a macro that *might* be defined is closer to what a compiler sees than one that is
+    /// certainly not, and it is **also** marked uncertain, so a later `#ifdef` on it answers "unknown" rather than a
+    /// confident true or false. Names, sorted, one entry each.
+    ///
+    /// This is the half of `docs/parser-toolchain-review.md` P1-7 that a consumer can act on: `Marked::mark_uncertain`
+    /// already carried the doubt through the conditions, and until now nothing outside the walk could see it.
+    pub uncertain: Vec<Box<str>>,
     /// Whether macros that could not be accounted for might still have been in force here.
     ///
     /// True for a header the walk started from, because its includer — the translation unit that supplies the
@@ -562,6 +572,9 @@ fn visit<F: FileProvider>(
             defines: directives.defines.clone(),
             depth,
             macros: inherited_names,
+            // **The doubt the includer leaves behind**, which is what a consumer has to know to read `macros` as
+            // "definitely" rather than "maybe".
+            uncertain: inherited.uncertain_names(),
             missing_context: state.missing_context(),
         },
     );
@@ -599,13 +612,27 @@ fn visit<F: FileProvider>(
         // unreadable or unresolved include); marking the *name* uncertain as well would make `#ifdef X` answer
         // "unknown" for a definition this file plainly wrote, and `FileEntry` has no way to carry that distinction
         // yet — see the worklog on what is left of the review's P1-7.
+        // **Applied even when the region is undecidable, and the doubt recorded separately.** A macro that *might* be
+        // defined is closer to what a compiler sees than one that is certainly not, so it is defined; marking the name
+        // uncertain as well is what makes a later `#ifdef` on it answer "unknown" instead of a confident true - the
+        // review's P1-7. `is_defined` stays true, which is what keeps a guard chain (`#ifndef X` / `#define X`) working
+        // for a header read on its own; `FileEntry::uncertain` carries the doubt to a consumer.
+        let certainly_compiled = visibility == Some(true);
         match &spanned.directive {
             Directive::Define(define) => {
                 if let Some(definition) = &define.macro_def {
                     macros.define(definition.clone());
+                    if !certainly_compiled {
+                        macros.mark_uncertain(&definition.name);
+                    }
                 }
             }
-            Directive::Undef { name: Some(name) } => macros.undefine(name),
+            Directive::Undef { name: Some(name) } => {
+                macros.undefine(name);
+                if !certainly_compiled {
+                    macros.mark_uncertain(name);
+                }
+            }
             _ => {}
         }
 
@@ -965,6 +992,7 @@ fn follow<F: FileProvider>(
                 defines: Vec::new(),
                 depth,
                 macros: inherited.defined_names(),
+                uncertain: inherited.uncertain_names(),
                 // An unreadable file is not a file whose context is *known*: whatever it might have defined is
                 // unknown along with the rest of it.
                 missing_context: state.missing_context(),
@@ -1004,6 +1032,7 @@ fn record(graph: &mut FileGraph, file: FileId, entry: FileEntry) {
             defines: Vec::new(),
             depth: usize::MAX,
             macros: Vec::new(),
+            uncertain: Vec::new(),
             // A placeholder is not a file, so there is nothing here to have context about. `false` keeps a
             // consumer from reading `context_is_complete` as a statement about a file this walk never reached.
             missing_context: false,
@@ -1168,6 +1197,13 @@ impl Marked {
     /// What a walk does with a fact it could not place: a `#define NAME 1` inside an `#if` nobody can evaluate,
     /// or anything at all in a file that may not have been included. From that point on the name is
     /// [`Lookup::Unanswered`](crate::Lookup::Unanswered) — not `0`, and not "defined".
+    /// **The names whose definitions are in doubt**, sorted — what a [`FileEntry`] records for its includers.
+    pub fn uncertain_names(&self) -> Vec<Box<str>> {
+        let mut names: Vec<Box<str>> = self.uncertain.iter().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn mark_uncertain(&mut self, name: &str) {
         // **One hash, not a scan.** This and [`Marked::is_uncertain`] both walked the whole set for every question,
         // and the set is not small: it holds a name per macro fact the walk could not place, which on a
@@ -1659,6 +1695,92 @@ mod tests {
             graph.edges.is_empty(),
             "the name was undefined before the `#if`, so nothing is included: {:?}",
             graph.edges
+        );
+    }
+    /// **An unknown branch leaves the name it defines undecided, not defined.**
+    ///
+    /// This is the review's P1-7 test, and the observable is the *second* file: `taken.h` is reached only under `#if X`,
+    /// `not_taken.h` only under `#else`. With `X` defined in a region the walk could not decide, both branches are
+    /// undecidable, which is why both headers are reached. Before the fix `X` was simply defined - the walk applied the
+    /// `#define` and said nothing about the doubt - so `#if X` was true and only `taken.h` was read.
+    ///
+    /// The root is a **header**, which is what makes `MAYBE` unknown in the first place: nobody included it, so the
+    /// `-D`s and `#define`s that came before it cannot be known (`WalkState::missing_context`).
+    #[test]
+    fn a_definition_in_an_undecidable_region_is_in_doubt_for_the_files_after_it() {
+        let source = "#if MAYBE\n#define X 1\n#endif\n#include \"h.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file(
+                "src/h.h",
+                "#if X\n#include \"taken.h\"\n#else\n#include \"not_taken.h\"\n#endif\n",
+            )
+            .with_file("src/taken.h", "int taken;\n")
+            .with_file("src/not_taken.h", "int not_taken;\n")
+            .with_file("src/main.h", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.h");
+
+        let names: Vec<String> = graph
+            .edges
+            .iter()
+            .map(|edge| edge.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "taken.h"),
+            "the `#if X` arm is not known to be false: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "not_taken.h"),
+            "and it is not known to be true either: {names:?}"
+        );
+
+        let header = graph
+            .files
+            .iter()
+            .find(|entry| entry.path.ends_with("h.h"))
+            .expect("h.h was reached");
+        assert!(
+            header.uncertain.iter().any(|name| name.as_ref() == "X"),
+            "and the doubt is recorded where a consumer can read it: {:?}",
+            header.uncertain
+        );
+    }
+
+    /// **The control**: the same `#define` outside a condition is a fact, so only one arm is read and nothing is in
+    /// doubt.
+    #[test]
+    fn a_definition_outside_a_condition_is_certain() {
+        let source = "#define X 1\n#include \"h.h\"\n";
+        let files = MemoryFiles::new()
+            .with_file(
+                "src/h.h",
+                "#if X\n#include \"taken.h\"\n#else\n#include \"not_taken.h\"\n#endif\n",
+            )
+            .with_file("src/taken.h", "int taken;\n")
+            .with_file("src/not_taken.h", "int not_taken;\n")
+            .with_file("src/main.h", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.h");
+
+        let names: Vec<String> = graph
+            .edges
+            .iter()
+            .map(|edge| edge.name.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [String::from("h.h"), String::from("taken.h")],
+            "only the taken arm: {names:?}"
+        );
+        let header = graph
+            .files
+            .iter()
+            .find(|entry| entry.path.ends_with("h.h"))
+            .expect("h.h was reached");
+        assert!(
+            header.uncertain.is_empty(),
+            "nothing is in doubt: {:?}",
+            header.uncertain
         );
     }
 }
