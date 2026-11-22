@@ -345,11 +345,21 @@ swallowed what followed. C++26 is now a standard the configuration carries (`Sta
 from the family, because the shared five gave C++26 a zero mask. The C++23 negative test puts the name in a variable, a
 function and a call; with the unconditional keyword back it fails at the first line.
 
+**Fixed — P1-6, the include walk's conditions decided where they are written** (`34098177`). Every directive's
+visibility was computed in one pass before the loop that applies the file's `#define`s, all from the inherited state, so
+`#define FEATURE 1` above a `#if FEATURE` never reached the include and an `#undef` above one still saw the definition.
+The pass is a `RegionWalk` stepped against the macros in force at each directive now; the region stack and the
+"undecidable" rule were right and are unchanged. An **unresolved** include also marks the walk's state incomplete
+(`Marked::mark_incomplete`), the part of P1-7 that is unambiguous. The other half of P1-7 — marking a *name* uncertain
+when its `#define` sits in an undecidable region — is **not** done: it makes `#ifdef X` answer unknown for a definition
+the file plainly wrote, which breaks the guard chain of a header read on its own, and `FileEntry` has no field that
+could carry the distinction to a consumer yet. The region walk's test fails with the old single-state pass (no edge at
+all); the seven guard tests and `a_macro_a_header_defines_itself_is_still_decided` stay green.
+
 **Confirmed by reading, not yet fixed** — in the order this round would take them:
 
 | item | where | what the code does |
 | --- | --- | --- |
-| P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
 | P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
 
 ## curl's last three `syntax-error`s, and the two defects behind them
