@@ -140,6 +140,30 @@ what the header writes.
 
 ### Still open, and now precisely: **a header included from a header contributes nothing**
 
+**The reproduction, with no nlohmann code in it** (`E:\corpora\json-probe`): `probe.cpp` includes `x.hpp`, `x.hpp`
+includes `y.hpp`, `y.hpp` defines `Y_MACRO`. All four quoted/angle combinations give a 33-byte rendering
+(`#pragma once` and the translation unit's own line) and `Y_MACRO` never expands; the same `y.hpp` included **by the
+translation unit** works in all four spellings. `y.hpp` declaring something instead of defining a macro is dropped the
+same way. System headers behave alike: `<utility>` at depth one contributes (125 bytes of live tokens), at depth two
+nothing (27 bytes).
+
+**And the cook's shape explains it**: `cook_with` is `cook_with_search(…, None, "")` — a cook has **no header search**,
+so it can only inline an include whose reading the *walk* already stored. `catch_up` fills that store for the file and a
+slice of its includes, which is depth one. In the three-file project, `--index --all-files` (which seeds and indexes the
+whole root) makes the depth-two include arrive — 41 bytes, macro expanded — so the missing piece is a **reading for the
+included file**, not a grammar rule.
+
+What does not follow is that seeding fixes everything: nlohmann/json **is** scanned whole (171 files, `include/` and
+`tests/thirdparty/` included) and still drops `doctest.h` and `hedley.hpp`. So the next question is narrower than "the
+walk": why a file the scan holds has no reading for the walk — an unread include at depth two, a summary without a
+rendering, or the walk's own `already read` bookkeeping. `cpp_inspect rendering --limit 1` answers a file's rendering
+size in one call, and a 27-byte answer for a header with 200 lines is the signature.
+
+After the condition fix the json measurement stands at **126 of 126 answered, 95 `syntax-error`** — `unit-conversions1.cpp`
+went from eight to six (its two hedley ones are gone), and the rest are the doctest shape above.
+
+
+
 Through `#include <nlohmann/json.hpp>` the same probe is still unexpanded, and a three-file probe in a project of its
 own (`E:\corpora\json-probe`) reproduces the reason without any of nlohmann's code:
 
