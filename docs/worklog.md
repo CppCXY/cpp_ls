@@ -288,6 +288,43 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The goal's two json defects, closed — and the numbers
+
+Both of the objective's json items are fixed, each by a minimal reproduction and a separate commit:
+
+* **`__LINE__`/`__COUNTER__` numbered in the file that wrote them.** Two defects, not one: the `__COUNTER__` count was
+  per **stream segment** instead of per translation unit (`732e4352`), and a `__LINE__` written in a macro body expanded
+  during an **argument prescan** answered the line of the *reconstruction* — two bytes of text, so a line like 2 —
+  because the call had not been pushed onto the stack yet (`93e48780`, with the run's own span as the fallback). The
+  names are now the ones a compiler would make: `DOCTEST_CAPTURE_530`, `DOCTEST_CAPTURE_OTHER_530`.
+* **The 60 `syntax-error`s.** One expander defect: a macro's replacement was rescanned with that macro painted even for
+  tokens that came **after** the replacement — a callee name ending the replacement, called by arguments written after
+  it, which is how json's `NLOHMANN_DEFINE_TYPE_INTRUSIVE` is built. C11 6.10.3.4 says *"not including the rest of the
+  source file's preprocessing tokens"*, and the fix makes that true (`25c1ece4`, with a fixture that fails without it and
+  the standard's own nested-macro example beside it).
+
+| measurement | before this round | after |
+| --- | --- | --- |
+| nlohmann/json, 126 test files | 190 findings: 86 `redefinition`, 60 `syntax-error` | **47 findings: 0 and 0** |
+
+What remains there is 30 `use-override` (doctest's own code), 4 `return-type-mismatch`, 3 `assign-type-check`,
+2 `access-invisible`, 2 `implicit-bool-conversion`, 2 `include-not-found`, 2 `undefined-name`, 1 `macro-parentheses`,
+1 `missing-return`.
+
+And the C corpora, all re-measured with the final binary (same probes, `sweep`):
+
+| corpus | measured | skipped (no command) | findings | `syntax-error` |
+| --- | --- | --- | --- | --- |
+| libuv 1.53.1 `src` | 55 | 54 | 349 | **0** |
+| redis 8.x `src` | 127 | 96 | 1116 | **0** |
+| curl 8.x `lib` | 146 | 188 | 397 | **3** |
+| curl 8.x `src` | 42 | 45 | 86 | **0** |
+| nginx `src` (a real `configure --crossbuild=win32` database) | 128 | 282 | **33** | **0** |
+
+nginx's 33 are `macro-parentheses` 23, `else-after-return` 5, `unused` 3, `include-not-found` 2 — the same hint classes
+as the other C projects. The three curl `syntax-error`s are `lib/curl_gssapi.c:63,66` and `lib/multi.c:3516`
+(`struct Curl_mapi_guard guard;`): the next thing to triage, and not part of this goal.
+
 ## The C corpora, re-measured after the cook and parser work — and the measurement itself was wrong three ways
 
 The condition evaluator now decides `#if` the way the standard does (`Unknown || true` is true, the rule that fixed
