@@ -280,7 +280,15 @@ pub(crate) fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     let mut open_questions = 0isize;
 
     'scan: {
-        for kind in p.peek_token_kind_at(1..128) {
+        // **To the end of the file, not to a fixed window.** This scan looks for the `>` that closes the cursor's `<`,
+        // and answering "no matching angle" because 128 tokens went by is a budget reported as a grammatical fact: a
+        // template-id with 64 arguments (about 130 tokens) was refused, and the alias or type that used it was reported
+        // as ``expected `;` `` at its own `<` (`docs/parser-toolchain-review.md` P2-1, measured with
+        // `target/bench/threshold_probe.py`). The loop stops at the matching `>` or at EOF, so the file's length is the
+        // only budget it needs.
+        let from = p.current_token_index() + 1;
+        let reach = p.token_count().saturating_sub(from);
+        for kind in (0..reach).map(|offset| p.token_kind_at(from + offset)) {
             match kind {
                 // **An angle inside matched parentheses is an expression's, not this list's.**
                 //
@@ -392,7 +400,14 @@ pub(crate) fn a_bare_template_id_is_here(p: &CppParser) -> bool {
     // is the list's own `<`, which ends no template-name.
     let mut previous = CppTokenKind::Less;
 
-    for (index, kind) in p.peek_token_kind_at(2..128).iter().enumerate() {
+    // **To the end of the file, not to a fixed window** — the same defect the scan above had, in the rule that decides
+    // whether a name in type position is a template-id rather than a comparison. See that note.
+    let scan_from = p.current_token_index() + 2;
+    let scan_reach = p.token_count().saturating_sub(scan_from);
+    for (index, kind) in (0..scan_reach)
+        .map(|offset| p.token_kind_at(scan_from + offset))
+        .enumerate()
+    {
         match kind {
             // The `<` question, asked of the token before it — see [`angle_depth_delta`]. The scan starts inside
             // the list, so the first token's predecessor is the list's own `<`, which ends no template-name.
@@ -400,7 +415,7 @@ pub(crate) fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             CppTokenKind::Greater | CppTokenKind::RightShift => {
                 // `>>` closes two levels at once, so it can be the matching `>` of either the inner or the
                 // outer list; both arrive here because the amount is all that differs.
-                depth -= if *kind == CppTokenKind::RightShift {
+                depth -= if kind == CppTokenKind::RightShift {
                     2
                 } else {
                     1
@@ -437,7 +452,7 @@ pub(crate) fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             _ => {}
         }
 
-        previous = *kind;
+        previous = kind;
     }
 
     false

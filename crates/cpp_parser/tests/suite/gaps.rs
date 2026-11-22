@@ -7757,3 +7757,33 @@ int after_this;
     assert!(declared("Rows"));
     assert!(declared("after_this"));
 }
+
+/// **A `using` alias whose initializer carries a long template argument list.** The scan that finds the matching `>`
+/// of a template-id used to give up after 128 tokens, and the alias's own `<` was then reported as `` expected `;` ``.
+/// 120 arguments is about 240 tokens, which is what an alias built by a generator looks like
+/// (`docs/parser-toolchain-review.md` P2-1, measured with `target/bench/threshold_probe.py`).
+#[test]
+fn a_using_alias_with_a_long_template_argument_list_parses() {
+    let arguments: Vec<String> = (0..120).map(|n| format!("T{n}")).collect();
+    let source = format!(
+        "template<typename... Ts> struct S {{}};\nusing Alias = S<{}>;\n",
+        arguments.join(", ")
+    );
+
+    let tree = CppParser::parse(&source, ParserConfig::default());
+    assert_eq!(tree.get_errors(), [], "it parses: {:?}", tree.get_errors());
+}
+
+/// **A cast whose type-id carries a long template argument list** — the same scan, reached through a type-id in
+/// parentheses rather than through an alias.
+#[test]
+fn a_cast_with_a_long_template_argument_list_parses() {
+    let arguments: Vec<String> = (0..140).map(|n| format!("T{n}")).collect();
+    let source = format!(
+        "struct U {{}};\nint f() {{ return (int)(U<{}>) x; }}\n",
+        arguments.join(", ")
+    );
+
+    let tree = CppParser::parse(&source, ParserConfig::default());
+    assert_eq!(tree.get_errors(), [], "it parses: {:?}", tree.get_errors());
+}
