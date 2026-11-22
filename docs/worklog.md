@@ -12,6 +12,10 @@ The protocol for asking one question at a time is [`inspect.md`](inspect.md).
 
 ## The json `syntax-error`s, reduced to one line: json's own DEFINE body against an equivalent local one
 
+> **Superseded.** This section records the reduction that led to the fix; the 60 `syntax-error`s are **gone** (0 in
+> the section "The goal's two json defects, closed", commit `25c1ece4`). Kept because the comparison below is how the
+> expander defect was found.
+
 Re-measured in the current tree: **126 of 126 files answered, 190 findings** — 86 `redefinition`, 60 `syntax-error`,
 28 `use-override`, and 16 others. The 60 are all one construct, and the second measurement this round narrowed it to a
 **single line of difference**, in the same file, at the same position:
