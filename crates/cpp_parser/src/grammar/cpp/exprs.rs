@@ -2924,7 +2924,21 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // expression begins is the block's own token. The node is a `LambdaExpr` — a block is an anonymous function
         // with no capture list, which is the closest thing this grammar has, and the analysis then treats it as the
         // closure it is. Nothing is invented: the `^`, the parameter list and the body are the file's own tokens.
-        CppTokenKind::Caret => parse_block_literal(p),
+        // **Only when the configuration says Clang's block literals exist** — see the note above. Without the feature
+        // a ^ in operand position is not an expression at all, and saying so is the truthful reading: a C++17
+        // compiler given ^(int n) { } reports an error at the ^, which is what this arm does.
+        CppTokenKind::Caret => {
+            if p.language()
+                .support(crate::features::Feature::BlockLiteral)
+            {
+                parse_block_literal(p)
+            } else {
+                Err(crate::CppParseError::syntax_error_from(
+                    &t!("a block literal is a Clang extension"),
+                    p.current_token_range(),
+                ))
+            }
+        }
 
         // `this`
         CppTokenKind::ThisKeyword => {

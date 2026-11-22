@@ -27,6 +27,12 @@ pub struct ParserConfig<'cache> {
     /// GNU's spellings at once, which a single "level" cannot say. The analysis layer sets this from the
     /// toolchain's own predefined macros (`__GNUC__` / `_MSC_VER`).
     pub dialect: Dialect,
+    /// **Did a caller name a compiler**, or is `dialect` merely its default?
+    ///
+    /// `Dialect::default()` is GNU, and that default is what a compiler's predefines reported rather than a choice this
+    /// builder made — so a language config applied to a parser that never asked for a compiler must keep exactly the
+    /// vendors it names. See [`ParserConfig::with_language`].
+    dialect_was_named: bool,
     lexer_config: LexerConfig,
     node_cache: Option<&'cache mut NodeCache>,
     symbol_table: Option<&'cache dyn SymbolTable>,
@@ -106,12 +112,21 @@ pub struct ParserConfig<'cache> {
     skip_bodies: bool,
 }
 
+/// **The vendor a dialect stands for** - the one thing [`Dialect`] ever said about syntax.
+fn dialect_vendor(dialect: Dialect) -> crate::features::Vendor {
+    match dialect {
+        Dialect::Gnu => crate::features::Vendor::Gnu,
+        Dialect::Msvc => crate::features::Vendor::Msvc,
+    }
+}
+
 impl<'cache> ParserConfig<'cache> {
     pub fn new(level: CppLanguageLevel, node_cache: Option<&'cache mut NodeCache>) -> Self {
         Self {
             cuda: false,
             level,
             dialect: Dialect::default(),
+            dialect_was_named: false,
             lexer_config: LexerConfig::new(level),
             node_cache,
             symbol_table: None,
@@ -170,24 +185,42 @@ impl<'cache> ParserConfig<'cache> {
     }
 
     /// Parse for a **target compiler**: what its reserved spellings mean. See [`Dialect`].
+    ///
+    /// **The dialect is the authority for its vendor, and the two builders compose in either order.** The defect this
+    /// closes is an order-dependence the index path itself used
+    /// (`ParserConfig::default().with_dialect(dialect).with_language(language)`): `with_dialect` added the vendor to the
+    /// language config and then `with_language` **replaced** the whole config, so a `/std:c++20` command that named MSVC
+    /// came out without MSVC — and `LanguageConfig` and `Dialect` then saw two different targets
+    /// (`docs/parser-toolchain-review.md` P1-2).
+    ///
+    /// Naming a compiler also says the *other* compilers are not the one building this: the vendors are cleared before
+    /// the dialect's own is added. Without that, `with_dialect(Msvc)` over the permissive default kept GNU's and Clang's
+    /// spellings, so an MSVC parse accepted `typeof` and `^(…){}`.
     pub fn with_dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
-        // **A dialect is a vendor**, and that is the only thing it ever said: which compiler's own spellings this parse
-        // should recognise. Passing it on as a vendor keeps the two layers consistent instead of leaving the flags in two
-        // vocabularies that can disagree.
-        let vendor = match dialect {
-            Dialect::Gnu => Some(crate::features::Vendor::Gnu),
-            Dialect::Msvc => Some(crate::features::Vendor::Msvc),
-        };
-        if let Some(vendor) = vendor {
-            self.lexer_config.language = self.lexer_config.language.with_vendor(vendor);
-        }
+        self.dialect_was_named = true;
+        self.lexer_config.language = self
+            .lexer_config
+            .language
+            .with_no_vendors()
+            .with_vendor(dialect_vendor(dialect));
         self
     }
 
     /// **The syntax this parse accepts**, as a set of standards and vendors — see [`crate::features`].
+    ///
+    /// A dialect already named survives this: the language config says what the *standard* is, and the dialect says
+    /// whose compiler, so the vendor of [`ParserConfig::with_dialect`] is re-applied here. That is what makes the two
+    /// builders idempotent in either order.
     pub fn with_language(mut self, language: crate::features::LanguageConfig) -> Self {
-        self.lexer_config.language = language;
+        self.lexer_config.language = if self.dialect_was_named {
+            language.with_vendor(dialect_vendor(self.dialect))
+        } else {
+            // **Nobody named a compiler**, so nothing is added: a caller that asks for strict C++23 must get strict
+            // C++23 even though `Dialect::default()` is GNU (that default is "what a compiler's predefines said", not a
+            // choice this builder ever made).
+            language
+        };
         self
     }
 
@@ -267,6 +300,7 @@ impl Default for ParserConfig<'_> {
             cuda: false,
             level: CppLanguageLevel::default_level(),
             dialect: Dialect::default(),
+            dialect_was_named: false,
             lexer_config: LexerConfig::default(),
             node_cache: None,
             symbol_table: None,

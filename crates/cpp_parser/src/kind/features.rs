@@ -573,6 +573,19 @@ impl LanguageConfig {
     /// **Every vendor's spellings**, which is what a parse does when it has not been told which compiler built the file:
     /// `__typeof__`, `__restrict`, `__int128`, `__declspec` are all recognised, and no standard is implied. Narrowing
     /// this is what `with_language` is for.
+    /// **Drop every vendor bit** — the starting point for a caller that is about to name its compiler.
+    ///
+    /// See `ParserConfig::with_dialect`: naming a compiler says the others are not the one building this, and the two
+    /// halves of that statement are this call and [`LanguageConfig::with_vendor`].
+    pub const fn with_no_vendors(self) -> Self {
+        Self {
+            // The **standards** survive; every vendor bit goes. (`!STANDARDS_MASK` is the vendor block, so keeping it
+            // would be the opposite call - which is exactly how this was written first, and the C++17 standard bit
+            // disappeared from a config that only asked for a vendor to be added.)
+            bits: self.bits & STANDARDS_MASK,
+        }
+    }
+
     pub const fn with_all_vendors(self) -> Self {
         Self {
             bits: self.bits | Vendor::Gnu.bit() | Vendor::Msvc.bit() | Vendor::Clang.bit(),

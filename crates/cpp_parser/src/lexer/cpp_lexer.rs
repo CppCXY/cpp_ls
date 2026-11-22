@@ -434,7 +434,13 @@ impl<'a> CppLexer<'a> {
                 match self.reader.current_char() {
                     '=' => {
                         self.reader.bump();
-                        if self.reader.current_char() == '>' {
+                        // **<=> is C++20's**, and this lexer knows which standard it is reading: without the feature
+                        // the three characters are <= followed by >, which is what a C++17 compiler makes of them
+                        // (two tokens, and then a parse error at the >). Reading them as one token in every mode is
+                        // what docs/parser-toolchain-review.md P1-2 lists first among the ungated vendor spellings.
+                        if self.reader.current_char() == '>'
+                            && self.accepts(crate::features::Feature::ThreeWayComparison)
+                        {
                             self.reader.bump();
                             CppTokenKind::Spaceship
                         } else {

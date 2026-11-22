@@ -854,3 +854,116 @@ fn the_keyword_table_reads_the_feature_set() {
     );
     let _ = Feature::Consteval;
 }
+
+/// **The two config builders compose in either order** — the review's P1-2, and the order the index path itself uses is
+/// the one that was broken: `with_dialect(dialect).with_language(language)` used to lose the dialect, because
+/// `with_language` replaced the whole language config and the dialect's vendor lived only inside it.
+#[test]
+fn naming_a_compiler_and_a_standard_is_order_independent() {
+    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
+    use cpp_parser::{CppLanguageLevel, Dialect, ParserConfig};
+
+    let strict = LanguageConfig::new().with_standard(Standard::Cpp20);
+
+    // The index path's order: the compiler first, then the standard.
+    let compiler_then_standard = ParserConfig::new(CppLanguageLevel::Cpp20, None)
+        .with_dialect(Dialect::Msvc)
+        .with_language(strict);
+    // And the other way round.
+    let standard_then_compiler = ParserConfig::new(CppLanguageLevel::Cpp20, None)
+        .with_language(strict)
+        .with_dialect(Dialect::Msvc);
+
+    assert_eq!(
+        compiler_then_standard.language().describe(),
+        standard_then_compiler.language().describe(),
+        "the order does not change what the parse accepts"
+    );
+    assert_eq!(
+        compiler_then_standard
+            .language()
+            .vendors()
+            .collect::<Vec<_>>(),
+        vec![Vendor::Msvc],
+        "the compiler survives a standard that does not name it"
+    );
+    assert_eq!(
+        compiler_then_standard
+            .language()
+            .standards()
+            .collect::<Vec<_>>(),
+        vec![Standard::Cpp20],
+        "and the standard is the language's, not the dialect's"
+    );
+}
+
+/// **A strict standard refuses the vendor spellings.** Three constructs the review names, each ungated before: MSVC's
+/// `__try`, Clang's `^(…){}` block literal, and C++20's `<=>`. Nothing about them is ambiguous — the configuration says
+/// which compiler and which standard, and a construct outside both is an error, not a shape.
+#[test]
+fn a_strict_standard_refuses_the_vendor_spellings() {
+    use cpp_parser::features::{LanguageConfig, Standard};
+    use cpp_parser::{
+        CppLanguageLevel, CppParser, CppSyntaxKind, Dialect, LexerConfig, ParserConfig, lex,
+    };
+
+    let strict_cpp23 =
+        ParserConfig::default().with_language(LanguageConfig::new().with_standard(Standard::Cpp23));
+
+    // `__try { } __finally { }` is MSVC's, so a strict C++23 parse has no `TryStat` for it — and reports an error, which
+    // is what a compiler without the extension does.
+    let seh = CppParser::parse("void f() { __try { } __finally { } }\n", strict_cpp23);
+    assert!(
+        !seh.get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TryStat),
+        "no `TryStat` without the MSVC dialect"
+    );
+    assert!(seh.has_syntax_errors(), "and the spelling is an error");
+
+    // The same text with the dialect named is the SEH statement, because `Dialect::Msvc` is the feature.
+    let msvc = CppParser::parse(
+        "void f() { __try { } __finally { } }\n",
+        ParserConfig::default().with_dialect(Dialect::Msvc),
+    );
+    assert!(
+        !msvc.has_syntax_errors(),
+        "MSVC's own spelling parses in its dialect: {:?}",
+        msvc.get_errors()
+    );
+
+    // A block literal is Clang's.
+    let block = CppParser::parse(
+        "auto b = ^(int v) { return v; };\n",
+        ParserConfig::default().with_language(LanguageConfig::new().with_standard(Standard::Cpp23)),
+    );
+    assert!(
+        !block
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaExpr),
+        "no `LambdaExpr` for a block literal without the Clang dialect"
+    );
+    assert!(block.has_syntax_errors(), "and the `^` is an error");
+
+    // `<=>` is C++20's, so a C++17 lexer sees `<=` and `>`.
+    let strict_cpp17 = LexerConfig::new(CppLanguageLevel::Cpp17)
+        .with_language(LanguageConfig::new().with_standard(Standard::Cpp17));
+    let (tokens, _) = lex("a <=> b;", &strict_cpp17);
+    assert!(
+        !tokens
+            .iter()
+            .any(|token| token.kind == cpp_parser::CppTokenKind::Spaceship),
+        "no spaceship token in C++17"
+    );
+
+    // …and C++23 does have it, which is the control.
+    let cpp23 = LexerConfig::new(CppLanguageLevel::Cpp23);
+    let (tokens, _) = lex("a <=> b;", &cpp23);
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.kind == cpp_parser::CppTokenKind::Spaceship),
+        "C++23 lexes it as one token"
+    );
+}

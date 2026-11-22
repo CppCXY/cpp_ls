@@ -1893,6 +1893,12 @@ fn parse_parenthesized_filter(p: &mut CppParser) -> ParseResult {
 fn at_the_implementations_try(p: &CppParser) -> bool {
     p.current_token() == CppTokenKind::Identifier
         && p.current_token_text() == THE_KEYWORD_TRY_IS_SPELLED
+        // **Only where structured exception handling exists.** __try is MSVC's spelling, and a configuration that did
+        // not name MSVC must read it as the identifier it is in standard C++ — an expression statement that then fails
+        // at the {, which is what a compiler without the extension reports
+        // (docs/parser-toolchain-review.md P1-2).
+        && p.language()
+            .support(crate::features::Feature::StructuredExceptionHandling)
         && p.peek_next_token() == CppTokenKind::LeftBrace
 }
 
