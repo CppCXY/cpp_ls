@@ -706,6 +706,37 @@ fn an_access_specifier_introduces_a_class(p: &CppParser) -> bool {
         && a_class_key(p.peek_token_kind_at(at + 1..at + 2).first())
 }
 
+/// **Is a pragma operator here?** `_Pragma("…")`, `__pragma(…)` — an operator of the grammar, not a directive.
+///
+/// Written between declarations ([`parse_declaration_here`]) **and between statements** ([`ps`](crate::grammar::cpp::stats)):
+/// hedley's `JSON_HEDLEY_PRAGMA(...)` and doctest's suppression macros expand to it inside a function body, where it
+/// has no `;` and is not a call.
+pub(crate) fn is_a_pragma_operator(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && matches!(p.current_token_text(), "_Pragma" | "__pragma")
+        && matches!(
+            p.peek_token_kind_at(1..2).first(),
+            Some(&CppTokenKind::LeftParen)
+        )
+}
+
+/// **Consume one pragma operator** into a `PragmaDirective` node — everything up to the matching `)`.
+pub(crate) fn parse_pragma_operator(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::PragmaDirective);
+    p.bump(); // `_Pragma`
+    p.bump(); // `(`
+    // Everything up to the matching `)`: a string literal, or a `warning(push)`-shaped token run for `__pragma`.
+    let mut depth = 1isize;
+    while depth > 0 && !p.is_eof() {
+        match p.current_token() {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => depth -= 1,
+            _ => {}
+        }
+        p.bump();
+    }
+    Ok(m.complete(p))
+}
 fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let checkpoint = p.checkpoint();
@@ -724,25 +755,8 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     // body in a state where the `export` that follows was refused — measured: the file that holds such a class parses
     // with 13 errors and the `}` closing `namespace std` goes with the recovery, so every header after it is read
     // inside `std`.
-    if p.current_token() == CppTokenKind::Identifier
-        && matches!(p.current_token_text(), "_Pragma" | "__pragma")
-        && matches!(
-            p.peek_token_kind_at(1..2).first(),
-            Some(&CppTokenKind::LeftParen)
-        )
-    {
-        p.bump(); // `_Pragma`
-        p.bump(); // `(`
-        // Everything up to the matching `)`: a string literal, or a `warning(push)`-shaped token run for `__pragma`.
-        let mut depth = 1isize;
-        while depth > 0 && !p.is_eof() {
-            match p.current_token() {
-                CppTokenKind::LeftParen => depth += 1,
-                CppTokenKind::RightParen => depth -= 1,
-                _ => {}
-            }
-            p.bump();
-        }
+    if is_a_pragma_operator(p) {
+        parse_pragma_operator(p)?;
         // **The declaration after it**, which is what the caller is waiting for.
         return parse_declaration(p);
     }

@@ -1531,6 +1531,17 @@ fn parse_initializer_part(p: &mut CppParser) -> ParseResult {
 fn parse_statement_body(p: &mut CppParser) -> ParseResult {
     types::parse_attribute_specifiers(p)?;
 
+    // **A pragma operator as a statement** — `_Pragma("…")` between statements, which is what hedley's
+    // `JSON_HEDLEY_PRAGMA(GCC diagnostic ignored "-Wfloat-equal")` and doctest's suppression macros expand to.
+    //
+    // It carries no `;` (it is an operator, not an expression statement), so the expression rule read it as a call and
+    // reported ``expected `;` after expression`` against the **next** statement — measured as the only eight errors in
+    // nlohmann/json's `unit-conversions1.cpp`, at the offsets of `equal_general`, `less_general` and `equal_leaf`
+    // (`docs/worklog.md`).
+    if decls::is_a_pragma_operator(p) {
+        return decls::parse_pragma_operator(p);
+    }
+
     if p.current_token() == CppTokenKind::LeftBrace {
         return parse_compound_stat(p);
     }

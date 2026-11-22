@@ -176,6 +176,33 @@ fn a_pragma_operator_at_declaration_position_is_a_declaration() {
     );
 }
 
+/// **`_Pragma("…")` at statement position** — between statements of a body, where hedley's `JSON_HEDLEY_PRAGMA(…)` and
+/// doctest's suppression macros expand to it:
+///
+/// ```cpp
+/// static bool equal_general(const_reference lhs, const_reference rhs) noexcept {
+///     JSON_HEDLEY_DIAGNOSTIC_PUSH JSON_HEDLEY_PRAGMA(GCC diagnostic ignored "-Wfloat-equal")
+///     const auto lhs_type = lhs.type();
+/// ```
+///
+/// It carries no `;` — it is an operator, not an expression statement — so the expression rule read it as a call and
+/// reported ``expected `;` after expression`` against the **declaration after it**. Measured as the only errors of
+/// nlohmann/json's `unit-conversions1.cpp` at the three hedley-pragma sites in its rendering (`docs/worklog.md`).
+#[test]
+fn a_pragma_operator_between_statements_is_a_statement() {
+    let text = "bool equal_general(int a, int b) {\n    _Pragma(\"GCC diagnostic push\")\n    _Pragma(\"GCC diagnostic ignored \\\"-Wfloat-equal\\\"\")\n    const auto x = a == b;\n    return x;\n}\nint after_this;\n";
+    let tree = parse(text);
+    assert!(
+        tree.get_errors().is_empty(),
+        "no error: {:?}",
+        tree.get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range).start_offset)
+            .collect::<Vec<_>>()
+    );
+    assert!(at_file_scope(&tree, text, "after_this"), "the body closed");
+}
+
 /// **The measured line, verbatim** — string-literal concatenation inside the attribute, `export template`, `_Pragma`s.
 ///
 /// **Ignored while it fails**, and it is the next target rather than a regression: the combination is `_Pragma("…")`

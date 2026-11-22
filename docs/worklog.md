@@ -54,7 +54,31 @@ So the failure needs **doctest + nlohmann/json + the seven std headers + doctest
 a state interaction rather than one construct, and the next step is to shrink it by one include at a time from that
 failing probe (the script is the one that produced the table: a Python loop over probe files with one CDB entry each).
 
+### The root cause of the json failures: hedley's macros are not in the cook''s table
+
+Once `cpp_inspect rendering` existed, the failing unit could be read instead of guessed: `unit-conversions1.cpp` cooks
+to **240 434** bytes and parses with exactly **eight** errors, all `expected `;` after expression`, all at three
+places — the bodies of `equal_general`, `less_general` and `equal_leaf`:
+
+```text
+… noexcept { JSON_HEDLEY_DIAGNOSTIC_PUSH JSON_HEDLEY_PRAGMA(GCC diagnostic ignored "-Wfloat-equal")const auto lhs_type = lhs .type(); …
+```
+
+`JSON_HEDLEY_PRAGMA(value)` is `_Pragma(#value)` (`include/nlohmann/thirdparty/hedley/hedley.hpp:742`), an operator
+with **no `;`**, so a parser that reads it as a call expression reports the error against the *declaration after it* —
+which is exactly what the eight errors are. Two separate defects then:
+
+* **the cook leaves hedley''s function-like macros unexpanded** — the rendering still spells `JSON_HEDLEY_PRAGMA(…)`,
+  `JSON_HEDLEY_DIAGNOSTIC_PUSH` and `JSON_HEDLEY_UNLIKELY(…)` (61 occurrences) — so whatever the parser does, the
+  stream it reads is not the compiler''s. Why the table lacks them is the open question: the guard around
+  `#define JSON_HEDLEY_PRAGMA` is `defined(__GNUC__) && …`, and `__GNUC__` **is** known to the cook (a fixture printing
+  `gnuc_seen` in its rendering proves it), so the loss is somewhere in the include chain or in a cross-file state.
+* **the parser had no rule for a pragma operator between statements** — fixed here (`stats.rs`,
+  `a_pragma_operator_between_statements_is_a_statement`), which is the *expanded* form hedley and doctest produce;
+  `FORMAT_VERSION` 47 → 48 for the grammar change.
+
 ### The probe files were measured on a rendering of nothing — the bisect below is void
+
 
 Trying to shrink the failing shape to a fixture, every probe created as a new `.cpp` under `tests/src` answered from a
 **114-byte rendering** — the file's own tokens with the include closure collapsed to one `using` line — while
