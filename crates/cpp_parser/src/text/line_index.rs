@@ -16,21 +16,44 @@ impl LineIndex {
             + self.line_only_ascii_vec.capacity()
     }
 
+    /// Build the index for `text`, treating **every spelling of a line break** as one.
+    ///
+    /// `\n`, `\r\n`, a lone `\r`, and the `\n\r` pair are all one break — the same four the lexer's `eat_newline`
+    /// accepts. This used to count only `\n`, so a file with old-Mac `\r` endings was **one line** to the index and many
+    /// to the lexer: every diagnostic in it pointed at line 0, every LSP range was a column of a line the client had
+    /// never heard of, and `get_offset(line, col)` answered positions inside a different line's syntax
+    /// (`docs/parser-toolchain-review.md` P2-3).
     pub fn parse(text: &str) -> LineIndex {
         let mut line_offsets = Vec::new();
         let mut line_only_ascii_vec = Vec::new();
-        let mut offset = 0;
 
-        line_offsets.push(TextSize::from(offset as u32));
+        line_offsets.push(TextSize::from(0u32));
 
         let mut is_line_only_ascii = true;
+        // The first half of a break whose second half may still come: `\r` before a `\n`, or the other way round. Two
+        // different characters in a row are **one** break, not two — that is what keeps `\r\n` from producing an empty
+        // line between its halves.
+        let mut first_half: Option<char> = None;
+
         for (i, c) in text.char_indices() {
-            if c == '\n' {
-                offset = i + 1; // 记录每行的字节偏移量
-                line_offsets.push(TextSize::from(offset as u32));
-                line_only_ascii_vec.push(is_line_only_ascii);
-                is_line_only_ascii = true;
-            } else if !c.is_ascii() {
+            if c == '\n' || c == '\r' {
+                if first_half.is_some_and(|first| first != c) {
+                    // The pair closes here, and the line starts after the second byte.
+                    if let Some(last) = line_offsets.last_mut() {
+                        *last = TextSize::from((i + 1) as u32);
+                    }
+                    first_half = None;
+                } else {
+                    line_offsets.push(TextSize::from((i + 1) as u32));
+                    line_only_ascii_vec.push(is_line_only_ascii);
+                    is_line_only_ascii = true;
+                    first_half = Some(c);
+                }
+                continue;
+            }
+
+            first_half = None;
+            if !c.is_ascii() {
                 is_line_only_ascii = false;
             }
         }
@@ -193,4 +216,69 @@ fn floor_char_boundary(text: &str, at: usize) -> usize {
         at -= 1;
     }
     at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LineIndex;
+
+    /// The line starts a text produces, which is what every other answer is derived from.
+    fn starts(text: &str) -> Vec<usize> {
+        let index = LineIndex::parse(text);
+        (0..index.line_count())
+            .map(|line| usize::from(index.get_line_offset(line).expect("a line")))
+            .collect()
+    }
+
+    /// **Every spelling of a line break is one break** — `\n`, `\r\n`, a lone `\r`, and the `\n\r` pair the lexer also
+    /// accepts. Counting only `\n` made an old-Mac file one line to the index and many to the parser
+    /// (`docs/parser-toolchain-review.md` P2-3).
+    #[test]
+    fn every_spelling_of_a_line_break_starts_one_line() {
+        assert_eq!(starts("a\nb"), [0, 2], "LF");
+        assert_eq!(starts("a\r\nb"), [0, 3], "CRLF is one break, not two");
+        assert_eq!(starts("a\rb"), [0, 2], "a lone CR is one");
+        assert_eq!(starts("a\n\rb"), [0, 3], "and so is the LFCR pair");
+        assert_eq!(starts("a\nb\n"), [0, 2, 4], "a trailing break opens an empty line");
+        assert_eq!(starts(""), [0], "an empty text is one empty line");
+    }
+
+    /// The line of an offset, and the offset of a line and column, agree with those starts — the two directions a
+    /// diagnostic and a client position each need.
+    #[test]
+    fn offsets_and_lines_agree() {
+        let text = "a\r\nbc\rd\n\re";
+        let index = LineIndex::parse(text);
+        assert_eq!(index.line_count(), 4, "{text:?}");
+
+        // `b` is on line 1 and at column 0; `c` at line 1, column 1.
+        let b = text.find('b').expect("b");
+        let c = text.find('c').expect("c");
+        assert_eq!(index.position_of(b, text), Some((1, 0)));
+        assert_eq!(index.position_of(c, text), Some((1, 1)));
+        assert_eq!(
+            usize::from(index.get_offset(1, 1, text).expect("an offset")),
+            c
+        );
+
+        // The line's end is the line's end: a column past it does not walk into the next line.
+        let end_of_line_0 = usize::from(index.get_offset(0, 99, text).expect("an offset"));
+        assert_eq!(
+            end_of_line_0,
+            text.find('\r').expect("the first break"),
+            "clamped to this line"
+        );
+    }
+
+    /// A non-ASCII line is flagged, and its column counts **characters** rather than bytes.
+    #[test]
+    fn a_non_ascii_line_counts_characters() {
+        let text = "éé\r\nxy";
+        let index = LineIndex::parse(text);
+        assert!(!index.is_line_only_ascii(rowan::TextSize::from(0)));
+        assert!(index.is_line_only_ascii(rowan::TextSize::from(1)));
+        assert_eq!(index.position_of(0, text), Some((0, 0)));
+        // The second `é` starts at byte 2 and is column 1.
+        assert_eq!(index.position_of(2, text), Some((0, 1)));
+    }
 }
