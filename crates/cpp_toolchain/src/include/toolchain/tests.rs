@@ -1150,7 +1150,7 @@ fn the_search_list_flags_of_a_command_are_taken_and_nothing_else() {
 
     assert_eq!(
         flags(&[
-            "clang++",
+            "g++",
             "--target=x86_64-w64-mingw32",
             "--gcc-toolchain=C:/mingw64",
             "-std=c++23",
@@ -1165,6 +1165,22 @@ fn the_search_list_flags_of_a_command_are_taken_and_nothing_else() {
             "--gcc-toolchain=C:/mingw64".to_string()
         ],
         "the two flags that decide which library, and nothing else"
+    );
+
+    // **`-m32` is one of them.** It is the other spelling of "which architecture", and asking a native compiler would
+    // report the 64-bit search paths and predefines for a 32-bit build (`docs/parser-toolchain-review.md` P2-10).
+    assert_eq!(
+        flags(&["g++", "-m32", "-std=c++17", "-c", "src/main.cpp"]),
+        vec!["-m32".to_string()],
+        "the architecture flag is forwarded"
+    );
+    assert_eq!(
+        flags(&["g++", "-m64", "-c", "src/main.cpp"]),
+        vec!["-m64".to_string()]
+    );
+    assert_eq!(
+        flags(&["g++", "-march=native", "-c", "src/main.cpp"]),
+        vec!["-march=native".to_string()]
     );
 
     assert_eq!(

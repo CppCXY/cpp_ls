@@ -752,7 +752,14 @@ fn search_list_flags(arguments: &[String]) -> Vec<String> {
         .iter()
         .any(|prefix| argument.starts_with(prefix));
 
-        if starts_with || takes_a_separate_value {
+        // **`-m32` / `-m64`, whole.** They say which architecture the compiler targets, which is which *library* it
+        // searches and which predefines it reports — the same question `--target` answers, in the other spelling. A
+        // 32-bit project asked a native 64-bit compiler therefore got the wrong search order, the wrong pointer size in
+        // its predefines, and every condition on them decided the wrong way
+        // (`docs/parser-toolchain-review.md` P2-10). They take no separate value, so they are not in that list.
+        let is_an_architecture = argument == "-m32" || argument == "-m64";
+
+        if starts_with || is_an_architecture || takes_a_separate_value {
             taken.push(argument.clone());
             if takes_a_separate_value && let Some(value) = rest.next() {
                 taken.push(value.clone());
