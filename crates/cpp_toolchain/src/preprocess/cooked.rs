@@ -1530,6 +1530,11 @@ pub fn cook_with(
 pub struct CookingState {
     /// The macros the cook has executed so far, in the order the text wrote them.
     pub macros: MacroTable,
+    /// **The `__COUNTER__` count** — a compiler counts per translation unit, so the program's cook carries it from one
+    /// file to the next. On the state rather than on the stream because a stream is one *segment* of one file: a count
+    /// that restarted per segment would hand doctest's anonymous names the same number twice, and the names are what
+    /// make them distinct.
+    pub counters: usize,
 }
 
 pub fn cook_with_search(
@@ -1574,7 +1579,12 @@ pub fn cook_with_search_and_state(
     };
     let mut regions: Vec<Region> = Vec::new();
 
-    let mut out = CookedStream::default();
+    let mut out = CookedStream {
+        // **The program's `__COUNTER__` count**, continued from the state this cook was handed and written back at the
+        // end — see [`CookingState::counters`].
+        counters: state.counters,
+        ..CookedStream::default()
+    };
     let mut run_from = 0usize;
     let mut directive_index = 0usize;
 
@@ -1748,6 +1758,8 @@ pub fn cook_with_search_and_state(
     // **The table goes back to the caller**, so the next file of the same program starts with what this one defined —
     // a preprocessor's one table, not a view of it.
     state.macros = live.own;
+    // **And so does the `__COUNTER__` count**, for the same reason: it is the program's, not this segment's.
+    state.counters = out.counters;
 
     out
 }
