@@ -337,11 +337,18 @@ take the reader process down instead of returning an error. The reading is a fal
 range order, discriminant via `try_from_raw`) and the visitor maps a failure onto `serde`'s error. The test feeds eight
 malformed spellings; with the old form back in place it panics at `kind/mod.rs:84` on `0xffff`.
 
+**Fixed — P1-3, `contract_assert` as a C++26 keyword** (`27530e3e`). The lexer made it a keyword in every mode, which
+breaks a valid C++23 program: `int contract_assert = 1;` reported `expected primary expression` and the error node
+swallowed what followed. C++26 is now a standard the configuration carries (`Standard::Cpp26`, the `c++26`/`c++2c`/
+`c++latest` spellings, `LanguageConfig::cpp26()`, `202400L` for `__cplusplus`), the keyword arm reads
+`Feature::ContractAssert`, and the sixth C++ standard moved the vendor bits from 10 to 11 — with the mask length taken
+from the family, because the shared five gave C++26 a zero mask. The C++23 negative test puts the name in a variable, a
+function and a call; with the unconditional keyword back it fails at the first line.
+
 **Confirmed by reading, not yet fixed** — in the order this round would take them:
 
 | item | where | what the code does |
 | --- | --- | --- |
-| P1-3 | `cpp_lexer.rs:247` | `contract_assert` becomes a keyword **unconditionally**, so a C++23 identifier of that name fails to parse; `pre`/`post` are contextual and unaffected. Fixing it needs a `Standard::Cpp26` and a move of the vendor bits in `LanguageConfig` (the vendor block starts at bit 10). |
 | P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
 | P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
 
