@@ -496,11 +496,34 @@ pub fn definitions_across_files(
             {
                 return Known::Yes(ProjectDefinitions::one(found));
             }
-            return if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset)
-            {
-                index.definitions(&name, path)
-            } else {
-                index.definitions_in_scope(&name, path)
+            // **The index answers from the whole file, so a declaration written below the use has to come out.** The
+            // single-file walk has already said "nothing before this offset", and this fallback is for names the scope
+            // tree cannot place — a name from an include, a macro, a file the closure has not read. Without the filter
+            // a file's *own* later declaration comes back and the forward jump survives the walk that was just fixed:
+            // `void f() { later(); } void later() {}` resolved to the second line
+            // (`docs/code-analysis-review.md` P1-1).
+            //
+            // Class-member questions are exempt, for the reason the walk's own filter is: a member is visible
+            // throughout its class body.
+            let answer =
+                if naming_a_member || inside_a_definition_written_with_a_qualifier(root, offset) {
+                    index.definitions(&name, path)
+                } else {
+                    index.definitions_in_scope(&name, path)
+                };
+            return match answer {
+                Known::Yes(mut definitions) if !naming_a_member => {
+                    definitions.found.retain(|definition| {
+                        // A definition in another file is a name this file can see through its includes; the point
+                        // here is only the file the cursor is in, where "below" is a fact in the same coordinates.
+                        definition.file != path || definition.fact.name_range.start_offset <= offset
+                    });
+                    match definitions.found.is_empty() {
+                        true => Known::No,
+                        false => Known::Yes(definitions),
+                    }
+                }
+                other => other,
             };
         }
         Known::Unknown(reason) => return Known::Unknown(reason),

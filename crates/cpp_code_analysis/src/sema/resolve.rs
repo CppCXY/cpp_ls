@@ -1219,7 +1219,7 @@ pub fn definitions_at(
     // The scopes a `using namespace` directive brings into view, resolved **once** before the walk: a directive
     // names a namespace, and finding which scope that namespace is has nothing to do with where the search has
     // got to. Searching per scope would also have to decide what to do when the same directive is seen twice.
-    let mut pending = using_directive_targets(scopes);
+    let mut pending = using_directive_targets(scopes, offset);
     pending.extend(scopes_to_search(scopes, innermost));
 
     let mut visited = Vec::new();
@@ -1238,7 +1238,27 @@ pub fn definitions_at(
 
         let found = bindings_named(scope_data, &name);
         if !found.is_empty() {
-            return Known::Yes(found.into_iter().cloned().collect());
+            // **A declaration is visible from its own point onward** — the first slice of the program-point rule
+            // (`docs/code-analysis-review.md` P1-1). `void f() { later(); } void later() {}` is not a program, and the
+            // name resolved to the declaration written after it; a compiler rejects the call.
+            //
+            // A **class scope** is the exception the language states: a member is visible throughout the class body
+            // (`void f() { return g(); } int g();` is legal), which is what "complete-class context" means. Every other
+            // scope — a namespace, a block, a function body — is strictly from-the-declaration-onward.
+            //
+            // When this scope declares the name only *later*, the walk continues rather than stopping: at the use the
+            // later declaration is not in scope, and an enclosing scope's earlier one still is (`int x; { f(); int x;
+            // }` calls with the outer `x` visible).
+            let a_class = scope_data.kind == crate::ScopeKind::Class;
+            let visible: Vec<Binding> = found
+                .into_iter()
+                .filter(|binding| a_class || binding.name_range.start_offset <= offset)
+                .cloned()
+                .collect();
+            if !visible.is_empty() {
+                return Known::Yes(visible);
+            }
+            continue;
         }
     }
 
@@ -1348,15 +1368,21 @@ fn qualified_definitions_at(
 /// where `b` is inside `a` is legal and does bring `a`'s names in, and following it would need a worklist with
 /// its own cycle handling — the recursion here is bounded by the number of scopes because a scope is only ever
 /// added to `pending` once it is found.
-fn using_directive_targets(scopes: &ScopeTree) -> Vec<ScopeId> {
+fn using_directive_targets(scopes: &ScopeTree, offset: usize) -> Vec<ScopeId> {
     // The names the file's `using namespace` directives name — `ns` in `using namespace ns;`. Read from the
     // bindings rather than from a syntax walk, because the directive is already recorded as a binding of
     // exactly that name; see [`BindingKind::UsingDirective`].
+    //
+    // **Only the directives written before the use.** A directive is a declaration like any other: `using namespace A;`
+    // written below a use makes nothing visible at that use, and the review's third reproducer —
+    // `namespace A { int secret; } void f() { secret; } using namespace A;` — resolved `secret` through the directive
+    // below it (`docs/code-analysis-review.md` P1-1).
     let named: Vec<String> = scopes
         .scopes()
         .iter()
         .flat_map(|scope| scope.bindings.iter())
         .filter(|binding| binding.kind == BindingKind::UsingDirective)
+        .filter(|binding| binding.name_range.start_offset <= offset)
         .map(|binding| binding.name.text())
         .collect();
 

@@ -383,6 +383,41 @@ is dropped and the file is read in place, which records the stamp of the text th
 The test is `session/tests/disk.rs::a_wave_prepared_against_one_text_is_not_committed_against_another`; it failed on the
 old code with the old summary in the index and passes now.
 
+### Stage 3, the first slice of the program point: declaration order
+
+`docs/code-analysis-review.md` P1-1, and the reproducer the review wrote by hand:
+
+```cpp
+void f() { later(); }
+void later() {}
+```
+
+`define` on the call answered the **second** line. C++ has no such program, and the answer is the wrong kind of wrong: a
+jump to a declaration the compiler would reject is a fact the reader cannot act on.
+
+Two layers answered it and both needed the position:
+
+* `sema/resolve.rs::definitions_at` walked scopes and took the first scope that declared the name **anywhere** — now a
+  binding is visible only from its own point onward (`binding.name_range.start_offset <= offset`). A scope whose
+  declarations are all later **continues the walk**, because an enclosing scope's earlier declaration is still visible
+  (`int x; { f(); int x; }`). A **class scope** is the exception the language states: a member is visible throughout its
+  class body, so the filter does not apply there.
+* `index/project/queries.rs::definitions_across_files` asks the project index when the scope tree answers
+  `NotDeclaredHere`, and the index answers from the whole file — so the file's own later declaration came back even after
+  the walk was fixed. Those answers are filtered by the same rule now, with the same member exemption.
+* `using_directive_targets` takes the offset and drops directives written **after** the use — `using namespace A;` below
+  a use makes nothing visible at that use.
+
+The test is `semantic.rs::a_use_before_the_declaration_finds_nothing`: it pins the forward case (`Known::No`), a call
+after the declaration (still `Known::Yes`), and a member declared after its use inside the same class (still
+`Known::Yes`). Without the two source changes the first assertion fails; `cpp_inspect define` on the review's fixture now
+answers `found: []`.
+
+This is deliberately **the first slice** of what the review calls a program point: the offset is threaded through these
+two lookups, not through a type that every query carries. `global_names` and completion's file-scope names still ask
+without one, which is the next slice.
+
+
 ### P1-5, recorded as **not reproduced**
 
 Two end-to-end tests — a header appearing earlier on the search path with the watcher re-reading the includer, and a

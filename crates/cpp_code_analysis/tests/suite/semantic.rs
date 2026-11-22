@@ -2737,3 +2737,56 @@ fn a_namespace_inside_one_of_the_same_name_keeps_both_segments() {
         "a compiler calls this `A::A::f`"
     );
 }
+
+/// **A declaration is visible from its own point onward** — the first slice of the review's program-point rule.
+///
+/// The lookup walked scopes and took the first one that declared the name *anywhere*, so a call resolved to a
+/// declaration written below it, and a `using namespace` directive below a use made its names visible at that use.
+/// Neither is a program a compiler accepts (`docs/code-analysis-review.md` P1-1).
+#[test]
+fn a_use_before_the_declaration_finds_nothing() {
+    use cpp_code_analysis::file::coordinates::FileOffset;
+
+    let definitions = |source: &str, occurrence: usize| {
+        let session = session_with(&[("/p/a.cpp", source)]);
+        let view = session.view("/p/a.cpp").expect("the file is held");
+        let mut at = None;
+        let mut from = 0;
+        for _ in 0..=occurrence {
+            at = Some(from + source[from..].find("later").expect("the fixture names it"));
+            from = at.expect("a position") + "later".len();
+        }
+        let reading = view
+            .reading_offset_of(FileOffset::new(at.expect("a position")))
+            .expect("the cursor is in the rendering");
+        session.definitions(&view, reading)
+    };
+
+    // The call, then the declaration: nothing is declared where the call is written.
+    assert!(
+        matches!(
+            definitions("void f() { later(); }\nvoid later() {}\n", 0),
+            Known::No
+        ),
+        "a call before the declaration names nothing"
+    );
+
+    // The same pair the other way round still answers: the control that says the filter is order and not breakage.
+    assert!(
+        matches!(
+            definitions("void later() {}\nvoid f() { later(); }\n", 1),
+            Known::Yes(_)
+        ),
+        "a call after the declaration resolves"
+    );
+
+    // **A class body is the exception the language states.** A member function declared after its use inside the class
+    // is visible at that use (a complete-class context), and the filter must not take that away.
+    assert!(
+        matches!(
+            definitions("struct S { void f() { later(); } void later() {} };\n", 0),
+            Known::Yes(_)
+        ),
+        "a member is visible throughout its class"
+    );
+}
