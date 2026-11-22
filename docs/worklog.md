@@ -292,6 +292,28 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The review's P3 list: the two thirds worth doing
+
+P3 has three items, and only two of them were work rather than a project of their own.
+
+**P3-2, the vendor matrix** (`45cfe718`). One test over eight constructs: each has to parse in the configuration that
+names its vendor and **error** in a strict C++23 parse. It found **five more ungated extensions** — GNU statement
+expressions, `asm` blocks, the elvis operator, MSVC's `__interface` and GNU's `__restrict` — all gated here. `__restrict`
+is the one the error-based matrix cannot express and has its own test: a strict parse reads `int* __restrict__ p` as a
+declaration *named* `__restrict__`, a silently wrong tree rather than an error, and that is the declaration heuristic's
+business rather than the gate's.
+
+**P3-3, the references to documents that do not exist** (`a7de65fa`). `docs/parser-review.md`,
+`docs/parse-architecture.md`, `docs/buglist.md` and `reference/README.md` are cited from **29 files** and none of them
+exists, so following a comment landed on nothing. The references now name the document that holds the record —
+`worklog.md` for the measured defects, `open-questions.md` for the archaeology — and the section numbers went with the
+documents they belonged to, because an invented number is worse than none.
+
+**P3-1, the incremental reparse, is deliberately not done.** It is a large change (token reuse, reparse boundaries,
+invalidation across edits) whose benefit is editing latency, and nothing measured asks for it: the latency tests cover the
+index filling and the steady-state query, and no corpus run has been slow in a way a reparse would fix. If it ever is
+wanted, the first step is a measurement — one 5,000-line file, one full reparse — not the feature.
+
 ## The review's P2 list, closed
 
 The P1 list is closed, and so is this one: ten items, each by a reproduction that fails without the change. What remains
