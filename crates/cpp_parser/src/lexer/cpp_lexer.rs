@@ -1317,7 +1317,12 @@ impl<'a> CppLexer<'a> {
         loop {
             match self.reader.lookahead(length + 1) {
                 // Unterminated: decline rather than swallow the rest of the line.
-                '\0' | '\n' | '\r' | ';' | '\\' => return None,
+                //
+                // **A backslash is a character of the name here, not an escape.** A header name has no escape
+                // sequences — an h-char is any character but a newline and the closing delimiter — so
+                // `#include "sub\header.h"` is the Windows spelling of a path, and declining it left the file's include
+                // unresolved (`docs/parser-toolchain-review.md` P2-2).
+                '\0' | '\n' | '\r' | ';' => return None,
                 ch if ch == terminator => {
                     return (length > 0).then_some(length);
                 }

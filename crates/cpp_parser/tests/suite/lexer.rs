@@ -673,3 +673,29 @@ fn a_word_cpp_reserves_is_a_name_in_c() {
         "the same table still reads C++ as C++"
     );
 }
+
+/// **A backslash in a quoted header name is a path separator, not an escape.**
+///
+/// A header name has no escape sequences — an h-char is any character but a newline and the closing delimiter — so
+/// `#include "sub\header.h"` is a Windows project's own spelling. Three readers used to refuse it and one of them
+/// (`parse_include`) then had no target at all, so the **include vanished**: the header was never read, its macros and
+/// declarations were missing from the program, and the fixture measured here reported `includes: []`.
+/// `docs/parser-toolchain-review.md` P2-2.
+#[test]
+fn lex_header_name_accepts_a_backslash_in_a_quoted_name() {
+    for source in [
+        "\"sub\\header.h\"",
+        "\"..\\..\\include\\config.h\"",
+        "<sys\\types.h>",
+    ] {
+        let mut errors = Vec::new();
+        let mut lexer = CppLexer::new(source, LexerConfig::default(), &mut errors);
+
+        let kind = lexer
+            .lex_header_name()
+            .unwrap_or_else(|| panic!("{source:?} is a header name"));
+        assert_eq!(kind, CppTokenKind::HeaderName);
+        assert_eq!(lexer.tokenize().len(), 0, "{source:?} left tokens behind");
+        assert!(errors.is_empty(), "{source:?}: {errors:?}");
+    }
+}

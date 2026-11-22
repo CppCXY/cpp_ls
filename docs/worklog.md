@@ -316,10 +316,11 @@ feeds a real CMake-shaped entry and requires both the resolved path and the flag
 as a grammatical fact. Both read to the end of the token stream now; the file is the budget, because each already stops at
 the terminator it wants. 508 integration tests did not move, which is what removing a budget should look like.
 
-**Two limits found while writing those boundary tests**, and not fixed here: a `using` alias whose initializer carries
-**120** template arguments fails with ``expected `;` `` at the `S<`, and a cast whose second group holds **140** template
-arguments fails with `expected primary expression`. Both are the type-id / template-argument readers' own limits rather
-than the windows — the next round's first task.
+**Two limits found while writing those boundary tests** — both **fixed** in `3fd93f47`: a template-id whose argument list
+is longer than 128 tokens lost its matching `>`, so at exactly **64** template arguments a `using` alias reported
+``expected `;` `` at its own `<` and a cast's type-id failed the same way. Two scans in `names.rs` treated the window as a
+grammar boundary; both read to EOF now, and `target/bench/threshold_probe.py` reports zero errors at 64, 80, 96, 112 and
+128 arguments in both shapes.
 
 ## The review's P1 list: what is confirmed, and what is fixed
 

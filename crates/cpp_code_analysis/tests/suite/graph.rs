@@ -1415,3 +1415,28 @@ fn a_chain_deeper_than_the_limit_stops() {
         "and it said why"
     );
 }
+
+/// **A quoted include with a backslash reaches its header.** The separator is a character of the header name, so
+/// `#include "sub\header.h"` must resolve to `sub/header.h` — the spelling every Windows project uses. Before the fix the
+/// directive had no target at all, so this header was never read: `docs/parser-toolchain-review.md` P2-2.
+#[test]
+fn a_quoted_include_with_a_backslash_reaches_its_header() {
+    let files = MemoryFiles::new()
+        .with_file("src/main.c", "#include \"sub\\header.h\"\n")
+        .with_file("src/sub/header.h", "int value;\n");
+
+    let (graph, interner) = walk_from(&files, "src/main.c");
+
+    let header = interner
+        .get(Path::new("src/sub/header.h"))
+        .expect("the include resolved to the header");
+    assert!(
+        graph.entry(header).is_some(),
+        "and the walk read it: {:?}",
+        graph
+            .edges
+            .iter()
+            .map(|edge| edge.name.to_string())
+            .collect::<Vec<_>>()
+    );
+}

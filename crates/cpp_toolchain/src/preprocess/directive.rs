@@ -635,6 +635,18 @@ fn parse_include(tokens: &[Token], kind: DirectiveKind) -> Directive {
                 name: kind.name().into(),
             };
         }
+        // **A quoted operand the folding did not relabel** — the same include, read from the tokens rather than from the
+        // `HeaderName`. Keeping this arm is what makes the two readers' disagreement harmless: whichever one saw the
+        // operand first, the directive is an include with a target.
+        CppTokenKind::StringLiteral => {
+            let text = first.text();
+            let target = text.trim_start_matches('"').trim_end_matches('"');
+            return Directive::Include(Include {
+                form: IncludeForm::Quote,
+                target: target.into(),
+                is_next,
+            });
+        }
         // `#include HEADER`, where `HEADER` is a macro. Well formed; the target is not a literal.
         CppTokenKind::Identifier => {
             return Directive::Include(Include {
@@ -738,9 +750,42 @@ pub fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
         if tokens[target].kind != CppTokenKind::StringLiteral {
             continue;
         }
-        let text = &source[tokens[target].range.start_offset..tokens[target].range.end_offset()];
-        if !text.contains('\\') {
-            tokens[target].kind = CppTokenKind::HeaderName;
+        // **Every quoted operand of `#include` is a header name**, a backslash included: an h-char is not escaped, so
+        // `"sub\header.h"` is a Windows project's path rather than a string literal. Refusing it left the directive
+        // with no target at all, which is worse than a wrong one — the include simply vanished
+        // (`docs/parser-toolchain-review.md` P2-2, measured with `target/bench/bs_main.c`).
+        tokens[target].kind = CppTokenKind::HeaderName;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// **A quoted `#include` with a backslash is still an include.** The quoted operand of `#include` is a header name,
+    /// and a header name has no escape sequences, so `"sub\header.h"` is a path. Three readers used to refuse it and the
+    /// directive then had **no target at all** — the include vanished rather than pointing somewhere wrong
+    /// (`docs/parser-toolchain-review.md` P2-2).
+    #[test]
+    fn a_quoted_include_with_a_backslash_keeps_its_target() {
+        for source in [
+            "#include \"sub\\header.h\"\n",
+            "#include \"..\\..\\include\\config.h\"\n",
+        ] {
+            let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+            let preprocessing = crate::preprocess::preprocess(source, &tokens);
+
+            let include = preprocessing
+                .directives
+                .iter()
+                .find_map(|spanned| spanned.directive.as_include())
+                .unwrap_or_else(|| panic!("{source:?} is an include"));
+
+            assert_eq!(include.form, crate::directive::IncludeForm::Quote);
+            assert!(
+                include.target.contains('\\'),
+                "the path keeps its separator: {:?}",
+                include.target
+            );
         }
     }
 }

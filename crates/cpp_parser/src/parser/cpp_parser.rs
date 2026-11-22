@@ -922,9 +922,19 @@ impl<'a> CppParser<'a> {
         // cannot tell it apart from a string at the time. `"local.h"` is already the right shape, so
         // this case only has to relabel it.
         if start.kind == CppTokenKind::StringLiteral {
+            // **A header name has no escape sequences at all** — an h-char is any character but a newline and the
+            // closing delimiter — so a backslash in the quoted form is a character of the path, not an escape:
+            //
+            // ```cpp
+            // #include "sub\header.h"      a Windows project's own spelling
+            // ```
+            //
+            // This used to refuse every quoted name containing `\`, on the reasoning that an escape means a real
+            // string. Nothing in a header name is escaped, so that reading refused the file the compiler reads, and the
+            // include was never resolved (`docs/parser-toolchain-review.md` P2-2).
             let text = &self.text[start.range.start_offset..start.range.end_offset()];
-            // A header name has no escapes and no concatenation; anything else is a real string.
-            if !text.contains('\\') {
+            let is_a_header_name = text.len() >= 2 && text.starts_with('"') && text.ends_with('"');
+            if is_a_header_name {
                 let token = self.tokens[self.token_index];
                 self.follower_memo.get_mut().clear();
                 self.tokens[self.token_index] =
