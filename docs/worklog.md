@@ -292,9 +292,24 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
-## The review's P2 list, first six
+## The review's P2 list, closed
 
-The P1 list is closed; these are the P2 items small enough to take with it and clear enough to prove.
+The P1 list is closed, and so is this one: ten items, each by a reproduction that fails without the change. What remains
+of the review is its **P3** list — the incremental reparse, the fuzzing and compiler differential jobs, and the dead
+Lua-era sources — which is future work rather than a defect list.
+
+| item | what it was | commit |
+| --- | --- | --- |
+| P2-1 | fixed lookahead windows treated as grammar boundaries; a template-id longer than 128 tokens lost its `>` | `8acb7430`, `3fd93f47` |
+| P2-2, P2-11 | three readers refused a backslash in a header name, so `#include "sub\header.h"` vanished | `bd69031b` |
+| P2-3 | the line index counted only `\n`, so an old-Mac file was one line to diagnostics and many to the lexer | `183e36b8` |
+| P2-4 | `parse_tokens` panicked on a token stream its caller gave it | `e847fb6f` |
+| P2-5 | a serialised syntax id did not say which schema it was written in | `706ada74` |
+| P2-6 | "supported" was one word for three different abilities | `17d95012` |
+| P2-7 | a target's `args`/`extra_args`/`remove_args` parsed and changed nothing | `160ab598` |
+| P2-8 | a compile database's relative `file` was not resolved against its `directory` | `996966b6` |
+| P2-9 | compile command matching folded case before comparing it | `78988c62` |
+| P2-10 | `-m32`/`-m64` never reached the compiler that is asked for its search paths | `932fb38d` |
 
 **P2-2 / P2-11, a backslash in a header name** (`bd69031b`). `#include "sub\header.h"` is a Windows project's spelling,
 and **three** readers refused it with the same wrong reasoning — "an escape means a real string". A header name has no
