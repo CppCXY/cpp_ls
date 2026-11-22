@@ -278,7 +278,30 @@ error lands on the next keyword (`void do{…}while(0)`, where `do` is libuv's `
 
 So this is **not** a regression in the analysis but a **parser gap that the fix exposed** — and the next step is the same
 one the C work has always taken: take the smallest of those (aix.c's, 15 790-byte rendering), find the construct, fix it,
-and only then believe the number. Until then the honest statement about libuv is *"0 syntax errors under the old
+and only then believe the number.
+
+**The aix.c construct, located**: the rendering holds
+
+```text
+… avg[2]; } void do{(void)((!!(0 && "unreachable code"))||(_assert("…","",3),0));abort();}while(0) { } int uv_fs_event_init(…
+```
+
+and the source is `aix.c:845`:
+
+```c
+void uv__fs_event_close(uv_fs_event_t* handle) {
+#ifdef HAVE_SYS_AHAFS_EVPRODS_H
+  uv_fs_event_stop(handle);
+#else
+  UNREACHABLE();
+#endif
+}
+```
+
+The **function head is missing from the rendering** (`uv__fs_event_close` appears once in the whole 15 790-byte text, and
+not here) while the body's `UNREACHABLE()` — a `do{…}while(0)` — is there, so the parser reads `void do{…}while(0) { }`.
+A head that is live in the file and gone from the stream, with a directive immediately after it, is a **slicing defect in
+the cook**, not a grammar gap: the next fix is here, and it is the first thing the goal's C half needs. Until then the honest statement about libuv is *"0 syntax errors under the old
 condition evaluation; 27 in code that evaluation was hiding"*.
 
 ## curl 8.x — the third C project, and the cleanest so far
