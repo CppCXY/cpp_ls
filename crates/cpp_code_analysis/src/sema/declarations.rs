@@ -3039,7 +3039,7 @@ fn an_operator_return_is_usable(root: &CppSyntaxNode, binding: &Binding, spellin
                 name.contains("::") && arguments.iter().all(means_the_same_everywhere)
             }
             Type::Pointer { to }
-            | Type::Qualified { of: to }
+            | Type::Qualified { of: to, .. }
             | Type::Reference { to, .. }
             | Type::Array { of: to, .. } => means_the_same_everywhere(to),
             _ => false,

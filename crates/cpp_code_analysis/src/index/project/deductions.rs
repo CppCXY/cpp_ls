@@ -664,7 +664,7 @@ pub(crate) fn a_call_to_a_function(
 pub(crate) fn as_a_range(type_of: &Type) -> &Type {
     match type_of {
         Type::Reference { to, .. } => as_a_range(to),
-        Type::Qualified { of } => as_a_range(of),
+        Type::Qualified { of, .. } => as_a_range(of),
         other => other,
     }
 }

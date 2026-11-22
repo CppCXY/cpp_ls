@@ -973,8 +973,17 @@ pub(crate) fn parse_one_decl_specifier_inner(
             return Ok(m.complete(p));
         }
 
+        // **`volatile` is its own qualifier node**, and it used to be a `ConstQual`: the two share one rule here, so
+        // every reader that asked the tree "is this const" was told yes for a `volatile` declaration, and
+        // `volatile S v; auto x = v;` typed `x` as `const S` (`docs/code-analysis-review.md` P1-3). The kinds are
+        // separate because the questions are: `const` says assignment is not allowed, `volatile` says every access is
+        // observable, and a member list can hold `f()`, `f() const` and `f() volatile` at once.
         CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword => {
-            let m = p.mark(CppSyntaxKind::ConstQual);
+            let kind = match p.current_token() {
+                CppTokenKind::VolatileKeyword => CppSyntaxKind::VolatileQual,
+                _ => CppSyntaxKind::ConstQual,
+            };
+            let m = p.mark(kind);
             p.bump();
             return Ok(m.complete(p));
         }

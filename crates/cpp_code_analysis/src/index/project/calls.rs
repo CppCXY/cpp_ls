@@ -418,6 +418,7 @@ pub(crate) fn type_of_a_call(
         let element = crate::sema::types::parse_type_spelling(&element);
         let element = Arc::new(Type::Qualified {
             of: Arc::new(element),
+            qualifiers: crate::sema::types::Qualifiers::CONST,
         });
         let array = Arc::new(Type::Array {
             of: element,
@@ -1830,6 +1831,7 @@ pub(crate) fn a_members_answer_as_a_type(
         class_type = match class_type.is_const() && !resolved.is_const() {
             true => crate::sema::types::Type::Qualified {
                 of: std::sync::Arc::new(resolved),
+                qualifiers: crate::sema::types::Qualifiers::CONST,
             },
             false => resolved,
         };

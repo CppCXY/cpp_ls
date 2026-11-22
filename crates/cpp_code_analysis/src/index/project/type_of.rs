@@ -2005,6 +2005,7 @@ pub(crate) fn operator_returns_of_with_arguments(
         let target_type = if class_type.is_const() && !target_type.is_const() {
             crate::sema::types::Type::Qualified {
                 of: std::sync::Arc::new(target_type),
+                qualifiers: crate::sema::types::Qualifiers::CONST,
             }
         } else {
             target_type

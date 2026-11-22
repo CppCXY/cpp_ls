@@ -658,7 +658,7 @@ pub(crate) fn member_access_class(written: &Type) -> Option<String> {
 pub(crate) fn the_class_spelling(type_of: &Type) -> String {
     match type_of {
         Type::Reference { to, .. } => the_class_spelling(to),
-        Type::Qualified { of } => the_class_spelling(of),
+        Type::Qualified { of, .. } => the_class_spelling(of),
         other => other.to_string(),
     }
 }

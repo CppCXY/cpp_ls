@@ -4236,3 +4236,35 @@ fn each_declarator_of_one_declaration_has_its_own_type() {
         "`a` is declared by the first declarator, which has no array suffix"
     );
 }
+
+/// **`volatile` is its own qualifier**, not a spelling of `const`.
+///
+/// `Type::Qualified` recorded *that* a type was qualified and not which qualifiers, so every answer spelled `const`:
+/// `volatile S v; auto x = v;` typed `x` as `const S`, and a `volatile` member function was read as a `const` one — the
+/// two are different overloads (`docs/code-analysis-review.md` P1-3).
+#[test]
+fn a_volatile_object_keeps_its_qualifier() {
+    assert_eq!(
+        type_of_use(
+            "struct S {};\nvolatile S v;\nvoid f() { auto x = v; }\n",
+            "v"
+        )
+        .as_deref(),
+        Some("volatile S"),
+        "the qualifier is `volatile`, and it is the one the declaration wrote"
+    );
+    assert_eq!(
+        type_of_use(
+            "struct S {};\nconst volatile S v;\nvoid f() { auto x = v; }\n",
+            "v"
+        )
+        .as_deref(),
+        Some("const volatile S"),
+        "and both, in the order the language spells them"
+    );
+    assert_eq!(
+        type_of_use("struct S {};\nconst S v;\nvoid f() { auto x = v; }\n", "v").as_deref(),
+        Some("const S"),
+        "a plain `const` is unchanged"
+    );
+}

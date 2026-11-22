@@ -329,6 +329,25 @@ With the probe working, it confirms four of the review's claims and leaves one o
 | P1-1 use before declaration | `define` picks the declaration written **after** the call |
 | P1-3 `volatile S v; auto x = v;` | still `not_an_expression` — the next thing to look at, and the row the first Stage 1 test will pin |
 
+### P1-3, `volatile` is its own qualifier, and the parser was calling it `const`
+
+The review's guess was that `Type::Qualified` compresses the qualifiers into "qualified". The measurement found two
+defects, one behind the other:
+
+1. **`Type::Qualified { of }` recorded no qualifier at all** and `Display` spelled every one of them `const`.
+2. **The parser labelled a `volatile` keyword `ConstQual`** — one rule, one node kind — so even a reader that asked the
+   tree "which qualifier is this" was told `const`. `cpp_inspect grep volatile` on `volatile S v;` answered
+   `Syntax(ConstQual)`, which is the whole defect in one line.
+
+So the fix is in two crates: `specifiers.rs` marks `VolatileQual` for the second keyword, and `sema/types.rs` carries
+`Qualifiers { is_const, is_volatile }` on `Type::Qualified`, with `is_const`, `is_volatile`, `qualifiers`, and the two
+writers (`leading_words`/`trailing_words`) reading their own bit. The specifier reader records both words in either
+order, and `parse_type_spelling` keeps the trailing ones.
+
+`a_volatile_object_keeps_its_qualifier` pins `volatile S`, `const volatile S` and `const S`; before the fix it answered
+`const S` for the first two. Suite: **892 unit + 1147 integration**, gate green.
+
+
 ### P1-4, a literal's type is in its spelling (`literal_type` fixed)
 
 One function now reads it — `sema/literal.rs::a_literal_type` — where three had each read part of it and all three

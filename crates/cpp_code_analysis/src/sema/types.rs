@@ -23,7 +23,7 @@
 //! Type::Array { of, extent }          `int[4]`, `int[]`
 //! Type::Function { returns, … }       `int(int)`, `int (*)(int)`
 //! Type::Pack { of }                   `Args...`
-//! Type::Qualified { of }              `const Widget`, `volatile int`
+//! Type::Qualified { of, .. }              `const Widget`, `volatile int`
 //! ```
 //!
 //! Three of those exist for reasons worth stating, because each replaced a bug rather than a gap:
@@ -134,6 +134,83 @@ fn written_trimmed(node: &CppSyntaxNode) -> String {
 pub type TypeOf = Arc<Type>;
 
 /// **A type, as a shape.** See the module documentation for why the spelling is carried beside it.
+/// **The qualifiers written on a type** — `const`, `volatile`, or both.
+///
+/// A wrapper on [`Type::Qualified`] recorded only *that* a type was qualified, so every spelling came out `const`:
+/// `volatile S v; auto x = v;` typed `x` as `const S`, and `int f() volatile` was read as a `const` member function —
+/// a different overload (`docs/code-analysis-review.md` P1-3). The two are separate bits because they are separate
+/// questions: `volatile` says every access is an observable side effect, `const` says assignment is not allowed, and a
+/// member list can hold `f()`, `f() const` and `f() volatile` at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Qualifiers {
+    is_const: bool,
+    is_volatile: bool,
+}
+
+impl Qualifiers {
+    pub const NONE: Qualifiers = Qualifiers {
+        is_const: false,
+        is_volatile: false,
+    };
+    pub const CONST: Qualifiers = Qualifiers {
+        is_const: true,
+        is_volatile: false,
+    };
+    pub const VOLATILE: Qualifiers = Qualifiers {
+        is_const: false,
+        is_volatile: true,
+    };
+
+    /// The qualifier a single word spells, if it is one.
+    pub fn of_a_word(word: &str) -> Option<Qualifiers> {
+        match word {
+            "const" => Some(Qualifiers::CONST),
+            "volatile" => Some(Qualifiers::VOLATILE),
+            _ => None,
+        }
+    }
+
+    /// Both, in either order — `const volatile` and `volatile const` are one type.
+    pub fn with(self, other: Qualifiers) -> Qualifiers {
+        Qualifiers {
+            is_const: self.is_const || other.is_const,
+            is_volatile: self.is_volatile || other.is_volatile,
+        }
+    }
+
+    pub fn is_const(self) -> bool {
+        self.is_const
+    }
+
+    pub fn is_volatile(self) -> bool {
+        self.is_volatile
+    }
+
+    pub fn is_none(self) -> bool {
+        !self.is_const && !self.is_volatile
+    }
+
+    /// **The words when they lead the type** — `"const "`, `"volatile "`, `"const volatile "`, or nothing.
+    pub fn leading_words(self) -> &'static str {
+        match (self.is_const, self.is_volatile) {
+            (true, true) => "const volatile ",
+            (true, false) => "const ",
+            (false, true) => "volatile ",
+            (false, false) => "",
+        }
+    }
+
+    /// **The words when they trail it** — `" const"`, `" volatile"`, `" const volatile"`, or nothing.
+    pub fn trailing_words(self) -> &'static str {
+        match (self.is_const, self.is_volatile) {
+            (true, true) => " const volatile",
+            (true, false) => " const",
+            (false, true) => " volatile",
+            (false, false) => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// A builtin: `int`, `void`, `unsigned long long`, `decltype(auto)`.
@@ -186,6 +263,7 @@ pub enum Type {
     /// qualifier was written on, which is exactly when it reads it.
     Qualified {
         of: TypeOf,
+        qualifiers: Qualifiers,
     },
 }
 
@@ -196,7 +274,7 @@ pub enum Type {
 fn a_pointee_without_its_qualifiers(type_of: &TypeOf) -> (&Type, bool) {
     let mut current: &Type = type_of;
     let mut qualified = false;
-    while let Type::Qualified { of } = current {
+    while let Type::Qualified { of, .. } = current {
         qualified = true;
         current = of;
     }
@@ -233,7 +311,7 @@ impl Type {
             // A reference and a qualifier are both **transparent** to this question, and C++ is why: a member of a
             // `Widget&` is a member of `Widget`, and a member of a `const Widget` is a member of `Widget` — you
             // cannot assign to it, which is a fact about assignment and not about the class.
-            Type::Reference { to, .. } | Type::Qualified { of: to } => to.class_name(),
+            Type::Reference { to, .. } | Type::Qualified { of: to, .. } => to.class_name(),
             _ => None,
         }
     }
@@ -242,7 +320,7 @@ impl Type {
     pub fn arguments(&self) -> &[Type] {
         match self {
             Type::Named { arguments, .. } => arguments,
-            Type::Reference { to, .. } | Type::Qualified { of: to } => to.arguments(),
+            Type::Reference { to, .. } | Type::Qualified { of: to, .. } => to.arguments(),
             _ => &[],
         }
     }
@@ -259,9 +337,28 @@ impl Type {
     /// `const_reference operator[] const` and the choice was by name and arity only.
     pub fn is_const(&self) -> bool {
         match self {
-            Type::Qualified { .. } => true,
+            Type::Qualified { qualifiers, .. } => qualifiers.is_const(),
             Type::Reference { to, .. } => to.is_const(),
             _ => false,
+        }
+    }
+
+    /// **Is the object this type describes `volatile`** — the same rule as [`Type::is_const`], and a separate bit
+    /// because `volatile int` is neither a const object nor an unqualified one (`docs/code-analysis-review.md` P1-3).
+    pub fn is_volatile(&self) -> bool {
+        match self {
+            Type::Qualified { qualifiers, .. } => qualifiers.is_volatile(),
+            Type::Reference { to, .. } => to.is_volatile(),
+            _ => false,
+        }
+    }
+
+    /// The qualifiers this type was written with, when it was written with any.
+    pub fn qualifiers(&self) -> Qualifiers {
+        match self {
+            Type::Qualified { qualifiers, .. } => *qualifiers,
+            Type::Reference { to, .. } => to.qualifiers(),
+            _ => Qualifiers::NONE,
         }
     }
 
@@ -292,8 +389,9 @@ impl Type {
             // **A qualifier survives the decay**, because the thing it qualifies does: `const int arr[4]` used as a
             // value is a pointer to a const `int`. Dropping it here would make `const` disappear from exactly the
             // types a `auto p = &arr;` deduces.
-            Type::Qualified { of } => Type::Qualified {
+            Type::Qualified { of, qualifiers } => Type::Qualified {
                 of: Arc::new(of.decay()),
+                qualifiers: *qualifiers,
             },
             other => other.clone(),
         }
@@ -447,7 +545,7 @@ impl Type {
     pub fn is_arithmetic(&self) -> bool {
         match self {
             Type::Builtin { spelling } => !matches!(spelling.as_str(), "void" | "decltype(auto)"),
-            Type::Qualified { of } => of.is_arithmetic(),
+            Type::Qualified { of, .. } => of.is_arithmetic(),
             _ => false,
         }
     }
@@ -456,7 +554,7 @@ impl Type {
     pub fn is_void(&self) -> bool {
         match self {
             Type::Builtin { spelling } => spelling == "void",
-            Type::Qualified { of } => of.is_void(),
+            Type::Qualified { of, .. } => of.is_void(),
             _ => false,
         }
     }
@@ -476,7 +574,7 @@ impl Type {
             Type::Pointer { to } | Type::Array { of: to, .. } => Some(Arc::clone(to)),
             // **A qualifier is transparent here too**, and C++ is again why: `*p` on a `const Widget*` gives a
             // `const Widget`, which is the pointee. Only the operators are peeled.
-            Type::Qualified { of } => of.pointee(),
+            Type::Qualified { of, .. } => of.pointee(),
             _ => None,
         }
     }
@@ -494,7 +592,7 @@ impl Type {
             Type::Pointer { to }
             | Type::Reference { to, .. }
             | Type::Pack { of: to }
-            | Type::Qualified { of: to } => to.depends_on_a_parameter(),
+            | Type::Qualified { of: to, .. } => to.depends_on_a_parameter(),
             Type::Array { of, .. } => of.depends_on_a_parameter(),
             Type::Function {
                 returns,
@@ -579,8 +677,9 @@ impl Type {
             Type::Pack { of } => Type::Pack {
                 of: Arc::new(of.substituted(substitutions)),
             },
-            Type::Qualified { of } => Type::Qualified {
+            Type::Qualified { of, qualifiers } => Type::Qualified {
                 of: Arc::new(of.substituted(substitutions)),
+                qualifiers: *qualifiers,
             },
             Type::Builtin { .. } => self.clone(),
         }
@@ -643,8 +742,9 @@ impl Type {
             Type::Pack { of } => Type::Pack {
                 of: Arc::new(of.replacing(name, with)),
             },
-            Type::Qualified { of } => Type::Qualified {
+            Type::Qualified { of, qualifiers } => Type::Qualified {
                 of: Arc::new(of.replacing(name, with)),
+                qualifiers: *qualifiers,
             },
         }
     }
@@ -713,10 +813,14 @@ impl fmt::Display for Type {
             Type::Pack { of } => write!(out, "{of}..."),
             // `const Widget`, in the position the file wrote it — which is what makes `const Widget*` and
             // `Widget* const` two different answers here rather than one.
-            Type::Qualified { of } if matches!(**of, Type::Pointer { .. } | Type::Array { .. }) => {
-                write!(out, "{of} const")
+            Type::Qualified { of, qualifiers }
+                if matches!(**of, Type::Pointer { .. } | Type::Array { .. }) =>
+            {
+                write!(out, "{of}{}", qualifiers.trailing_words())
             }
-            Type::Qualified { of } => write!(out, "const {of}"),
+            Type::Qualified { of, qualifiers } => {
+                write!(out, "{}{of}", qualifiers.leading_words())
+            }
         }
     }
 }
@@ -758,7 +862,7 @@ impl Type {
                 }
                 // `void* const`: the qualifier is written after what it qualifies, which is why it is part of the
                 // operator run rather than of the base.
-                Type::Qualified { of }
+                Type::Qualified { of, .. }
                     if matches!(**of, Type::Pointer { .. } | Type::Array { .. }) =>
                 {
                     qualified = true;
@@ -954,11 +1058,12 @@ pub fn parse_type_spelling(written: &str) -> Type {
     // `assign-type-check` for `const char *sep = luaL_optlstring(…)` (8 false positives, 2026-11-20).
     let (trailing, rest) = strip_trailing_qualifiers(written.trim());
     let parsed = parse_type_spelling_without_a_trailing_qualifier(rest);
-    match trailing {
-        Some(_) => Type::Qualified {
+    match trailing.is_none() {
+        true => parsed,
+        false => Type::Qualified {
             of: Arc::new(parsed),
+            qualifiers: trailing,
         },
-        None => parsed,
     }
 }
 
@@ -1093,11 +1198,12 @@ fn parse_type_spelling_without_a_trailing_qualifier(written: &str) -> Type {
         },
     };
 
-    match qualifier {
-        Some(_qualifier) => Type::Qualified {
+    match qualifier.is_none() {
+        true => qualified,
+        false => Type::Qualified {
             of: Arc::new(qualified),
+            qualifiers: qualifier,
         },
-        None => qualified,
     }
 }
 
@@ -1211,18 +1317,23 @@ fn is_a_builtin(spelling: &str) -> bool {
 ///
 /// The qualifier is *returned* rather than dropped: a trailing `const` on a pointee is the difference between a
 /// pointer to a `const char` and a pointer to a `char`, and [`parse_type_spelling`] is what decides conversions.
-fn strip_trailing_qualifiers(written: &str) -> (Option<&str>, &str) {
+fn strip_trailing_qualifiers(written: &str) -> (Qualifiers, &str) {
     let mut end = written.trim_end();
-    let mut stripped: Option<&str> = None;
+    let mut stripped = Qualifiers::NONE;
 
     loop {
         let Some(word) = end.split_whitespace().next_back() else {
             return (stripped, end);
         };
-        if !matches!(word, "const" | "volatile") || word.len() == end.len() {
+        let Some(qualifier) = Qualifiers::of_a_word(word) else {
+            return (stripped, end);
+        };
+        if word.len() == end.len() {
             return (stripped, end);
         }
-        stripped = Some(word);
+        // **Every word, not the last one**: `Widget const volatile` has two, and recording only the last made the
+        // first one vanish (`docs/code-analysis-review.md` P1-3).
+        stripped = stripped.with(qualifier);
         end = end[..end.len() - word.len()].trim_end();
     }
 }
@@ -1233,19 +1344,22 @@ fn strip_trailing_qualifiers(written: &str) -> (Option<&str>, &str) {
 /// The elaborated keywords (`struct`, `class`, `enum`, `typename`) are stepped over and **not** reported: they are
 /// how a type is disambiguated rather than anything about it, and `struct Widget` and `Widget` are one type. A
 /// qualifier is reported because it is not.
-fn split_leading_qualifiers(written: &str) -> (Option<&str>, &str) {
+fn split_leading_qualifiers(written: &str) -> (Qualifiers, &str) {
     let mut rest = written.trim();
-    let mut qualifier: Option<&str> = None;
+    let mut qualifier = Qualifiers::NONE;
 
     while let Some(word) = rest.split_whitespace().next() {
         if word.len() == rest.len() {
             break;
         }
-        match word {
-            "const" if qualifier.is_none() => qualifier = Some("const"),
-            "volatile" if qualifier.is_none() => qualifier = Some("volatile"),
-            "struct" | "class" | "enum" | "typename" => {}
-            _ => break,
+        match Qualifiers::of_a_word(word) {
+            // **Both, in either order** — `const volatile S` and `volatile const S` are one type, and the second word
+            // used to be dropped (`docs/code-analysis-review.md` P1-3).
+            Some(found) => qualifier = qualifier.with(found),
+            None => match word {
+                "struct" | "class" | "enum" | "typename" => {}
+                _ => break,
+            },
         }
         rest = rest[word.len()..].trim_start();
     }
@@ -1842,7 +1956,7 @@ pub(crate) fn read_specifiers_named(
     // Was an **elaborated keyword** (`struct`, `class`, `union`, `enum`) written here? See the `BuiltinType` arm.
     let mut elaborated = false;
     // Was a **`const`** written in the sequence, before the type's name? See the end of this function.
-    let mut const_written = false;
+    let mut qualifiers_written = Qualifiers::NONE;
 
     for child in specifiers.children_with_tokens() {
         let Some(node) = child.into_node() else {
@@ -1930,12 +2044,17 @@ pub(crate) fn read_specifiers_named(
             // Not part of what the type is called. Qualifiers, attributes, storage class, `constexpr`, `inline`,
             // `friend` — a caller that needs to know a declaration was `static` or `friend` asks the declaration.
             //
-            // **Except `const`, which is part of the type it is written on** — see the end of this function.
+            // **Except `const` and `volatile`, which are part of the type they are written on** — see the end of this
+            // function. `volatile` used to be in the list below, which is how `volatile S v;` became `const S`: the
+            // word was skipped and the answer was then built as if every qualified type were a `const` one
+            // (`docs/code-analysis-review.md` P1-3).
             CppSyntaxKind::ConstQual => {
-                const_written = true;
+                qualifiers_written = qualifiers_written.with(Qualifiers::CONST);
             }
-            CppSyntaxKind::VolatileQual
-            | CppSyntaxKind::RestrictQual
+            CppSyntaxKind::VolatileQual => {
+                qualifiers_written = qualifiers_written.with(Qualifiers::VOLATILE);
+            }
+            CppSyntaxKind::RestrictQual
             | CppSyntaxKind::Attribute
             | CppSyntaxKind::AttributeList
             | CppSyntaxKind::FriendDecl
@@ -2038,11 +2157,12 @@ pub(crate) fn read_specifiers_named(
     } else {
         spelling.unwrap_or_else(|| Type::builtin("void"))
     };
-    match const_written {
-        true => Type::Qualified {
+    match qualifiers_written.is_none() {
+        true => answer,
+        false => Type::Qualified {
             of: std::sync::Arc::new(answer),
+            qualifiers: qualifiers_written,
         },
-        false => answer,
     }
 }
 
