@@ -253,6 +253,34 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## libuv, re-measured after the cook and parser work — **and it went from 0 syntax errors to 27**
+
+The same sweep (`cpp_inspect --project E:\corpora\libuv --file … sweep --including libuv\src`), the same corpus, the same
+database. The number moved because the **condition evaluator now decides `#if` the way the standard does** (`Unknown ||
+true` is true — the rule that fixed hedley), and libuv's platform branches are full of
+`#if defined(X) || …` conditions whose left side is a macro nobody defined. A branch that used to be **skipped** is now
+**compiled**, so the parser is handed code it had never seen — and cannot read:
+
+| file | line | first error |
+| --- | --- | --- |
+| `src/unix/aix.c` | 754 | `expected primary expression` |
+| `src/unix/ibmi.c` | 543 | `expected primary expression` |
+| `src/unix/kqueue.c` | 496 | `expected primary expression` |
+| `src/unix/linux.c` | 837, 867 | ``expected `;` after expression`` |
+
+Every one of them is `struct file: first error` on a **platform file** — AIX, IBM i, kqueue, Linux — which the old
+evaluation had left out of the rendering. The shape is the same in each: a function **head** has lost its tokens and the
+error lands on the next keyword (`void do{…}while(0)`, where `do` is libuv's `UNREACHABLE()`):
+
+```text
+… avg[2]; } void do{(void)((!!(0 && "unreachable code"))||(_assert("0 && \"unreachable code\"","",3),0));abort();}while(0) { }
+```
+
+So this is **not** a regression in the analysis but a **parser gap that the fix exposed** — and the next step is the same
+one the C work has always taken: take the smallest of those (aix.c's, 15 790-byte rendering), find the construct, fix it,
+and only then believe the number. Until then the honest statement about libuv is *"0 syntax errors under the old
+condition evaluation; 27 in code that evaluation was hiding"*.
+
 ## curl 8.x — the third C project, and the cleanest so far
 
 Cloned at `E:\corpora\curl`, configured with its own CMake and MinGW's gcc — a **real** database, not a synthesized one:
