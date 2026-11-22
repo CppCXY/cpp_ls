@@ -88,7 +88,7 @@ impl ParseAnchor {
 }
 
 /// Health of an event stream, used by tests to assert that recovery left the node stack balanced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EventStreamAudit {
     /// Nodes opened and never closed. Must be zero: anything else means every token after them
     /// ends up in the wrong place.
@@ -104,6 +104,57 @@ pub struct EventStreamAudit {
     pub empty_nodes: usize,
     /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
     pub unclosed: Vec<crate::kind::CppSyntaxKind>,
+}
+
+/// **The first way a caller's token stream cannot be parsed**, as a message for the error the tree carries.
+///
+/// The four checks are the four ways `text[start..end]` panics or lies: a range past the end, a reversed range, a range
+/// that lands inside a character, and a stream whose tokens are not in order. `None` means the stream is usable.
+fn why_the_tokens_do_not_fit(text: &str, tokens: &[CppTokenData]) -> Option<String> {
+    let mut previous_start = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        let start = token.range.start_offset;
+        let end = token.range.end_offset();
+        if start > end {
+            return Some(format!(
+                "token {index} has a range that ends before it starts ({start}..{end})"
+            ));
+        }
+        if end > text.len() {
+            return Some(format!(
+                "token {index} ends past the text ({end} > {})",
+                text.len()
+            ));
+        }
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return Some(format!(
+                "token {index} has a range inside a character ({start}..{end})"
+            ));
+        }
+        if start < previous_start {
+            return Some(format!(
+                "token {index} starts before token {} ({start} < {previous_start})",
+                index.saturating_sub(1)
+            ));
+        }
+        previous_start = start;
+    }
+    None
+}
+
+/// A tree that is an empty translation unit and one error — what [`CppParser::parse_tokens`] answers for tokens it
+/// cannot parse, so a caller gets the same shape a parse of garbage produces rather than a panic.
+fn a_tree_that_says(text: &str, tokens: &[CppTokenData], problem: String) -> CppSyntaxTree {
+    let mut builder = rowan::GreenNodeBuilder::new();
+    builder.start_node(crate::kind::CppSyntaxKind::TranslationUnit.into());
+    builder.finish_node();
+    let root = builder.finish();
+    let message = format!("the token stream does not describe this text: {problem}");
+    let error = CppParseError::syntax_error_from(
+        &message,
+        crate::text::SourceRange::new(0, text.len().min(1)),
+    );
+    CppSyntaxTree::new(root, vec![error], tokens.to_vec(), 0)
 }
 
 impl EventStreamAudit {
@@ -561,6 +612,18 @@ impl<'a> CppParser<'a> {
         tokens: &[CppTokenData],
         config: ParserConfig<'a>,
     ) -> (CppSyntaxTree, EventStreamAudit) {
+        // **The caller's token ranges are input, and input is checked here.** This is a public entry point that takes
+        // whatever a caller hands over, and every later slice is `text[start..end]`: a range past the end of the text,
+        // one that ends before it starts, one that lands inside a character, or a stream that goes backwards all panicked
+        // inside a safe API (`docs/parser-toolchain-review.md` P2-4). A tree that is one empty translation unit and one
+        // error is the honest answer — the same shape a parse of garbage produces, so every consumer already handles it.
+        if let Some(problem) = why_the_tokens_do_not_fit(text, tokens) {
+            return (
+                a_tree_that_says(text, tokens, problem),
+                EventStreamAudit::default(),
+            );
+        }
+
         // Same reason as [`CppParser::parse_with_audit`] for the `CppParser::` path.
         let mut errors: Vec<CppParseError> = Vec::new();
         CppParser::with_tokens(text, tokens.to_vec(), config, &mut errors).run()

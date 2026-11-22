@@ -7787,3 +7787,64 @@ fn a_cast_with_a_long_template_argument_list_parses() {
     let tree = CppParser::parse(&source, ParserConfig::default());
     assert_eq!(tree.get_errors(), [], "it parses: {:?}", tree.get_errors());
 }
+
+/// **`parse_tokens` refuses a stream that does not describe its text, instead of panicking.**
+///
+/// It is a public entry point that takes whatever token stream a caller hands over, and every later step slices
+/// `text[start..end]`: a range past the end of the text, one that lands inside a character, and a stream that goes
+/// backwards all reached a panic inside a safe API (`docs/parser-toolchain-review.md` P2-4). The answer is the shape a
+/// parse of garbage already produces — an empty translation unit and one error — so nothing downstream needs a new case.
+#[test]
+fn parse_tokens_refuses_a_stream_that_does_not_describe_its_text() {
+    use cpp_parser::{CppTokenData, CppTokenKind, ParserConfig, SourceRange};
+
+    let text = "int x;";
+    let token = |start: usize, length: usize| {
+        CppTokenData::new(CppTokenKind::IntKeyword, SourceRange::new(start, length))
+    };
+
+    for (what, tokens) in [
+        ("a range past the end", vec![token(4, 8)]),
+        (
+            "a range that starts before the previous one",
+            vec![token(4, 1), token(0, 1)],
+        ),
+    ] {
+        let tree = cpp_parser::CppParser::parse_tokens(text, &tokens, ParserConfig::default());
+        assert!(
+            tree.has_syntax_errors(),
+            "{what} is reported: {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(tree.to_source_text(), "", "and the tree holds no text");
+    }
+
+    // A range inside a multi-byte character: `é` is two bytes, so byte 1 is not a boundary.
+    let tree = cpp_parser::CppParser::parse_tokens(
+        "é",
+        &[CppTokenData::new(
+            CppTokenKind::Identifier,
+            SourceRange::new(1, 1),
+        )],
+        ParserConfig::default(),
+    );
+    assert!(
+        tree.has_syntax_errors(),
+        "a range inside a character is reported: {:?}",
+        tree.get_errors()
+    );
+
+    // The control: a stream that does describe its text parses, and keeps every token.
+    let good = vec![
+        token(0, 3),
+        CppTokenData::new(CppTokenKind::Whitespace, SourceRange::new(3, 1)),
+        CppTokenData::new(CppTokenKind::Identifier, SourceRange::new(4, 1)),
+        CppTokenData::new(CppTokenKind::Semicolon, SourceRange::new(5, 1)),
+    ];
+    let tree = cpp_parser::CppParser::parse_tokens(text, &good, ParserConfig::default());
+    assert_eq!(
+        tree.to_source_text(),
+        text,
+        "a well formed stream still parses"
+    );
+}
