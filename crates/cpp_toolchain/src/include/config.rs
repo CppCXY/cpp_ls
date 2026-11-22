@@ -488,6 +488,50 @@ impl CompilerConfig {
             {
                 config.standard = Some(standard.as_str().into());
             }
+
+            // **A target's whole command line**, when the configuration writes one out. It is the same shape the
+            // project's `[compile].args` has, and read in the same order — the arguments it states, its `remove_args`
+            // dropped, its `extra_args` appended — but it belongs to the files this target describes rather than to
+            // every file. This was accepted by `TargetSection` and never applied, which is the worst of both: a
+            // configuration that parses and changes nothing (`docs/parser-toolchain-review.md` P2-7).
+            if let Some(declared) = &target.args {
+                let arguments: Vec<String> = declared
+                    .iter()
+                    .filter(|argument| !target.remove_args.iter().any(|drop| drop == *argument))
+                    .cloned()
+                    .chain(target.extra_args.iter().cloned())
+                    .collect();
+
+                // Relative `-I`s are relative to the project root, like the target's own `includes`.
+                let own = config_from_arguments(&arguments, Some(root.clone()));
+
+                // A whole command line is a statement about these files, so its directories **replace** what was
+                // discovered for them — that is the difference from `includes`, which is additive by design. A relative
+                // one is resolved against the project root, the way the target's own `includes` are, so that a stored
+                // search path is a path rather than a string whose meaning depends on who reads it.
+                config.include_paths = own
+                    .include_paths
+                    .into_iter()
+                    .map(|mut path| {
+                        if path.directory.is_relative() {
+                            path.directory = root.join(&path.directory);
+                        }
+                        path
+                    })
+                    .collect();
+                for definition in own.defines {
+                    if !config
+                        .defines
+                        .iter()
+                        .any(|held| held.name == definition.name)
+                    {
+                        config.defines.push(definition);
+                    }
+                }
+                if own.standard.is_some() {
+                    config.standard = own.standard;
+                }
+            }
         }
 
         // **A file with no command of its own inherits the project's standard, when the project states exactly one.**

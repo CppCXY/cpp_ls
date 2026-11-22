@@ -198,3 +198,60 @@ fn patterns_mean_what_the_documentation_says() {
             .is_none()
     );
 }
+
+/// **A target's own `args` are read, in the order the project's keys use.**
+///
+/// `TargetSection` accepts `args`, `extra_args` and `remove_args` and documents them exactly as `[compile]`'s own — and
+/// `for_file` applied none of them, so `args = ["-Igenerated", "-DFEATURE=1"]` parsed and changed nothing: the include
+/// directory was not searched and the macro was not defined (`docs/parser-toolchain-review.md` P2-7).
+#[test]
+fn a_targets_own_command_line_is_applied_to_the_files_it_describes() {
+    let section = compile_section(
+        r#"
+[[compile.target]]
+name    = "Server"
+sources = ["CodeFormatServer/**"]
+args    = ["-Igenerated", "-DFEATURE=1", "-DOLD=1"]
+remove_args = ["-DOLD=1"]
+extra_args  = ["-DEXTRA=1"]
+"#,
+    );
+
+    let config = config_for(&section, "/p/CodeFormatServer/main.cpp");
+
+    assert_eq!(
+        directories(&config),
+        ["/p/generated"],
+        "the target's `-Igenerated` is resolved against the project root, like its `includes`"
+    );
+    assert_eq!(
+        defines(&config),
+        ["FEATURE", "EXTRA"],
+        "`-DFEATURE=1` is defined, `-DOLD=1` was removed, and `-DEXTRA=1` was added"
+    );
+}
+
+/// **And a file the target does not describe keeps the project's configuration**, which is what makes the rule a
+/// target's rather than a project's.
+#[test]
+fn a_targets_command_line_does_not_leak_to_other_files() {
+    let section = compile_section(
+        r#"
+[[compile.target]]
+name    = "Server"
+sources = ["CodeFormatServer/**"]
+args    = ["-Igenerated", "-DFEATURE=1"]
+"#,
+    );
+
+    let config = config_for(&section, "/p/Elsewhere/main.cpp");
+
+    assert!(
+        !directories(&config)
+            .iter()
+            .any(|path| path.ends_with("generated")),
+        "no generated directory for a file outside the target: {:?}",
+        directories(&config)
+    );
+    assert!(defines(&config).is_empty(), "{:?}", defines(&config));
+}
