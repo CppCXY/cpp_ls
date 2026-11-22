@@ -7467,3 +7467,103 @@ int live_name = 2;
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }
+
+/// **A configuration file saved from the editor reloads the project.**
+///
+/// The open-buffer rule — "the buffer is the text, the disk is not" — is right for source and wrong for the project's
+/// own configuration, which is not edited into the analysis but **re-read**. `if open { continue }` skipped the reload,
+/// and `didSave` carries no text (the server asks for none), so saving `.cppls.toml` in an editor changed nothing until
+/// a restart (`docs/language-server-review.md` P1-4).
+#[test]
+fn a_configuration_file_saved_from_the_editor_reloads_the_project() {
+    let project = Project::new("config-save-reload");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    project.write(".cppls.toml", "[hover]\nenable = false\n");
+    let configuration = project.root().join(".cppls.toml");
+    let configuration_uri = uri_of(&configuration);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "workspace": { "configuration": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    // The configuration file is **open in the editor**, which is the state a user saves it from.
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": configuration_uri,
+                "languageId": "toml",
+                "version": 1,
+                "text": "[hover]\nenable = false\n",
+            }
+        }),
+    );
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    let hover = |server: &mut Server, id: i64| {
+        server.request(
+            id,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 3, "character": 6 },
+            }),
+        )
+    };
+    assert_eq!(
+        hover(&mut server, 2)["result"],
+        Value::Null,
+        "the project turned the popup off, and the server read that from the file"
+    );
+
+    // The user edits and saves: the disk gets the new text, then the notifications a save produces.
+    std::fs::write(&configuration, "[hover]\nenable = true\n").expect("the configuration writes");
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": configuration_uri, "version": 2 },
+            "contentChanges": [{ "text": "[hover]\nenable = true\n" }],
+        }),
+    );
+    server.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": configuration_uri } }),
+    );
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": configuration_uri, "type": 2 }] }),
+    );
+
+    // The reload is debounced and asynchronous: ask until the new configuration answers, within a bound.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut id = 10;
+    loop {
+        let answer = hover(&mut server, id);
+        if !answer["result"].is_null() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("the saved configuration never reached the server: {answer}");
+        }
+        id += 1;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = server.request(id + 1, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}

@@ -292,6 +292,29 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The language-server review: batch 1, workspace and reload
+
+`docs/language-server-review.md` is the third review, of `cpp_ls` itself. Its central claim — that a second state machine
+exists beside the document-update queue (configuration, reload, progress and inactive regions each own their lifecycle,
+and those paths do not obey the sequence/version discipline the document path does) — checked out against the code, and
+four of its P1 items were confirmed line by line before any change.
+
+**P1-4, a configuration file saved in the editor did nothing at all.** The review was right about the mechanism:
+`process_did_change_watched_files` treats an open buffer as the authority — correct for source, wrong for a file whose
+change is not an edit but a **reason to reload** — and the `if open { continue }` sat before the configuration check.
+`didSave` carries no text (the server asks for none), so a save produced no event, no reload, and no error; the old
+environment stayed in force until the file was closed or the server restarted.
+
+Two changes: the open/configuration pair is decided together, and a configuration change **falls through** to the reload
+(it must not also be queued as a source event — a `.toml` is not a translation unit). The test is
+`handshake.rs::a_configuration_file_saved_from_the_editor_reloads_the_project`: it opens `.cppls.toml` with
+`[hover] enable = false`, verifies the popup is off, writes and saves the file with `enable = true`, sends the
+`didChange`/`didSave`/`didChangeWatchedFiles` a client sends, and asks the popup until it answers (bound 20 s). It failed
+without the change with the log showing no reload at all, and passes in **2.65 s** with it.
+
+**P1-1, P1-6, P1-5 remain open** — they are next in the batch; the review's other P1 item, the idle test it reports red,
+**passes here** (14.08 s), so its baseline is older than this tree.
+
 ## The analysis review: the baseline, the probe, and what it found before any fix
 
 `docs/code-analysis-review.md` arrived as a second review, of `cpp_code_analysis`. Stage 0 of working through it is a

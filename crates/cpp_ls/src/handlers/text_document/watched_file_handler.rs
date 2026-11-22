@@ -114,9 +114,18 @@ pub async fn process_did_change_watched_files(
 
         // A buffer the client has open is the text, and the disk is not: a save reports both a `didSave` and a
         // watched-file change, and re-reading the file would answer about text the user cannot see.
-        let open = {
+        //
+        // **Except a configuration file, which is not a text to index but a reason to reload.** It has no buffer
+        // reading in the analysis at all — the project's configuration is read from disk when a session opens — and
+        // `didSave` carries no text (the server asks for none), so treating an open `.cppls.toml` like an open source
+        // file left a save with **no effect at all** until the file was closed or the server restarted
+        // (`docs/language-server-review.md` P1-4).
+        let (open, configuration) = {
             let workspace_manager = context.workspace_manager().lock().await;
-            workspace_manager.is_open_file(&change.uri)
+            (
+                workspace_manager.is_open_file(&change.uri),
+                workspace_manager.is_configuration_file(&path),
+            )
         };
 
         match change.typ {
@@ -127,11 +136,14 @@ pub async fn process_did_change_watched_files(
                 }
             }
             FileChangeType::CREATED | FileChangeType::CHANGED => {
-                if open {
+                if open && !configuration {
                     continue;
                 }
-
-                changes.push(cpp_code_analysis::FileEvent::modified(path.clone()));
+                // **And no source event for a configuration file**, open or not: a `.toml` is not a translation unit,
+                // and what a change to it means is the reload at the bottom of this loop.
+                if !configuration {
+                    changes.push(cpp_code_analysis::FileEvent::modified(path.clone()));
+                }
             }
             _ => continue,
         }
