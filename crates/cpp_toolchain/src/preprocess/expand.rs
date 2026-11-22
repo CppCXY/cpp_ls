@@ -414,16 +414,28 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
     ///
     /// `None` for everything else, and for all three when the expansion was given no positions
     /// (`expand_with_positions` is the constructor that gives them).
-    fn a_position_dependent_macro(&self, token: &Token) -> Option<Token> {
+    fn a_position_dependent_macro(
+        &self,
+        token: &Token,
+        region: Option<SourceRange>,
+    ) -> Option<Token> {
         let lines = self.lines?;
         if token.kind != cpp_parser::CppTokenKind::Identifier {
             return None;
         }
-        // The call site when this token came out of a body, its own position when the file wrote it.
-        let at = match self.invocations.last() {
-            Some(invocation) => invocation.call_site.start_offset,
-            None => token.range.start_offset,
-        };
+        // **The outermost call site** — the one the reader wrote — then the span this run was expanded in, and only
+        // then the token itself.
+        //
+        // The middle fallback is the argument **prescan**: it expands an argument before the call is pushed, so there
+        // is no invocation yet, and the body tokens it is expanding carry offsets in the *reconstruction* of a
+        // `#define` line (a few bytes long) — so their own range answers a line like 2. Every capture in a file then
+        // got the same name, and `redefinition` reported 86 of them across nlohmann/json (`docs/worklog.md`).
+        let at = self
+            .invocations
+            .first()
+            .map(|invocation| invocation.call_site.start_offset)
+            .or_else(|| region.map(|region| region.start_offset))
+            .unwrap_or(token.range.start_offset);
         match token.text.as_str() {
             "__LINE__" => Some(Token::new(
                 cpp_parser::CppTokenKind::IntegerLiteral,
@@ -623,7 +635,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                 // (the standard's answer — the *call's* line, not the `#define`'s), and the token's own offset when it
                 // was written at the call site. `__FILE__` has no name to answer here, so it becomes an empty literal
                 // rather than a wrong one. See `expand_with_positions`.
-                if let Some(replacement) = self.a_position_dependent_macro(token) {
+                if let Some(replacement) = self.a_position_dependent_macro(token, region) {
                     if !self.push(replacement, tokens[index].origin.clone(), region) {
                         return consumed;
                     }

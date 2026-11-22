@@ -437,7 +437,7 @@ use std::path::{Path, PathBuf};
 /// summary holds a C++ reading, and the client's `languageId: "c"` (redis 8.x: **73 `cstyle-cast` findings, all in
 /// `.h` files**, `docs/c-support.md` §8) changes the reading rather than only the rules. `context_hash` covers the
 /// configuration, and the client's answer is not part of it.
-pub const FORMAT_VERSION: u32 = 54;
+pub const FORMAT_VERSION: u32 = 55;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
