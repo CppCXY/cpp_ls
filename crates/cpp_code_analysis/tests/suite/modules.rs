@@ -2168,7 +2168,7 @@ fn a_module_unit_is_read_as_a_translation_unit() {
 /// `geometry.cppm` — which the candidate list did not know: it tried `geometry-shapes`, `geometry/shapes` and
 /// `geometry.shapes`, so `export import :shapes;` in the primary interface resolved to nothing, and a file that
 /// imports the module saw neither `Rect` nor `rect_area`. Measured with `tests/partition_probe.rs` and the real
-/// project (`docs/buglist.md` section 11).
+/// project (`docs/worklog.md`).
 ///
 /// The fixture spells the same shape in memory: a primary interface that re-exports two partitions, and a `.cpp` that
 /// imports the module and uses what the partitions export.
@@ -2201,7 +2201,7 @@ fn a_partition_named_with_an_underscore_is_found_and_its_names_are_visible() {
     // names are. The convention itself is measured on the real project by `tests/partition_probe.rs` (partition files
     // invisible before the `_` spelling was added, visible after), and a fixture that reproduces it needs the scanner
     // to read a file the project has not — which this fixture's provider could not be made to do (the attempt is in
-    // `docs/buglist.md` section 11).
+    // `docs/worklog.md`).
     session.add_project_files([
         std::path::PathBuf::from("src/geometry.cppm"),
         std::path::PathBuf::from("src/geometry_shapes.cppm"),

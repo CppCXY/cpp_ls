@@ -540,7 +540,7 @@ mod tests {
         /// The compiler searches the including file's own directory first and the `-I` list after it — and a project
         /// with no compile database has neither for `#include "LanguageServer.h"`, which sits one directory up from
         /// the `.cpp` that writes it. Measured on `EmmyLuaCodeStyle`: unresolved, and `LanguageServer` answered **0**
-        /// members from every `.cpp` (`docs/buglist.md` section 8). A quoted include is the project's own by
+        /// members from every `.cpp` (`docs/worklog.md`). A quoted include is the project's own by
         /// convention, so one file of that name is that file.
         #[test]
         fn a_bare_quoted_include_finds_the_only_file_of_that_name() {

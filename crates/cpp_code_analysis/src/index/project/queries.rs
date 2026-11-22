@@ -172,7 +172,7 @@ pub fn definition_across_files(
             // name a module re-exports: measured on `test_module`'s `import std;` file, `std::cout` had two candidates
             // — `std.cc:1588 using std::cout;` (kind `Other`) and `iostream:65 extern ostream cout;` — and `std::map`
             // had three: the same kind of synonym, the **definition** in `stl_map.h`, and a forward declaration in
-            // `stl_multimap.h`. See `docs/buglist.md` section 10.
+            // `stl_multimap.h`. See `docs/worklog.md`.
             if found
                 .found
                 .iter()

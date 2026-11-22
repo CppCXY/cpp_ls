@@ -361,7 +361,7 @@ fn a_member_through_a_smart_pointers_arrow_is_named() {
 /// fact has no type, no return type and no parameter list — which is every fact built from a **binding** — and a
 /// local's `qualified_name()` is its bare spelling, because a function body contributes no scope segment. So the bare
 /// name found another entity entirely. `definitions`, `definition` and `type_at` had the local right all along.
-/// See `docs/buglist.md` section 7.
+/// See `docs/worklog.md`.
 #[test]
 fn a_local_is_not_answered_by_a_same_named_declaration_from_the_index() {
     let root: PathBuf = std::env::temp_dir().join("cppls-hover-local");

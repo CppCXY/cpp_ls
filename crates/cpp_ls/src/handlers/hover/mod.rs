@@ -1707,13 +1707,13 @@ fn declaration_markdown(
     // declared in `xlocale:581:11` `` — a real declaration of the same spelling from the standard library, inside a
     // conditional block. `definitions` and `type_at` had the local right; only the card re-asked. `LSP.cpp:12`'s
     // `auto object = nlohmann::json::object();` was the same shape: a variable shown as the static function
-    // `basic_json::object(initializer_list_t init = ...)`. See `docs/buglist.md` section 7.
+    // `basic_json::object(initializer_list_t init = ...)`. See `docs/worklog.md`.
     // **A type is never re-asked either.** A class fact has no type, no return type and no parameter list — the
     // fields the re-ask exists to recover from a *binding* — so the condition below was true for every class, and
     // the name lookup replaced the declaration the caller had chosen with whatever the bare spelling answered:
     // `std::vector<std::string>`'s card was a forward declaration in `<format>` and then the `vector<bool>`
     // specialization, never the definition the hover had just selected (`CPPLS_TRACE_HOVER=1` shows
-    // `[card] heard vector … => indexed stl_bvector.h:vector`). See `docs/buglist.md` section 10.
+    // `[card] heard vector … => indexed stl_bvector.h:vector`). See `docs/worklog.md`.
     let indexed = if !found.fact.local
         && !matches!(
             found.fact.kind,

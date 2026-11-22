@@ -191,7 +191,7 @@ const DETACHED: u8 = 2;
 ///
 /// Not a profiler: a count per kind of question, printed once at the end of a parse. It answers the only question a
 /// profiler on this machine cannot — *how often* a rule runs — and the times then come from what one of them must
-/// cost. The numbers it produced are in `docs/parser-review.md` §2.
+/// cost. The numbers it produced are in `docs/worklog.md`.
 #[derive(Default)]
 struct ParserCounts {
     checkpoints: std::cell::Cell<u64>,
@@ -578,7 +578,7 @@ impl<'a> CppParser<'a> {
     ///
     /// This is what an editor needs: a file's text arrives as a slice of a stream that was lexed once
     /// for something much larger — the stitched, macro-expanded translation unit — and reparsing the
-    /// whole of it for a keystroke in one file is the wrong work (see `docs/parse-architecture.md`).
+    /// whole of it for a keystroke in one file is the wrong work (see `docs/worklog.md`).
     ///
     /// # The contract
     ///
@@ -1905,7 +1905,7 @@ impl<'a> CppParser<'a> {
         // syntax errors reported — see `tests/lossless.rs`.
         //
         // **Asserted only under `CPPLS_TRIVIA=1`**, because the state is reachable today: a debug build of the server
-        // hits it while indexing ordinary C++ headers (§4 of `docs/parser-review.md`), and a guard that fires on
+        // hits it while indexing ordinary C++ headers (§4 of `docs/worklog.md`), and a guard that fires on
         // every run is a guard nobody can keep. The probe turns it into the failure it is.
         //
         // **The switch is read once for the process, not once per token.** This assertion used to call

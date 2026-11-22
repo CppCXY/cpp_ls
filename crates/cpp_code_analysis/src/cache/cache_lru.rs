@@ -115,7 +115,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     /// **The views a session remembers** — [`VIEW_ENTRIES`] of them, and at most [`VIEW_BYTES`] of *estimated tree*.
     ///
     /// The weight is not the text a view was parsed from but what the view costs: a rowan tree is 8–24× its text
-    /// (`docs/parser-review.md`), so a budget stated in text bytes would understate the memory by an order of
+    /// (`docs/worklog.md`), so a budget stated in text bytes would understate the memory by an order of
     /// magnitude. See [`crate::session::a_view_weighs`] for the estimate.
     pub fn views() -> Self {
         Self::new(VIEW_ENTRIES, VIEW_BYTES)

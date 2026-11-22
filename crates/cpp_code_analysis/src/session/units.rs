@@ -500,7 +500,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // evicted this file's entry during the project read.
         //
         // The fix is therefore not here: it is to keep the **open file's timeline hot** (pinned against eviction), so
-        // the contract holds at milliseconds. See `docs/buglist.md` §6.
+        // the contract holds at milliseconds. See `docs/worklog.md`.
         let (unit, provisional) = self.unit_and_state_of(path)?;
         (!provisional && unit.environment_of(path).is_some()).then_some(unit)
     }

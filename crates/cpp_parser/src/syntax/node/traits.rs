@@ -7,7 +7,7 @@
 //! [`CppSyntaxNode`], with `cast`/`can_cast` deciding whether a node is of that type.
 //!
 //! That shape (and the names in it) follows the Lua implementation this project grew out of, so code
-//! written against the old API keeps working. See `reference/README.md` for where that code lives now.
+//! written against the old API keeps working. See `docs/open-questions.md` for where that code lives now.
 //!
 //! # The three traits
 //!

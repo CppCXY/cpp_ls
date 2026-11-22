@@ -203,7 +203,7 @@ impl FuzzyIndex {
     /// settle either. It exists for a **quoted** include, which the compiler resolves against the including file's own
     /// directory before any search path — and which a project with no compile database leaves with no search path at
     /// all. Measured on `EmmyLuaCodeStyle`, whose `LSPHandle.cpp` writes `#include "LanguageServer.h"` one directory
-    /// up: unresolved, so `LanguageServer` had **0** members from every `.cpp` (`docs/buglist.md` section 8).
+    /// up: unresolved, so `LanguageServer` had **0** members from every `.cpp` (`docs/worklog.md`).
     ///
     /// An **angled** include never reaches this: `<vector>` is spelled without a directory because the search path is
     /// meant to find it, and resolving it to a project file named `vector` would be the confident wrong answer the

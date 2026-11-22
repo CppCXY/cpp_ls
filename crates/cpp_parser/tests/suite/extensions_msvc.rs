@@ -69,7 +69,7 @@ fn the_msvc_gaps_are_named() {
 /// The specifier sequence joined the whole qualified name into the type (`starts_an_out_of_class_member` only knew a
 /// leading *identifier*), so the declarator named nothing and the `(` was read as a direct-initialiser — which failed
 /// at the parameter's own `::` and cost the declaration. Measured before: 11 errors in `vccorlib.h` on the sweep, and
-/// after: none (`docs/buglist.md` section 13).
+/// after: none (`docs/worklog.md`).
 ///
 /// The check is on the **shape of the declaration**, not on the error count alone: a declaration read as a
 /// type-plus-initialiser can be error-free in the shapes where the initializer parses, and the parameter list is what a

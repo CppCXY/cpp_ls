@@ -747,7 +747,7 @@ fn a_braced_construction_of_a_template_id_is_typed() {
     //
     // The second half of the fixture is deliberately not asserted: `auto y = B<int>{}.with(2);` answers the initialiser's
     // **spelling** (`B<int>{}.with`), because the type of a member call on a braced construction is a separate question —
-    // the hover on the member answers `int with(int x)` while the call's own type does not. Recorded in `docs/buglist.md`
+    // the hover on the member answers `int with(int x)` while the call's own type does not. Recorded in `docs/worklog.md`
     // as the next piece of the card work rather than asserted away here.
     let at = source.find("x = ").expect("the fixture");
     assert_eq!(

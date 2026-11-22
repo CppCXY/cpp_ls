@@ -155,7 +155,7 @@ pub fn the_hover(opened: &Opened, place: &Place) -> Result<Answer, String> {
     let where_at = at_a_place(&opened.text, at);
     // **What the analysis answers before the card is rendered** — the probe this question needed: `hover` and
     // `define` disagreed about the same cursor, and the difference had to be seen before `hover_text` composed
-    // anything. See `docs/buglist.md` section 7.
+    // anything. See `docs/worklog.md`.
     if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
         let picked = opened
             .session

@@ -676,7 +676,7 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
 /// `private ref class WriteOnlyArray<…>`, `public enum class E` — which is not C++ and which the declaration rule has
 /// to be told about. The head is one of the class keys, optionally behind the dialect's own word (`ref`, `value`,
 /// `interface`), and the answer is no when neither is there: `public:` inside a class is a label and is read by the
-/// member rule, and `protected private:` is two labels (`docs/buglist.md` section 13).
+/// member rule, and `protected private:` is two labels (`docs/worklog.md`).
 fn an_access_specifier_introduces_a_class(p: &CppParser) -> bool {
     let mut at = 1usize;
     while matches!(
@@ -5366,7 +5366,7 @@ pub(crate) fn starts_an_out_of_class_member(p: &CppParser) -> bool {
     // a qualified name written with the global scope operator — MSVC's `vccorlib.h` writes every `Guid` member that
     // way — and without this arm the specifier sequence swallowed the whole qualified name as the *type*, the
     // declarator named nothing, and the `(` was read as a direct-initialiser, which fails at the parameter's own `::`
-    // (`docs/buglist.md` section 13). The shape still has to end at `(`: `::Platform::Guid g;` is a variable whose
+    // (`docs/worklog.md`). The shape still has to end at `(`: `::Platform::Guid g;` is a variable whose
     // type is qualified, and it must keep joining the type.
     let mut at = 1usize;
     let mut scopes = 0usize;

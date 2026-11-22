@@ -50,7 +50,7 @@ fn is_on(value: Option<std::ffi::OsString>) -> bool {
 switch! {
     trivia => "CPPLS_TRIVIA",
         "Assert that the cursor never stands on trivia when `bump` emits — the live defect of \
-         `docs/parser-review.md` §4, made to fail loudly instead of silently dropping bytes.";
+         `docs/worklog.md`, made to fail loudly instead of silently dropping bytes.";
     declaration_trace => "CPPLS_TRACE_DECLARATION",
         "Print one line per declaration reading that failed, with the offset and the error — the trace that named \
          the shape a construct was misread as.";

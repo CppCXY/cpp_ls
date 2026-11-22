@@ -1,5 +1,5 @@
 //! **A parse of a run of tokens, not of a whole text** — the enabling refactor for the split in
-//! `docs/parse-architecture.md`.
+//! `docs/worklog.md`.
 //!
 //! An editor reparses because one file changed. The stream it parses is the **stitched** translation unit — that file's
 //! text with every include's text macro-expanded into it — and for `#include <vector>` that is tens of thousands of

@@ -33,7 +33,7 @@
 //!
 //! [`Session`]: crate::Session
 //!
-//! See `docs/buglist.md` for the two that remain.
+//! See `docs/worklog.md` for the two that remain.
 //!
 //! # What makes a hint *useful* rather than noise
 //!

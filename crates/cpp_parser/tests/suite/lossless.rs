@@ -5,7 +5,7 @@
 //!
 //! The tests here are the invariant made checkable: a file that parses cleanly must give its text back byte for byte, a
 //! file with a comment in it must keep the comment, and the container that reads declarations until a `}` must keep the
-//! comments between them. The last one **was** a failure — `docs/parser-review.md` §4 has the measurement (22 315 bytes in,
+//! comments between them. The last one **was** a failure — `docs/worklog.md` has the measurement (22 315 bytes in,
 //! 19 987 out, zero syntax errors) and the cause: the linkage block's loop did not emit the trivia a declaration's `;`
 //! stops before, so the comment was at its cursor when the next iteration began.
 

@@ -58,7 +58,7 @@ pub struct MemoryReport {
     /// **The parse trees kept for reuse**: how many views, and their estimated tree bytes.
     ///
     /// The newest table here and the largest per entry — a rowan tree is 8–24× the text it describes
-    /// (`docs/parser-review.md` §2) — bounded by [`crate::cache::cache_lru::VIEW_BYTES`] of *estimated tree*. It buys
+    /// (`docs/worklog.md`) — bounded by [`crate::cache::cache_lru::VIEW_BYTES`] of *estimated tree*. It buys
     /// a hundredfold on every request that asks a question about a position, which used to parse the rendering again.
     pub views: usize,
     pub view_bytes: usize,

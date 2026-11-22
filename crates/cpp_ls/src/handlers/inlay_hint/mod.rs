@@ -23,7 +23,7 @@
 //! `std::vector<int>` was not an instantiated type. Both are answered now (`Session::type_hints`, which asks the same
 //! reader the hover does), so the refusal became a gap. What is still refused is a **lambda parameter**'s type (needs the
 //! call sites) and a **lambda's deduced return** (its type is unnamed and the deduction starts from a binding) — see
-//! `docs/buglist.md`.
+//! `docs/worklog.md`.
 //!
 //! # Offsets in, positions out
 //!

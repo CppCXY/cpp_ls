@@ -84,7 +84,7 @@ switch! {
     share => "CPPLS_WALK_SHARE", "Turn the walk cache's cross-walk contribution sharing **on** — an experiment switch, and off by default because the order is wrong: a contribution is replayed at the position it was recorded at in a *different* walk, which drops include edges. Measured on `import std;`: `<limits>` lost its `<cwchar>` and `<xstddef>` includes, so the `_MEMBER_CALL_*` macros were undefined where `<xtr1common>` uses them, and the standard module's rendering kept their invocations as text.";
     attribution => "CPPLS_TRACE_ATTRIBUTION", "Why a declaration a program read found was filed under the file it did — the trace that named a wrong owner.";
     semantic => "CPPLS_TRACE_SEMANTIC", "Where one semantic-token request's milliseconds went: the phase, the encoding and how many tokens came out.";
-    trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/parser-review.md` §4.";
+    trivia => "CPPLS_TRIVIA", "Assert the cursor-is-on-trivia invariant: with this on, `bump` panics instead of silently dropping a token's bytes — the live defect of `docs/worklog.md`.";
 
     // **The four that were read at a use site on a hot path** — the same defect this module removes, found in this
     // crate by auditing for it rather than by waiting for a profile.
@@ -105,7 +105,7 @@ switch! {
 /// A variable rather than a switch because the answer is a *file*: `FileIndexer::index_rendering` parses a rendering of
 /// the file, and a parse that goes wrong only in that text cannot be seen in `inspect tree` (the file's own text) or in
 /// `Session::render_the_unit` (a different rendering — measured: correct for the 28-line reproducer in
-/// `docs/buglist.md` §31, while the summary built here is wrong). One `.rendering` file per indexed file, named after
+/// `docs/worklog.md`, while the summary built here is wrong). One `.rendering` file per indexed file, named after
 /// it, written only when asked.
 ///
 /// **Read once**, like every switch: a directory's name cannot change during a run, and this is asked per indexed file.

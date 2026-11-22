@@ -268,7 +268,7 @@ fn dump_a_function_pointer_declaration() {
 /// To this parser they were ordinary identifiers, so `return __real__ _M_value;` was a return of `__real__` followed
 /// by a second expression, and the recovery from that error **swallowed the rest of the class body**. On the unit read
 /// of `bits/std.cc` the class was `<complex>` and every file rendered after it lost its declarations — `iostream`'s
-/// `std::cout` among them, which is what `docs/buglist.md` section 12 is about:
+/// `std::cout` among them, which is what `docs/worklog.md` is about:
 ///
 /// ```text
 /// before:  [names] insert_a_reading .../iostream: declarations 0

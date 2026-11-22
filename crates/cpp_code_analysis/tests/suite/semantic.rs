@@ -2077,7 +2077,7 @@ int f(void) { binary_op operation = add; int value = 1; return operation(value, 
 
 /// **A member whose `if` condition holds a preprocessor directive does not swallow the rest of the class.**
 ///
-/// The reduced reproducer for `docs/buglist.md` §31. Three ingredients, each necessary:
+/// The reduced reproducer for `docs/worklog.md`. Three ingredients, each necessary:
 ///
 /// ```text
 /// a *resolved* #include      an unresolved one, or the same text written inline, parses correctly

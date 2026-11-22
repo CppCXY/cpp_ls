@@ -666,7 +666,7 @@ pub struct CacheSizes {
 
 /// **What one parsed view costs**, in the estimate the view cache's budget is stated in.
 ///
-/// A rowan tree weighs 8–24× the text it describes, measured on two corpora (`docs/parser-review.md` §2): one
+/// A rowan tree weighs 8–24× the text it describes, measured on two corpora (`docs/worklog.md`): one
 /// allocation per token with the token's bytes copied into it, one per node with its children. 8 is the low end and a
 /// source file is the case that hits it, so `text × 8` plus a word per token is the estimate — deliberately an
 /// under-estimate, because over-stating it would evict views that are cheap to keep and the budget is what matters,

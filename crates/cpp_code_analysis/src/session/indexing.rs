@@ -824,7 +824,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// meaning depended on a header that arrived later. Cooking before that pass would build a reading of an
     /// environment the summaries are about to revise.
     /// **What the queue physically holds against what it says is pending** — a diagnostic, and the measurement behind
-    /// §6 of `docs/buglist.md`.
+    /// §6 of `docs/worklog.md`.
     ///
     /// `pending()` is the number of paths whose standing is `Queued`; the deques also hold entries that were re-armed
     /// into the other half, upgraded, forgotten or worked — `pop` walks them and skips them, and the two numbers

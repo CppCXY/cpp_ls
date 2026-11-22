@@ -419,7 +419,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         //
         // A parse that goes wrong only here cannot be seen in `inspect tree`, which reads the file's own text, and
         // `Session::render_the_unit` is a different rendering (measured: correct for the 28-line reproducer in
-        // `docs/buglist.md` §31, while the summary this function builds is wrong). So the one text that matters gets a
+        // `docs/worklog.md`, while the summary this function builds is wrong). So the one text that matters gets a
         // way out, off unless asked for, like this crate's other traces.
         if let Some(directory) = crate::probes::dump_rendering_dir() {
             let _ = std::fs::create_dir_all(directory);

@@ -3,7 +3,7 @@
 //! A token type exists when the token has behaviour beyond its kind: a name has text, a number has a
 //! value, an operator has a precedence. Tokens that carry nothing extra use [`CppGeneralToken`].
 //!
-//! The shape follows the reference implementation (`reference/README.md`): a newtype over a
+//! The shape follows the reference implementation (`docs/open-questions.md`): a newtype over a
 //! [`CppSyntaxToken`] plus a `CppAstToken` impl, with accessors as inherent methods.
 
 use crate::{
