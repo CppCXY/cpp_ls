@@ -579,27 +579,26 @@ fn visit<F: FileProvider>(
     // for the includes after it and not for the ones before, which is what makes two includes of one header
     // see two different macro tables. Walking only the includes would lose that.
     //
-    // The macro state is snapshotted before each directive, because a condition has to be decided against the
-    // macros in force where it was *written* — see [`directive_visibilities`].
-    //
-    // **One state, not one per directive.** The walk used to clone the inherited [`Marked`] once per directive so
-    // that a condition could be decided against "the state at its position" — but every one of those clones was of
-    // the *same* value (the walk applies a `#define` as it reaches it, not before), so the table was a thousand copies
-    // of one state: on MSVC, whose predefines are ~9 400 names, `xutility` alone paid for a thousand clones of a
-    // 9 400-entry `Vec` and `HashSet` — **185 ms per file**, most of it not analysis. `preprocess` already carries the
-    // state at every offset (`FilePreprocessing::macros_at`), which is where a per-position answer belongs; until that
-    // is wired in, the honest single state is what this reads, and the verdicts are the same ones the clones produced.
-    let visibilities = directive_visibilities(&macros, &preprocessing.directives);
+    // **The regions this file opens, stepped in file order.** A `#define` above a `#if` is what decides that branch, so
+    // the verdicts cannot be computed in one pass before the loop below applies the defines — see [`RegionWalk`].
+    let mut regions = RegionWalk::new();
 
-    for (index, spanned) in preprocessing.directives.iter().enumerate() {
-        // A define inside a region that is definitely not compiled never takes effect. Applying it anyway
+    for spanned in &preprocessing.directives {
+        let visibility = regions.step(spanned, &macros);
+        // A directive in a region that is definitely not compiled never takes effect. Applying it anyway
         // would put a macro in force that a compiler never defines — the failure that makes a consumer believe
         // a branch is live when it is not. An undecidable region is applied, because a macro that *might* be
         // defined is closer to what a compiler sees than one that is certainly not.
-        if visibilities[index] == Some(false) {
+        if visibility == Some(false) {
             continue;
         }
-
+        // **Applied even when the region is undecidable**, which is the older reading of the same doubt: a macro that
+        // *might* be defined is closer to what a compiler sees than one that is certainly not, and a guard chain
+        // (`#ifndef X` / `#define X` / `#endif` in a header read on its own) is exactly the case where refusing to
+        // define it costs the whole file. The doubt itself is recorded on the walk (`mark_incomplete` below for an
+        // unreadable or unresolved include); marking the *name* uncertain as well would make `#ifdef X` answer
+        // "unknown" for a definition this file plainly wrote, and `FileEntry` has no way to carry that distinction
+        // yet — see the worklog on what is left of the review's P1-7.
         match &spanned.directive {
             Directive::Define(define) => {
                 if let Some(definition) = &define.macro_def {
@@ -621,12 +620,17 @@ fn visit<F: FileProvider>(
         let resolution = resolver.resolve(include, &including, None, interner);
 
         match resolution {
-            Resolution::Unresolved(unresolved) => graph.unresolved.push(UnresolvedInclude {
-                from: file,
-                name: unresolved.name,
-                searched: unresolved.searched,
-                range: spanned.range,
-            }),
+            Resolution::Unresolved(unresolved) => {
+                // **The table is incomplete from here on.** The file that would have supplied definitions was not found,
+                // so a name the walk has not seen is not certainly undefined — see `Marked::mark_incomplete` (P1-7).
+                macros.mark_incomplete();
+                graph.unresolved.push(UnresolvedInclude {
+                    from: file,
+                    name: unresolved.name,
+                    searched: unresolved.searched,
+                    range: spanned.range,
+                });
+            }
             Resolution::Resolved(resolved) => {
                 let visit = decide_visit(resolved.file, graph, state, &macros, depth);
 
@@ -680,80 +684,70 @@ fn visit<F: FileProvider>(
     macros
 }
 
-/// The visibility of every directive, by position: `Some(true)` for one that a compiler compiles,
-/// `Some(false)` for one inside a region it does not, and `None` for one that cannot be decided.
+/// **The conditional regions the walk is inside, stepped one directive at a time.**
 ///
-/// One entry per directive in the file, in file order and index-aligned with it, so a caller can ask about any
-/// of them — including the ones that are not conditions at all, which is what the walk needs: a `#define` or an
-/// `#include` is skipped exactly when it sits inside a region that is not compiled.
+/// The pass this replaces computed every directive's visibility **before** the loop that applies `#define`s, all from
+/// the state the file was entered with. That is not what a compiler does, and the cost was the most basic ordering there
+/// is (`docs/parser-toolchain-review.md` P1-6):
 ///
-/// # Why each open region remembers where its arms start
-///
-/// Asking "did some arm of this region hold" is not the same question as "is the code here inside the arm that
-/// is in force", and the two differ wherever a region has more than one. Under the first reading
-/// `#if 1 ... #else ... #endif` is compiled throughout, so the `#else` arm's `#define`s are applied although a
-/// compiler never reads them. The region therefore keeps its arms' *starting positions* as well as their
-/// verdicts, and the code at a position belongs to the last arm that started at or before it.
-///
-/// Positions rather than indices-within-the-region, because the question is about the file: an arm's index
-/// within its region says nothing about where in the file it is.
-///
-/// # Why the verdicts are decided against a snapshot
-///
-/// Each arm's condition is decided against the macros in force **where it was written** — `states[position]`,
-/// captured by the walk as it passed. Asking at the end gives the opposite answer for the one pattern that
-/// matters most:
-///
-/// ```text
-/// #ifndef GUARDED_H     <- true here: nothing has defined it yet
-/// #define GUARDED_H     <- and now it is defined
-/// ...                   <- everything from here reads as inside a condition that is now false
+/// ```c
+/// #define FEATURE 1
+/// #if FEATURE
+/// #  include "feature.h"     // never reached: the `#if` was decided from the *inherited* state
 /// #endif
 /// ```
 ///
-/// Decide the guard from the final state and every guarded header's body looks disabled — its includes
-/// included, so they are never followed.
-///
-/// # Why `#endif` is the one directive that changes nothing
-///
-/// Every directive's visibility is decided by the regions open **before** it, and `#endif` is no exception
-/// however strange that reads: the `#endif` line is inside the region it closes, and a region that is disabled
-/// makes its own `#endif` part of the disabled text. Applying that uniformly is what lets this be one loop
-/// with no special case — the region is popped as the `#endif` is *passed*, which is what puts the directive
-/// after it outside.
-fn directive_visibilities(state: &Marked, directives: &[SpannedDirective]) -> Vec<Option<bool>> {
-    let mut open: Vec<OpenRegion> = Vec::new();
-    let mut visibilities: Vec<Option<bool>> = Vec::with_capacity(directives.len());
+/// Stepping it means each branch is decided against the macros in force where it is written — the caller applies the
+/// file's own `#define`s to the running [`Marked`] between steps, so the next condition sees them, exactly as the
+/// preprocessor does.
+struct RegionWalk {
+    open: Vec<OpenRegion>,
+    /// Which directive this is, in the file's own order — what [`inside_active_arm`] compares the arms' starts against.
+    position: usize,
+}
 
-    for (position, spanned) in directives.iter().enumerate() {
-        // At a directive that is itself a condition, the region's own verdict is about the arm it opens: an
-        // `#else` sits *inside* the region, in the arm it introduces. `inside_active_arm` places it there
-        // because it counts arms starting at or before the position, and this arm starts here.
-        visibilities.push(inside_active_arm(&open, position));
+impl RegionWalk {
+    fn new() -> Self {
+        RegionWalk {
+            open: Vec::new(),
+            position: 0,
+        }
+    }
 
-        // Every kind of condition is resolved here, `#endif` included, so that one branch of the match cannot
-        // advance the state differently from another.
+    /// The visibility of the code at `spanned`, and then the region its own condition opens, closes or switches.
+    ///
+    /// `Some(true)` compiled, `Some(false)` definitely not, `None` undecidable — see [`inside_active_arm`].
+    fn step(&mut self, spanned: &SpannedDirective, macros: &Marked) -> Option<bool> {
+        let position = self.position;
+        self.position += 1;
+
+        // At a directive that is itself a condition, the region's own verdict is about the arm it opens: an `#else`
+        // sits *inside* the region, in the arm it introduces. `inside_active_arm` places it there because it counts
+        // arms starting at or before the position, and this arm starts here.
+        let visibility = inside_active_arm(&self.open, position);
+
+        // Every kind of condition is resolved here, `#endif` included, so that one branch of the match cannot advance
+        // the state differently from another.
         let Some(branch) = branches_at(spanned) else {
-            continue;
+            return visibility;
         };
 
-        // The macros in force where this branch was written, which is what its expression is about.
-        let holds = branch.decide(state);
+        // The macros in force where this branch is written, which is what its expression is about.
+        let holds = branch.decide(macros);
 
         match branch.kind {
             DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
-                open.push(OpenRegion {
+                self.open.push(OpenRegion {
                     starts: vec![position],
                     holds: vec![holds],
                     active: if holds == Some(true) { Some(0) } else { None },
-                })
+                });
             }
             DirectiveKind::Elif | DirectiveKind::Else => {
-                if let Some(region) = open.last_mut() {
-                    // An arm is eligible only when **every** arm before it is false. An `#else` tests nothing,
-                    // so its own verdict says nothing about whether it is the arm in force — letting it
-                    // activate itself from that verdict is what makes both halves of an `#if`/`#else` look
-                    // compiled at once.
+                if let Some(region) = self.open.last_mut() {
+                    // An arm is eligible only when **every** arm before it is false. An `#else` tests nothing, so its
+                    // own verdict says nothing about whether it is the arm in force — letting it activate itself from
+                    // that verdict is what makes both halves of an `#if`/`#else` look compiled at once.
                     let eligible = region.holds.iter().all(|holds| *holds == Some(false));
 
                     region.starts.push(position);
@@ -766,13 +760,13 @@ fn directive_visibilities(state: &Marked, directives: &[SpannedDirective]) -> Ve
                 }
             }
             DirectiveKind::Endif => {
-                open.pop();
+                self.open.pop();
             }
             _ => {}
         }
-    }
 
-    visibilities
+        visibility
+    }
 }
 
 /// The conditional branch a directive introduces, if it introduces one.
@@ -1623,5 +1617,48 @@ mod tests {
             .filter(|visit| matches!(visit, Visit::Skipped(SkipReason::AlreadyVisited)))
             .collect();
         assert_eq!(skipped.len(), 2, "one skip per guard: {skipped:?}");
+    }
+    /// **A `#define` above a `#if` decides that branch** — the most basic ordering there is, and the one the walk had
+    /// wrong: every condition was decided from the state the file was *entered* with, so the include below was never
+    /// reached and its edge never existed (`docs/parser-toolchain-review.md` P1-6).
+    #[test]
+    fn a_define_above_a_condition_decides_the_branch() {
+        let source = "#define FEATURE 1\n#if FEATURE\n#  include \"feature.h\"\n#endif\n";
+        let files = MemoryFiles::new()
+            .with_file("src/feature.h", "int feature;\n")
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        let edges: Vec<(String, &Visit)> = graph
+            .edges
+            .iter()
+            .map(|edge| (edge.name.to_string(), &edge.visit))
+            .collect();
+        assert_eq!(
+            edges,
+            [(String::from("feature.h"), &Visit::Analysed)],
+            "`#define FEATURE 1` is in force at the `#if`, so the header is read: {edges:?}"
+        );
+    }
+
+    /// **And an `#undef` above it takes the branch away**, which the same defect answered the other way round: the table
+    /// the verdicts were computed from still held the definition from `config`, so the include was followed even though
+    /// the file had removed the name.
+    #[test]
+    fn an_undef_above_a_condition_closes_the_branch() {
+        let source =
+            "#define FEATURE 1\n#undef FEATURE\n#if FEATURE\n#  include \"feature.h\"\n#endif\n";
+        let files = MemoryFiles::new()
+            .with_file("src/feature.h", "int feature;\n")
+            .with_file("src/main.c", source);
+
+        let graph = walk_a_fixture(&files, source, "src/main.c");
+
+        assert!(
+            graph.edges.is_empty(),
+            "the name was undefined before the `#if`, so nothing is included: {:?}",
+            graph.edges
+        );
     }
 }
