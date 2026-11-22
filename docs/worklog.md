@@ -340,6 +340,29 @@ the project, sees the popup turned off, edits the shared file, and requires the 
 the fixes (no reload in the log at all) and passes in **2.6 s**. `watch.rs::a_verbatim_configuration_path_is_recognized`
 pins the three spellings.
 
+### Batch 2: the capability and the CLI say what the code does
+
+**P2-1, the save-time formatting request is advertised.** `textDocumentSync.willSaveWaitUntil` was `None` while
+`documentFormattingProvider` and `documentRangeFormattingProvider` were true and the dispatcher routed
+`textDocument/willSaveWaitUntil` to the formatter — no compliant client ever sent it, so format-on-save could not work,
+and the formatter module's own comment claimed the opposite of the wire. The capability is `Some(true)` now; the assertion
+reads the `initialize` response and was `Null` before.
+
+**P2-2, one identity and no dead switches.** `LspServer::new` built the features from `initialize.clientInfo` while the
+configuration path consulted `--editor`, so one session could choose its *settings* as VS Code and its *commands* as
+another client. `context::the_effective_client_id` is the one policy now, computed once in `LspServer::new` and read back
+by `initialized_handler`. The test makes the disagreement visible on the wire: client `"Neovim"`, argument `vscode`, and
+the code lens command must be `cppls.showReferences` — it was the empty command an unknown client gets.
+
+`--load-stdlib` and `--resources-path` are deleted, with the `CmdBool` wrapper that existed for the first: both were
+declared with defaults and read nowhere. `the_cli_does_not_offer_switches_nothing_reads` runs `--help` and requires
+neither name while `--editor` stays.
+
+**The eight capability boundaries** are `docs/language-server.md` now — advertised / implemented / complete as three
+claims (the third is not made), the boundaries themselves, and the two drifts measured in this batch with their single
+authority (the `initialize` response; `cpp_code_analysis`'s extension and configuration-name lists).
+
+
 
 ## The analysis review: the baseline, the probe, and what it found before any fix
 
