@@ -118,11 +118,25 @@ impl CppSyntaxId {
     }
 }
 
+/// **The schema this serialised form is written in**, and the only one [`from_hex`] accepts.
+///
+/// The kind is a **discriminant**, which means the spelling `1:0:3` is only an id because this version of the crate says
+/// what `1` is. A variant inserted in the middle of the enum - an ordinary thing to do - would silently change what every
+/// stored id meant, and no reader could tell (`docs/parser-toolchain-review.md` P2-5). The tag makes that a rejection
+/// instead: a cache written by another schema is refused, and the reader says so rather than pointing at the wrong node.
+const WIRE_SCHEMA: &str = "v1";
+
 impl std::fmt::Display for CppSyntaxId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let start = u32::from(self.range.start());
         let end = u32::from(self.range.end());
-        write!(f, "{:x}:{:x}:{:x}", self.kind.get_raw(), start, end)
+        write!(
+            f,
+            "{WIRE_SCHEMA}:{:x}:{:x}:{:x}",
+            self.kind.get_raw(),
+            start,
+            end
+        )
     }
 }
 
@@ -136,13 +150,14 @@ impl serde::Serialize for CppSyntaxId {
     }
 }
 
-/// **Read the `kind:start:end` spelling**, which is what [`CppSyntaxId`] serialises to.
+/// **Read the `v1:kind:start:end` spelling**, which is what [`CppSyntaxId`] serialises to.
 ///
 /// Fallible, and every way it can fail is a value that a *reader* must reject rather than act on: this is the shape a
 /// cache file or another process hands over, so a malformed string is input and not a bug in the program. The three
 /// things that used to be unchecked here were
 ///
 /// ```text
+/// schema a tag this reader does not know — see `WIRE_SCHEMA`
 /// kind   CppKind::from_raw panics for a discriminant outside the kind space
 /// range  TextRange::new panics when the end is before the start
 /// shape  a string with the wrong number of fields
@@ -152,11 +167,22 @@ impl serde::Serialize for CppSyntaxId {
 /// down instead of returning an error (`docs/parser-toolchain-review.md` P1-5).
 fn from_hex(value: &str) -> Result<CppSyntaxId, String> {
     let mut parts = value.split(':');
-    let (Some(kind), Some(start), Some(end), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(format!("expected 'kind:start:end', got {value:?}"));
+    let (Some(schema), Some(kind), Some(start), Some(end), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(format!(
+            "expected '{WIRE_SCHEMA}:kind:start:end', got {value:?}"
+        ));
     };
+    if schema != WIRE_SCHEMA {
+        return Err(format!(
+            "this id was written in schema {schema:?}, and this reader only knows {WIRE_SCHEMA:?}"
+        ));
+    }
 
     let kind = u16::from_str_radix(kind, 16).map_err(|error| format!("invalid kind: {error}"))?;
     let start =
@@ -228,13 +254,15 @@ mod tests {
 
         for (value, why) in [
             ("", "an empty string"),
-            ("1:2", "two fields"),
-            ("1:2:3:4", "four fields"),
-            ("zz:0:1", "a kind that is not hex"),
-            ("1:zz:2", "a start that is not hex"),
-            ("1:2:zz", "an end that is not hex"),
-            ("ffff:0:1", "a discriminant outside the kind space"),
-            ("1:2:1", "a range that ends before it starts"),
+            ("v1:1:2", "three fields"),
+            ("v1:1:2:3:4", "five fields"),
+            ("1:2:3", "no schema tag — the form before the tag existed"),
+            ("v2:1:2:3", "a schema this reader does not know"),
+            ("v1:zz:0:1", "a kind that is not hex"),
+            ("v1:1:zz:2", "a start that is not hex"),
+            ("v1:1:2:zz", "an end that is not hex"),
+            ("v1:ffff:0:1", "a discriminant outside the kind space"),
+            ("v1:1:2:1", "a range that ends before it starts"),
         ] {
             let refused = from_hex(value);
             assert!(
@@ -253,14 +281,12 @@ mod tests {
 
         // Mirrors the `Deserialize` implementation, so this stays dependency free.
         let text = id.to_string();
-        let parts: Vec<&str> = text.split(':').collect();
-        let parsed = CppSyntaxId {
-            kind: CppKind::from_raw(u16::from_str_radix(parts[0], 16).unwrap()),
-            range: TextRange::new(
-                TextSize::new(u32::from_str_radix(parts[1], 16).unwrap()),
-                TextSize::new(u32::from_str_radix(parts[2], 16).unwrap()),
-            ),
-        };
+        assert_eq!(
+            from_hex(&text).expect("its own spelling reads back"),
+            id,
+            "and the spelling starts with the schema: {text}"
+        );
+        let parsed = from_hex(&text).expect("an id");
 
         assert_eq!(id, parsed);
     }
