@@ -294,7 +294,7 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
 
 ## The review's P1 list: what is confirmed, and what is fixed
 
-`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Two of its findings were
+`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Three of its findings were
 reproduced and fixed in this round; the rest were checked by reading the code it points at, and its line references and
 claims held everywhere I looked.
 
@@ -304,7 +304,14 @@ siblings: `Leaked()` came out as a `Declaration` with a parameter list, no `Call
 of scopes. The review's step 2 — recording *value* bindings so a variable can hide a type — is deliberately **not**
 done, and the module docs say so.
 
-**Fixed — P1-9, the inferred `include/` root** (this commit). `IncludeResolver::resolve` searched the root inferred
+**Fixed — P1-10, MSVC's option spellings** (`0e9690f3`). `config_from_arguments` read `-I`, `-D` and `-U`, and not
+`/I`, `/D` or `/U`, so a `cl.exe` database lost its include directories **and** its feature macros: conditionals took
+the branch the build does not, and generated config headers were never found. The joined and separated forms are read
+now, with the flags that merely begin like them written down as refusals — `/I-`, `/DEBUG`, `/D0`, `/D1`, `/D2`,
+`/doc`, `/INCREMENTAL`, `/IGNOREIDL` — because `/DEBUG` read as `-D EBUG` would invent a definition and change the
+branches the file is read in. The test feeds a `cl.exe`-style argument list and pins all three lists.
+
+**Fixed — P1-9, the inferred `include/` root** (`d9f28861`). `IncludeResolver::resolve` searched the root inferred
 from `include/` beside `src/` for **every** include form, though the comment above it says quoted only, and it searched
 it **before** the compile command's `-I` paths. Measured in the new unit test: an angle `#include <vector>` resolved to
 the checkout's own `include/vector` instead of the `-I` directory's. The guard is back and the test fails without it
@@ -314,17 +321,18 @@ the checkout's own `include/vector` instead of the `-I` directory's. The guard i
 
 | item | where | what the code does |
 | --- | --- | --- |
-| P1-8 | `graph.rs:894` `decide_visit` | skips a guarded file already visited **without reading the macro state**; `Guard::blocks_a_visit` exists and is not called. `has_pragma_once` also counts an inactive `#proma once`. |
+| P1-8 | `graph.rs:894` `decide_visit` | skips a guarded file already visited **without reading the macro state**; `Guard::blocks_a_visit` exists and is not called. `has_pragma_once` also counts an inactive `#pragma once`. |
 | P1-3 | `cpp_lexer.rs:247` | `contract_assert` becomes a keyword **unconditionally**, so a C++23 identifier of that name fails to parse; `pre`/`post` are contextual and unaffected. Fixing it needs a `Standard::Cpp26` and a move of the vendor bits in `LanguageConfig` (the vendor block starts at bit 10). |
-| P1-10 | `config.rs:760` | `-I/-D/-U` are read; **no** `/I`, `/D`, `/U` — an `cl.exe` database loses its include directories and feature macros. |
 | P1-5 | `syntax/id.rs:139` | `deserialize` calls `CppKind::from_raw` and `TextRange::new` without validating either, so a malformed cache entry can panic the reader. |
 | P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
 | P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
 
-Also worth recording, and outside the review: **four different timing tests in `crates/cpp_ls/tests/suite` failed under a
-full-workspace run today** (`latency` twice, `hover_attributes` once, `hover_layout` once) and each passed alone. The
-`latency` module's budgets are 50 ms with two render allowances, and `cargo test` runs the module's tests in parallel
-with everything else; that is a test-design problem rather than a parser one, and it is the review's P3-2.
+Also worth recording, and outside the review: **four different tests in `crates/cpp_ls/tests/suite` failed under a
+full-workspace run today** (`latency` twice, `hover_attributes` once, `hover_layout` once), each passed alone, and the
+cause is found: the fixture helpers built their temp directory from the **process id**, which every test in one binary
+shares, so one test's `remove_dir_all` landed in another's `fs::write`. `a3957bf1` adds `common::a_temp_directory`
+(process id plus a per-binary counter) and switches the three suites that shared a directory. One flake remains in
+three full runs after that change and its name has not been caught yet — the review's P3-2 list is where it belongs.
 
 ## curl's last three `syntax-error`s, and the two defects behind them
 
