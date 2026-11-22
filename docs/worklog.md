@@ -342,7 +342,6 @@ malformed spellings; with the old form back in place it panics at `kind/mod.rs:8
 | item | where | what the code does |
 | --- | --- | --- |
 | P1-3 | `cpp_lexer.rs:247` | `contract_assert` becomes a keyword **unconditionally**, so a C++23 identifier of that name fails to parse; `pre`/`post` are contextual and unaffected. Fixing it needs a `Standard::Cpp26` and a move of the vendor bits in `LanguageConfig` (the vendor block starts at bit 10). |
-| P1-5 | `syntax/id.rs:139` | `deserialize` calls `CppKind::from_raw` and `TextRange::new` without validating either, so a malformed cache entry can panic the reader. |
 | P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
 | P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
 
