@@ -29,7 +29,11 @@ impl RegisterCapabilities for TextDocumentCapabilities {
                 open_close: Some(true),
                 change: Some(TextDocumentSyncKind::INCREMENTAL),
                 will_save: None,
-                will_save_wait_until: None,
+                // **Advertised because it is implemented.** 	extDocument/willSaveWaitUntil is dispatched to the
+                // formatter (ormatting::on_will_save_wait_until), and with None here no compliant client ever sent
+                // it: a save-time format-on-save setting could not work, and the comment in the formatter module claimed
+                // the opposite of the wire (docs/language-server-review.md P2-1).
+                will_save_wait_until: Some(true),
                 save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                     include_text: Some(false),
                 })),

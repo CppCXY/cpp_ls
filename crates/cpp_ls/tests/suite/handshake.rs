@@ -2558,6 +2558,14 @@ fn an_incremental_edit_is_visible_to_the_next_completion() {
         initialized["result"]["capabilities"]["textDocumentSync"]["change"],
         json!(2)
     );
+    // **The save-time formatting request is advertised**, because it is implemented: a client that asks before saving
+    // gets the formatter's edits, and a capability that answers `None` means no compliant client ever asks
+    // (docs/language-server-review.md P2-1).
+    assert_eq!(
+        initialized["result"]["capabilities"]["textDocumentSync"]["willSaveWaitUntil"],
+        json!(true),
+        "the implemented save-time request is in the capability: {initialized}"
+    );
     server.notify("initialized", json!({}));
     server.notify(
         "textDocument/didOpen",
@@ -7754,3 +7762,4 @@ fn a_configuration_file_outside_the_workspace_is_watched() {
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }
+
