@@ -292,7 +292,7 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
-## The review's P2 list, first five
+## The review's P2 list, first six
 
 The P1 list is closed; these are the P2 items small enough to take with it and clear enough to prove.
 
@@ -302,6 +302,12 @@ escapes at all, so the backslash is part of the path. The lexer's scanner, the p
 all accept it now, and `parse_include` also reads a quoted `StringLiteral` directly so a reader that folded nothing still
 produces an include with a target rather than nothing. Measured with `--fixture` before the fix: **`includes: []`** — the
 header was never read. Four tests, the last of them the include graph reaching `sub/header.h`.
+
+**P2-4, `parse_tokens` checks its input** (`e847fb6f`). The public entry point took whatever token stream a caller handed
+over and every later step sliced `text[start..end]` — a range past the end, one inside a multi-byte character, or a stream
+that goes backwards panicked inside a safe API (measured: `end byte index 12 is out of bounds for string of length 6`).
+Four checks now answer `why_the_tokens_do_not_fit`, and a stream that fails one gets what a parse of garbage produces: an
+empty translation unit plus one error. `EventStreamAudit` gained `Default` for that path.
 
 **P2-3, a line index counts every line break** (`183e36b8`). `LineIndex::parse` advanced only on `\n`, while the lexer's
 `eat_newline` accepts `\n`, `\r\n`, a lone `\r` and the `\n\r` pair — so an old-Mac file was **one line** to the index and
