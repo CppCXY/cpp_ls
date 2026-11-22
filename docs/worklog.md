@@ -159,7 +159,7 @@ whitespace collapsed. Any rule that judges a *spelling* should use that and not 
 
 | Code | Count | Standing |
 | --- | --- | --- |
-| `redefinition` | 86 | `DOCTEST_CAPTURE___LINE__` again: the `__LINE__` in doctest's `DOCTEST_ANONYMOUS` arrives through a **definition's body**, where this layer answers the `#define`'s line rather than the invocation's. Call-site uses are fixed; the body case is the remaining half, and it needs the invocation position handed into the rescan. |
+| `redefinition` | 86 | **The expansion is fixed**: `__LINE__`/`__COUNTER__` are answered from the **outermost** call site, so doctest's macros render `DOCTEST_CAPTURE_530` / `DOCTEST_CAPTURE_OTHER_530` rather than the literal `DOCTEST_CAPTURE___LINE__`. The finding's message still names `DOCTEST_CAPTURE_2`, **a name that appears zero times** in the file's 57 794-byte rendering — so what is left is the *check*'s own range-to-text path, a separate item. |
 | `syntax-error` | 60 | three files — `unit-json_view_from_json.cpp`, `unit-regression3.cpp`, `unit-udt_macro.cpp` — all `expected `;` after expression`. |
 | `use-override` | 28 | doctest's own code: `virtual` without `override`. A style rule firing on a third-party header. |
 | others | 16 | `return-type-mismatch` 4, `assign-type-check` 3, `access-invisible` 2, `implicit-bool-conversion` 2, `include-not-found` 2, `undefined-name` 2, `macro-parentheses` 1. |
