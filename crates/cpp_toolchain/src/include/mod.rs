@@ -230,11 +230,18 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
         // A search that finds something is a file that exists at the spelling asked for, and the summary records
         // which path won, so a wrong hit is a wrong file rather than a wrong answer about a right one — the same
         // standing every `-I` has.
-        for root in include_roots_above(including, name, self.case_insensitive(), self.files) {
-            candidates.push((
-                join_normalized(&root, name, self.case_insensitive()),
-                FoundIn::LocalDirectory,
-            ));
+        // A **quoted** include only, deliberately — an inferred directory must not be able to shadow `<vector>`, and
+        // an angle include in this project is a system header. The loop below used to run for every form, which made
+        // the rule in this comment false: a checkout with `include/vector` resolved `<vector>` to its own file, and
+        // the inferred root was searched **before** the compile command's `-I` paths. `docs/parser-toolchain-review.md`
+        // P1-9.
+        if include.form == IncludeForm::Quote && skip_through.is_none() {
+            for root in include_roots_above(including, name, self.case_insensitive(), self.files) {
+                candidates.push((
+                    join_normalized(&root, name, self.case_insensitive()),
+                    FoundIn::LocalDirectory,
+                ));
+            }
         }
 
         for (index, include_path) in self.config.include_paths.iter().enumerate() {
@@ -664,6 +671,58 @@ mod tests {
             }
             Resolution::Resolved(resolved) => panic!("expected a failure, got {resolved:?}"),
         }
+    }
+
+    /// **An inferred `include/` root serves quoted includes only, never `<…>`.**
+    ///
+    /// The root is a guess — `include/` beside `src/` is the CMake convention, and the closure of a project nobody
+    /// has configured is otherwise a small fraction of itself — and a guess must not shadow a system header. The loop
+    /// this tests ran for both forms, so a checkout with `include/vector` resolved `<vector>` to its own file (and
+    /// searched that root before the compile command's `-I` paths); `docs/parser-toolchain-review.md` P1-9.
+    #[test]
+    fn an_inferred_include_root_does_not_shadow_an_angle_include() {
+        let files = MemoryFiles::new()
+            .with_file(
+                "include/vector",
+                "the project's own, and not the standard library's",
+            )
+            .with_file("user/vector", "what the compile command's -I names")
+            .with_file("src/main.cpp", "#include <vector>\n");
+        let config = config();
+        let resolver = IncludeResolver::new(&files, &config);
+        let mut interner = PathInterner::new(false);
+
+        let angle = Include {
+            form: IncludeForm::Angle,
+            target: "vector".into(),
+            is_next: false,
+        };
+        // **The search path wins, not the guess.** With the inferred root in the candidate list this resolves to
+        // include/vector instead - the guess was searched *before* the -I directories.
+        let resolution = resolver.resolve(&angle, Path::new("src"), None, &mut interner);
+        assert_eq!(
+            resolution
+                .resolved()
+                .map(|it| normalize_path(&it.path, false)),
+            Some("user/vector".to_string()),
+            "an angle include is answered by the search path, never by an inferred root: {resolution:?}"
+        );
+
+        // The same spelling as a quoted include is exactly what the inference is for.
+        let quoted = Include {
+            form: IncludeForm::Quote,
+            target: "vector".into(),
+            is_next: false,
+        };
+        let mut interner = PathInterner::new(false);
+        let resolution = resolver.resolve(&quoted, Path::new("src"), None, &mut interner);
+        assert_eq!(
+            resolution
+                .resolved()
+                .map(|it| normalize_path(&it.path, false)),
+            Some("include/vector".to_string()),
+            "a quoted include still climbs to the inferred root"
+        );
     }
 
     /// A macro target cannot be resolved here — its value comes from expansion — and saying so is better

@@ -288,6 +288,40 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The review's P1 list: what is confirmed, and what is fixed
+
+`docs/parser-toolchain-review.md` was checked against the tree rather than taken on its word. Two of its findings were
+reproduced and fixed in this round; the rest were checked by reading the code it points at, and its line references and
+claims held everywhere I looked.
+
+**Fixed — P1-1, local type names** (`091fc1ba`). `TypeNames` kept one entry per name with the brace depth it was
+written at, and visibility was `declared_at <= depth`, so a `typedef` in one function was a type name inside its
+siblings: `Leaked()` came out as a `Declaration` with a parameter list, no `CallExpr`, no diagnostic. It is now a stack
+of scopes. The review's step 2 — recording *value* bindings so a variable can hide a type — is deliberately **not**
+done, and the module docs say so.
+
+**Fixed — P1-9, the inferred `include/` root** (this commit). `IncludeResolver::resolve` searched the root inferred
+from `include/` beside `src/` for **every** include form, though the comment above it says quoted only, and it searched
+it **before** the compile command's `-I` paths. Measured in the new unit test: an angle `#include <vector>` resolved to
+the checkout's own `include/vector` instead of the `-I` directory's. The guard is back and the test fails without it
+(`left: include/vector`, `right: user/vector`).
+
+**Confirmed by reading, not yet fixed** — in the order this round would take them:
+
+| item | where | what the code does |
+| --- | --- | --- |
+| P1-8 | `graph.rs:894` `decide_visit` | skips a guarded file already visited **without reading the macro state**; `Guard::blocks_a_visit` exists and is not called. `has_pragma_once` also counts an inactive `#proma once`. |
+| P1-3 | `cpp_lexer.rs:247` | `contract_assert` becomes a keyword **unconditionally**, so a C++23 identifier of that name fails to parse; `pre`/`post` are contextual and unaffected. Fixing it needs a `Standard::Cpp26` and a move of the vendor bits in `LanguageConfig` (the vendor block starts at bit 10). |
+| P1-10 | `config.rs:760` | `-I/-D/-U` are read; **no** `/I`, `/D`, `/U` — an `cl.exe` database loses its include directories and feature macros. |
+| P1-5 | `syntax/id.rs:139` | `deserialize` calls `CppKind::from_raw` and `TextRange::new` without validating either, so a malformed cache entry can panic the reader. |
+| P1-6, P1-7 | `graph.rs:592` | the walk computes every directive's visibility once, before the loop that applies `#define`/`#undef`; unknown branches and unread includes do not mark the macro state uncertain. |
+| P1-4 | `cpp_tree_builder.rs:219` | `balance_events` appends a `NodeEnd` for each open node at the end of the event list, which is what its own comment says it must not do. |
+
+Also worth recording, and outside the review: **four different timing tests in `crates/cpp_ls/tests/suite` failed under a
+full-workspace run today** (`latency` twice, `hover_attributes` once, `hover_layout` once) and each passed alone. The
+`latency` module's budgets are 50 ms with two render allowances, and `cargo test` runs the module's tests in parallel
+with everything else; that is a test-design problem rather than a parser one, and it is the review's P3-2.
+
 ## curl's last three `syntax-error`s, and the two defects behind them
 
 `lib/curl_gssapi.c:63,66` and `lib/multi.c:3516` were the only errors left in curl's `lib`, and neither was a curl
