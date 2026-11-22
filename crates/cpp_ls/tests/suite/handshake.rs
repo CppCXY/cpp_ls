@@ -823,9 +823,16 @@ impl Server {
         // there: the trace line exists in the handler and the level dropped it. Run this suite with
         // `CPPLS_TEST_LOG_LEVEL=debug` and `CPPLS_TEST_LOG_PATH=<file>` when a request has to be watched.
         let mut command = Command::new(env!("CARGO_BIN_EXE_cpp_ls"));
-        command
-            .arg("--log-path")
-            .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
+        // **Unless the test named one itself** — --log-path may not be given twice, and a test that reads the log file
+        // has to know where it is.
+        if !arguments
+            .iter()
+            .any(|argument| *argument == std::ffi::OsStr::new("--log-path"))
+        {
+            command
+                .arg("--log-path")
+                .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
+        }
         if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
             command.arg("--log-level").arg(level);
         }
@@ -8107,6 +8114,77 @@ fn a_request_after_a_configuration_change_sees_the_new_settings() {
     );
 
     let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **A notification the server cannot read is said out loud, and the server keeps answering.**
+///
+/// The dispatcher dropped one silently — `if let Ok(params)` with no `else` — so a client bug or a field this server
+/// reads and the client does not send left the analysis a document behind with nothing in the log to say why
+/// (`docs/language-server-review.md` P2-6). The log is a file here (`--log-path`), which is also the only way a test can
+/// see what a **notification** did: nothing is sent back to a client for one.
+#[test]
+fn a_malformed_notification_is_logged_and_does_not_stop_the_server() {
+    let project = Project::new("malformed-notification");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    let logs = project.root().join("logs");
+
+    let mut server = Server::start_with_args(
+        project.root(),
+        &[std::ffi::OsStr::new("--log-path"), logs.as_os_str()],
+    );
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+
+    // **Not a `didOpen`**: no `textDocument`, no `text`. The client is buggy, and the server has to say so rather than
+    // act as though the document had opened.
+    server.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": main_uri } }),
+    );
+
+    // The server still answers, and the open it never processed is simply not there — the file is read from disk.
+    let answered = server.request(
+        2,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 3, "character": 6 },
+        }),
+    );
+    assert!(
+        answered.get("error").is_none(),
+        "the malformed notification did not disturb the next request: {answered}"
+    );
+
+    let log = std::fs::read_dir(&logs)
+        .expect("the log directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .expect("a log file");
+    let written = std::fs::read_to_string(&log).expect("the log reads");
+    assert!(
+        written.contains("malformed textDocument/didOpen"),
+        "the dropped notification is named, with its method: {written}"
+    );
+    assert!(
+        written.contains(&main_uri.to_string()),
+        "and with the URI the raw params still carried: {written}"
+    );
+
+    let _ = server.request(3, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
     let _ = server.wait_for_exit();
 }

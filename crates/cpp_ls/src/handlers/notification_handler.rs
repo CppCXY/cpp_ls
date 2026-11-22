@@ -22,6 +22,34 @@ use super::{
     },
 };
 
+/// **Read a notification's params, or say why not.**
+///
+/// The dispatcher used to drop a malformed one silently (`if let Ok(params)` with no `else`), so a client bug — or a
+/// field this server reads and the client does not send — left the analysis a document behind with nothing in the log to
+/// say why (`docs/language-server-review.md` P2-6).
+///
+/// It takes the notification **by value** because `Notification::extract` consumes it, and it reads the URI out of the
+/// raw params *before* extracting, which is the only place it exists once extraction has failed. The params themselves
+/// are never logged: a `didChange` carries whole buffers.
+fn or_report<P: serde::de::DeserializeOwned>(notification: lsp_server::Notification) -> Option<P> {
+    let method = notification.method.clone();
+    let uri = notification
+        .params
+        .get("textDocument")
+        .and_then(|document| document.get("uri"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<no textDocument.uri>")
+        .to_string();
+
+    match notification.extract::<P>(&method) {
+        Ok(params) => Some(params),
+        Err(error) => {
+            warn!("dropping a malformed {method} notification for {uri}: {error}");
+            None
+        }
+    }
+}
+
 macro_rules! dispatch_notification {
     ($notification:expr, $context:expr, {
         sync: { $($sync_notif:ty => $sync_handler:expr),* $(,)? }
@@ -29,13 +57,15 @@ macro_rules! dispatch_notification {
     }) => {
         match $notification.method.as_str() {
             Cancel::METHOD => {
-                if let Ok(params) = $notification.extract::<CancelParams>(Cancel::METHOD) {
+                if let Some(params) = or_report::<CancelParams>($notification) {
                     handle_cancel($context, params).await;
                 }
             }
             $(
                 <$sync_notif>::METHOD => {
-                    if let Ok(params) = $notification.extract::<<$sync_notif as LspNotification>::Params>(<$sync_notif>::METHOD) {
+                    if let Some(params) =
+                        or_report::<<$sync_notif as LspNotification>::Params>($notification)
+                    {
                         let snapshot = $context.snapshot();
                         // Catch panics locally so a handler cannot kill the main loop.
                         let _ = crate::util::catch_unwind($sync_handler(snapshot, params)).await;
@@ -44,7 +74,9 @@ macro_rules! dispatch_notification {
             )*
             $(
                 <$async_notif>::METHOD => {
-                    if let Ok(params) = $notification.extract::<<$async_notif as LspNotification>::Params>(<$async_notif>::METHOD) {
+                    if let Some(params) =
+                        or_report::<<$async_notif as LspNotification>::Params>($notification)
+                    {
                         let snapshot = $context.snapshot();
                         let _ = crate::util::catch_unwind($async_handler(snapshot, params)).await;
                     }
