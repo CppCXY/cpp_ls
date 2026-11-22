@@ -833,6 +833,8 @@ pub fn the_sweep(
     let mut files: Vec<Value> = Vec::new();
     let mut answered = 0usize;
     let mut counted = 0usize;
+    // How many files the compilation database has no command for — see the note in the loop.
+    let mut not_in_the_database = 0usize;
 
     // **Each file is read for its own line numbers.** The findings a file gets are in that file's coordinates, and
     // `--file` names only the one the session was opened around: a sweep that measured every line against it printed
@@ -844,11 +846,25 @@ pub fn the_sweep(
     paths.sort();
 
     for path in &paths {
+        // **A file the compilation database does not name is measured against no configuration at all.** libuv's
+        // database has 80 commands and no `aix.c`, `ibmi.c`, `kqueue.c` or `linux.c` — those are other platforms'
+        // sources — and cooking one of them invents include paths, which produced 27 syntax errors that were findings
+        // about the *measurement*, not about libuv (`docs/worklog.md`). Such a file is counted, not measured: a number
+        // a reader can trust has to say how many files it left out and why.
+        let in_the_database = opened.session.config_for(path).is_in_the_database(path);
+        if !in_the_database {
+            not_in_the_database += 1;
+            continue;
+        }
         // **The reading the server has when it answers a pull**: the file asked for, then read, then cooked —
         // `want_cooked_reading` + `catch_up` is the same pair `--cook` uses, and without it `Session::cook` answered
         // from a rendering built before this file's environment was known (measured: nlohmann/json's
         // `unit-32bit.cpp` reported ten syntax errors in its `CHECK_THROWS_WITH_AS(…)` lines here and **none** through
         // `diagnostics --cook`, which is the path a client takes).
+        // **The whole closure**, the same walk `--cook` takes: `catch_up` reads eight includes, and a file whose
+        // second-level headers are missing from the index cooks against a partial closure — measured on libuv's
+        // `signal.c`, which this loop reported a syntax error for and a single `diagnostics --cook` reported none.
+        crate::project::warm_the_closure(&mut opened.session, path);
         opened.session.want_cooked_reading(path);
         opened.session.catch_up(path);
         let _ = opened.session.cook(path);
@@ -942,6 +958,7 @@ pub fn the_sweep(
         .collect();
     let value = json!({
         "files_answered": answered,
+        "not_in_the_database": not_in_the_database,
         "findings": counted,
         "codes": codes,
         "by_file": files,
