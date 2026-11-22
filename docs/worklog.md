@@ -388,6 +388,21 @@ boundaries, the two header-name readers, `parse_tokens` not validating its input
 wire format, the Windows/case-platform questions, the incremental reparse, and the compiler differential jobs. Those are
 their own rounds; the P1 list above is closed.
 
+**Re-measured after all ten**, with the same probes, because four of the fixes change how a file is preprocessed, read or
+configured — and two of them change it *for the better*, which the numbers show as movement in both directions:
+
+| corpus | files | skipped | findings | `syntax-error` |
+| --- | --- | --- | --- | --- |
+| libuv `src` | 55 | 54 | 351 (was 349; two more `braces`) | **0** |
+| redis `src` | 127 | 96 | 1112 (was 1116; five fewer `braces`, three more `undefined-name`) | **0** |
+| curl `lib` | 146 | 188 | 404 | **0** |
+| nginx `src` | 128 | 282 | 33 | **0** |
+| nlohmann/json (126 test files) | 126 | — | 47 | **0** |
+
+nginx and json did not move at all; libuv and redis moved by a handful of hints in both directions, which is what a
+changed macro environment looks like — code that was inside a mis-decided branch is now read, and a guard that was skipped
+is now honoured.
+
 ## curl's last three `syntax-error`s, and the two defects behind them
 
 `lib/curl_gssapi.c:63,66` and `lib/multi.c:3516` were the only errors left in curl's `lib`, and neither was a curl
