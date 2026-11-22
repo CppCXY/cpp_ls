@@ -39,6 +39,10 @@ pub enum Family {
     Cpp,
 }
 
+/// **The bits the standards occupy** — every standard's bit, so a mask computed from one family never reaches into the
+/// vendor block that follows.
+const STANDARDS_MASK: u64 = (1 << Standard::first_vendor_bit()) - 1;
+
 /// **A published standard**, one per family.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Standard {
@@ -52,10 +56,12 @@ pub enum Standard {
     Cpp17,
     Cpp20,
     Cpp23,
+    /// **C++26** — contracts (P2900) are the first syntax that needs it. -std=c++26, /std:c++latest.
+    Cpp26,
 }
 
 /// **Every standard, in the order of their bits** — the table `covers_mask` is built from.
-pub const STANDARDS: [Standard; 10] = [
+pub const STANDARDS: [Standard; 11] = [
     Standard::C89,
     Standard::C99,
     Standard::C11,
@@ -66,6 +72,7 @@ pub const STANDARDS: [Standard; 10] = [
     Standard::Cpp17,
     Standard::Cpp20,
     Standard::Cpp23,
+    Standard::Cpp26,
 ];
 
 impl Standard {
@@ -78,7 +85,8 @@ impl Standard {
             | Standard::Cpp14
             | Standard::Cpp17
             | Standard::Cpp20
-            | Standard::Cpp23 => Family::Cpp,
+            | Standard::Cpp23
+            | Standard::Cpp26 => Family::Cpp,
         }
     }
 
@@ -90,12 +98,22 @@ impl Standard {
             Standard::C11 | Standard::Cpp17 => 2,
             Standard::C17 | Standard::Cpp20 => 3,
             Standard::C23 | Standard::Cpp23 => 4,
+            Standard::Cpp26 => 5,
         }
     }
 
     /// This standard's own bit.
     pub const fn bit(self) -> u64 {
         1 << (self as u32)
+    }
+
+    /// **Where the vendor bits start** — one past the last standard's.
+    ///
+    /// The layout is the standards' bits first (C's five, then C++'s six), then one bit per vendor. C++26 moved the
+    /// vendor block from bit 10 to bit 11, which is why this is a named constant rather than a literal in
+    /// [`Vendor::bit`] and in the masks above.
+    pub const fn first_vendor_bit() -> u32 {
+        11
     }
 
     /// **Every standard that covers this one** — this one and the later ones of its family. The mask `support` ANDs
@@ -116,10 +134,15 @@ impl Standard {
             Standard::Cpp17 => (5, 2),
             Standard::Cpp20 => (5, 3),
             Standard::Cpp23 => (5, 4),
+            Standard::Cpp26 => (5, 5),
         };
-        // `5 - rank` bits, starting at this standard's own bit: `C++17` (rank 2, base 5) → bits 7..9, the standards at or
-        // after it in its family.
-        (((1u64 << (5 - rank)) - 1) << (base + rank)) & 0b11111_11111
+        // One bit per standard from this one to the end of its family, starting at this standard's own bit: `C++17`
+        // (rank 2, base 5) → bits 7..9, the standards at or after it in its family. The length is the **family's** and
+        // not a shared five: C has five standards and C++ has six, and a shared constant silently gave C++26 a zero
+        // mask (which is how this was caught — `covered_by_mask` of `C++26` answered 0, so no feature required by it was
+        // ever supported).
+        let in_the_family = if base == 0 { 5u32 } else { 6u32 };
+        (((1u64 << (in_the_family - rank)) - 1) << (base + rank)) & STANDARDS_MASK
     }
 
     /// The inverse of [`Standard::covered_by_mask`]: every standard this one accepts — its own and the earlier ones of
@@ -137,8 +160,9 @@ impl Standard {
             Standard::Cpp17 => (5, 2),
             Standard::Cpp20 => (5, 3),
             Standard::Cpp23 => (5, 4),
+            Standard::Cpp26 => (5, 5),
         };
-        ((1u64 << (rank + 1)) - 1) << base
+        (((1u64 << (rank + 1)) - 1) << base) & STANDARDS_MASK
     }
 
     /// **Does enabling this standard enable `needed`?** — same family, and at least as late.
@@ -160,6 +184,7 @@ impl fmt::Display for Standard {
             Standard::Cpp17 => "c++17",
             Standard::Cpp20 => "c++20",
             Standard::Cpp23 => "c++23",
+            Standard::Cpp26 => "c++26",
         })
     }
 }
@@ -175,7 +200,7 @@ pub enum Vendor {
 
 impl Vendor {
     pub const fn bit(self) -> u64 {
-        1 << (10 + self as u32)
+        1 << (Standard::first_vendor_bit() + self as u32)
     }
 }
 
@@ -305,6 +330,10 @@ pub enum Feature {
     RestrictGnu,
     /// `__int128`, a builtin type on GCC and Clang and not a type at all on MSVC.
     Int128,
+    /// **`contract_assert`** — C++26's contract assertion (P2900). A *full keyword* there, which is why it is a feature
+    /// and not a contextual name: in C++23 it is an ordinary identifier, and a lexer that claims it in every mode
+    /// breaks a valid C++23 program (`int contract_assert = 1;`). `pre`/`post` are contextual and need no gate.
+    ContractAssert,
 }
 
 impl Feature {
@@ -371,6 +400,9 @@ impl Feature {
             Typeof => AnyOf(&[S(Standard::C23), V(Vendor::Gnu)]),
             StructuredExceptionHandling | Interface => V(Vendor::Msvc),
             BlockLiteral => V(Vendor::Clang),
+
+            // C++26.
+            ContractAssert => S(Standard::Cpp26),
         }
     }
 
@@ -447,6 +479,7 @@ impl Feature {
             RestrictGnu => "__restrict",
             RawStrings => "raw string literal",
             Int128 => "__int128",
+            ContractAssert => "contract_assert",
         }
     }
 }
@@ -485,6 +518,12 @@ impl LanguageConfig {
     /// `-std=c++17`, no vendor extensions — the most common C++ build a reader meets.
     pub const fn cpp17() -> Self {
         Self::new().with_standard(Standard::Cpp17)
+    }
+
+    /// **`-std=c++26`** — the first standard whose syntax needs it is contracts (P2900), and `contract_assert` is a
+    /// keyword only here.
+    pub const fn cpp26() -> Self {
+        Self::new().with_standard(Standard::Cpp26)
     }
 
     /// `-std=gnu++17`, the GCC default mode for a long time.
@@ -625,6 +664,7 @@ impl LanguageConfig {
             Some(Standard::Cpp17) => "++17",
             Some(Standard::Cpp20) => "++20",
             Some(Standard::Cpp23) => "++23",
+            Some(Standard::Cpp26) => "++26",
             None => return "no-standard".to_string(),
         };
         let mut described = if self.bits & Vendor::Gnu.bit() != 0 {
@@ -715,7 +755,9 @@ impl LanguageConfig {
             "c++14" | "c++1y" => Standard::Cpp14,
             "c++17" | "c++1z" => Standard::Cpp17,
             "c++20" | "c++2a" => Standard::Cpp20,
-            "c++23" | "c++2b" | "c++latest" => Standard::Cpp23,
+            "c++23" | "c++2b" => Standard::Cpp23,
+            // \/std:c++latest\ is "the newest this compiler knows", and that is C++26 now.
+            "c++26" | "c++2c" | "c++latest" => Standard::Cpp26,
             "c89" | "c90" | "iso9899:1990" => Standard::C89,
             "c99" | "c9x" | "iso9899:1999" => Standard::C99,
             "c11" | "c1x" | "iso9899:2011" => Standard::C11,
@@ -793,6 +835,9 @@ impl LanguageConfig {
             Some(Standard::Cpp14) => CppLanguageLevel::Cpp14,
             Some(Standard::Cpp20) => CppLanguageLevel::Cpp20,
             Some(Standard::Cpp23) => CppLanguageLevel::Cpp23,
+            // **C++26 has no level of its own.** The level model is the legacy one (see the review's P1-2); the newest
+            // level it can name is C++23, and a caller that asked for C++26 gets that answer rather than a panic.
+            Some(Standard::Cpp26) => CppLanguageLevel::Cpp23,
             Some(Standard::Cpp17) | None => CppLanguageLevel::Cpp17,
             // A C config has no level; C++17 is the conservative reading, and the vendors are what a C file needs.
             Some(_) => CppLanguageLevel::Cpp17,
@@ -804,7 +849,10 @@ impl LanguageConfig {
     /// requirement.
     pub const fn permissive() -> Self {
         Self {
-            bits: (1u64 << 13) - 1,
+            // **Every standard and every vendor** — the union of the bits this crate models, not "all one bits
+            // forever". Built from the layout rather than a literal: the literal was `(1 << 13) - 1` and a literal is
+            // what C++26 broke, because the vendor block moved and the third vendor's bit fell outside it.
+            bits: (1u64 << (Standard::first_vendor_bit() + 3)) - 1,
         }
     }
 }

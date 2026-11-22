@@ -13,7 +13,7 @@
 //!
 //! No compiler here has contracts (GCC's is experimental and behind `-fcontracts`), so these pin the *syntax*.
 
-use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
+use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig, features::LanguageConfig};
 
 fn parsed(source: &str) -> cpp_parser::CppSyntaxNode {
     let tree = CppParser::parse(source, ParserConfig::default());
@@ -28,9 +28,44 @@ fn parsed(source: &str) -> cpp_parser::CppSyntaxNode {
     root
 }
 
+/// **C++23, the default** — `contract_assert` is an ordinary identifier there.
+fn parsed_as_cpp23(source: &str) -> cpp_parser::CppSyntaxNode {
+    let config = ParserConfig::default()
+        .with_language(LanguageConfig::new().with_standard(cpp_parser::features::Standard::Cpp23));
+    let tree = CppParser::parse(source, config);
+    assert_eq!(
+        tree.get_errors(),
+        [],
+        "{source:?} must parse cleanly in C++23, got {:?}",
+        tree.get_errors()
+    );
+    tree.get_red_root()
+}
+
+/// **C++26**, where `contract_assert` is a keyword.
+fn parsed_as_cpp26(source: &str) -> cpp_parser::CppSyntaxNode {
+    let tree = CppParser::parse(
+        source,
+        ParserConfig::default().with_language(LanguageConfig::cpp26()),
+    );
+    assert_eq!(
+        tree.get_errors(),
+        [],
+        "{source:?} must parse cleanly in C++26, got {:?}",
+        tree.get_errors()
+    );
+    tree.get_red_root()
+}
+
 fn count(source: &str, kind: CppSyntaxKind) -> usize {
     parsed(source)
         .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+        .count()
+}
+
+fn count_in(root: &cpp_parser::CppSyntaxNode, kind: CppSyntaxKind) -> usize {
+    root.descendants()
         .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
         .count()
 }
@@ -82,7 +117,40 @@ int f(int x) {
     return x;
 }
 ";
-    assert_eq!(count(source, CppSyntaxKind::ContractAssertStat), 2);
+    // **C++26**, where the name is a keyword; see the C++23 test below for the other side.
+    let root = parsed_as_cpp26(source);
+    assert_eq!(count_in(&root, CppSyntaxKind::ContractAssertStat), 2);
+}
+
+/// **In C++23 contract_assert is an ordinary identifier**, in all three positions a name can stand in: a variable, a
+/// function, and a call. A lexer that claims the keyword unconditionally fails all three — and the error node then
+/// swallows the declarations after it, so the damage is larger than one line
+/// (\docs/parser-toolchain-review.md\ P1-3).
+#[test]
+fn contract_assert_is_an_identifier_before_cpp26() {
+    let source = "\
+int contract_assert = 1;
+void contract_assert_call() { contract_assert(2); }
+int contract_assert_function();
+";
+    let root = parsed_as_cpp23(source);
+    assert_eq!(
+        count_in(&root, CppSyntaxKind::ContractAssertStat),
+        0,
+        "nothing is a contract assertion in C++23"
+    );
+    let declarations: Vec<String> = root
+        .descendants()
+        .filter_map(|node| {
+            use cpp_parser::CppAstNode as _;
+            cpp_parser::CppDeclaration::cast(node)
+        })
+        .filter_map(|declaration| declaration.get_name_text())
+        .collect();
+    assert!(
+        declarations.iter().any(|name| name == "contract_assert"),
+        "the variable is declared: {declarations:?}"
+    );
 }
 
 /// **A lambda carries contracts** — the proposal's own example.

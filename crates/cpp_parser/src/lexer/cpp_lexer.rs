@@ -241,10 +241,14 @@ impl<'a> CppLexer<'a> {
             {
                 CppTokenKind::StaticAssertKeyword
             }
-            // **C++26's contract assertion** (P2900). Unconditional, like the reflection operators: no earlier
-            // standard gives the name a meaning, and a file that writes it is being read as C++26 whatever `-std=`
-            // said. `pre` and `post` are *not* here — they are context-sensitive and stay identifiers.
-            "contract_assert" => CppTokenKind::ContractAssertKeyword,
+            // **C++26's contract assertion** (P2900). A **keyword**, and therefore *gated*: `contract_assert` is an
+            // ordinary identifier in C++23 and every earlier standard, so claiming it unconditionally breaks a valid
+            // program — `int contract_assert = 1;` failed to parse, and the error node swallowed the declarations after
+            // it. `pre` and `post` are *not* here: they are context-sensitive and stay identifiers. See
+            // `docs/parser-toolchain-review.md` P1-3.
+            "contract_assert" if self.accepts(crate::features::Feature::ContractAssert) => {
+                CppTokenKind::ContractAssertKeyword
+            }
             "template" => CppTokenKind::TemplateKeyword,
             "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => {
                 CppTokenKind::ThreadLocalKeyword

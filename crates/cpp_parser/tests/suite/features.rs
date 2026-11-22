@@ -476,7 +476,8 @@ fn a_standard_flag_becomes_a_configuration() {
     for (spelling, standard) in [
         ("-std=c++1z", Standard::Cpp17),
         ("-std=gnu++2a", Standard::Cpp20),
-        ("-std=c++latest", Standard::Cpp23),
+        ("-std=c++latest", Standard::Cpp26),
+        ("-std=c++26", Standard::Cpp26),
         ("-std=iso9899:1999", Standard::C99),
         ("--std=c11", Standard::C11),
     ] {
@@ -565,7 +566,7 @@ fn permissive_accepts_everything() {
         );
     }
     // …and it is the union of the bits we model, not "all one bits forever".
-    assert_eq!(config.bits() & !((1u64 << 13) - 1), 0);
+    assert_eq!(config.bits() & !((1u64 << 14) - 1), 0);
 }
 
 /// **The lexer reads the feature set, not the old level** — a C configuration refuses a raw string literal whatever the

@@ -1260,6 +1260,9 @@ fn the_standards_own_macro(
             Standard::Cpp17 => Some("201703L".to_string()),
             Standard::Cpp20 => Some("202002L".to_string()),
             Standard::Cpp23 => Some("202302L".to_string()),
+            // **C++26 reports a draft value**, as every compiler does before the standard is published; GCC 14 and
+            // Clang 18 both answer 202400L for -std=c++26.
+            Standard::Cpp26 => Some("202400L".to_string()),
             _ => None,
         },
         _ => None,

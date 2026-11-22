@@ -43,7 +43,7 @@ fn an_unconfigured_project_is_permissive() {
     assert!(language.support(Feature::C89Declarations));
     assert_eq!(
         language.standards().count(),
-        10,
+        11,
         "every standard, every vendor"
     );
 }
@@ -65,7 +65,7 @@ fn a_command_without_a_standard_flag_falls_through() {
         language.support(Feature::DeducingThis),
         "the permissive fallback"
     );
-    assert_eq!(language.standards().count(), 10);
+    assert_eq!(language.standards().count(), 11);
 }
 
 /// **A separated `-std c++17` is read too**, which some build systems write even though a compiler wants it joined.
