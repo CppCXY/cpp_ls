@@ -1,6 +1,6 @@
 [package]
 name = "cpp_check"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 publish = false
 description = "Run the analysis's checks over a whole workspace, from the command line."

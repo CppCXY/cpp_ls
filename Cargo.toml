@@ -11,13 +11,13 @@ members = [
 # has to check rather than trust.
 [workspace.dependencies]
 # local
-cpp_parser = { path = "crates/cpp_parser", version = "0.4.0" }
-cpp_toolchain = { path = "crates/cpp_toolchain", version = "0.4.0" }
-cpp_formatter = { path = "crates/cpp_formatter", version = "0.4.0" }
-cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.4.0" }
+cpp_parser = { path = "crates/cpp_parser", version = "0.5.0" }
+cpp_toolchain = { path = "crates/cpp_toolchain", version = "0.5.0" }
+cpp_formatter = { path = "crates/cpp_formatter", version = "0.5.0" }
+cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.5.0" }
 # Named by `tools/inspect` only: the hover card is the server's rendering, and a tool asking the analysis instead would
 # answer a different question from the one an editor asks.
-cpp_ls = { path = "crates/cpp_ls", version = "0.4.0" }
+cpp_ls = { path = "crates/cpp_ls", version = "0.5.0" }
 
 # external
 lsp-server = "0.10.0"
@@ -29,22 +29,16 @@ serde_json = "1.0.151"
 rowan = { version = "0.17.0" }
 glob = "0.3"
 notify = "8.2"
-# `.cppls.toml` is a file a user writes by hand: it gets a real TOML parser, not a subset that silently ignores
-# what it cannot read. See `crates/cpp_code_analysis/src/project/config.rs`.
 toml = "0.8"
 percent-encoding = "2.3"
 log = "0.4.33"
 fern = "0.7.1"
 chrono = "0.4.45"
-# **The cache is one embedded database, not 1 800 files** — see `crates/cpp_code_analysis/src/cache/cache_db.rs`.
-# Pure Rust, single file, MVCC, ordered keys: reading does not take the lock writing takes, and a
-# range delete is how a generation is collected.
 redb = "4.4.0"
-# Compresses the summaries and the renderings. Level 3 rather than 9: these are small blobs read on
-# the interactive path, and the difference measured at 9 was bytes we do not have (0.6 % on a summary).
 zstd = "0.13"
 clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
-# The parser's own error messages are localized (`t!` in its grammar rules); this is the parser's dependency and
-# not the server's.
 rust-i18n = "3"
 unicode-ident = "1.0.26"
+mimalloc-safe = "0.1.70"
+smol_str = { version = "0.2", features = ["serde"] }
+rustc-hash = "2"

@@ -1,6 +1,6 @@
 [package]
 name = "cpp_inspect"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 publish = false
 description = "Ask the C++ analysis one question, as JSON, for a program rather than a person."
@@ -24,8 +24,6 @@ description = "Ask the C++ analysis one question, as JSON, for a program rather 
 [dependencies]
 cpp_parser.workspace = true
 cpp_code_analysis.workspace = true
-# The hover card is the server's own rendering, and a tool that asked the analysis instead would answer a different
-# question from the one an editor asks.
 cpp_ls.workspace = true
 
 clap.workspace = true

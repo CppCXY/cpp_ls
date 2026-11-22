@@ -19,13 +19,14 @@ use std::process::ExitCode;
 
 /// **The crates whose `version` in `[workspace.dependencies]` has to match the tag.** `edit_version` and the
 /// tools are not published, so they are not listed.
-const PUBLISHED: [&str; 6] = [
+const PUBLISHED: [&str; 7] = [
     "cpp_parser",
     "cpp_toolchain",
     "cpp_formatter",
     "cpp_code_analysis",
     "cpp_check",
     "cpp_ls",
+    "cpp_inspect"
 ];
 
 fn main() -> ExitCode {

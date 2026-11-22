@@ -1,6 +1,6 @@
 [package]
 name = "cpp_toolchain"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "The toolchain and preprocessor layer of cpp_ls: how a translation unit is found, configured, walked and rendered."
 license = "MIT"

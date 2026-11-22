@@ -1,6 +1,6 @@
 [package]
 name = "cpp_code_analysis"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "The analysis layer of cpp_ls: the preprocessor, symbol scopes, type inference and the semantic checks."
 license = "MIT"
@@ -12,44 +12,21 @@ categories = ["development-tools"]
 
 [dependencies]
 cpp_parser.workspace = true
-
-# **The layer below this one**: the toolchain, the include resolver, the walk and the preprocessor. It is a crate
-# rather than a folder because the direction has to be the compiler's to enforce — the preprocessor may not ask the
-# index what a name means, and while both lived in one crate nothing stopped it.
 cpp_toolchain.workspace = true
-
-# **An expansion is code, and the hover shows it as code.** `the_expansion_of_a_macro` hands the preprocessor's own
-# answer to the formatter before a reader sees it: `((a)+(b))` with the arguments substituted is not what a reader
-# wants to compare with the source, and re-spacing it by hand here would be a second formatter. The formatter depends
-# on `cpp_parser` only, so this edge closes no cycle.
 cpp_formatter.workspace = true
 
-# **The decisions this layer makes are invisible from outside it**, and a report that says "completion and the hints
-# come and go" cannot be answered from the LSP layer alone: whether a callee resolved, whether its parameter list was
-# readable, and which of the four ways a call produces no hint are all decided here, in `inlay` and `index::project`.
-# The alternative is a signature that returns its own diagnosis, which is a worse shape for every other caller.
-#
-# Already in the graph — `cpp_ls` logs through it — so this is a dependency edge rather than a new crate.
+
 log.workspace = true
-
-# `WatchFilter` ignores paths by *pattern* as well as by directory (`**/build/**`, `*.generated.h`): which trees a
-# project considers its own source is a convention no analysis can guess, so a caller says it — and a caller with a
-# configuration file has a glob in its hand, not a directory.
 glob.workspace = true
-
-# The diagnostics speak the reader's language (see the crate documentation), the cache is one embedded database with
-# compressed entries, and `rustc-hash` is the hasher the index's tables are built over — three things that are about
-# what a *summary* is, and therefore still this layer's. `serde`/`toml`/`smol_str` moved to `cpp_toolchain` with the
-# files that read them (a `.cppls.toml` is the project's, not the index's).
 rust-i18n.workspace = true
 redb.workspace = true
 zstd.workspace = true
-rustc-hash = "2"
+rustc-hash.workspace = true
 # **A summary's text is an identifier, not a document.** `SmolStr` keeps up to 22 bytes inline, so a declaration's name
 # costs no allocation at all — and a `FileSummary` is made of them: 486 783 declarations over 1 761 files on
 # `EmmyLuaCodeStyle`, 517 bytes each. See `tests/summary_cost_probe.rs`. The `serde` feature is on because a name
 # ends up in an LSP payload (`typeHierarchyItem.data`), and converting at each site is what the type should not need.
-smol_str = { version = "0.2", features = ["serde"] }
+smol_str.workspace = true
 
 [features]
 # **The performance probe's observation points.** Off by default and **not compiled** when off: the marks in the
@@ -62,4 +39,4 @@ perf-probe = []
 # allocator, and the question `docs/memory-audit.md` asks — "is the resident set the live tables or pages the
 # allocator is holding" — cannot be answered with a different allocator underneath. The wrapper is
 # `mimalloc-safe`, the one `cpp_ls` depends on, so the probe and the server cannot drift apart.
-mimalloc-safe = "0.1.70"
+mimalloc-safe.workspace = true
