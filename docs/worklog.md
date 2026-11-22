@@ -288,6 +288,28 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The host wedged twice in one session — what to do when a command that cannot be slow hangs
+
+Twice today the shell stopped answering: the second time a **literal string** (`'probe-ok'`) did not return within 20
+seconds, and before that a 90-second `Get-Process` — a pure OS query — did not return either. The first occurrence was
+fixed by rebooting the machine. Nothing in this repository is implicated: the shell layer could not run `echo`.
+
+What made it expensive was not the wedge but **how long each hanging command was allowed to run**: a 10-minute timeout
+on a `Get-Content` of a 700-line file spends ten minutes to learn nothing. The rules that follow from it:
+
+* **Every command gets a timeout that its work justifies.** Trivial file/path queries: 20–60 s. A build or a sweep:
+  as long as it needs, and then it runs in the background and is collected by `job_output` rather than by waiting.
+* **A command that exceeds its budget is killed at once** (`job_kill`), not left to finish — and the next attempt is a
+  *different* command, not the same one again.
+* **Corpus files are read with the file tools** (`read`, `grep`, `glob`, which run in-process), not with `Get-Content`:
+  a freshly cloned tree (nginx, curl, json) is exactly where the disk is slowest.
+* **One measurement at a time.** Several concurrent `cpp_inspect sweep` processes are gigabytes and cores each; the
+  numbers get slower and less comparable, and the machine is what pays for it.
+* The first symptom to watch for is a command that *should* be instant not returning: stop, kill it, and check the host
+  rather than retrying.
+
+
+
 ## The goal's two json defects, closed — and the numbers
 
 Both of the objective's json items are fixed, each by a minimal reproduction and a separate commit:
