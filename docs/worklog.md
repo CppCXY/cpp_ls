@@ -405,6 +405,21 @@ the wire **without answering the settings**: while they are unanswered the hover
 in **0.5 s** with the configuration still outstanding, and the test fails with *"the request was answered before the
 settings it follows"*. New code: **5.4 s**, after the settings are answered and the change is applied.
 
+### P2-6: a notification the server cannot read is said out loud
+
+`dispatch_notification!` read every notification with `if let Ok(params)` and no `else`: a malformed `didOpen` (or one
+missing a field this server reads) left the analysis a document behind with nothing in the log to say why
+(`docs/language-server-review.md` P2-6). `or_report` reads the params or reports the failure — method, the URI taken from
+the **raw** params (the only place it exists once extraction has failed), and the parse error; never the params themselves,
+because a `didChange` carries whole buffers. `$/setTrace` now records the level a client asked for and says that the
+server's own `--log-level` is what it uses.
+
+The test starts the server with its own `--log-path` (the helper used to force `none`; it now leaves the flag to the test
+when one is named, because it may not be given twice), sends `didOpen` with no `text`, checks that the next hover still
+answers, and reads the log. Without the change the log has no line naming the notification and the test fails; with it the
+method and URI are there.
+
+
 
 
 
