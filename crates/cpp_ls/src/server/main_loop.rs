@@ -17,7 +17,7 @@ pub(super) async fn main_loop(
     let (init_tx, init_rx) = oneshot::channel::<()>();
 
     // Create and configure server instance
-    let server = LspServer::new(connection, &params, init_rx);
+    let server = LspServer::new(connection, &params, init_rx, &cmd_args);
 
     // Start initialization process
     let server_context_snapshot = server.server_context.snapshot();

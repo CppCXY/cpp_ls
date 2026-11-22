@@ -62,10 +62,9 @@ pub async fn initialized_handler(
     let roots = workspace_roots(&params);
     let log_file = init_logger(roots.first().and_then(|root| root.to_str()), &cmd_args);
 
-    let client_id = match &cmd_args.editor {
-        Some(editor) => editor.clone().into(),
-        None => get_client_id(&params.client_info),
-    };
+    // **The session's identity, not a second computation of it** — see `the_effective_client_id`, and the capability
+    // side that reads the same value (`docs/language-server-review.md` P2-2).
+    let client_id = context.lsp_features().client_id();
     let supports_config_request = params
         .capabilities
         .workspace

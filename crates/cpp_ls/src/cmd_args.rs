@@ -28,10 +28,6 @@ pub struct CmdArgs {
     #[cfg_attr(feature = "cli", structopt(long, default_value = "none"))]
     pub log_path: NoneableString,
 
-    /// Path to the resources and logs directory. Use 'none' to indicate that assets should not be output to the file system.
-    #[cfg_attr(feature = "cli", structopt(long, default_value = ""))]
-    pub resources_path: NoneableString,
-
     /// Path to a project configuration file, instead of `.cppls.toml` in the workspace root.
     ///
     /// For the project whose configuration lives somewhere else — a shared file, a generated one, a checkout being
@@ -39,10 +35,6 @@ pub struct CmdArgs {
     /// not a convention (see `cpp_code_analysis::project::load_config`).
     #[cfg_attr(feature = "cli", structopt(long, default_value = "none"))]
     pub config: NoneableString,
-
-    /// Whether to load the standard library.
-    #[cfg_attr(feature = "cli", structopt(long, default_value = "true"))]
-    pub load_stdlib: CmdBool,
 
     /// Force editor mode. Options: vscode, intellij, neovim
     #[cfg_attr(feature = "cli", structopt(long))]
@@ -132,25 +124,11 @@ impl NoneableString {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CmdBool(pub bool);
-
-impl std::str::FromStr for CmdBool {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "true" => Ok(CmdBool(true)),
-            "false" => Ok(CmdBool(false)),
-            _ => Err(format!(
-                "Invalid boolean value: '{}'. Please choose 'true' or 'false'",
-                s
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+/// **Force the session's identity**, for a client that cannot name itself: `vscode`, `intellij` or `neovim`.
+///
+/// One value, used where a *setting* is chosen and where a *command* is chosen alike — see
+/// [`crate::context::the_effective_client_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(ValueEnum))]
 pub enum Editor {
     Vscode,

@@ -19,7 +19,6 @@ cargo run -p cpp_ls -- --help                          # every switch, with its 
 | `--log-level` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
 | `--log-path` | `none` | a log file, or `none` |
 | `--config` | `none` | a `.cppls.toml` somewhere other than the workspace root |
-| `--load-stdlib` | `true` | read the standard library's own headers |
 | `--editor` | unset | `vscode`, `intellij`, `neovim` — capabilities that differ by client |
 
 ## What it answers

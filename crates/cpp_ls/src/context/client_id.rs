@@ -33,6 +33,27 @@ impl ClientId {
     }
 }
 
+/// **Which editor this session is for** — the `--editor` argument when a caller passed one, the client's own
+/// `clientInfo` otherwise.
+///
+/// One function, because there used to be two answers: `LspServer::new` built `LspFeatures` from `clientInfo` alone while
+/// the client-configuration path consulted `--editor`, so `--editor vscode` spoke with one identity where a *setting* is
+/// chosen and another where a *command* is chosen — a VS Code lens command and a Neovim semantic-token list from the same
+/// session (`docs/language-server-review.md` P2-2).
+pub fn the_effective_client_id(
+    editor: Option<&crate::cmd_args::Editor>,
+    client_info: &Option<ClientInfo>,
+) -> ClientId {
+    match editor {
+        // Editor is Copy at its call sites through the value form; a shared reference is matched rather than
+        // copied so the signature can take &Editor without requiring Copy here.
+        Some(crate::cmd_args::Editor::Vscode) => ClientId::VSCode,
+        Some(crate::cmd_args::Editor::Intellij) => ClientId::Intellij,
+        Some(crate::cmd_args::Editor::Neovim) => ClientId::Neovim,
+        None => get_client_id(client_info),
+    }
+}
+
 pub fn get_client_id(client_info: &Option<ClientInfo>) -> ClientId {
     match client_info {
         Some(info) => match info.name.as_str() {

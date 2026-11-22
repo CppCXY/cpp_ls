@@ -12,7 +12,7 @@ mod workspace_manager;
 mod workspace_state;
 pub use analysis_state::AnalysisState;
 pub use client::ClientProxy;
-pub use client_id::{ClientId, get_client_id};
+pub use client_id::{ClientId, get_client_id, the_effective_client_id};
 pub use diagnostics::DiagnosticService;
 pub use lsp_features::LspFeatures;
 pub(crate) use lsp_features::wants_inactive_regions;

@@ -7763,3 +7763,105 @@ fn a_configuration_file_outside_the_workspace_is_watched() {
     let _ = server.wait_for_exit();
 }
 
+/// **`--editor` is the session's identity on both sides.**
+///
+/// Two computations of "which editor is this" disagreed under the argument: the capability side used
+/// `initialize.clientInfo` and the configuration side used `--editor`, so a session started with `--editor vscode` from a
+/// client that calls itself something else chose its *settings* as VS Code and its *commands* as that other client
+/// (`docs/language-server-review.md` P2-2).
+///
+/// The observable is a code lens: VS Code is sent `cppls.showReferences` (its extension registers it, and it refuses the
+/// editor's internal command), an IntelliJ client is sent `editor.action.showReferences`, and anything else gets no
+/// command at all. The client here says it is Neovim and the argument says vscode, so the two identities would disagree
+/// in one wire answer if both computations survived.
+#[test]
+fn the_editor_argument_is_the_identity_the_commands_are_chosen_with() {
+    let source = "\
+int grow(int by) { return by + 1; }
+int f() { return grow(1); }
+";
+    let project = Project::new("editor-identity");
+    project.write("main.cpp", source);
+
+    let mut server = Server::start_with_args(
+        project.root(),
+        &[
+            std::ffi::OsStr::new("--editor"),
+            std::ffi::OsStr::new("vscode"),
+        ],
+    );
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "clientInfo": { "name": "Neovim" },
+            "capabilities": { "textDocument": { "codeLens": { "dynamicRegistration": false } } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+    server.pull_diagnostics(2, &main_uri);
+
+    let lenses = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+    let listed = lenses["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list of lenses: {lenses}"));
+    assert!(
+        !listed.is_empty(),
+        "the fixture has a function to count: {lenses}"
+    );
+    let command = listed
+        .iter()
+        .filter_map(|lens| lens["command"].as_object())
+        .map(|command| command["command"].as_str().unwrap_or_default().to_string())
+        .next()
+        .unwrap_or_default();
+    assert_eq!(
+        command, "cppls.showReferences",
+        "`--editor vscode` is the identity the command is chosen with, whatever the client calls itself: {lenses}"
+    );
+
+    let _ = server.request(200, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
+/// **The CLI does not advertise a switch nothing reads.**
+///
+/// `--load-stdlib` and `--resources-path` were declared and never consumed: a user could pass them and get no behaviour
+/// change, which reads as "this is supported and did not help" rather than "this does nothing"
+/// (`docs/language-server-review.md` P2-2). They are deleted, and the help text is the contract that says so — `--editor`,
+/// which *is* read (the session's identity), stays listed.
+#[test]
+fn the_cli_does_not_offer_switches_nothing_reads() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cpp_ls"))
+        .arg("--help")
+        .output()
+        .expect("the binary runs");
+    let help = String::from_utf8_lossy(&output.stdout).to_string();
+
+    for dead in ["load-stdlib", "resources-path"] {
+        assert!(
+            !help.contains(dead),
+            "`--{dead}` is offered and nothing reads it: {help}"
+        );
+    }
+    assert!(
+        help.contains("--editor"),
+        "the identity switch is offered, because it is read: {help}"
+    );
+}

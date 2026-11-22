@@ -22,6 +22,7 @@ impl LspServer {
         connection: AsyncConnection,
         params: &InitializeParams,
         init_rx: oneshot::Receiver<()>,
+        cmd_args: &crate::cmd_args::CmdArgs,
     ) -> Self {
         // **The language, before anything is parsed.** `initialize.locale` is the client's own setting — VS Code
         // sends `"locale": "zh-cn"` from `--locale`/the display language — and it is applied here because the very
@@ -33,10 +34,15 @@ impl LspServer {
             set_locale(locale);
         }
 
-        // **Which editor asked**, from `initialize.clientInfo` (and the `--editor` argument, when a caller passed
-        // one). The capability list cannot answer this: a client names the standard semantic token types it knows,
-        // so a custom type is never in it even for a client whose theme can draw it.
-        let client_id = crate::context::get_client_id(&params.client_info);
+        // **Which editor asked**, from the `--editor` argument when a caller passed one and `initialize.clientInfo`
+        // otherwise — **one** value for the whole session. It is computed here and read back from the features by every
+        // handler, because the two computations this replaced disagreed under `--editor`: the capability side used the
+        // client's own info and the configuration side the argument, so one session held two identities
+        // (`docs/language-server-review.md` P2-2). The capability list cannot answer the question at all: a client names
+        // the standard semantic token types it knows, so a custom type is never in it even for a client whose theme can
+        // draw it.
+        let client_id =
+            crate::context::the_effective_client_id(cmd_args.editor.as_ref(), &params.client_info);
         let server_context = context::ServerContext::new(
             connection.connection.clone(),
             params.capabilities.clone(),
