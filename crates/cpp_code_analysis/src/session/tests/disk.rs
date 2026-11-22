@@ -595,3 +595,141 @@ pub(crate) fn a_comment_edit_to_a_header_keeps_the_cook_record() {
         second.cooks_served_from_disk()
     );
 }
+
+/// **A header that appears earlier on the search path moves the include.**
+///
+/// `SummaryStore::where_it_resolves_now` remembers each search for the life of the store, and
+/// `resolution_still_holds` uses those remembered answers to decide whether a stored summary is still current. A
+/// header created mid-session makes both wrong in the same direction: the *fresh* search would find the new file, but
+/// the remembered answer — the old file — matches what the summary recorded, so the summary is kept and the file whose
+/// include should now resolve earlier keeps the old reading (`docs/code-analysis-review.md` P1-5).
+///
+/// The watcher does its part: `naming_files` asks for the includer to be re-read. The memo is what defeated it.
+#[test]
+pub(crate) fn a_header_that_appears_earlier_on_the_path_moves_the_include() {
+    use crate::include::config::IncludePath;
+
+    let project = Project::new("include-order");
+    project.write("a.cpp", "#include \"x.h\"\nvoid f() { X x; }\n");
+    project.write("second/x.h", "struct X { int from_the_second; };\n");
+
+    let mut config = CompilerConfig::default();
+    config
+        .include_paths
+        .push(IncludePath::user(project.root.join("first")));
+    config
+        .include_paths
+        .push(IncludePath::user(project.root.join("second")));
+
+    let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+    let mut session = Session::with_config(
+        &project.root,
+        providers,
+        WatchFilter::new(&project.root),
+        config,
+    );
+    let a_cpp = project.root.join("a.cpp");
+    session.add_project_files([a_cpp.clone()]);
+    session.index_everything();
+
+    let resolved = |session: &Session<_>| -> String {
+        session
+            .index()
+            .summary(&a_cpp)
+            .and_then(|summary| summary.includes.first().cloned())
+            .and_then(|include| include.resolved)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    };
+    assert!(
+        resolved(&session).ends_with("second/x.h"),
+        "the only `x.h` is in the second directory: {:?}",
+        resolved(&session)
+    );
+
+    // The header the search should have found first, created now.
+    project.write("first/x.h", "struct X { int from_the_first; };\n");
+    let answer = session.changed([crate::index::watch::FileEvent::created(
+        project.root.join("first/x.h"),
+    )]);
+    assert!(
+        answer.reindex.iter().any(|path| path.ends_with("a.cpp")),
+        "the file whose include can now resolve elsewhere is asked for: {:?}",
+        answer.reindex
+    );
+    session.index_everything();
+
+    assert!(
+        resolved(&session).ends_with("first/x.h"),
+        "the include resolves where the search order says it does, now that the file exists: {:?}",
+        resolved(&session)
+    );
+}
+
+/// **A second session does not trust a stored include search.**
+///
+/// The first session stored `#include "x.h"` resolving to `second/x.h`, and the search is also remembered in the
+/// database so a later session does not repeat it. A header that then appears in `first/` — earlier on the path —
+/// makes that remembered answer wrong, and nothing about the *summary's* key can notice: the text, the configuration
+/// and the directory are all unchanged. The summary is a candidate and `resolution_still_holds` is what makes it an
+/// answer, so the check has to ask the filesystem, not a recorded search (`docs/code-analysis-review.md` P1-5).
+#[test]
+pub(crate) fn a_second_session_does_not_trust_a_stored_include_search() {
+    use crate::include::config::IncludePath;
+
+    let project = Project::new("include-search-cache");
+    project.write("a.cpp", "#include \"x.h\"\nvoid f() { X x; }\n");
+    project.write("second/x.h", "struct X { int from_the_second; };\n");
+
+    let config = {
+        let mut config = CompilerConfig::default();
+        config
+            .include_paths
+            .push(IncludePath::user(project.root.join("first")));
+        config
+            .include_paths
+            .push(IncludePath::user(project.root.join("second")));
+        config
+    };
+    let a_cpp = project.root.join("a.cpp");
+
+    let open_and_read = || {
+        let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+        let mut session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            config.clone(),
+        );
+        session.add_project_files([a_cpp.clone()]);
+        session.index_everything();
+        session
+    };
+    let resolved = |session: &Session<_>| -> String {
+        session
+            .index()
+            .summary(&a_cpp)
+            .and_then(|summary| summary.includes.first().cloned())
+            .and_then(|include| include.resolved)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    };
+
+    let first_session = open_and_read();
+    assert!(
+        resolved(&first_session).ends_with("second/x.h"),
+        "{:?}",
+        resolved(&first_session)
+    );
+    drop(first_session);
+
+    // The header the search should find first, created while no session is open.
+    project.write("first/x.h", "struct X { int from_the_first; };\n");
+
+    let second_session = open_and_read();
+    assert!(
+        resolved(&second_session).ends_with("first/x.h"),
+        "the stored search must not outvote the filesystem: {:?}",
+        resolved(&second_session)
+    );
+}
