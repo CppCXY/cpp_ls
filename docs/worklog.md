@@ -331,6 +331,12 @@ spare machine was there" rather than "what does the code do" — they failed onl
 run under `CPPLS_LATENCY_STRICT=1 ... -- --test-threads=1`, while the fill-time bound and the steady-state median stay
 unconditional. Two full-workspace runs after both changes were clean.
 
+**Fixed — P1-5, the serialised syntax id** (`d20fc2b4`). `CppSyntaxId::deserialize` called `CppKind::from_raw`, which
+panics outside the kind space, and `TextRange::new`, which panics on a reversed range — so a malformed cache entry could
+take the reader process down instead of returning an error. The reading is a fallible `from_hex` now (field count, hex,
+range order, discriminant via `try_from_raw`) and the visitor maps a failure onto `serde`'s error. The test feeds eight
+malformed spellings; with the old form back in place it panics at `kind/mod.rs:84` on `0xffff`.
+
 **Confirmed by reading, not yet fixed** — in the order this round would take them:
 
 | item | where | what the code does |
