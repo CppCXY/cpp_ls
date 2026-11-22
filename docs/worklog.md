@@ -292,6 +292,32 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## The analysis review: the baseline, the probe, and what it found before any fix
+
+`docs/code-analysis-review.md` arrived as a second review, of `cpp_code_analysis`. Stage 0 of working through it is a
+baseline and a **probe** — a fix in this layer is worth nothing if the tool cannot answer the question it is about.
+
+**The baseline matches the review's**: `cargo test -p cpp_code_analysis` is **889 unit (3 ignored)** and **1136
+integration (9 ignored)**.
+
+**Confirmed, with the probe** (`target/bench/analysis_probe.py`):
+
+* **P1-1, no program point.** `void f() { later(); } void later() {}` — `define` at the call answers `a.cpp:2:6`, the
+  declaration written *after* the use. A compiler rejects the call; the analysis resolves it.
+* **P2-4, `undefined-name` is not an undefined check.** `void f() { missing = 1; }` produces **no finding at all** — the
+  rule only looks at call callees and member receivers.
+
+**Found while building the probe, and it comes first**: `type` and `hover` answer
+**`not_an_expression: true`** for positions that hold a perfectly ordinary expression. `type --at` on `auto a = 1u;`
+answered `int` once, and has answered `not_an_expression` every time since — the answer depends on the session's index
+state rather than on the code, which is a worse failure than a wrong type: an editor asking about the token under the
+cursor is told there is no expression there. `hover` says the same (`markdown: null`), and `define` on a valid
+`later();` call has answered both a declaration and nothing, depending on the same state.
+
+So the first task is not a review item but a prerequisite: **make a query answer deterministically after a file is
+written**, then re-run the probe, and only then start on P1-3 (qualifiers) and P1-4 (literal types) — the two claims this
+probe can measure directly.
+
 ## The review's P3 list: the two thirds worth doing
 
 P3 has three items, and only two of them were work rather than a project of their own.
