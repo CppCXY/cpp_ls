@@ -288,6 +288,43 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## curl's last three `syntax-error`s, and the two defects behind them
+
+`lib/curl_gssapi.c:63,66` and `lib/multi.c:3516` were the only errors left in curl's `lib`, and neither was a curl
+construct:
+
+* **`gss_OID_desc Curl_spnego_mech_oid CURL_ALIGN8 = { 6, … };`** where `CURL_ALIGN8` is
+  `__attribute__((aligned(8)))`. The specifier sequence takes a name as another *word of the type* when what follows it
+  can still be a declarator, and `__attribute__` is an identifier — so the declarator's own name joined the type, the
+  declarator was left empty, and the initializer had nothing to initialise: ``expected `;` after expression`` at the
+  name. The rule now asks what follows the **attribute** (`=`, `;`, `,`, `{`, `(` means the name is the declarator;
+  another name, a `*`, a `&` or `operator` means the attribute belongs to the type), which is also the shape
+  `MY_API Widget __attribute__((unused)) x;` needs. `extensions_gnu` has both spellings, and the case fails without the
+  fix.
+* **`struct Curl_mapi_guard guard;` at `multi.c:3516`** was a **cascade**, not the construct: `multi.c` writes
+  `#undef curl_multi_socket` and then defines the function of that name, and the lookup fell back to `multi.h` after
+  finding the `#undef`. So the definition's own name expanded through the public macro —
+  `#define curl_multi_socket(x, y, z) curl_multi_socket_action(x, y, 0, z)` — leaving `0` where the second parameter's
+  type belonged: `curl_multi_socket_action(CURLM *m, curl_socket_t s, 0, int *running_handles)`. `MacroBindings` can now
+  say **"undefined here"** as well as "not in this layer", and both layered lookups (`Live`, the cook's own table over
+  its starting layer, and `Over`, the closure's) stop instead of falling through.
+
+Measured with the same probes:
+
+| corpus | before | after |
+| --- | --- | --- |
+| curl 8.x `lib` | 146 files, 397 findings, **3** `syntax-error` | 146 files, 404 findings, **0** `syntax-error` |
+| curl 8.x `src` | 42 files, 86 findings, 0 | unchanged |
+| libuv / redis / nginx | 0 `syntax-error` each | unchanged |
+
+The findings rose by seven because the code the broken expansion used to hide is now live and read: nine more
+`braces-around-statements` and one more `else-after-return`.
+
+The cross-file `#undef` rule is verified by the two-file fixture (`target/bench/undef_header.h` and `undef_user.c`:
+the use after the `#undef` is no longer expanded), **not** by a unit test — the suite's helpers cannot build a layered
+table from text yet, and a same-file `#undef` never had the defect. A `rendered_with(table)` helper is the next step
+if that rule needs to be pinned.
+
 ## The host wedged twice in one session — what to do when a command that cannot be slow hangs
 
 Twice today the shell stopped answering: the second time a **literal string** (`'probe-ok'`) did not return within 20

@@ -1194,12 +1194,21 @@ struct Live<'base> {
 
 impl crate::macros::MacroBindings for Live<'_> {
     fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        // **An `#undef` in this file ends the search** — see `Over`'s note on the same rule. The header that defined a
+        // name must not answer it after the file took it away; curl's `lib/multi.c` `#undef`s the public
+        // `curl_multi_socket` macro and then defines the function of that name.
+        if self.own.undefined_at(name, offset) {
+            return None;
+        }
         self.own
             .definition_at(name, offset)
             .or_else(|| self.base.definition_at(name, offset))
     }
 
     fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        if self.own.undefined(name) {
+            return None;
+        }
         self.own
             .definition(name)
             .or_else(|| self.base.definition(name))
@@ -1280,12 +1289,24 @@ impl<'a> Over<'a> {
 
 impl crate::macros::MacroBindings for Over<'_> {
     fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        // **An `#undef` in the newer layer ends the search.** `None` from `newest` means two different things —
+        // "never mentioned here" and "taken away here" — and only the first may fall through to the older layer.
+        // Measured on curl's `lib/multi.c`, which `#undef`s the public `curl_multi_socket` macro before defining the
+        // function of that name: the header answered instead, the definition's own name expanded as a call
+        // (`curl_multi_socket_action(x, y, 0, z)`), and the `0` it left in the parameter list was a `syntax-error`
+        // at `multi.c:3516`.
+        if self.newest.undefined_at(name, offset) {
+            return None;
+        }
         self.newest
             .definition_at(name, offset)
             .or_else(|| self.oldest.definition_at(name, offset))
     }
 
     fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        if self.newest.undefined(name) {
+            return None;
+        }
         self.newest
             .definition(name)
             .or_else(|| self.oldest.definition(name))

@@ -263,6 +263,21 @@ pub trait MacroBindings {
         let _ = (name, operand);
         None
     }
+
+    /// **Is this name explicitly undefined here** — an `#undef` in force, rather than silence?
+    ///
+    /// A layered table has to ask before falling back: a file that writes `#undef NAME` must not then be answered by
+    /// the header that defined it. `false` by default, because only a table that records `#undef`s can say.
+    fn undefined_at(&self, name: &str, offset: usize) -> bool {
+        let _ = (name, offset);
+        false
+    }
+
+    /// [`MacroBindings::undefined_at`] at the end of the file.
+    fn undefined(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
 }
 
 impl MacroBindings for MacroTable {
@@ -272,6 +287,14 @@ impl MacroBindings for MacroTable {
 
     fn definition(&self, name: &str) -> Option<&MacroDef> {
         self.get(name)
+    }
+
+    fn undefined_at(&self, name: &str, offset: usize) -> bool {
+        MacroTable::undefined_at(self, name, offset)
+    }
+
+    fn undefined(&self, name: &str) -> bool {
+        MacroTable::undefined(self, name)
     }
 }
 
@@ -431,6 +454,28 @@ impl MacroTable {
 
     pub fn is_defined_at(&self, name: &str, offset: usize) -> bool {
         self.get_at(name, offset).is_some()
+    }
+
+    /// **Is the binding in force at `offset` an `#undef`?** — a name taken away here, rather than one nobody wrote.
+    ///
+    /// [`MacroTable::get_at`] answers `None` for both, and a layered lookup cannot tell them apart without this: the
+    /// older layer must answer a name this file never mentioned, and must **not** answer one it `#undef`ed. Measured
+    /// on curl's `lib/multi.c`, which `#undef`s the public `curl_multi_socket` macro before defining the function of
+    /// that name: the header's definition answered instead, the definition's own name expanded as a call, and the
+    /// result was a `syntax-error` at `multi.c:3516` (`docs/worklog.md`).
+    pub fn undefined_at(&self, name: &str, offset: usize) -> bool {
+        matches!(
+            self.binding_at(name, Some(offset)),
+            Some(binding) if binding.definition.is_none()
+        )
+    }
+
+    /// [`MacroTable::undefined_at`] at the end of the file.
+    pub fn undefined(&self, name: &str) -> bool {
+        matches!(
+            self.binding_at(name, None),
+            Some(binding) if binding.definition.is_none()
+        )
     }
 
     /// Every macro defined at the end of the file, latest binding of each name first.
