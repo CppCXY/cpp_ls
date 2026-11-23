@@ -27,11 +27,35 @@ const CONSTRUCTS: &[(&str, &str)] = &[
         "struct B { void f(); }; struct D : B { void g() { __super::f(); } };",
     ),
     ("a __ptr32 pointer", "void f(int __ptr32* p);"),
+    ("__asm block", "void f() { __asm { mov eax, 1 } }"),
+    ("bare __asm", "void f() { __asm mov eax, 1; }"),
 ];
 
 #[test]
 fn every_msvc_extension_parses_without_an_error() {
     assert_all_parse("MSVC", CONSTRUCTS);
+}
+
+/// **`__asm` is MSVC's construct, and both of its forms are statements.** The braced payload is a block; the
+/// traditional form has no brackets at all and its operands are everything up to the statement's `;`. The feature
+/// used to be GNU's alone, so an MSVC configuration read `__asm` as an identifier and reported the operands as
+/// separate statements (three errors on `__asm mov eax, 1;`).
+#[test]
+fn msvc_asm_forms_are_statements() {
+    use cpp_parser::{CppParser, CppSyntaxKind, Dialect, ParserConfig};
+
+    let tree = CppParser::parse(
+        "void f() { __asm { mov eax, 1 } __asm mov eax, 1; }\n",
+        ParserConfig::default().with_dialect(Dialect::Msvc),
+    );
+
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    assert!(
+        tree.get_red_root()
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AsmStat }),
+        "the payload is an asm statement"
+    );
 }
 
 /// **The MSVC constructs that used to be gaps** — structured exception handling and `__interface`.

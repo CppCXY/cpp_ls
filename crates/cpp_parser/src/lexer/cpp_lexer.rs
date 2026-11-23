@@ -179,7 +179,7 @@ impl<'a> CppLexer<'a> {
             "alignas" if self.accepts(crate::features::Feature::AlignasCpp) => {
                 CppTokenKind::AlignasKeyword
             }
-            "alignof" => CppTokenKind::AlignofKeyword,
+            "alignof" | "__alignof__" => CppTokenKind::AlignofKeyword,
             "constexpr" if self.accepts(crate::features::Feature::Constexpr) => {
                 CppTokenKind::ConstexprKeyword
             }
@@ -209,6 +209,7 @@ impl<'a> CppLexer<'a> {
             // ordinary identifier when it does not — which is what a strict `-std=c++20` parse must see, and what the
             // `typeof` test in `extensions_gnu.rs` pins from the other side.
             "__typeof__" | "__typeof" | "__decltype" | "typeof" | "typeof_unqual"
+            | "__typeof_unqual__"
                 if self
                     .lexer_config
                     .language()

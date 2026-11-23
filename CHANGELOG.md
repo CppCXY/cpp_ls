@@ -35,6 +35,11 @@ fix many parser and toolchain bug
   answered 0 and `pointer->three` reported no member while the header's summary held all four. The same held for
   `enum Color pick(void);`, where a jump on `Color` landed on the function. A tag is now bound only when its
   declaration introduces nothing else (`struct bits;`, `class Widget;`). `FORMAT_VERSION` 59 → 60.
+- **Parser: the compiler-extension spellings missing from the vendor grammar.** `__alignof__` and
+  `__typeof_unqual__` lex as their keywords; `_Atomic` (C11) is a type specifier in both spellings and a qualifier
+  after `*`; Clang's `_Nullable`/`_Nonnull`/`_Null_unspecified` are consumed instead of becoming a parameter's name;
+  `_Decimal32/64/128`, `_Float32x/64x` and `__float80` are types for a GNU target; and MSVC's `__asm` is a statement
+  in both its braced and its traditional brace-less form.
 
 ## [0.4.0]
 

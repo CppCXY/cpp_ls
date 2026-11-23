@@ -67,3 +67,54 @@ fn a_block_literal_parses() {
         )],
     );
 }
+#[test]
+fn atomic_is_a_type_specifier_and_nullability_is_not_a_name() {
+    use cpp_parser::features::{LanguageConfig, Standard};
+    use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
+
+    // **`_Atomic` is C11's**, and the feature table says so; a C++ configuration has no such keyword.
+    let c11 =
+        ParserConfig::default().with_language(LanguageConfig::new().with_standard(Standard::C11));
+    let tree = CppParser::parse(
+        "void f() { _Atomic(int) n = 0; _Atomic int m = 0; int * _Atomic p = 0; }\n",
+        c11,
+    );
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let root = tree.get_red_root();
+    assert!(
+        root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType
+                && node.text().to_string().contains("_Atomic(int)")
+        }),
+        "`_Atomic(int)` is a type specifier with a type-id, not a macro call"
+    );
+    assert!(
+        root.descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TypeId),
+        "and the parenthesised half is read as a type name"
+    );
+    assert!(
+        root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType
+                && node.text().to_string().trim() == "_Atomic"
+        }),
+        "the qualifier spelling before a type is a specifier too"
+    );
+
+    // **An unnamed parameter stays unnamed.** Before the nullability qualifiers were read, `_Nullable` stood where
+    // the declarator's name goes, so this parameter was a parameter *named* `_Nullable`.
+    let tree = CppParser::parse("void f(int * _Nullable);\n", ParserConfig::default());
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let parameter = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+        .expect("the parameter");
+    assert!(
+        !parameter
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr),
+        "the qualifier is not the parameter's name: {}",
+        parameter.text()
+    );
+}

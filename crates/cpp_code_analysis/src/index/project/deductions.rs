@@ -811,7 +811,13 @@ pub(crate) fn a_typeof_payload(
             .to_string();
         matches!(
             name.as_str(),
-            "typeof" | "typeof_unqual" | "__typeof__" | "__typeof" | "__decltype" | "decltype"
+            "typeof"
+                | "typeof_unqual"
+                | "__typeof__"
+                | "__typeof"
+                | "__decltype"
+                | "decltype"
+                | "__typeof_unqual__"
         )
     })?;
     // The payload is the node inside the parentheses. A type-id has a TypeId child and is not this question.

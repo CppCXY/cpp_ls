@@ -523,6 +523,17 @@ pub(crate) fn eat_cv_qualifiers(p: &mut CppParser) {
             continue;
         }
 
+        // **C11's `_Atomic` as a qualifier** — `int * _Atomic p;`. The parenthesised spelling is a *type* and is read
+        // by the specifier rule; in the pointer/qualifier position only the bare form is legal, and it says nothing
+        // about the type or the name.
+        if p.current_token() == CppTokenKind::Identifier
+            && p.current_token_text() == "_Atomic"
+            && p.language().support(crate::features::Feature::Atomic)
+        {
+            p.bump();
+            continue;
+        }
+
         if an_implementation_keyword(p).is_some() {
             parse_an_implementation_keyword(p);
             continue;

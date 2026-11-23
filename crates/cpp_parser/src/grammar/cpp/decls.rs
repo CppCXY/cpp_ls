@@ -5291,6 +5291,24 @@ pub fn starts_declaration(p: &mut CppParser) -> bool {
         // found `y` next, and reported `expected primary expression` against the `decltype` itself.
         CppTokenKind::DecltypeKeyword if a_decltype_here_is_a_type(p) => true,
 
+        // **C11's `_Atomic` begins a declaration**, in both spellings: `_Atomic(int) n = 0;` and `_Atomic int
+        // n = 0;`. It is an identifier rather than a keyword kind (the spelling is contextual — a C++ program may
+        // use the name), and without the anchor the statement rule read `_Atomic(int)` as a macro call and `n = 0`
+        // as the rest of an expression. A genuine call in statement position still falls back to the expression
+        // reading when the declaration attempt fails.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "_Atomic"
+                && p.language().support(crate::features::Feature::Atomic) =>
+        {
+            true
+        }
+
+        // **A type the target's compiler spells itself also begins a declaration** — `__int128`, `_Decimal64`,
+        // `_Complex double` (GNU), `__int64` (MSVC). They are identifiers rather than keyword kinds, so the
+        // statement rule had no anchor for them; `_Complex` was the visible one, read as a macro call followed by a
+        // second declaration (`double z;`) instead of one declaration whose type is `_Complex double`.
+        CppTokenKind::Identifier if types::a_type_the_compiler_spells(p) => true,
+
         kind => can_begin_a_declaration(kind),
     }
 }

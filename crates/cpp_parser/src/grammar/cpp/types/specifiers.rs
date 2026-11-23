@@ -276,6 +276,11 @@ pub(crate) fn parse_decl_specifier_seq_with(
             && p.peek_next_token() == CppTokenKind::LeftParen
             && !at_an_attribute(p)
             && !super::super::decls::a_bitint_declaration_starts_here(p)
+            // **`_Atomic(type) name` is a declaration, not a macro specifier.** The follower is a name, which this
+            // arm reads as a further specifier (any identifier can be a type), so it consumed `n` into the type and
+            // left the declaration with no declarator — `expected a declarator name` at the `=`. The compiler's own
+            // spelling is read by the `_Atomic` arm of [`parse_one_decl_specifier_inner`] instead.
+            && p.current_token_text() != "_Atomic"
             && a_specifier_follows_the_group(p)
         {
             let checkpoint = p.checkpoint();
@@ -425,6 +430,10 @@ pub(crate) fn parse_decl_specifier_seq_with(
         if allow_second_name
             && specifiers == 0
             && !super::super::decls::a_bitint_declaration_starts_here(p)
+            // **`_Atomic(int) n` is a declaration, not a macro call.** The shape is a name, a group and a name,
+            // which is what the macro arm below looks for; `_Atomic` is the compiler's own spelling and the
+            // specifier rule above reads it, so the arm stands aside for it exactly as it does for `_BitInt`.
+            && p.current_token_text() != "_Atomic"
             && a_macro_call_begins_the_declaration(p)
         {
             if let Err(err) = super::super::stats::parse_a_macro_that_stands_for_a_declaration(p) {
@@ -736,6 +745,26 @@ pub(crate) fn parse_one_decl_specifier_inner(
             expect_token(p, CppTokenKind::LeftParen)?;
             super::super::exprs::parse_assignment_expr(p)?;
             expect_token(p, CppTokenKind::RightParen)?;
+            return Ok(m.complete(p));
+        }
+
+        // **C11's `_Atomic`** — a type specifier in both of its spellings, `_Atomic(int) n;` and `_Atomic int n;`.
+        // Read here as a `BuiltinType` so the declaration has a type specifier: without this, `_Atomic(int)` was a
+        // `MacroCall` in the specifier sequence, so the type of `n` was the *call* and `_Atomic int` a name.
+        //
+        // The parenthesised form carries a type name rather than an expression — `_Atomic(int)` is C11 6.7.2.4's
+        // `_Atomic ( type-name )` — so the group is read with the type-id rule, not as a call's arguments.
+        CppTokenKind::Identifier
+            if p.current_token_text() == "_Atomic"
+                && p.language().support(crate::features::Feature::Atomic) =>
+        {
+            let m = p.mark(CppSyntaxKind::BuiltinType);
+            p.bump(); // `_Atomic`
+            if p.current_token() == CppTokenKind::LeftParen {
+                p.bump(); // `(`
+                parse_type_id(p)?;
+                expect_token(p, CppTokenKind::RightParen)?;
+            }
             return Ok(m.complete(p));
         }
 

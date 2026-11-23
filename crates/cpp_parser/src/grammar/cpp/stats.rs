@@ -577,7 +577,11 @@ fn at_an_asm_statement(p: &CppParser) -> bool {
                 offset += 1;
             }
             Some(&CppTokenKind::LeftParen | &CppTokenKind::LeftBrace) => return true,
-            _ => return false,
+            // **MSVC's traditional form has no brackets at all**: `__asm mov eax, 1;`, where the operands are
+            // everything up to the statement's `;`. Only MSVC's own spelling takes this reading — GCC's `asm`
+            // without a group is an identifier, and a name followed by another name is not a statement.
+            Some(_) => return matches!(p.current_token_text(), "__asm" | "__asm__"),
+            None => return false,
         }
     }
 }
@@ -595,6 +599,9 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::AsmStat);
 
+    // **Which spelling was written**, read before the keyword is consumed: the traditional form is MSVC's
+    // `__asm` only, and by the time the payload is looked at the cursor is past the keyword.
+    let bare_form_is_msvc_s = matches!(p.current_token_text(), "__asm" | "__asm__");
     p.bump(); // the keyword
 
     loop {
@@ -614,6 +621,21 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
     let (open, close, closes_itself) = match p.current_token() {
         CppTokenKind::LeftParen => (CppTokenKind::LeftParen, CppTokenKind::RightParen, false),
         CppTokenKind::LeftBrace => (CppTokenKind::LeftBrace, CppTokenKind::RightBrace, true),
+        // **MSVC's traditional form** — `__asm mov eax, 1;` — is the keyword followed by the assembler text and
+        // the statement's `;`. The text is not C++ and there is no bracket to balance, so the rest of the
+        // statement is kept as the tokens it is, as the bracketed form does one arm up.
+        _ if bare_form_is_msvc_s => {
+            while !p.is_eof()
+                && p.current_token() != CppTokenKind::Semicolon
+                && p.current_token() != CppTokenKind::RightBrace
+            {
+                p.bump();
+            }
+            if p.current_token() == CppTokenKind::Semicolon {
+                p.bump();
+            }
+            return Ok(m.complete(p));
+        }
         _ => {
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(

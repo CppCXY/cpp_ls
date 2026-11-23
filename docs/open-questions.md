@@ -3415,3 +3415,56 @@ parenthesis is transparent for line breaking), so its statements end lines and i
 That is a change to `breaks::logical_lines_with` and `layout::classify_braces`, with the shape clang-format 19.1.7
 writes as the expectation, and a test on the fixture. Not done — this turn moved to the C member lookup and jump
 defects (above), which were reported next.
+
+## A parser review of the GNU/MSVC/Clang extensions — what held, what was fixed, what is open
+
+A review of `cpp_parser`'s vendor-extension coverage was checked against the code, the parser suite and the compilers
+on this machine. The claims and their verdicts:
+
+| The review said | Verdict | Evidence |
+|---|---|---|
+| `Feature::NestedFunction` is defined but no grammar reads it | **confirmed** | the only occurrences are in `features.rs` (the bit and its name); `parse_function_suffix_or_initializer` refuses a block-scope definition |
+| `__auto_type` is not lexed as `auto` | **confirmed** | a `NamedType` in the tree; the analysis special-cases the spelling in `deductions.rs`/`type_of.rs` |
+| `__alignof__` is not an `alignof` keyword | **confirmed, fixed** | the lexer maps it now; the tree is a `UnaryExpr` over the keyword |
+| `__typeof_unqual__` is missing | **confirmed, fixed** | lexer + the three analysis spelling lists (`deductions`, `types`, `undefined_name`); a GNU parse makes it a `BuiltinType` decltype specifier instead of a `MacroCall` |
+| `_Nullable`/`_Nonnull`/… are not qualifiers, so an unnamed parameter takes the qualifier as its name | **confirmed, fixed** | `void f(int * _Nullable);` was a parameter **named** `_Nullable`; it now has no name (`Parameter` has no `NameExpr`) |
+| `Feature::Atomic` is unused and `_Atomic` is a macro call | **confirmed, fixed** | `_Atomic(int)` is a `BuiltinType` with a `TypeId`; `_Atomic int` and `int * _Atomic` are specifier/qualifier. The rule is gated on `Feature::Atomic` |
+| `_Complex`/`__complex__`/`_Imaginary`/`_Decimal*`/`_Float32x`/`_Float64x`/`__float80`/`__ibm128` are missing types | **partly** | gcc (MinGW, `-std=gnu2x`) accepts `_Complex`, `__complex__`, `_Decimal32/64/128`, `_Float32x/64x`, `__float80`; it rejects `_Imaginary` and `__ibm128`. The decimal and x86 spellings are now `BuiltinType`s; `_Complex double z;` is still a `MacroCall` and a separate `double z;` — the parser has no complex type for the adjective to join, a type-model gap rather than a missing spelling |
+| `__label__` is not a keyword | **confirmed, open** | facts record `done` as a variable of type `__label__` |
+| MSVC `__uuidof`/`__assume`/`__super`/`__leave` have no dedicated nodes | **confirmed, tolerated** | `__uuidof(p)` and `__super::f()` are in the MSVC parse table and parse as a call and a qualified name; the AST has no node of its own |
+| MSVC `__asm` needs `(`/`{`, so the traditional `__asm mov eax, 1;` fails | **confirmed, fixed** | three errors before; `AsmStat` now, and `AsmBlock` covers MSVC as well as GNU |
+| `__based`/`__sptr`/`__uptr` are missing | **confirmed, open** | no occurrence in the parser |
+| `__has_builtin`/`__has_feature`/`__has_extension`/`__has_attribute`/`__has_declspec_attribute` answer `Unknown`, so the branch is skipped | **confirmed, open** | rendering of `#if __has_feature(cxx_lambdas)` and `#if __has_builtin(__builtin_expect)` keeps only `feature_no` and `builtin_no` |
+
+What was changed, with the tests that pin it:
+
+* `__alignof__` → `AlignofKeyword`, `__typeof_unqual__` → `DecltypeKeyword` (`cpp_lexer.rs`); the analysis spelling
+  lists accept the new spelling too.
+* `_Atomic` is read in both spellings and in the pointer/qualifier position, gated on `Feature::Atomic`; the
+  declaration-start rule and the two macro-shaped specifier arms stand aside for it.
+* Clang's nullability qualifiers are `ImplementationKeyword::Bare` — they disappear from the type/name positions
+  instead of becoming a parameter name. `__nonnull` is read only when not followed by `(`, because glibc's
+  `__nonnull((1))` is a macro.
+* `_Decimal32/64/128`, `_Float32x/64x` and `__float80` are types for a GNU target, and a declaration-start anchor
+  makes a compiler-spelled type begin a declaration.
+* `AsmBlock` now covers both vendors; MSVC's traditional `__asm mov eax, 1;` consumes to its `;` as an `AsmStat`.
+
+Tests: `the_gnu_spellings_are_read_as_their_constructs`, `atomic_is_a_type_specifier_and_nullability_is_not_a_name`
+and `msvc_asm_forms_are_statements`, plus the constructs added to the three `extensions_*.rs` tables. The parser suite
+is 517 passed, 0 failed.
+
+What is still open:
+
+* **Nested functions** — the feature bit is still not read by the grammar; a block-scope definition is refused.
+* **`__auto_type`** — still a `NamedType`; the analysis deduces it from the spelling, and the fact records
+  `__auto_type` rather than the deduced type.
+* **`__label__`** — a local label declaration is read as a variable whose type is `__label__`.
+* **A complex type** — `_Complex`/`__complex__` need a `Type` the parser can name; the spelling alone was measured not
+  to change the recorded type.
+* **`_Imaginary`/`__ibm128`** — the measured compiler rejects them, so there is nothing to parse for this target; a
+  PowerPC or another C implementation is a different measurement.
+* **The `__has_*` operators** — answering them needs the compiler's own feature table (a probe, like the predefines),
+  not a guess; until then their branches take the else arm.
+* **`__based`/`__sptr`/`__uptr`** — spelled nowhere in the grammar; they would need their own pointer-modifier rules.
+* **`__uuidof`/`__assume`/`__super`/`__leave`** — parse through the general call/name rules; a dedicated node is a
+  later refinement, not a parse failure.

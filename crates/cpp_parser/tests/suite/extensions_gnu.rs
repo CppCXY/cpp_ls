@@ -298,3 +298,49 @@ fn the_complex_operators_do_not_swallow_the_rest_of_the_class() {
         "and so does the one after that: {names:?}"
     );
 }
+#[test]
+fn the_gnu_spellings_are_read_as_their_constructs() {
+    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
+    use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
+
+    // **A GNU configuration**, not the permissive default: the point of these spellings is which vendor's grammar
+    // reads them, and `with_language` without the vendor would leave `__typeof_unqual__` an ordinary name.
+    let language = LanguageConfig::new()
+        .with_standard(Standard::Cpp23)
+        .with_vendor(Vendor::Gnu);
+    let source = "\
+void f() { __typeof_unqual__(1) n = 1; int a = __alignof__(int); }
+_Decimal64 d; _Float32x x; __float80 g;
+";
+    let tree = CppParser::parse(source, ParserConfig::default().with_language(language));
+
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let root = tree.get_red_root();
+    assert!(
+        root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType
+                && node
+                    .text()
+                    .to_string()
+                    .trim_start()
+                    .starts_with("__typeof_unqual__")
+        }),
+        "`__typeof_unqual__` is read as a decltype specifier, not a macro call"
+    );
+    assert!(
+        root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::UnaryExpr
+                && node.text().to_string().contains("__alignof__")
+        }),
+        "`__alignof__` is read as the operator"
+    );
+    for spelling in ["_Decimal64", "_Float32x", "__float80"] {
+        assert!(
+            root.descendants().any(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType
+                    && node.text().to_string().trim() == spelling
+            }),
+            "`{spelling}` is a type this compiler spells"
+        );
+    }
+}

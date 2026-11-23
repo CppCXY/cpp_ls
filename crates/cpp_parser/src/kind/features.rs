@@ -393,9 +393,11 @@ impl Feature {
             BitInt => AnyOf(&[S(Standard::C89), S(Standard::Cpp11)]),
 
             // Vendors.
-            StatementExpression | ElvisOperator | AsmBlock | NestedFunction | LabelsAsValues => {
-                V(Vendor::Gnu)
-            }
+            StatementExpression | ElvisOperator | NestedFunction | LabelsAsValues => V(Vendor::Gnu),
+            // **`asm` is both vendors'**: GCC spells it `asm`/`__asm__` with a parenthesised payload, and cl.exe
+            // spells it `__asm` with a braced payload or — traditionally — none at all (`__asm mov eax, 1;`). One
+            // feature because it is one construct read by one rule; the spellings are what tell whose it is.
+            AsmBlock => AnyOf(&[V(Vendor::Gnu), V(Vendor::Msvc)]),
             RestrictGnu | Int128 => V(Vendor::Gnu),
             Typeof => AnyOf(&[S(Standard::C23), V(Vendor::Gnu)]),
             StructuredExceptionHandling | Interface => V(Vendor::Msvc),

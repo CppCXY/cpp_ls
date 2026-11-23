@@ -231,6 +231,7 @@ fn is_a_keyword_construct(name: &str) -> bool {
             | "typeof_unqual"
             | "__typeof__"
             | "__typeof"
+            | "__typeof_unqual__"
             | "_BitInt"
             | "noexcept"
             | "decltype"

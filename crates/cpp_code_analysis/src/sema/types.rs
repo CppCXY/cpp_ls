@@ -1846,7 +1846,13 @@ fn is_a_typeof_spelling(word: &str) -> bool {
     let name = word.split('(').next().unwrap_or(word).trim();
     matches!(
         name,
-        "typeof" | "typeof_unqual" | "__typeof__" | "__typeof" | "__decltype" | "decltype"
+        "typeof"
+            | "typeof_unqual"
+            | "__typeof__"
+            | "__typeof"
+            | "__decltype"
+            | "decltype"
+            | "__typeof_unqual__"
     )
 }
 

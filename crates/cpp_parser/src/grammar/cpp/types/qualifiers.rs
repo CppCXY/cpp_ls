@@ -212,6 +212,20 @@ pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<Implement
         {
             ImplementationKeyword::Qualifier
         }
+        // **Clang's nullability qualifiers**, written before the type or after the `*` — `void f(int * _Nullable p);`
+        // — and the reserved spellings are the compiler's, so consuming one here cannot take a program's name. They
+        // say nothing this layer reads (the checked type is the same pointer); without them the qualifier lands where
+        // the declarator's *name* goes: measured, `void f(int * _Nullable);` was read as a parameter **named**
+        // `_Nullable`, which loses the unnamed parameter and gives the type a name it does not have.
+        //
+        // `__nonnull` is the one spelling that is also a **macro** in a system header — glibc's `__nonnull((1))` after
+        // a parameter list — so the parenthesised call is left to the macro rule and only the qualifier form is read.
+        "_Nullable" | "_Nonnull" | "_Null_unspecified" | "__nullable" | "__null_unspecified" => {
+            ImplementationKeyword::Bare
+        }
+        "__nonnull" if p.peek_next_token() != CppTokenKind::LeftParen => {
+            ImplementationKeyword::Bare
+        }
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
         "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
         | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => {
@@ -266,9 +280,27 @@ pub(crate) fn a_type_the_compiler_spells(p: &CppParser) -> bool {
                 | "_Float32"
                 | "_Float64"
                 | "_Float128"
+                | "_Float32x"
+                | "_Float64x"
                 | "__float128"
+                | "__float80"
                 | "__fp16"
                 | "__bf16"
+                // **C99's decimal floating types.** Measured with MinGW's gcc under `-std=gnu2x`:
+                // `_Decimal32`, `_Decimal64`, `_Decimal128`, `_Float32x`/`_Float64x` and `__float80` are accepted;
+                // `_Imaginary` and `__ibm128` are not (`_Imaginary` is an optional C99 type gcc does not implement,
+                // and `__ibm128` is a 128-bit IBM double-double on PowerPC only).
+                //
+                // **`_Complex` and `__complex__` are deliberately not here.** They are adjectives on the floating
+                // type that follows, and this parser has no complex type: measured, `_Complex double z;` came out as
+                // a `MacroCall` followed by `double z;` (and `double _Complex w;` as `double` plus a name), with or
+                // without an entry in this table. Reading the spelling as a `BuiltinType` therefore did not make the
+                // type `_Complex double` — it only moved the failure. The missing piece is the type model, not the
+                // word. `_Imaginary` (not implemented by gcc) and `__ibm128` (PowerPC only) are out for the same
+                // reason plus their own compilers' answers.
+                | "_Decimal32"
+                | "_Decimal64"
+                | "_Decimal128"
         ),
         // MSVC's own integer types. Under GNU they are *not* types: MinGW's `_mingw.h` `#define`s every one of
         // them (`#define __int64 long long`), so reading them as types there would be reading a macro as a
