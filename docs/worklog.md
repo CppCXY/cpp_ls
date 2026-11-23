@@ -10,6 +10,64 @@ The protocol for asking one question at a time is [`inspect.md`](inspect.md).
 
 ---
 
+## The program that parsed with 1 962 errors: four spellings, and what each one cost
+
+The 19-second freeze (the section below) was the *lock*, not the work: even off the writer, a whole-program read of
+neovim's `ui.c` — **460 files, 711 023 tokens** — reported **1 962 parse errors**, and error recovery is most of what the
+18 s of that read is spent on. This is those errors: **1 962 → 0**, in four steps, each one measured on the same program.
+
+The instrument was the dump the index already had for renderings, extended to name the file each error falls in
+(`CPPLS_DUMP_RENDERING_DIR`, now writing `unit.errors` beside `unit.stream` — a rendering carries no file markers, so a
+bare offset in it says nothing about which header is wrong).
+
+### One: a macro's expansion was joined to the token before it — 1 962 → 1 626
+
+The stream read `int__attribute__((__cdecl__)) abs(int _X);` where the source says `int __cdecl abs(int _X);`. The
+program's renderer (`RenderedUnit::push`) decides the separator between two tokens from the **expander's**
+`space_before`, which answers "did the source have a space before the invocation" — a different question from "may the
+expansion's first spelling be joined to what precedes it". `int` + `__attribute__` lex as **one identifier**, which is a
+type that does not exist, and everything after it is recovery. The per-file renderer had asked the lexer this question
+since it was written (`joining_would_merge`); the program's renderer now asks the same function, exported for it. The
+count of "a declarator takes only one initializer" went from 114 to zero with it.
+
+### Two: an attribute group inside a declarator had no reading — 1 626 → 1 622, and later 8 → 1
+
+`typedef void (__attribute__((__stdcall__)) DRVCALLBACK)(HDRVR hdrvr, …)` — every MinGW callback typedef — and the
+abstract spelling `void (__attribute__((__cdecl__)) *)` in `stdlib.h` with it. The group was taken for a parameter list,
+the declaration fell apart at its `;`, and the lines after it were read as rubble. Both parenthesised-declarator
+predicates now look past an attribute group, and the group is parsed where it stands.
+
+The same class was the **last** error: `_getdllprocaddr` in `objidl.h` is written with an attribute *on both sides* of
+the operator, and with the name's parameter list *inside* the group —
+`int (__attribute__((__cdecl__)) * __attribute__((__cdecl__)) _getdllprocaddr(intptr_t, char *, intptr_t))(void)`. The
+operator and its attributes are taken before the abstract-declarator reading, which has no rule for the name that
+follows them.
+
+### Three: `__inline__` was read as a type name — 1 622 → 8
+
+`extern __inline__ size_t __attribute__((__cdecl__)) strnlen_s(…) { … }` is how mingw's `string.h` and **every** GCC
+intrinsic header write a body. The keyword table had `__forceinline` but not GNU's `__inline`/`__inline__`, so the word
+became a `NamedType` in the specifier sequence: two types, the declaration failed, the whole line was dropped — 398 of
+the 1 622 errors were `fxsrintrin.h`, `cmpccxaddintrin.h` and `enqcmdintrin.h`, which write nothing else. Both spellings
+are `InlineSpec` now.
+
+### Where it stands, and the guard against it coming back
+
+Measured on a cold cache after the last change:
+
+```text
+read a program as one piece: 460 file(s), 711023 token(s), 0 error(s)
+```
+
+Four tests pin the shapes: the stream keeps `int` and the expansion as two tokens (`translation_unit.rs`'s
+`a_macro_that_writes_an_attribute_after_a_type_keeps_them_apart`), an attribute group inside a declarator has a reading
+and the inline spellings are specifiers (`declarator_shapes.rs`). The rendering format version moved (`61 → 62`), because
+a stored rendering is a stored *text* and this changed what the text is.
+
+**Not claimed:** 0 errors means "this program, as this project's own compile command describes it, parses". It does not
+mean every construct in mingw's headers and the Windows SDK is read as a compiler reads it — these shapes were found
+because something counted errors, and the next project will have its own.
+
 ## The json `syntax-error`s, reduced to one line: json's own DEFINE body against an equivalent local one
 
 > **Superseded.** This section records the reduction that led to the fix; the 60 `syntax-error`s are **gone** (0 in
