@@ -874,8 +874,20 @@ impl<F: FileProvider + Clone> Session<F> {
         // cook that cannot answer it reads a branch on no evidence. The resolver's own search is what an `#include`
         // would use, which is what makes the two agree.
         let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
-        let stream =
-            { unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search)) };
+        // **The compiler's answers for this program.** A `#if __has_builtin(…)` in a header decides which
+        // declarations the program has; without the probe the unit would take the else branch while the file's own
+        // cook takes the then branch, and the two readings would disagree about which branch was compiled.
+        let features = self.feature_probe(root);
+        let stream = {
+            unit.cook_the_unit_with_features(
+                &sources,
+                &definitions,
+                Some(&seed),
+                true,
+                Some(&search),
+                features.as_deref(),
+            )
+        };
 
         // **Kept under the key, provisionally or not — the key is what makes that safe.** It folds every `(path,
         // content)` the walk entered, so a rendering of a closure that was still filling has a key the finished

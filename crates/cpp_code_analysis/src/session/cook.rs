@@ -178,6 +178,43 @@ impl<F: FileProvider + Clone> Session<F> {
     /// slice is claimed under the write lock, which is a `Vec` operation, and gathered here under the read one.
     /// Measured from the server's own budget warning, the gather was **58–76 ms** of every drain's write hold and the
     /// pop was nothing.
+    /// **The probe that answers this file's `__has_*`**, when a compiler was discovered.
+    ///
+    /// `None` is not a failure: a project with no compiler, or a compiler whose flags this probe does not know
+    /// (MSVC's `/E`), leaves the operators `Unknown`, which is where they were before the probe existed.
+    pub(crate) fn feature_probe(
+        &self,
+        path: &Path,
+    ) -> Option<std::sync::Arc<dyn cpp_toolchain::FeatureProbe>> {
+        let compiler = self
+            .toolchain
+            .as_ref()
+            .and_then(|toolchain| toolchain.compiler.clone())?;
+        // **MSVC's compiler takes different flags** (`/E` rather than `-E`), so the probe keeps to the
+        // GNU/Clang spelling and leaves the question `Unknown` where it cannot be asked correctly.
+        let name = compiler.file_name()?.to_string_lossy().to_ascii_lowercase();
+        if name.starts_with("cl") && !name.starts_with("clang") {
+            return None;
+        }
+        let language = self.config.language_for(path);
+        let probe_language = match language.family() {
+            Some(cpp_parser::features::Family::C) => cpp_toolchain::ProbeLanguage::C,
+            _ => cpp_toolchain::ProbeLanguage::Cpp,
+        };
+        // **A permissive configuration states no standard**, and asking with one guessed from another family is
+        // worse than asking the compiler's default: `-x c -std=c++23` is a command line no compiler accepts.
+        let standard = language.family().map(|_| language.describe());
+        Some(std::sync::Arc::new(
+            cpp_toolchain::CompilerFeatureProbe::new(
+                compiler,
+                std::sync::Arc::new(cpp_toolchain::DiskCommands),
+                probe_language,
+                standard,
+            )
+            .with_cache(self.feature_cache.clone()),
+        ) as std::sync::Arc<dyn cpp_toolchain::FeatureProbe>)
+    }
+
     pub fn cooking_materials(&self, path: &Path) -> Option<CookingMaterials> {
         let path = self.store.index().summary(path)?.path.clone();
         let key = SummaryKey::new(0, self.store.context_hash(&path));
@@ -353,6 +390,8 @@ impl<F: FileProvider + Clone> Session<F> {
         let text_hash = crate::cache::content_hash(&text);
         let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
 
+        let features = self.feature_probe(&path);
+
         Some(CookingMaterials {
             path,
             key,
@@ -362,6 +401,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             seed,
             already_declared,
+            features,
             revision: self.revision(),
         })
     }
@@ -403,6 +443,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             seed,
             already_declared,
+            features,
             revision,
         } = materials;
 
@@ -431,20 +472,22 @@ impl<F: FileProvider + Clone> Session<F> {
                     Some(seed),
                     true,
                 );
-                crate::preprocess::cooked::cook_with_file(
+                crate::preprocess::cooked::cook_with_file_and_features(
                     text,
                     &tokens,
                     &macros,
                     Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
+                    features.as_deref(),
                 )
             }
             (None, Some(configuration)) => {
                 let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
-                crate::preprocess::cooked::cook_with_file(
+                crate::preprocess::cooked::cook_with_file_and_features(
                     text,
                     &tokens,
                     &start,
                     Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
+                    features.as_deref(),
                 )
             }
             (None, None) => return None,
@@ -900,8 +943,11 @@ impl<F: FileProvider + Clone> Session<F> {
         let view = unit.environment_of(&path)?;
         let macros =
             crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, Some(&seed), true);
+        // **The probe belongs here too**: a rendering rebuilt for a `view` must decide `#if __has_builtin(…)` the
+        // way the compiler does, or the text and the facts disagree about which branch was compiled.
+        let features = self.feature_probe(&path);
         Some(
-            crate::preprocess::cooked::cook_with_file(
+            crate::preprocess::cooked::cook_with_file_and_features(
                 &text,
                 &tokens,
                 &macros,
@@ -910,6 +956,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         .presumed_name_for(&path)
                         .unwrap_or(path.as_path()),
                 ),
+                features.as_deref(),
             )
             .render(),
         )

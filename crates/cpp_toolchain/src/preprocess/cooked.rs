@@ -1191,6 +1191,9 @@ struct Live<'base> {
     search: Option<&'base dyn HeaderSearch>,
     /// The directory of the file being cooked: what the **quoted** form of `__has_include` searches first.
     directory: &'base Path,
+    /// **What `__has_builtin` and its siblings are answered from**, when the caller has a compiler to ask. `None`
+    /// leaves them [`crate::Value::Unknown`], which is the honest answer for a cook with no compiler behind it.
+    features: Option<&'base dyn crate::include::feature::FeatureProbe>,
 }
 
 impl crate::macros::MacroBindings for Live<'_> {
@@ -1213,6 +1216,55 @@ impl crate::macros::MacroBindings for Live<'_> {
         self.own
             .definition(name)
             .or_else(|| self.base.definition(name))
+    }
+
+    /// **The operator answer, where every condition can reach it.**
+    ///
+    /// Every cook evaluates a `#if` through a [`crate::preprocess::PositionalMacros`], which holds a
+    /// `&dyn MacroBindings` and calls *this* method. An answer implemented only on
+    /// [`crate::condition::MacroValues`] would sit one layer below the only caller — which is what happened to the
+    /// probe at first: `__has_builtin(__builtin_expect)` still took the else branch while the probe had the right
+    /// answer. Both traits forward to [`Live::answer_a_builtin_operator`].
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        self.answer_a_builtin_operator(name, operand)
+    }
+}
+
+impl Live<'_> {
+    /// **A builtin operator's answer** — `__has_include` first, then the compiler's own `__has_*` family.
+    fn answer_a_builtin_operator(
+        &self,
+        name: &str,
+        operand: &str,
+    ) -> Option<crate::condition::Value> {
+        use crate::condition::Value;
+
+        // `__has_cpp_attribute` is answered by the table's own [`crate::macros::MacroBindings::attribute_support`],
+        // which `PositionalMacros` reaches through the trait — so there is nothing to do here. It was answered here
+        // once, from a free function, and that is exactly the mistake this file's `PositionalMacros` note describes:
+        // an implementation one layer below the only caller that ever asks.
+        //
+        // `__has_include_next` asks about the search *after* the directory this file was found in. That needs to know
+        // where the file was found, which this layer is not told — and answering it as if it were `__has_include`
+        // would be a different question with a different answer.
+        if name != "__has_include" {
+            // **The compiler's own `__has_*` operators** — `__has_builtin`, `__has_feature`, `__has_extension`,
+            // `__has_attribute`, `__has_declspec_attribute`. The probe asks the project's compiler; without one the
+            // answer stays `Unknown` rather than a guessed `0`.
+            return self
+                .features
+                .and_then(|features| features.answer(name, operand))
+                .map(Value::Known);
+        }
+
+        let search = self.search?;
+        let (header, quoted) = split_a_header_operand(operand)?;
+
+        Some(if search.has(header, quoted, self.directory) {
+            Value::Known(1)
+        } else {
+            Value::Known(0)
+        })
     }
 }
 
@@ -1242,28 +1294,7 @@ impl crate::condition::MacroValues for Live<'_> {
     /// truthful answer and it becomes [`crate::Value::Unknown`]; inventing a `false` would send every
     /// `#if __has_cpp_attribute(nodiscard)` down the branch the compiler does not take.
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
-        use crate::condition::Value;
-
-        // `__has_cpp_attribute` is answered by the table's own [`crate::macros::MacroBindings::attribute_support`],
-        // which `PositionalMacros` reaches through the trait — so there is nothing to do here. It was answered here
-        // once, from a free function, and that is exactly the mistake this file's `PositionalMacros` note describes:
-        // an implementation one layer below the only caller that ever asks.
-        //
-        // `__has_include_next` asks about the search *after* the directory this file was found in. That needs to know
-        // where the file was found, which this layer is not told — and answering it as if it were `__has_include`
-        // would be a different question with a different answer.
-        if name != "__has_include" {
-            return None;
-        }
-
-        let search = self.search?;
-        let (header, quoted) = split_a_header_operand(operand)?;
-
-        Some(if search.has(header, quoted, self.directory) {
-            Value::Known(1)
-        } else {
-            Value::Known(0)
-        })
+        self.answer_a_builtin_operator(name, operand)
     }
 }
 
@@ -1546,8 +1577,19 @@ pub fn cook_with_file(
     initial: &dyn crate::macros::MacroBindings,
     file: Option<&Path>,
 ) -> CookedStream {
+    cook_with_file_and_features(source, tokens, initial, file, None)
+}
+
+/// [`cook_with_file`] with the probe that answers `__has_builtin` and its siblings.
+pub fn cook_with_file_and_features(
+    source: &str,
+    tokens: &[CppTokenData],
+    initial: &dyn crate::macros::MacroBindings,
+    file: Option<&Path>,
+    features: Option<&dyn crate::include::feature::FeatureProbe>,
+) -> CookedStream {
     let mut state = CookingState::default();
-    cook_with_search_and_state(
+    cook_with_search_and_state_and_features(
         source,
         tokens,
         initial,
@@ -1555,6 +1597,7 @@ pub fn cook_with_file(
         None,
         Path::new(""),
         file,
+        features,
     )
 }
 
@@ -1610,6 +1653,23 @@ pub fn cook_with_search_and_state(
     directory: &Path,
     file: Option<&Path>,
 ) -> CookedStream {
+    cook_with_search_and_state_and_features(
+        source, tokens, initial, state, search, directory, file, None,
+    )
+}
+
+/// The same walk as [`cook_with_search_and_state`], with a **compiler's answers** for `__has_builtin` and its
+/// siblings — see [`crate::FeatureProbe`].
+pub fn cook_with_search_and_state_and_features(
+    source: &str,
+    tokens: &[CppTokenData],
+    initial: &dyn crate::macros::MacroBindings,
+    state: &mut CookingState,
+    search: Option<&dyn HeaderSearch>,
+    directory: &Path,
+    file: Option<&Path>,
+    features: Option<&dyn crate::include::feature::FeatureProbe>,
+) -> CookedStream {
     let directives = crate::directive::scan_directives(source, tokens);
 
     // The macros this walk has actually reached, on top of what the configuration supplied. A `#define` in
@@ -1625,6 +1685,7 @@ pub fn cook_with_search_and_state(
         pushed: Vec::new(),
         search,
         directory,
+        features,
     };
     let mut regions: Vec<Region> = Vec::new();
 

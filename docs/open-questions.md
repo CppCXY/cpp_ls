@@ -3430,11 +3430,11 @@ on this machine. The claims and their verdicts:
 | `_Nullable`/`_Nonnull`/… are not qualifiers, so an unnamed parameter takes the qualifier as its name | **confirmed, fixed** | `void f(int * _Nullable);` was a parameter **named** `_Nullable`; it now has no name (`Parameter` has no `NameExpr`) |
 | `Feature::Atomic` is unused and `_Atomic` is a macro call | **confirmed, fixed** | `_Atomic(int)` is a `BuiltinType` with a `TypeId`; `_Atomic int` and `int * _Atomic` are specifier/qualifier. The rule is gated on `Feature::Atomic` |
 | `_Complex`/`__complex__`/`_Imaginary`/`_Decimal*`/`_Float32x`/`_Float64x`/`__float80`/`__ibm128` are missing types | **confirmed, fixed** | gcc (MinGW, `-std=gnu2x`) accepts `_Complex`, `__complex__`, `_Decimal32/64/128`, `_Float32x/64x`, `__float80`; it rejects `_Imaginary` and `__ibm128`. The accepted spellings are `BuiltinType`s now, and the type reader joins the complex adjective with its operand: a file-scope `_Complex double z;` is one declaration whose `type_of` is `_Complex double`, and `double _Complex w;` records `double _Complex`. The rejected two stay out |
-| `__label__` is not a keyword | **confirmed, open** | facts record `done` as a variable of type `__label__` |
+| `__label__` is not a keyword | **confirmed, fixed** | the scope builder binds each `__label__ done, again;` name as `BindingKind::Label`; the facts are `DeclKind::Other` with no type, the same kind a `done:` line produces |
 | MSVC `__uuidof`/`__assume`/`__super`/`__leave` have no dedicated nodes | **confirmed, tolerated** | `__uuidof(p)` and `__super::f()` are in the MSVC parse table and parse as a call and a qualified name; the AST has no node of its own |
 | MSVC `__asm` needs `(`/`{`, so the traditional `__asm mov eax, 1;` fails | **confirmed, fixed** | three errors before; `AsmStat` now, and `AsmBlock` covers MSVC as well as GNU |
 | `__based`/`__sptr`/`__uptr` are missing | **confirmed, fixed** | all three are implementation keywords now; `__based(p)` keeps its parenthesised argument as a token group |
-| `__has_builtin`/`__has_feature`/`__has_extension`/`__has_attribute`/`__has_declspec_attribute` answer `Unknown`, so the branch is skipped | **confirmed, open** | rendering of `#if __has_feature(cxx_lambdas)` and `#if __has_builtin(__builtin_expect)` keeps only `feature_no` and `builtin_no` |
+| `__has_builtin`/`__has_feature`/`__has_extension`/`__has_attribute`/`__has_declspec_attribute` answer `Unknown`, so the branch is skipped | **confirmed, fixed for GNU/Clang** | `CompilerFeatureProbe` writes the question as a two-line translation unit and runs the project's compiler; measured on a MinGW project, `#if __has_builtin(__builtin_expect)` and `#if __has_attribute(unused)` render `int yes; int attr_yes;`. `__has_feature` under gcc is a compiler error, so the probe returns `None` and the branch stays `Unknown` — the honest answer. MSVC's `cl` takes `/E`, so its path is left `Unknown` rather than asked wrongly |
 
 What was changed, with the tests that pin it:
 
@@ -3457,18 +3457,25 @@ What was changed, with the tests that pin it:
   aside for a type this compiler spells, so `_Complex double z;` at file scope is one declaration and its type is the
   two words together. Both written orders (`_Complex double`, `double _Complex`) are measured by
   `a_complex_type_keeps_the_adjective_in_its_spelling`.
+* **GNU's `__label__` declares labels**, not variables: the scope builder binds each name in the declarator list as
+  `BindingKind::Label`, the namespace `goto` and `done:` share, so the fact is `Other` and writes no type.
+* **The `__has_*` family is asked of the compiler.** `CompilerFeatureProbe` (`cpp_toolchain/include/feature.rs`)
+  renders the question as `#if __has_builtin(operand)` with two markers and runs the project's compiler over it; the
+  answers are cached by operator, operand, language and standard, and the session passes the probe to the cook and to
+  the unit render. Measured end to end: a MinGW project's `#if __has_builtin(__builtin_expect)` renders `int yes;`
+  instead of `int no;`, and `__has_attribute(unused)` likewise. A compiler that does not have the operator, and MSVC
+  (whose preprocessing flags the probe does not speak), stay `Unknown` rather than being answered wrongly.
 
 Tests: `the_gnu_spellings_are_read_as_their_constructs`, `a_nested_function_is_a_declaration_inside_a_body`,
-`atomic_is_a_type_specifier_and_nullability_is_not_a_name` and `msvc_asm_forms_are_statements`, plus the constructs
-added to the three `extensions_*.rs` tables and the analysis test above. The parser suite is 518 passed, 0 failed.
+`atomic_is_a_type_specifier_and_nullability_is_not_a_name`, `msvc_asm_forms_are_statements`,
+`a_gnu_label_declaration_binds_labels_not_variables` and `a_probe_answer_decides_the_branch`, plus the constructs
+added to the three `extensions_*.rs` tables. The parser suite is 518 passed, 0 failed.
 
 What is still open:
 
-* **`__label__`** — a local label declaration is read as a variable whose type is `__label__`; the label namespace is
-  not modelled.
 * **`_Imaginary`/`__ibm128`** — the measured compiler rejects them, so there is nothing to parse for this target; a
   PowerPC or another C implementation is a different measurement.
-* **The `__has_*` operators** — answering them needs the compiler's own feature table (a probe, like the predefines),
-  not a guess; until then their branches take the else arm.
+* **MSVC's `__has_*`** — `cl` takes `/E`/`/P`, and the probe is written for the GNU/Clang spelling; the operator stays
+  `Unknown` in an MSVC project until that flag spelling is added and measured.
 * **`__uuidof`/`__assume`/`__super`/`__leave`** — parse through the general call/name rules; a dedicated node is a
   later refinement, not a parse failure.

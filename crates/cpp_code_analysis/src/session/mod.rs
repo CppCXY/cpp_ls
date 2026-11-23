@@ -1089,6 +1089,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     rendering_summaries: std::sync::Mutex<
         cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
     >,
+    /// **What the compiler has already been asked about `__has_*`**, shared by every file's probe — see
+    /// [`crate::session::cook::Session::feature_probe`]. A header can write the same question twenty times, and a
+    /// process per question would make the second file pay what the first did.
+    feature_cache: cpp_toolchain::FeatureCache,
     ///
     /// `cooking_materials` answers `None` for a file whose unit is provisional, whose summary is not in the index, or
     /// whose render declines — and the caller that wanted it (`want_the_closure_cooked`, once per drain) wants it
@@ -1567,6 +1571,12 @@ pub struct CookingMaterials {
     pub seed: MacroTable,
     /// The names the file's raw reading already declares, so the render's addition can be counted.
     pub already_declared: std::collections::HashSet<String>,
+    /// **What `__has_builtin` and its siblings are answered from**, when this session has a compiler to ask.
+    ///
+    /// Carried with the materials rather than looked up in `render_cook`, because that function runs without the
+    /// session — see [`DetachedCook`] — and because the probe is per file: its language and standard are the ones
+    /// the file is built as.
+    pub features: Option<std::sync::Arc<dyn cpp_toolchain::FeatureProbe>>,
     revision: SessionRevision,
 }
 

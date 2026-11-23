@@ -1496,6 +1496,21 @@ impl ScopeWalker<'_> {
             return;
         }
 
+        // **GNU's `__label__` declares labels, not variables.** The declaration's specifier is the spelling
+        // `__label__`, and each name in its declarator list lives in the **label namespace** — the one `goto` looks
+        // in and `done:` fills. Read as an ordinary declaration it bound `done` as a variable whose type was
+        // `__label__`, so a hover on the label offered a variable and the same name existed twice in different
+        // namespaces. Measured on `void f(void) { __label__ done, again; done: goto again; }`: before this, `done`
+        // and `again` were `variable` facts; a `LabelStat` binds the same kind the `done:` line does.
+        if is_a_local_label_declaration(node) {
+            for declarator in declarators(node) {
+                if let Some((name, name_range)) = declared_name(&declarator) {
+                    self.bind(outer, name, BindingKind::Label, &declarator, name_range);
+                }
+            }
+            return;
+        }
+
         // A class or an enum written in the specifiers brings its own name — and, for an enum, its own body.
         // When it did, the declarators have nothing left to declare.
         //
@@ -2734,6 +2749,26 @@ fn declares_a_body(node: &CppSyntaxNode) -> bool {
 ///
 /// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
 /// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
+/// **Is this the GNU `__label__` declaration** — `__label__ done, again;`?
+///
+/// The specifier is the spelling `__label__`, an ordinary identifier to the lexer (the compiler's marker is
+/// contextual), so the declaration's specifier is a `NamedType` whose text is that word. The names it declares are
+/// **labels**, in the namespace `goto` and `done:` share — see the caller for the measurement.
+fn is_a_local_label_declaration(node: &CppSyntaxNode) -> bool {
+    if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
+        return false;
+    }
+    let Some(specifiers) = first_child(node, CppSyntaxKind::DeclSpecifierSeq) else {
+        return false;
+    };
+    specifiers.children().any(|specifier| {
+        matches!(
+            CppSyntaxKind::from(specifier.kind()),
+            CppSyntaxKind::BuiltinType | CppSyntaxKind::NamedType
+        ) && specifier.text().to_string().trim() == "__label__"
+    })
+}
+
 fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
     if !cpp_parser::CppDeclaration::can_cast(node.kind().into()) {
         return false;

@@ -2435,6 +2435,26 @@ impl TranslationUnit {
         use_in_force_bodies: bool,
         search: Option<&dyn crate::preprocess::cooked::HeaderSearch>,
     ) -> RenderedUnit {
+        self.cook_the_unit_with_features(
+            sources,
+            definitions,
+            seed,
+            use_in_force_bodies,
+            search,
+            None,
+        )
+    }
+
+    /// [`TranslationUnit::cook_the_unit`] with a **compiler probe** for `__has_builtin` and its siblings.
+    pub fn cook_the_unit_with_features(
+        &self,
+        sources: &dyn crate::preprocess::macros::UnitSources,
+        definitions: &UnitDefinitions,
+        seed: Option<&crate::macros::MacroTable>,
+        use_in_force_bodies: bool,
+        search: Option<&dyn crate::preprocess::cooked::HeaderSearch>,
+        features: Option<&dyn cpp_toolchain::FeatureProbe>,
+    ) -> RenderedUnit {
         let mut out = RenderedUnit {
             files: self.frames.iter().map(|frame| frame.file.clone()).collect(),
             file_lengths: self
@@ -2456,6 +2476,7 @@ impl TranslationUnit {
             seed,
             use_in_force_bodies,
             search,
+            features,
             // Which frames each frame includes, in the order it includes them. Frames are created in preorder, so
             // a parent's children are already in include order and pushing in index order keeps it.
             children: {
@@ -2505,6 +2526,9 @@ struct UnitCook<'unit> {
     /// **What `__has_include` is answered from** — the include search, or `None` when the caller has none and the
     /// operator must answer `Unknown` rather than guess. See [`crate::preprocess::cooked::HeaderSearch`].
     search: Option<&'unit dyn crate::preprocess::cooked::HeaderSearch>,
+    /// **What `__has_builtin` and its siblings are answered from**, when the session has a compiler. `None` leaves
+    /// them `Unknown`, which is the state every cook without a toolchain is in.
+    features: Option<&'unit dyn cpp_toolchain::FeatureProbe>,
     /// For each frame, the frames it includes, in include order.
     children: Vec<Vec<u32>>,
     /// **The macros the cook has executed so far** — one table for the whole program, in the order the text wrote
@@ -2529,6 +2553,7 @@ impl UnitCook<'_> {
         let seed = self.seed;
         let use_in_force_bodies = self.use_in_force_bodies;
         let search = self.search;
+        let features = self.features;
 
         let Some(text) = sources.source_of(&unit.frames[frame as usize].file) else {
             // A file nobody has the text of: the includes it names are still stitched (the walk reached them through
@@ -2577,7 +2602,7 @@ impl UnitCook<'_> {
                 .position(|token| token.range.start_offset >= at)
                 .unwrap_or(tokens.len())
                 .max(from);
-            let cook = crate::preprocess::cooked::cook_with_search_and_state(
+            let cook = crate::preprocess::cooked::cook_with_search_and_state_and_features(
                 text,
                 &tokens[from..boundary],
                 &initial,
@@ -2585,13 +2610,14 @@ impl UnitCook<'_> {
                 search,
                 directory,
                 presumed,
+                features,
             );
             produced += cook.tokens.len();
             depth += self.emit(frame, &cook, out);
             self.stitch(child, out);
             from = boundary;
         }
-        let cook = crate::preprocess::cooked::cook_with_search_and_state(
+        let cook = crate::preprocess::cooked::cook_with_search_and_state_and_features(
             text,
             &tokens[from..],
             &initial,
@@ -2599,6 +2625,7 @@ impl UnitCook<'_> {
             search,
             directory,
             presumed,
+            features,
         );
         produced += cook.tokens.len();
         depth += self.emit(frame, &cook, out);

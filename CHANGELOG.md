@@ -43,6 +43,16 @@ fix many parser and toolchain bug
   `__auto_type` is the `auto` keyword, and `__based`/`__sptr`/`__uptr` are read where they are written.
   `_Complex`/`__complex__` are type spellings, so a file-scope `_Complex double z;` is one declaration whose recorded
   type is `_Complex double`, not a macro followed by a separate `double z;`.
+- **GNU's `__label__` declares labels, not variables.** `__label__ done, again;` binds each name in the label
+  namespace, so the facts are labels (`Other`, no type) — the same kind a `done:` line produces — instead of variables
+  whose type is `__label__`.
+- **The `__has_*` operators are asked of the compiler.** `__has_builtin`, `__has_feature`, `__has_extension`,
+  `__has_attribute` and `__has_declspec_attribute` were `Unknown`, so their branches took the else arm. A
+  `CompilerFeatureProbe` renders the question as a tiny translation unit and runs the project's compiler over it
+  (GNU/Clang spelling; MSVC stays `Unknown`), caching by operator, operand, language and standard; measured on a
+  MinGW project, `#if __has_builtin(__builtin_expect)` now renders the taken branch. `__has_include` still belongs to
+  the include search, and a compiler that does not have the operator still answers `Unknown` rather than `0`.
+  `FORMAT_VERSION` 60 → 61 (both changes alter which declarations a stored reading holds).
 
 ## [0.4.0]
 

@@ -98,6 +98,7 @@ pub use graph::{
 };
 pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
+pub use include::feature::{CompilerFeatureProbe, FeatureCache, FeatureProbe, ProbeLanguage};
 pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 pub use macros::{
     MacroBindings, MacroBody, MacroDef, MacroTable, Parameter, ParameterKind, UnitSources,

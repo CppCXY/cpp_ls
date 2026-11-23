@@ -962,6 +962,7 @@ mod tests {
 // keeps a re-export so that every path written before the move still resolves. The distinction is the one that
 // matters for a language server: an include search *asks* for a file, and the file layer is what *holds* one.
 pub mod config;
+pub mod feature;
 pub mod fuzzy;
 pub mod graph;
 pub mod msvc;

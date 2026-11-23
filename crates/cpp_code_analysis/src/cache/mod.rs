@@ -460,7 +460,14 @@ use std::path::{Path, PathBuf};
 /// builder now binds only a bodyless class whose declaration has no init-declarator (`struct bits;`). The key is
 /// content plus `context_hash`, neither of which moves for a reader's change, so only the version reaches the old
 /// summaries.
-pub const FORMAT_VERSION: u32 = 60;
+/// # Why this moved to 61
+///
+/// **`__label__` binds labels, and `__has_*` is answered by the compiler.** A summary written before this files
+/// `__label__ done;` as a variable whose type is `__label__`, and a rendering cooked before the probe takes the else
+/// branch of `#if __has_builtin(__builtin_expect)` where the compiler takes the then branch — a difference in which
+/// declarations exist, not merely in how they are described. The key is content plus `context_hash`, neither of which
+/// moves for either change, so only the version reaches the old rows.
+pub const FORMAT_VERSION: u32 = 61;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

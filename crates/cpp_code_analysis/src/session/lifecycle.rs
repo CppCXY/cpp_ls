@@ -202,6 +202,7 @@ impl<F: FileProvider + Clone> Session<F> {
             surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
+            feature_cache: cpp_toolchain::FeatureCache::default(),
             views: std::sync::Mutex::new(cache::cache_lru::Cache::views()),
             rendering_views: std::sync::Mutex::new(cache::cache_lru::Cache::rendering_views()),
             rendering_summaries: std::sync::Mutex::new(cache::cache_lru::Cache::new(

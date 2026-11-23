@@ -74,3 +74,31 @@ fn the_hedley_shape_defines_what_it_guards() {
     assert!(text.contains("__builtin_expect"), "{text}");
     assert!(!text.contains("LIKELY("), "{text}");
 }
+
+/// **A probe turns the unknown into the compiler's answer.**
+///
+/// The tests above state what a cook with no compiler does — `Unknown`, so the else branch. This is the other half:
+/// when a probe answers `__has_builtin(__builtin_expect)`, the `#if` takes the branch the compiler takes, without any
+/// table in the preprocessor claiming to know what a compiler supports.
+#[test]
+fn a_probe_answer_decides_the_branch() {
+    use cpp_toolchain::FeatureProbe;
+    use cpp_toolchain::preprocess::cooked::cook_with_file_and_features;
+
+    struct Answers;
+    impl FeatureProbe for Answers {
+        fn answer(&self, operator: &str, operand: &str) -> Option<i128> {
+            (operator == "__has_builtin" && operand == "__builtin_expect").then_some(1)
+        }
+    }
+
+    let source = "#if __has_builtin(__builtin_expect)\nint taken;\n#else\nint skipped;\n#endif\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file_and_features(source, &tokens, &nothing_defined, None, Some(&Answers))
+        .render()
+        .text;
+
+    assert!(text.contains("taken"), "{text}");
+    assert!(!text.contains("skipped"), "{text}");
+}

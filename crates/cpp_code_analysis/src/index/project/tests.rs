@@ -1321,6 +1321,29 @@ fn a_complex_type_keeps_the_adjective_in_its_spelling() {
 }
 
 #[test]
+fn a_gnu_label_declaration_binds_labels_not_variables() {
+    // **`__label__` names live in the label namespace.** Read as an ordinary declaration, `done` was a variable
+    // whose type was `__label__`; the label namespace is the one `goto` and `done:` share, so the fact must be the
+    // same kind a label statement produces (`Other`) and carry no type.
+    let source = "void f(void) {\n  __label__ done, again;\n  goto done;\n}\n";
+    let summary = summarize(Path::new("/p/a.c"), source, SummaryKey::new(0, 0));
+
+    for name in ["done", "again"] {
+        let fact = summary
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is declared by the `__label__` line"));
+        assert_eq!(
+            fact.kind,
+            crate::summary::DeclKind::Other,
+            "`{name}` is a label, not a variable"
+        );
+        assert_eq!(fact.type_of, None, "a label writes no type");
+    }
+}
+
+#[test]
 fn a_member_list_of_an_alias_is_the_member_list_of_its_target() {
     // The other query that turns a spelling into a class, and it has to agree with the single-member one:
     // completion for `std::string` that listed nothing would be a member list of the alias rather than of the
