@@ -149,3 +149,35 @@ const char *file = FILE_;
         "the spelling the compile command used: {expansion}"
     );
 }
+
+/// **A `#line` in force before the use is what the card reports.** The card cooks a synthetic source, so it places the
+/// invocation with a `#line` of its own; without that the answer was the physical line the synthetic source happened to
+/// put it on.
+#[test]
+fn a_macro_expansion_honours_a_line_directive() {
+    let line = "\
+#define LINE __LINE__
+#line 100 \"x.c\"
+void f() {
+    int line = LINE;
+}
+";
+    assert_eq!(
+        expanded(line, "LINE;").trim(),
+        "101",
+        "line 4 of the file is 101 after `#line 100` on line 2"
+    );
+
+    let file = "\
+#define FILE_ __FILE__
+#line 100 \"x.c\"
+void f() {
+    const char *f = FILE_;
+}
+";
+    assert_eq!(
+        expanded(file, "FILE_;").trim(),
+        "\"x.c\"",
+        "and the name the directive states is the one the card reports"
+    );
+}

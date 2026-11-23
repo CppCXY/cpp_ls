@@ -124,6 +124,50 @@ int c = __LINE__;
     );
 }
 
+/// **`#line`'s arguments are macro-expanded** — a preprocessor reads `#line L "y.c"` with `L` expanded, and a
+/// directive whose number is a macro was read as no directive at all before.
+#[test]
+fn a_line_directives_number_is_expanded() {
+    let source = "\
+#define L 50
+#line L \"y.c\"
+int a = __LINE__;
+const char *f = __FILE__;
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(
+        text.contains("int a = 50;"),
+        "the line after `#line L` is 50: {text}"
+    );
+    assert!(text.contains("\"y.c\""), "and the name is `y.c`: {text}");
+}
+
+/// **A GNU line marker is a `#line`.** `# 100 "x.c" 1 2` is the shape a preprocessor writes; its number is not a
+/// directive name.
+#[test]
+fn a_gnu_line_marker_changes_the_line_and_the_file() {
+    let source = "\
+int a = __LINE__;
+# 100 \"x.c\" 1
+int b = __LINE__;
+const char *f = __FILE__;
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(
+        text.contains("int b = 100;"),
+        "the line after the marker is 100: {text}"
+    );
+    assert!(text.contains("\"x.c\""), "and the name is `x.c`: {text}");
+}
+
 /// **`__FILE__` and `__LINE__` answer the use** — the file the caller named and the line the token is written on.
 ///
 /// `__FILE__` used to be the empty literal everywhere, and a cook told no file keeps that answer (a fixture has no

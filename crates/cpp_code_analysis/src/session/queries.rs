@@ -812,20 +812,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
-        // **`__LINE__` must count the reader's lines, not this synthetic source's.** The definitions above take one
-        // line each and the invocation would follow them, so on a real file it landed a few lines above where it is
-        // written — measured on a one-line `#define` and a call on line 3: the card said `2`. Padding the source so the
-        // invocation starts on its own line makes the expander's line count the file's, without teaching it about
-        // synthetic text. The padding goes **before** the invocation: appending it after expands nothing.
-        let invocation_line = written[..start]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1;
-        let synthetic_line = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        if invocation_line > synthetic_line {
-            source.push_str(&"\n".repeat(invocation_line - synthetic_line));
+        // **The invocation is placed where the reader's text says it is** — including any `#line` in force before it.
+        // The card does not cook the file: it cooks a synthetic source of the file's `#define`s and the invocation, so
+        // it states the position itself with a `#line` of its own. A `#line N` whose next line is the invocation makes
+        // `__LINE__` answer N however many definitions the source holds, and a name, when one is in force, replaces the
+        // file's for `__FILE__`. (Emitting it always is simpler than padding the source and then discovering a `#line`
+        // moved the line somewhere padding cannot reach.)
+        let (presumed_line, stated_file) = presumed_position(&written, start);
+        source.push_str("#line ");
+        source.push_str(&presumed_line.to_string());
+        if let Some(name) = &stated_file {
+            push_a_quoted(&mut source, &name.to_string_lossy());
         }
+        source.push('\n');
         source.push_str(invocation);
 
         // **The environment underneath**: the closure's unconditional definitions, and the compiler's own — the same
@@ -1163,4 +1162,58 @@ fn a_partition_is_written_before(written: &str, at: usize) -> bool {
         cursor -= 1;
     }
     cursor > 0 && bytes[cursor - 1] == b':'
+}
+
+/// **The `#line` state at `at` in a file's own text** — the line the reader's text says, and the name a `#line`
+/// stated, if any.
+///
+/// The card's synthetic source is not the file, so it has to be told the position it is standing in. This walks the
+/// file's directives up to the use and applies each `#line` exactly as the cook does
+/// ([`crate::preprocess::cooked::a_line_directive_changes`]); the cook itself does the same while it walks, and the
+/// shared function is what keeps the two from disagreeing. The tokens are read **as written** here: a `#line` whose
+/// number is a macro is expanded by the cook, not by the card, and the card's fixture for it is a literal.
+fn presumed_position(written: &str, at: usize) -> (usize, Option<std::path::PathBuf>) {
+    use crate::preprocess::directive::{Directive, scan_directives};
+
+    let (tokens, _) = cpp_parser::lex(written, &cpp_parser::LexerConfig::default());
+    let mut line_base = 0isize;
+    let mut file = None;
+    for spanned in scan_directives(written, &tokens) {
+        if spanned.line.start_offset >= at {
+            break;
+        }
+        if let Directive::Line { tokens } = &spanned.directive {
+            let directive_line = 1 + written[..spanned.line.end_offset().min(written.len())]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            crate::preprocess::cooked::a_line_directive_changes(
+                tokens,
+                directive_line,
+                &mut line_base,
+                &mut file,
+            );
+        }
+    }
+    let physical = 1 + written[..at.min(written.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    ((physical as isize + line_base).max(1) as usize, file)
+}
+
+/// **`name` as a quoted C++ literal appended to `out`** — for the card's synthetic `#line`.
+fn push_a_quoted(out: &mut String, name: &str) {
+    out.push_str(" \"");
+    for character in name.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }

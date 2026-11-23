@@ -3316,17 +3316,27 @@ region fallback exists for argument prescans, whose synthetic ranges are not in 
 used when it falls inside the run; the prescan still gets the region. Without that, two `__LINE__`s in one run answered
 the same number.
 
-**What is still not covered**: `#line` in the hover card's synthetic source — the card builds a source of `#define`s and
-the invocation, so a file whose `#line` is in force at the call shows the physical line; GNU linemarkers (`# 100 "x"`)
-are not a `#line`; and a `#line` whose number is a macro (`#line __LINE__`) is read as a non-number and ignored. The
-card's own compile-command spelling is covered, which is what the report was about.
+**Also covered, in the same pass.** The hover card's synthetic source now states its position with a `#line` of its own:
+`presumed_position` walks the file's directives with the same `a_line_directive_changes` the cook uses, so a `#line`
+in force at the call is what the card reports (measured: `#line 100 "x.c"` on line 2 makes the call on line 4 answer
+`101`). GNU linemarkers (`# 100 "x.c" 1`) are read as `#line` by `parse_directive_tokens` — the token after the `#` is
+the number, not a directive name. And a `#line`'s arguments are macro-expanded before they are read, so `#line L` and
+`#line __LINE__` work; the arguments are expanded as their own run (`expand_with_positions` over
+`Directive::Line`'s tokens), and the `__COUNTER__` count is carried back.
 
-Tests: `the_file_and_the_line_macros_answer_the_use` and `a_line_directive_changes_the_line_and_the_file` in
+**What is still not covered**: `#if __LINE__` / `#if __COUNTER__` — the condition evaluator has no positions and no
+counter, so a condition asking one takes the undefined-name branch; and a `#line` that sits in a region nobody compiles
+is correctly ignored by the cook, but the **card** does not evaluate conditions, so its `presumed_position` would apply
+such a `#line` if one stood before the call.
+
+
+Tests: `the_file_and_the_line_macros_answer_the_use`, `a_line_directive_changes_the_line_and_the_file`,
+`a_line_directives_number_is_expanded` and `a_gnu_line_marker_changes_the_line_and_the_file` in
 `cpp_toolchain/tests/suite/rendering.rs`; `a_macro_expansion_answers_the_line_of_the_use`,
-`..._the_file_of_the_use`, `..._the_commands_spelling_of_the_file` in
+`..._the_file_of_the_use`, `..._the_commands_spelling_of_the_file` and `..._honours_a_line_directive` in
 `cpp_code_analysis/tests/suite/macro_expansion.rs`; `the_presumed_name_is_the_spelling_the_database_wrote` in
-`config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 143 + 162 + 23
-passed, 0 failed, 11 ignored.
+`config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 144 + 162 + 25
+passed, 0 failed, 14 ignored.
 
 
 

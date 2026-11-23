@@ -24,9 +24,10 @@ fix many parser and toolchain bug
 
 - **`__FILE__` answers the compile command's spelling, and `#line N "name"` is applied.** `__FILE__` used to be the
   empty literal in every rendering and `#line` was parsed and then dropped: a file whose command writes `src/a.cpp`
-  now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. `__LINE__`
-  written directly in a run also answers its own line now, where it used to answer the run's first line.
-  `context_hash` folds the spelling, so `FORMAT_VERSION` moved 57 → 58.
+  now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. A GNU line
+  marker (`# 100 "x.c"`), a `#line` whose number or name is a macro, and a `#line` in force at a hover card's use are
+  read as well; `__LINE__` written directly in a run also answers its own line now, where it used to answer the run's
+  first line. `context_hash` folds the spelling, so `FORMAT_VERSION` moved 57 → 58.
 
 ## [0.4.0]
 

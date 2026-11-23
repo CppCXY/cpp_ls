@@ -1809,20 +1809,46 @@ pub fn cook_with_search_and_state(
             // written, replaces the file's for everything after it. A `#line` in a region nobody compiles changes
             // nothing — the guard on the arm is that.
             DirectiveKind::Line if was_live => {
-                if let Directive::Line { tokens } = &spanned.directive {
+                if let Directive::Line { tokens: arguments } = &spanned.directive {
+                    // **The arguments are macro-expanded first** — `#line __LINE__` and `#line TABLE_SIZE` are what a
+                    // preprocessor reads, not the tokens as written. The arguments are the tokens *after* the
+                    // directive's name, so they are expanded as their own run rather than through the file's stream
+                    // (which would hand this function the `#` and the name as well).
+                    let counters = std::cell::Cell::new(out.counters);
+                    let lines = |at: usize| {
+                        1 + source[..at.min(source.len())]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count()
+                    };
+                    let macros = crate::preprocess::PositionalMacros {
+                        table: &live,
+                        offset: spanned.range.start_offset,
+                    };
+                    let expansion = crate::preprocess::expand::expand_with_positions(
+                        arguments,
+                        &macros,
+                        &lines,
+                        &counters,
+                        presumed_file.as_deref(),
+                        line_base,
+                    );
+                    out.counters = counters.get();
+                    let expanded: Vec<crate::token::Token> = expansion
+                        .tokens
+                        .into_iter()
+                        .map(|token| token.token)
+                        .collect();
                     let directive_line = 1 + source[..spanned.line.end_offset().min(source.len())]
                         .bytes()
                         .filter(|byte| *byte == b'\n')
                         .count();
-                    if let Some(number) = tokens
-                        .first()
-                        .and_then(|token| token.text().parse::<isize>().ok())
-                    {
-                        line_base = number - (directive_line as isize + 1);
-                    }
-                    if let Some(name) = tokens.get(1) {
-                        presumed_file = Some(PathBuf::from(a_presumed_file_name(name.text())));
-                    }
+                    a_line_directive_changes(
+                        &expanded,
+                        directive_line,
+                        &mut line_base,
+                        &mut presumed_file,
+                    );
                 }
             }
             _ => {}
@@ -2091,6 +2117,30 @@ fn branch_of(directive: &Directive, range: SourceRange) -> Option<Branch> {
     };
 
     Some(Branch::new(kind, tokens, name, range))
+}
+
+/// **What a `#line` directive puts in force** — the number the next physical line gets, and the name if written.
+///
+/// `tokens` are the directive's arguments **after macro expansion** (a `#line`'s number and name may be macros),
+/// `directive_line` is the 1-based physical line the directive itself stands on, and `line_base`/`file` are the state
+/// before it, updated in place. Shared by the cook and the hover card so the two cannot disagree about one `#line`.
+pub fn a_line_directive_changes(
+    tokens: &[crate::token::Token],
+    directive_line: usize,
+    line_base: &mut isize,
+    file: &mut Option<PathBuf>,
+) {
+    if let Some(number) = tokens
+        .first()
+        .and_then(|token| token.text().parse::<isize>().ok())
+    {
+        *line_base = number - (directive_line as isize + 1);
+    }
+    if let Some(name) = tokens.get(1)
+        && name.kind == cpp_parser::CppTokenKind::StringLiteral
+    {
+        *file = Some(PathBuf::from(a_presumed_file_name(name.text())));
+    }
 }
 
 /// **The name a `#line` directive writes**, as the literal's contents with `\\` and `\"` undone.

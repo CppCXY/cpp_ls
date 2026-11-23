@@ -523,6 +523,14 @@ pub fn parse_directive_tokens(tokens: &[Token], range: SourceRange) -> Directive
         // `#` alone on a line.
         return Directive::Null;
     };
+    // **A GNU line marker** — `# 100 "file" 1 2`, the shape a preprocessor writes for a `#line`. The token after the
+    // `#` is the number, not a directive name; read as an unknown directive it would drop the position of every
+    // generated file. The flags after the name are not this layer's business and stay unread.
+    if name.kind == CppTokenKind::IntegerLiteral {
+        return Directive::Line {
+            tokens: significant(&tokens[index..]),
+        };
+    }
     let kind = DirectiveKind::from_name(name.text());
     index += 1;
 
