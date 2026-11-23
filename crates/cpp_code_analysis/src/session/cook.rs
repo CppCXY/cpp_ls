@@ -431,11 +431,21 @@ impl<F: FileProvider + Clone> Session<F> {
                     Some(seed),
                     true,
                 );
-                crate::preprocess::cooked::cook_with(text, &tokens, &macros)
+                crate::preprocess::cooked::cook_with_file(
+                    text,
+                    &tokens,
+                    &macros,
+                    Some(path.as_path()),
+                )
             }
             (None, Some(configuration)) => {
                 let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
-                crate::preprocess::cooked::cook_with(text, &tokens, &start)
+                crate::preprocess::cooked::cook_with_file(
+                    text,
+                    &tokens,
+                    &start,
+                    Some(path.as_path()),
+                )
             }
             (None, None) => return None,
         };
@@ -890,7 +900,15 @@ impl<F: FileProvider + Clone> Session<F> {
         let view = unit.environment_of(&path)?;
         let macros =
             crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, Some(&seed), true);
-        Some(crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render())
+        Some(
+            crate::preprocess::cooked::cook_with_file(
+                &text,
+                &tokens,
+                &macros,
+                Some(path.as_path()),
+            )
+            .render(),
+        )
     }
 
     /// **Read one file the way the compiler does, and put that reading in the index.**

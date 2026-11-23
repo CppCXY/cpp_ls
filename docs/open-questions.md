@@ -3238,3 +3238,60 @@ handler module), `refinement.md` (the stored-refinement suite) and `declarator-s
 sentence uses the plan as the *authority* for a rule, so the rule has to be stated in the sentence — most already state
 it beside the citation — and the reference dropped. That is a prose edit per site, and it is the next pass.
 
+## `__FILE__` and `__LINE__` in a macro's expansion — fixed
+
+Reported from an editor, with a screenshot. The card for
+
+```cpp
+#define debug(x) std::println("DEBUG: {}: {} {}", __FILE__, __LINE__, x);
+...
+debug(println("Starting main function"));
+```
+
+said `__FILE__` was `""` and `__LINE__` was `2`. Two independent causes:
+
+1. **`__FILE__` had no file to name.** `expand.rs`'s `a_position_dependent_macro` answered it with a hard-coded `""`,
+   and nothing in the cook path passed a name — a placeholder whose comment even said "`__FILE__` has no name to answer
+   here". Every rendering therefore carried `""` for a file, not just the card.
+2. **The card's `__LINE__` counted a synthetic source.** `the_expansion_of_a_macro` builds `#define`s for the file's
+   macros and appends the invocation, so the invocation sat on the line after them: measured, a `#define` on line 1 and a
+   call on line 3 answered **2**.
+
+### The fix
+
+`expand_with_positions` now takes the file the run is written in (`Option<&Path>`), and `__FILE__` is that path as a
+C++ string literal — `\` and `"` escaped. `cook_with_file` is the cook that supplies one; the unit cook passes each
+frame's file, and `Session::render_cook`, `rendering_of` and the index's two renderings pass theirs, so the answer is in
+the rendering and not only in the card. A text with no file behind it (a fixture) still answers `""`, which is the
+honest answer there.
+
+The card pads the synthetic source **before** the invocation so the invocation starts on the line the reader wrote. The
+first version appended the padding after the invocation — the test still said `2`, which is how that mistake was caught.
+
+Measured through `cpp_inspect` on the reported shape (the fixture's own path, since a fixture is a temporary file):
+
+```text
+std::println("DEBUG: {}: {} {}",
+    "C:\\Users\\zc\\AppData\\Local\\Temp\\cppls-inspect-345776-47000\\main.cpp",
+    3, println("Starting main function"));
+```
+
+The argument keeps its call — the card in the report appeared to show `println` alone, and on this shape the expansion
+is the whole `println("Starting main function")`; if the original text had the argument split across lines, that is a
+separate report.
+
+### What the file is called, and what is left
+
+`__FILE__` answers the analysis's name for the file — its **path**. A compiler answers the *presumed* name, which is how
+the file was spelled on its command line (`main.cpp`, `src/main.cpp`, an absolute path); the analysis does not keep that
+spelling at this layer, and the frame carries the resolved path. If a project needs the command's spelling, the frame
+has to carry it, which is a change to `TranslationFrame`, not to the expander.
+
+`__LINE__` in a `#if` is still not answered: the condition evaluator has no positions, so `#if __LINE__ > 1` takes the
+undefined-name branch. That predates this report and is not what the card shows.
+
+Tests: `the_file_and_the_line_macros_answer_the_use` (`cpp_toolchain/tests/suite/rendering.rs`, a cook given
+`src\main.cpp` answers line 4 and the escaped literal) and `a_macro_expansion_answers_the_line_of_the_use` /
+`..._the_file_of_the_use` (`cpp_code_analysis/tests/suite/macro_expansion.rs`, the card itself).
+
+

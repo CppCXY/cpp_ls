@@ -1534,6 +1534,29 @@ pub fn cook_with(
     cook_with_search(source, tokens, initial, None, Path::new(""))
 }
 
+/// **The same cook, told which file the text is** — so `__FILE__` answers the name a compiler would have written.
+///
+/// `cook_with` cannot: a text with no file behind it (a fixture, a condition) has no name to report, and `""` is the
+/// honest answer there. The hover card's expansion is a synthetic source built from one real file, so it knows the
+/// file even though the text it expands is not the file.
+pub fn cook_with_file(
+    source: &str,
+    tokens: &[CppTokenData],
+    initial: &dyn crate::macros::MacroBindings,
+    file: Option<&Path>,
+) -> CookedStream {
+    let mut state = CookingState::default();
+    cook_with_search_and_state(
+        source,
+        tokens,
+        initial,
+        &mut state,
+        None,
+        Path::new(""),
+        file,
+    )
+}
+
 /// [`cook_with`] with a header search, so `__has_include` can be answered instead of guessed.
 ///
 /// `directory` is where the file being cooked sits, which is what the **quoted** form searches first. Both are
@@ -1566,7 +1589,7 @@ pub fn cook_with_search(
     directory: &Path,
 ) -> CookedStream {
     let mut state = CookingState::default();
-    cook_with_search_and_state(source, tokens, initial, &mut state, search, directory)
+    cook_with_search_and_state(source, tokens, initial, &mut state, search, directory, None)
 }
 
 /// [`cook_with_search`] with the table a **program**'s cook carries across files — see [`CookingState`].
@@ -1574,6 +1597,9 @@ pub fn cook_with_search(
 /// The names the text defines are appended to `state`, so the next file of the same program sees them; a name the text
 /// does not define is answered by `initial`, exactly as before. That layering is what makes this a change of *state*
 /// rather than of *policy*: a cook handed a fresh state — every per-file caller — behaves as it did.
+///
+/// `file` is the name `__FILE__` reports — the file the text is, for a caller that knows it (a unit's frame, a session's
+/// file). It is `None` for a synthetic text, where the empty literal is the honest answer.
 pub fn cook_with_search_and_state(
     source: &str,
     tokens: &[CppTokenData],
@@ -1581,6 +1607,7 @@ pub fn cook_with_search_and_state(
     state: &mut CookingState,
     search: Option<&dyn HeaderSearch>,
     directory: &Path,
+    file: Option<&Path>,
 ) -> CookedStream {
     let directives = crate::directive::scan_directives(source, tokens);
 
@@ -1623,7 +1650,7 @@ pub fn cook_with_search_and_state(
         // inside a run, so the table is constant across it, and the lookup offset is the run's start.
         if run_from < token_index {
             if was_live {
-                expand_run(source, tokens, run_from, token_index, &live, &mut out);
+                expand_run(source, tokens, run_from, token_index, &live, file, &mut out);
             } else {
                 let span = span_of(tokens, run_from, token_index);
                 merge_span(&mut out.inactive, span);
@@ -1746,7 +1773,7 @@ pub fn cook_with_search_and_state(
                 // every pragma — made us differ by exactly those tokens.
                 if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
                     let before = out.tokens.len();
-                    expand_run(source, tokens, first, last, &live, &mut out);
+                    expand_run(source, tokens, first, last, &live, file, &mut out);
                     if out.tokens.len() > before {
                         out.pragma_lines.push(before..out.tokens.len());
                     }
@@ -1769,7 +1796,15 @@ pub fn cook_with_search_and_state(
     // What is left after the last directive — and the whole file when there is none.
     if run_from < tokens.len() {
         if is_live(&regions) {
-            expand_run(source, tokens, run_from, tokens.len(), &live, &mut out);
+            expand_run(
+                source,
+                tokens,
+                run_from,
+                tokens.len(),
+                &live,
+                file,
+                &mut out,
+            );
         } else {
             let span = span_of(tokens, run_from, tokens.len());
             merge_span(&mut out.inactive, span);
@@ -2018,6 +2053,7 @@ fn expand_run(
     from: usize,
     to: usize,
     live: &dyn crate::macros::MacroBindings,
+    file: Option<&Path>,
     out: &mut CookedStream,
 ) {
     let run = crate::directive::to_tokens(source, &tokens[from..to]);
@@ -2040,7 +2076,7 @@ fn expand_run(
             + 1
     };
     let expansion =
-        crate::preprocess::expand::expand_with_positions(&run, &macros, &lines, &counters);
+        crate::preprocess::expand::expand_with_positions(&run, &macros, &lines, &counters, file);
     out.counters = counters.get();
     out.diagnostics.extend(expansion.diagnostics);
     out.exhausted |= expansion.exhausted;

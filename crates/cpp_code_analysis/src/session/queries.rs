@@ -812,6 +812,20 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
+        // **`__LINE__` must count the reader's lines, not this synthetic source's.** The definitions above take one
+        // line each and the invocation would follow them, so on a real file it landed a few lines above where it is
+        // written — measured on a one-line `#define` and a call on line 3: the card said `2`. Padding the source so the
+        // invocation starts on its own line makes the expander's line count the file's, without teaching it about
+        // synthetic text. The padding goes **before** the invocation: appending it after expands nothing.
+        let invocation_line = written[..start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
+        let synthetic_line = source.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        if invocation_line > synthetic_line {
+            source.push_str(&"\n".repeat(invocation_line - synthetic_line));
+        }
         source.push_str(invocation);
 
         // **The environment underneath**: the closure's unconditional definitions, and the compiler's own — the same
@@ -836,8 +850,13 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         let start_state = crate::preprocess::cooked::Over::new(&configuration.table, &seed);
         let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
-        let rendered =
-            crate::preprocess::cooked::cook_with(&source, &tokens, &start_state).render();
+        let rendered = crate::preprocess::cooked::cook_with_file(
+            &source,
+            &tokens,
+            &start_state,
+            Some(&view.path),
+        )
+        .render();
         let text = rendered.text.trim().to_string();
         if text.is_empty() {
             return None;

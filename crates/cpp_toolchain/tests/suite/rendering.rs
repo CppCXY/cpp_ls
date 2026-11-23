@@ -8,7 +8,7 @@
 //! `staticconstexpr`, which no parser can read and no C++ compiler would accept.
 
 use cpp_toolchain::macros::MacroTable;
-use cpp_toolchain::preprocess::cooked::cook_with;
+use cpp_toolchain::preprocess::cooked::{cook_with, cook_with_file};
 
 /// The rendered text of a source, through the same path a cook takes.
 fn rendered(source: &str) -> String {
@@ -82,4 +82,35 @@ fn an_identifier_that_starts_with_a_keyword_lexes_whole() {
     let (kind, range) =
         cpp_parser::lex_first("staticconstexpr", &cpp_parser::LexerConfig::default()).unwrap();
     assert_eq!(range.end_offset(), "staticconstexpr".len(), "{kind:?}");
+}
+
+/// **`__FILE__` and `__LINE__` answer the use** — the file the caller named and the line the token is written on.
+///
+/// `__FILE__` used to be the empty literal everywhere, and a cook told no file keeps that answer (a fixture has no
+/// name); `cook_with_file` is what the real paths pass. The line is the line of the **use**, which is line 4 here, not
+/// the line of the `#define`.
+#[test]
+fn the_file_and_the_line_macros_answer_the_use() {
+    let source = "\
+#define A __LINE__
+#define B __FILE__
+int a = 1;
+int b = A;
+const char *f = B;
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(
+        source,
+        &tokens,
+        &nothing_defined,
+        Some(std::path::Path::new("src\\main.cpp")),
+    )
+    .render()
+    .text;
+    assert!(text.contains("int b =4;"), "`__LINE__` is line 4: {text}");
+    assert!(
+        text.contains(r#""src\\main.cpp""#),
+        "`__FILE__` is the name the cook was given, escaped as a literal: {text}"
+    );
 }

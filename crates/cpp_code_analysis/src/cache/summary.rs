@@ -2553,6 +2553,7 @@ impl UnitCook<'_> {
                 &mut self.state,
                 search,
                 directory,
+                Some(&unit.frames[frame as usize].file),
             );
             produced += cook.tokens.len();
             depth += self.emit(frame, &cook, out);
@@ -2566,6 +2567,7 @@ impl UnitCook<'_> {
             &mut self.state,
             search,
             directory,
+            Some(&unit.frames[frame as usize].file),
         );
         produced += cook.tokens.len();
         depth += self.emit(frame, &cook, out);

@@ -42,6 +42,8 @@
 //! pathological input that is neither). All three decline to expand rather than failing, and say which
 //! one fired — see [`Diagnostic`].
 
+use std::path::Path;
+
 use cpp_parser::{CppTokenKind, LexerConfig, SourceRange, is_keyword};
 
 use crate::{
@@ -308,6 +310,7 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
         exhausted: false,
         lines: None,
         counters: None,
+        file: None,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -324,12 +327,14 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
     expansion
 }
 
-/// **Expand a file's run with the position-dependent predefined macros answered** — `__LINE__` and `__COUNTER__`.
+/// **Expand a file's run with the position-dependent predefined macros answered** — `__LINE__`, `__COUNTER__` and
+/// `__FILE__`.
 ///
-/// A compiler answers both from the position of the **use**: `__LINE__` is the line of the invocation, which for a
-/// token inside a macro body is the line of the *call*, and `__COUNTER__` is a count per translation unit. Neither can
-/// live in a table read from the compiler's predefines, so they are answered here instead — `lines` maps a byte offset
-/// to its line, and `counters` is the count shared by every run of the unit.
+/// A compiler answers them from the position of the **use**: `__LINE__` is the line of the invocation, which for a
+/// token inside a macro body is the line of the *call*, `__COUNTER__` is a count per translation unit, and `__FILE__`
+/// is the name of the file the use is written in. None can live in a table read from the compiler's predefines, so
+/// they are answered here instead — `lines` maps a byte offset to its line, `counters` is the count shared by every
+/// run of the unit, and `file` is the name `__FILE__` reports.
 ///
 /// Without this doctest's `DOCTEST_CAT(x, __LINE__)` pasted the **name** onto `x` and every capture in a test file
 /// became the identifier `DOCTEST_CAPTURE___LINE__` — 86 `redefinition` findings across nlohmann/json's tests, all of
@@ -339,6 +344,7 @@ pub fn expand_with_positions(
     macros: &(impl MacroValues + ?Sized),
     lines: &dyn Fn(usize) -> usize,
     counters: &std::cell::Cell<usize>,
+    file: Option<&Path>,
 ) -> Expansion {
     let mut expander = Expander {
         macros,
@@ -351,6 +357,7 @@ pub fn expand_with_positions(
         exhausted: false,
         lines: Some(lines),
         counters: Some(counters),
+        file,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -375,6 +382,7 @@ pub fn expand_with_budget(
         exhausted: false,
         lines: None,
         counters: None,
+        file: None,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -406,11 +414,15 @@ struct Expander<'a, M: MacroValues + ?Sized> {
     /// **The `__COUNTER__` count**, shared by every run of one translation unit — a compiler counts per translation
     /// unit, and a count that restarted per run would answer the same number twice.
     counters: Option<&'a std::cell::Cell<usize>>,
+    /// **The name `__FILE__` reports** — the file the use is written in, as the caller spells it. `None` in a text
+    /// with no file behind it (a condition, a synthetic source), where `__FILE__` is an empty literal: a valid string
+    /// and the honest answer, rather than a made-up name.
+    file: Option<&'a Path>,
 }
 
 impl<M: MacroValues + ?Sized> Expander<'_, M> {
-    /// **`__LINE__`, `__COUNTER__`, `__FILE__`** — the predefined macros a compiler answers from the position of the
-    /// use, and which therefore have no `#define` anywhere.
+    /// **`__LINE__`, `__COUNTER__`, `__FILE__`** — the predefined macros a compiler answers from where the use is
+    /// written, and which therefore have no `#define` anywhere.
     ///
     /// `None` for everything else, and for all three when the expansion was given no positions
     /// (`expand_with_positions` is the constructor that gives them).
@@ -454,7 +466,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             }
             "__FILE__" => Some(Token::new(
                 cpp_parser::CppTokenKind::StringLiteral,
-                "\"\"",
+                a_file_name_literal(self.file),
                 token.range,
             )),
             _ => None,
@@ -1535,6 +1547,32 @@ fn synthetic_comma(tokens: &[Token], near: usize) -> Token {
         .unwrap_or_else(|| SourceRange::new(0, 1));
 
     Token::new(CppTokenKind::Comma, ",", range)
+}
+
+/// **`__FILE__`'s value as a C++ string literal** — the name the caller gave, with `\` and `"` escaped so the token
+/// is the literal a compiler would have written.
+///
+/// An empty literal when there is no file: a synthetic source (the hover card's expansion) still has to produce a
+/// valid `std::string` argument rather than the unexpanded name.
+fn a_file_name_literal(file: Option<&Path>) -> String {
+    let Some(file) = file else {
+        return "\"\"".to_string();
+    };
+    let name = file.to_string_lossy();
+    let mut literal = String::with_capacity(name.len() + 2);
+    literal.push('"');
+    for character in name.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// `#x`: the argument's tokens as a string literal.

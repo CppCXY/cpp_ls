@@ -399,8 +399,13 @@ impl<F: FileProvider> DetachedRead<F> {
                     Some(&seed),
                     true,
                 );
-                let rendered =
-                    crate::preprocess::cooked::cook_with(&self.source, &tokens, &macros).render();
+                let rendered = crate::preprocess::cooked::cook_with_file(
+                    &self.source,
+                    &tokens,
+                    &macros,
+                    Some(self.path.as_path()),
+                )
+                .render();
                 let indexed =
                     indexer.index_the_readings(&self.path, &self.source, &rendered, self.key);
                 let summary = indexed.summary.clone();
@@ -1307,7 +1312,9 @@ impl<F: FileProvider> SummaryStore<F> {
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let macros =
             { crate::preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
-        let rendered = { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+        let rendered = {
+            crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path)).render()
+        };
 
         // **The directives the caller may have read already.** For a file the index cannot describe — the one a
         // reader is editing — they were read to decide whether the file could be read through a timeline at all, and
@@ -2668,8 +2675,10 @@ impl<F: FileProvider> SummaryStore<F> {
                     Some(&seed),
                     true,
                 );
-                let rendered =
-                    { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+                let rendered = {
+                    crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path))
+                        .render()
+                };
                 let dead = self.dead_macros_for(path);
                 let indexed = indexer
                     .without_these_macros(&dead)
@@ -2730,8 +2739,10 @@ impl<F: FileProvider> SummaryStore<F> {
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
             let macros =
                 crate::preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
-            let rendered =
-                { crate::preprocess::cooked::cook_with(source, &tokens, &macros).render() };
+            let rendered = {
+                crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path))
+                    .render()
+            };
 
             // **And what the walk decided is not compiled.** The unit has already evaluated every guarded `#define`
             // against its own state — the same evaluation the cook uses — and a fact it skipped is one a compiler

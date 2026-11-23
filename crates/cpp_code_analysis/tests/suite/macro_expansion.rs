@@ -91,3 +91,33 @@ int n = ADD(1,   2);
         "the formatter puts the operators where a reader expects them"
     );
 }
+
+/// **`__LINE__` is the line of the use, not of the card's synthetic source.** The card builds one `#define` line per
+/// definition and then the invocation, so a call written on line 3 used to expand to `2`; the source is padded so the
+/// invocation sits on its own line.
+#[test]
+fn a_macro_expansion_answers_the_line_of_the_use() {
+    let source = "\
+#define LINE __LINE__
+void f() {
+    int line = LINE;
+}
+";
+    let expansion = expanded(source, "LINE;");
+    assert_eq!(expansion.trim(), "3", "the call is on line 3: {expansion}");
+}
+
+/// **`__FILE__` is the file the use is written in.** It used to be the empty literal in every expansion.
+#[test]
+fn a_macro_expansion_answers_the_file_of_the_use() {
+    let source = "\
+#define FILE_ __FILE__
+const char *file = FILE_;
+";
+    let expansion = expanded(source, "FILE_;");
+    assert_eq!(
+        expansion.trim(),
+        "\"/p/a.cpp\"",
+        "the file this fixture is written in: {expansion}"
+    );
+}
