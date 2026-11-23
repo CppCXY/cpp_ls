@@ -463,6 +463,10 @@ impl AnalysisState {
     /// Returns whether a program was attempted. `false` when none was owed, or when the clock
     /// ([`cpp_code_analysis::Session::the_program_to_read`]) or the size budget said no.
     pub async fn read_a_program(&self) -> bool {
+        // **The four phases, timed.** This is the server's largest unprompted piece of work and every one of its parts
+        // has been a separate investigation — the walk, the cook and the parse, the per-file records, the inserts — so
+        // the line that says what a program read cost is the instrument the next one starts from.
+        let started = std::time::Instant::now();
         let Some(Some((root, revision))) = self.with_snapshot(|session| {
             session
                 .the_program_to_read()
@@ -470,6 +474,7 @@ impl AnalysisState {
         }) else {
             return false;
         };
+        let choosing = started.elapsed();
 
         // **The cheap half under the lock that is already taken for reads**, beside whatever other queries are doing.
         let gathering = root.clone();
@@ -494,6 +499,8 @@ impl AnalysisState {
             }
             None => None,
         };
+        let gathered = started.elapsed() - choosing;
+        let was_read = prepared.is_some();
 
         // **The per-file cache records, prepared with a read lock and no writer.**
         //
@@ -532,8 +539,11 @@ impl AnalysisState {
             None => None,
         };
 
+        let prepared_for_the_records = started.elapsed() - choosing - gathered;
+
         // **And the inserts, under the writer.** The root is marked read even when the read declined, so a program
         // that cannot be built is not chosen again on the next wake.
+        let committing = std::time::Instant::now();
         let read = self
             .update_session("read a program", move |session| {
                 if !session.is_current(&revision) {
@@ -544,6 +554,15 @@ impl AnalysisState {
             })
             .await
             .flatten();
+        let committed = committing.elapsed();
+
+        if read.is_some() || was_read {
+            log::info!(
+                "a program read cost: choose {choosing:?}, gather + read {gathered:?}, records {prepared_for_the_records:?}, \
+                 commit {committed:?} = {:?}",
+                started.elapsed()
+            );
+        }
 
         // **One line, because this is the most expensive thing the server does unprompted** — and the reader's log is
         // where "why is a core busy for five seconds after I stop typing" is answered. Silent when the *insert* is

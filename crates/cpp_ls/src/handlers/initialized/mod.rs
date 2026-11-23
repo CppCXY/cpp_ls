@@ -546,6 +546,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // takes the executor away from every request in flight for the length of the wave. Measured with the
             // latency fixture: one completion in about twelve lost **1.7 s** with no session lock held at all — the
             // lock was free and the thread was busy. That is the difference `spawn_blocking` makes.
+            let preparing = std::time::Instant::now();
             let prepared = context
                 .analysis()
                 .run_blocking("prepare a wave", move |session| {
@@ -554,6 +555,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .await
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
+            let prepared_in = preparing.elapsed().as_millis();
             log::trace!("pump: wave prepared ({prepared_count})");
 
             let Some((pending, drain, claimed, held, committed)) = context
@@ -641,8 +643,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         // sees whether it was the parse, the insert or the queueing without
                         // re-instrumenting.
                         log::info!(
-                            "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, \
-                             {cooking} to cook, {pending_now} left",
+                            "index slice: prepared {prepared_count} in {prepared_in} ms, committed {taken}, write lock \
+                             held {held} ms, {cooking} to cook, {pending_now} left",
                             cooking = claimed.len()
                         );
                     }
@@ -677,6 +679,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 drain_was_empty,
                 asked.len()
             );
+            let cooking_began = std::time::Instant::now();
             let (prepared_drain, stored_cooks, cooks, cooking_revision) = context
                 .analysis()
                 .run_blocking("prepare the drain", move |session| {
@@ -705,7 +708,10 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 })
                 .await
                 .unwrap_or_default();
+            let prepared_the_drain = cooking_began.elapsed().as_millis();
+            let rendering = std::time::Instant::now();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;
+            let rendered_the_cooks = rendering.elapsed().as_millis();
             let slice = cpp_code_analysis::session::AClaimedSlice {
                 stored: stored_cooks,
                 fresh: rendered_cooks,
@@ -781,6 +787,14 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // one (36.6 ms on `CodeFormat.cpp`, 109 ms on a cold session, against 2.2 ms for a repeat), and the pump is
             // the one party that knows when a new reading exists — it just committed one. `pending == 0` keeps it out of
             // a typing burst: the queue is empty, so no request is waiting on a parse this slice owes it.
+            if !asked.is_empty() || re_read > 0 || cooked > 0 {
+                log::info!(
+                    "index tail: drain {prepared_the_drain} ms ({re_read} re-read), render {rendered_the_cooks} ms \
+                     ({cooked} cooked), total {} ms",
+                    cooking_began.elapsed().as_millis()
+                );
+            }
+
             if (re_read > 0 || cooked > 0) && pending == 0 {
                 let warmed = context
                     .analysis()
