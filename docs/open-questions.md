@@ -3324,18 +3324,28 @@ the number, not a directive name. And a `#line`'s arguments are macro-expanded b
 `#line __LINE__` work; the arguments are expanded as their own run (`expand_with_positions` over
 `Directive::Line`'s tokens), and the `__COUNTER__` count is carried back.
 
-**What is still not covered**: `#if __LINE__` / `#if __COUNTER__` — the condition evaluator has no positions and no
-counter, so a condition asking one takes the undefined-name branch; and a `#line` that sits in a region nobody compiles
-is correctly ignored by the cook, but the **card** does not evaluate conditions, so its `presumed_position` would apply
+**`#if __LINE__` is answered too.** The condition evaluator is handed a macro table, and a name with no `#define` is
+C's `0` there; the two position names are bound by no `#define`, so `decide_a_condition` wraps the table in
+`ThePositions`, whose `lookup` answers `__LINE__`/`__FILE__` with a one-token definition of the directive's position
+(the `#elif`'s own line; a `#line` in force is applied). It is built only when the condition mentions one — directly or
+through a macro body (`a_body_mentions_the_position`, depth-capped), so an ordinary `#if` pays a token scan and no
+allocation. Measured: `#if __LINE__ == 1` on line 1, `#ifdef __LINE__`, `#if defined(__FILE__)`,
+`#elif __LINE__ == 3`, and `#define L __LINE__` + `#if L == 2` all take the expected branch.
+
+**What is still not covered**: `#if __COUNTER__` — the counter is mutable state and `MacroValues::lookup` answers by
+reference, so a synthetic definition cannot advance it; and a `#line` that sits in a region nobody compiles is
+correctly ignored by the cook, but the **card** does not evaluate conditions, so its `presumed_position` would apply
 such a `#line` if one stood before the call.
+
 
 
 Tests: `the_file_and_the_line_macros_answer_the_use`, `a_line_directive_changes_the_line_and_the_file`,
 `a_line_directives_number_is_expanded` and `a_gnu_line_marker_changes_the_line_and_the_file` in
-`cpp_toolchain/tests/suite/rendering.rs`; `a_macro_expansion_answers_the_line_of_the_use`,
-`..._the_file_of_the_use`, `..._the_commands_spelling_of_the_file` and `..._honours_a_line_directive` in
-`cpp_code_analysis/tests/suite/macro_expansion.rs`; `the_presumed_name_is_the_spelling_the_database_wrote` in
-`config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 144 + 162 + 25
+`cpp_toolchain/tests/suite/rendering.rs`; `a_condition_answers_the_line`, `..._the_definitions`,
+`..._the_line_after_a_line_directive`, `an_elif_answers_the_line` and `..._the_line_through_a_macro` there too;
+`a_macro_expansion_answers_the_line_of_the_use`, `..._the_file_of_the_use`, `..._the_commands_spelling_of_the_file`
+and `..._honours_a_line_directive` in `cpp_code_analysis/tests/suite/macro_expansion.rs`;
+`the_presumed_name_is_the_spelling_the_database_wrote` in `config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 144 + 162 + 30
 passed, 0 failed, 14 ignored.
 
 

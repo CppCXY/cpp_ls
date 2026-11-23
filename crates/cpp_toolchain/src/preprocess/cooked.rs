@@ -35,14 +35,15 @@
 
 use std::path::{Path, PathBuf};
 
-use cpp_parser::{CppTokenData, SourceRange};
+use cpp_parser::{CppTokenData, CppTokenKind, SourceRange};
 
 use crate::{
     Origin,
+    condition::{Lookup, MacroValues},
     directive::{Directive, DirectiveKind},
     expand::{Diagnostic, ExpandedToken},
     guard::Branch,
-    macros::{MacroBindings, MacroTable},
+    macros::{MacroBindings, MacroBody, MacroDef, MacroFile, MacroTable},
     token::is_trivia,
 };
 
@@ -1642,6 +1643,11 @@ pub fn cook_with_search_and_state(
     let mut presumed_file: Option<PathBuf> = file.map(Path::to_path_buf);
     let mut line_base: isize = 0;
 
+    // **Where each line starts**, for the one thing that needs a directive's line number: a `#if`/`#elif` that asks
+    // `__LINE__` or `__FILE__`. Built on first use, because most files never ask and the scan is over the whole
+    // source; `None` until then.
+    let mut line_starts: Option<Vec<usize>> = None;
+
     for token_index in 0..=tokens.len() {
         let is_a_directive = directives
             .get(directive_index)
@@ -1675,12 +1681,16 @@ pub fn cook_with_search_and_state(
         let kind = spanned.directive.kind();
         match kind {
             DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
-                let holds = decide(
+                let holds = decide_a_condition(
                     &spanned.directive,
                     spanned.range,
                     &live,
                     tokens,
                     token_index,
+                    &mut line_starts,
+                    source,
+                    line_base,
+                    presumed_file.as_deref(),
                 );
                 regions.push(Region {
                     outer_is_live: was_live,
@@ -1694,12 +1704,16 @@ pub fn cook_with_search_and_state(
                 }
             }
             DirectiveKind::Elif => {
-                let holds = decide(
+                let holds = decide_a_condition(
                     &spanned.directive,
                     spanned.range,
                     &live,
                     tokens,
                     token_index,
+                    &mut line_starts,
+                    source,
+                    line_base,
+                    presumed_file.as_deref(),
                 );
                 if let Some(region) = regions.last_mut() {
                     region.live = region.outer_is_live && !region.taken && holds == Some(true);
@@ -2071,6 +2085,148 @@ fn decide(
         offset,
     };
     branch.holds(&macros)
+}
+
+/// Would the directive's condition hold, **answering `__LINE__` and `__FILE__` when the condition asks**.
+///
+/// A condition is the one place the two names were not answered: the ordinary [`decide`] hands the evaluator a macro
+/// table, and a name with no `#define` is C's `0` there. The two names are not bound by any `#define` — their values
+/// are the directive's own position — so this wrapper answers them and delegates everything else. The allocations are
+/// made only when the condition mentions one: a header's `#if` count is large and almost none of them ask.
+fn decide_a_condition(
+    directive: &Directive,
+    range: SourceRange,
+    live: &dyn crate::macros::MacroBindings,
+    tokens: &[CppTokenData],
+    token_index: usize,
+    line_starts: &mut Option<Vec<usize>>,
+    source: &str,
+    line_base: isize,
+    file: Option<&Path>,
+) -> Option<bool> {
+    if !a_condition_mentions_the_position(directive, live, token_start(tokens, token_index)) {
+        return decide(directive, range, live, tokens, token_index);
+    }
+    let starts = line_starts.get_or_insert_with(|| {
+        let mut starts = vec![0usize];
+        starts.extend(
+            source
+                .bytes()
+                .enumerate()
+                .filter_map(|(at, byte)| (byte == b'\n').then_some(at + 1)),
+        );
+        starts
+    });
+    let line = starts.partition_point(|start| *start <= range.start_offset) as isize;
+    let at = ThePositions {
+        inner: crate::preprocess::PositionalMacros {
+            table: live,
+            offset: token_start(tokens, token_index),
+        },
+        line: a_predefined_macro(
+            "__LINE__",
+            CppTokenKind::IntegerLiteral,
+            (line + line_base).max(1).to_string(),
+            range,
+        ),
+        file: a_predefined_macro(
+            "__FILE__",
+            CppTokenKind::StringLiteral,
+            crate::preprocess::expand::a_file_name_literal(file),
+            range,
+        ),
+    };
+    branch_of(directive, range)?.holds(&at)
+}
+
+/// **`__LINE__` and `__FILE__` as the evaluator sees them** — two definitions whose bodies are the values at this
+/// directive, over the table everything else is answered from.
+struct ThePositions<'a> {
+    inner: crate::preprocess::PositionalMacros<'a>,
+    line: MacroDef,
+    file: MacroDef,
+}
+
+impl MacroValues for ThePositions<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
+        match name {
+            "__LINE__" => Lookup::Defined(&self.line),
+            "__FILE__" => Lookup::Defined(&self.file),
+            _ => self.inner.lookup(name),
+        }
+    }
+
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        self.inner.builtin_operator(name, operand)
+    }
+}
+
+/// One predefined name as a one-token definition, so the evaluator's ordinary expansion can read it.
+fn a_predefined_macro(
+    name: &str,
+    kind: CppTokenKind,
+    text: String,
+    range: SourceRange,
+) -> MacroDef {
+    MacroDef {
+        name: name.into(),
+        params: None,
+        body: MacroBody {
+            tokens: vec![crate::token::Token::new(kind, text, range)],
+            stringize: Vec::new(),
+            paste: Vec::new(),
+        },
+        range,
+        name_range: range,
+        written_in: Some(MacroFile::Here),
+        value: std::sync::OnceLock::new(),
+    }
+}
+
+/// Does the condition ask about `__LINE__` or `__FILE__` — **directly, or through a macro it names?**
+///
+/// The direct case is the one the report was about; the second is what a real header does (`#define L __LINE__` and
+/// then `#if L`), and the expansion of `L` is where the name appears. The bodies are searched with a depth cap rather
+/// than a visited set: a self-referential pair is bounded by the cap, and the cost is paid only for a condition that
+/// names a macro at all.
+fn a_condition_mentions_the_position(
+    directive: &Directive,
+    live: &dyn crate::macros::MacroBindings,
+    offset: usize,
+) -> bool {
+    let mentions = |name: &str| {
+        matches!(name, "__LINE__" | "__FILE__")
+            || a_body_mentions_the_position(live, name, offset, 0)
+    };
+    match directive {
+        Directive::Conditional { condition, .. } => condition.iter().any(|token| {
+            token.kind == CppTokenKind::Identifier
+                && !matches!(token.text(), "defined" | "true" | "false")
+                && mentions(token.text())
+        }),
+        Directive::Ifdef { name, .. } => matches!(name.as_ref(), "__LINE__" | "__FILE__"),
+        _ => false,
+    }
+}
+
+/// Does `name`'s body, at `offset`, contain one of the two position names, directly or through another macro?
+fn a_body_mentions_the_position(
+    live: &dyn crate::macros::MacroBindings,
+    name: &str,
+    offset: usize,
+    depth: u32,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let Some(definition) = live.definition_at(name, offset) else {
+        return false;
+    };
+    definition.body.tokens.iter().any(|token| {
+        token.is_identifier()
+            && (matches!(token.text(), "__LINE__" | "__FILE__")
+                || a_body_mentions_the_position(live, token.text(), offset, depth + 1))
+    })
 }
 
 /// Does deciding this condition need a name the file never defines?

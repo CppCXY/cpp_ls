@@ -442,7 +442,15 @@ use std::path::{Path, PathBuf};
 /// that spelling, so a new summary is keyed differently — but a row written by the old reader sits under the old key,
 /// and only the version makes the cache directory unreachable. `COOKED_VERSION` is the record's *format* and does not
 /// move for what the text says.
-pub const FORMAT_VERSION: u32 = 58;
+///
+/// # Why this moved to 59
+///
+/// **A condition now answers `__LINE__` and `__FILE__`, and a stored summary's regions were decided with them
+/// undefined.** `#if __LINE__ == 1` took the undefined-name branch (`__LINE__` → `0`) before `decide_a_condition`, so
+/// the region's live flag — and every fact filed under it — was the other branch. The same round made GNU line
+/// markers and a macro-expanded `#line` change a rendering. The key is content plus `context_hash`, neither of which
+/// moved for these, so only the version reaches the old rows.
+pub const FORMAT_VERSION: u32 = 59;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

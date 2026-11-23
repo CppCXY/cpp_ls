@@ -1572,7 +1572,7 @@ fn synthetic_comma(tokens: &[Token], near: usize) -> Token {
 ///
 /// An empty literal when there is no file: a synthetic source (the hover card's expansion) still has to produce a
 /// valid `std::string` argument rather than the unexpanded name.
-fn a_file_name_literal(file: Option<&Path>) -> String {
+pub(crate) fn a_file_name_literal(file: Option<&Path>) -> String {
     let Some(file) = file else {
         return "\"\"".to_string();
     };

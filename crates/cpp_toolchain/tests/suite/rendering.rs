@@ -146,6 +146,114 @@ const char *f = __FILE__;
     assert!(text.contains("\"y.c\""), "and the name is `y.c`: {text}");
 }
 
+/// **`#if __LINE__` asks the directive's own line** — the place a condition used to take the undefined-name branch,
+/// because the evaluator is handed a macro table and these two names are bound by no `#define`.
+#[test]
+fn a_condition_answers_the_line() {
+    let source = "\
+#if __LINE__ == 1
+int one = 1;
+#else
+int not_one = 1;
+#endif
+#if __LINE__ > 1
+int after = 1;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(text.contains("int one = 1;"), "line 1: {text}");
+    assert!(text.contains("int after = 1;"), "line 6 > 1: {text}");
+    assert!(!text.contains("not_one"), "the else is dead: {text}");
+}
+
+/// **And so do `#ifdef` and `defined`** — the two are defined names, in a condition or beside one.
+#[test]
+fn a_condition_answers_the_definitions() {
+    let source = "\
+#ifdef __LINE__
+int line_defined = 1;
+#endif
+#ifndef __FILE__
+int file_missing = 1;
+#endif
+#if defined(__FILE__)
+int file_defined = 1;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(text.contains("int line_defined = 1;"), "{text}");
+    assert!(text.contains("int file_defined = 1;"), "{text}");
+    assert!(!text.contains("file_missing"), "{text}");
+}
+
+/// **A `#line` moves the line a condition answers**, because the condition asks the same state a macro body does.
+#[test]
+fn a_condition_answers_the_line_after_a_line_directive() {
+    let source = "\
+#line 100 \"x.c\"
+#if __LINE__ == 100
+int yes = 1;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(text.contains("int yes = 1;"), "{text}");
+}
+
+/// **An `#elif` answers it too**, and the value is the `#elif`'s own line.
+#[test]
+fn an_elif_answers_the_line() {
+    let source = "\
+#if 0
+int no = 1;
+#elif __LINE__ == 3
+int yes = 1;
+#else
+int also_no = 1;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(
+        text.contains("int yes = 1;"),
+        "the elif's line is 3: {text}"
+    );
+    assert!(!text.contains("no = 1;"), "{text}");
+    assert!(!text.contains("also_no"), "{text}");
+}
+
+/// **And through a macro body** — `#define L __LINE__` then `#if L == 2` answers the `#if`'s line, because the body
+/// is expanded where the condition is asked, not where it was written.
+#[test]
+fn a_condition_answers_the_line_through_a_macro() {
+    let source = "\
+#define L __LINE__
+#if L == 2
+int yes = 1;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(source, &tokens, &nothing_defined, None)
+        .render()
+        .text;
+    assert!(text.contains("int yes = 1;"), "{text}");
+}
+
 /// **A GNU line marker is a `#line`.** `# 100 "x.c" 1 2` is the shape a preprocessor writes; its number is not a
 /// directive name.
 #[test]

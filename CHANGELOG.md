@@ -26,8 +26,9 @@ fix many parser and toolchain bug
   empty literal in every rendering and `#line` was parsed and then dropped: a file whose command writes `src/a.cpp`
   now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. A GNU line
   marker (`# 100 "x.c"`), a `#line` whose number or name is a macro, and a `#line` in force at a hover card's use are
-  read as well; `__LINE__` written directly in a run also answers its own line now, where it used to answer the run's
-  first line. `context_hash` folds the spelling, so `FORMAT_VERSION` moved 57 → 58.
+  read as well, and a condition may ask the two names (`#if __LINE__`, `#elif`, `#ifdef`, `defined`); `__LINE__`
+  written directly in a run also answers its own line now, where it used to answer the run's first line.
+  `context_hash` folds the spelling, so `FORMAT_VERSION` moved 57 → 58.
 
 ## [0.4.0]
 
