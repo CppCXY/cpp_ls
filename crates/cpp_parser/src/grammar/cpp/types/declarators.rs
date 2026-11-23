@@ -72,8 +72,17 @@ pub(crate) fn attribute_group_length(p: &CppParser, from: usize) -> Option<usize
 /// reaches this with a type keyword inside, is refused here, and stays a parameter list; `int (x)` reaches it
 /// with a name, is refused for the same reason, and stays a name.
 pub(crate) fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
+    // **An attribute group may stand first inside the parentheses**, and it decorates the operator that follows:
+    // `void (__attribute__((__cdecl__)) *)(void)` is the abstract spelling of a function pointer whose pointer is
+    // decorated, and mingw's `stdlib.h` writes every callback parameter that way. Measured: the group had no reading
+    // at all, `void (__attribute__((__cdecl__)) *)` came out as an expression, and the program of `ui.c` parsed with
+    // **1 626 errors** — the remainder after the separator fix — down to a handful with this.
+    let after_the_attributes = match attribute_group_length(p, 1) {
+        Some(length) => 1 + length,
+        None => 1,
+    };
     matches!(
-        p.peek_token_kind_at(1..2).first(),
+        p.peek_token_kind_at(after_the_attributes..after_the_attributes + 1).first(),
         Some(&CppTokenKind::Star)
             | Some(&CppTokenKind::Ampersand)
             | Some(&CppTokenKind::LogicalAnd)
@@ -83,7 +92,7 @@ pub(crate) fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool
     // `(C::*)` — the same operator with its class name written out, and no name after it: an *unnamed* parameter
     // of member-pointer-to-function type, `void h(int (C::*)(int));`. The named spelling `(C::*h)` never reaches
     // here — [`a_parenthesised_declarator_with_a_name_follows`] claims it first.
-    || pointer_to_member_operator_length(p, 1).is_some()
+    || pointer_to_member_operator_length(p, after_the_attributes).is_some()
     // …and the same pointer-to-member group with a **calling convention in front of the class name** —
     // `( __cdecl A :: * )`, which is how MSVC's `type_traits` writes every member-pointer predicate:
     //
@@ -160,6 +169,49 @@ pub(crate) fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> b
     // parameter at all.
     if let Some(length) = attribute_group_length(p, 1) {
         let after = 1 + length;
+        // **…and the same group with the name directly after it**, no operator: the calling-convention spelling of a
+        // callback typedef, which every MinGW header writes —
+        //
+        // ```c
+        // typedef void (__attribute__((__stdcall__)) DRVCALLBACK)(HDRVR hdrvr, UINT uMsg, …);   // winuser.h
+        // ```
+        //
+        // The attribute decorates the name it stands in front of, and the group it stands in is followed by that
+        // name's **parameter list** — the same follower the two-name case (`(WINAPI PM_OPEN_PROC)(LPWSTR)`) is told
+        // apart by. The groups that are *not* this shape are left as they were: a bare `(x)` is a parenthesised name,
+        // and only the attribute in front of it makes the group a declarator's.
+        // **And the operator may be decorated on both sides.** mingw's `stdlib.h` writes
+        //
+        // ```c
+        // _CRTIMP int (__cdecl *__cdecl _getdllprocaddr(intptr_t _Handle, char *_ProcedureName, intptr_t)) (void);
+        // ```
+        //
+        // — an attribute before the `*` and another after it, before the name. It is the shape that was this
+        // program's **last** parse error, after 1 962 had been closed.
+        let mut after = after;
+        if matches!(
+            p.peek_token_kind_at(after..after + 1).first(),
+            Some(&CppTokenKind::Star)
+                | Some(&CppTokenKind::Ampersand)
+                | Some(&CppTokenKind::LogicalAnd)
+                | Some(&CppTokenKind::Caret)
+        ) {
+            after += 1;
+            while let Some(length) = attribute_group_length(p, after) {
+                after += length;
+            }
+        }
+        // The name may be followed by its own parameter list **inside** the group —
+        // `( attr * attr _getdllprocaddr(intptr_t, char *, intptr_t) )` — or close the group directly. Either is a
+        // declarator's group; nothing else in this position can hold a name and a `(` in front of an attribute.
+        if p.peek_token_kind_at(after..after + 1) == [CppTokenKind::Identifier]
+            && matches!(
+                p.peek_token_kind_at(after + 1..after + 2).first(),
+                Some(&CppTokenKind::LeftParen) | Some(&CppTokenKind::RightParen)
+            )
+        {
+            return true;
+        }
         return matches!(
             p.peek_token_kind_at(after..after + 3).as_slice(),
             [
@@ -808,6 +860,32 @@ pub(crate) fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
         }
         attribute.complete(p);
     }
+    // **An operator whose attributes stand on both sides of it, with a name after them.**
+    //
+    // ```c
+    // int (__attribute__((__cdecl__)) * __attribute__((__cdecl__)) _getdllprocaddr(intptr_t, char *, intptr_t))(void);
+    // ```
+    //
+    // `parse_abstract_declarator` reads the operator and the attributes that decorate it, but it has no rule for a
+    // **name** after them — and this group's name is the whole point. The operator and its attributes are taken here,
+    // which leaves the cursor on the name the tail below already reads. Shapes without a name afterwards are
+    // unaffected: `( __cdecl * )` reaches the same `)` either way.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+    ) {
+        let operator = p.mark(CppSyntaxKind::PointerType);
+        p.bump();
+        operator.complete(p);
+        while let Some(length) = attribute_group_length(p, 0) {
+            let attribute = p.mark(CppSyntaxKind::AttributeList);
+            for _ in 0..length {
+                p.bump();
+            }
+            attribute.complete(p);
+        }
+    }
+
     // The inner declarator's parentheses wrap a declarator, never a parameter list, so no name may appear
     // there: `(*f)` is a pointer and `(*f(int))` a pointer to a *function*, whose parameter list is read by
     // the outer declarator's suffix loop.
@@ -886,6 +964,18 @@ pub(crate) fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
         CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
     ) {
         parse_abstract_declarator(p, false)?;
+    }
+
+    // **An attribute after the operator, before the name** — `( __attribute__((__cdecl__)) * __attribute__((__cdecl__))
+    // _getdllprocaddr(…) )`, which is how mingw's `stdlib.h` decorates both the pointer and the function it names.
+    // Skipping it here is safe in every shape: an attribute in this position can only decorate what follows.
+    while attribute_group_length(p, 0).is_some() {
+        let length = attribute_group_length(p, 0).unwrap_or(0);
+        let attribute = p.mark(CppSyntaxKind::AttributeList);
+        for _ in 0..length {
+            p.bump();
+        }
+        attribute.complete(p);
     }
 
     // A group with **no name at all** is the abstract spelling of the shape the fourth case in

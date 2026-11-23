@@ -227,6 +227,12 @@ pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<Implement
             ImplementationKeyword::Bare
         }
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
+        // **GNU's spelling of `inline`.** `extern __inline__ size_t __attribute__((__cdecl__)) strnlen_s(...) { ... }`
+        // is how mingw's `string.h` and every GCC intrinsic header write a body, and without the spelling the word was
+        // read as a **type name**: the specifier sequence then held two types, the declaration failed, and the whole
+        // line was dropped as an error. Measured on neovim's `ui.c`, whose program parsed with **1 622 errors**, most of
+        // them in `fxsrintrin.h`, `cmpccxaddintrin.h` and `enqcmdintrin.h`, which write nothing else.
+        "__inline" | "__inline__" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
         "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
         | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64"
         // **The signed/unsigned pointer modifiers and the based pointer.** `__sptr`/`__uptr` say whether a

@@ -329,3 +329,64 @@ fn a_type_declared_at_file_scope_is_still_a_type_inside_a_later_body() {
         "`w` is a declared variable: {names:?}"
     );
 }
+
+/// **An attribute group inside a declarator, and the spellings that put it there.**
+///
+/// Three shapes, and all three are how a real toolchain writes what the corpus needs:
+///
+/// ```c
+/// typedef void (__attribute__((__stdcall__)) DRVCALLBACK)(HDRVR hdrvr, UINT uMsg, …);   // winuser.h
+/// typedef int  (__attribute__((__stdcall__)) *FN)(int);                                 // combaseapi.h
+/// int f(void (__attribute__((__cdecl__)) *)(void));                                     // mingw's stdlib.h
+/// ```
+///
+/// Without a reading for them the group was taken for a parameter list, the declaration fell apart at its `;`, and the
+/// program of mingw's `ui.c` parsed with errors in `winuser.h`, `objidl.h`, `fobjidl.h` — the last eight of the 1 962
+/// the gluing fix and the `__inline` spellings left.
+#[test]
+fn an_attribute_group_inside_a_declarator_has_a_reading() {
+    let cases = [
+        "typedef void (__attribute__((__stdcall__)) DRVCALLBACK)(int hdrvr, unsigned int uMsg);",
+        "typedef unsigned long (__attribute__((__stdcall__)) PM_OPEN_PROC)(wchar_t *);",
+        "typedef int (__attribute__((__stdcall__)) *FN)(int);",
+        "int f(void (__attribute__((__cdecl__)) *)(void));",
+        "typedef struct S { int a; } S, *PS;",
+    ];
+    for source in cases {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "{source} parsed with {:?}",
+            tree.get_errors()
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// **The `inline` spellings a compiler writes are specifiers, not type names.**
+///
+/// `extern __inline__ size_t __attribute__((__cdecl__)) strnlen_s(…) { … }` is mingw's `string.h` and every GCC
+/// intrinsic header. Read as a name, `__inline__` sat in the specifier sequence beside the real type, the declaration
+/// failed, and the line was dropped — measured as **1 622 errors** in the program of neovim's `ui.c`, 398 of them in
+/// `fxsrintrin.h`, `cmpccxaddintrin.h` and `enqcmdintrin.h`.
+#[test]
+fn the_inline_spellings_are_specifiers() {
+    let cases = [
+        "typedef unsigned long size_t;\nextern __inline__ size_t __attribute__((__cdecl__)) strnlen_s(const char * s, size_t n) { return 0; }",
+        "extern __inline int f(void) { return 0; }",
+        "extern __forceinline__ int g(void) { return 0; }",
+    ];
+    for source in cases {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "{source} parsed with {:?}",
+            tree.get_errors()
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+}
