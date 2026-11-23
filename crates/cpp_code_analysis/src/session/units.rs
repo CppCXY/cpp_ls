@@ -258,11 +258,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 // **Held rather than taken**, for the reason the units table carries: this cache is what made the
                 // unit walk need `&mut self`, and `&mut self` is what put the walk inside the writer. A lock of its
                 // own is enough — the walk is the only thing that ever holds it for long.
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("closure");
                 let mut definitions = self.held_definitions();
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("definitions");
 
                 // **Has this exact closure been walked already in this run?** A `TranslationUnit` is a function of
                 // its closure's content and the context, so two roots that agree on both have the same timeline and
@@ -277,8 +273,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     .and_then(|mut held| held.get(&identity).cloned());
 
                 let (unit, provisional) = if let Some(shared) = shared {
-                    #[cfg(feature = "perf-probe")]
-                    crate::perf::mark("walk");
                     // A shared timeline is never provisional: only a finished walk is ever stored, for the same
                     // reason the disk entry refuses a provisional one.
                     self.note_a_unit(Which::FromMemory);
@@ -970,8 +964,6 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
         let started = std::time::Instant::now();
         let revision = self.revision();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("read start");
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
         // keyed by the normalized path.
         let root = self.store.index().summary(root)?.path.clone();
@@ -1191,8 +1183,6 @@ impl<F: FileProvider + Clone> Session<F> {
             log::debug!("discarding a unit reading prepared for an older session revision");
             return None;
         }
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("before the commit");
         let PreparedUnitReading {
             root,
             program,

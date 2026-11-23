@@ -85,11 +85,8 @@ pub use cpp_toolchain::{include, preprocess, probes, project};
 // **The layers hold the files; the root holds the names.** Everything that used to be a top-level module is a
 // layer's now — a cached reading is `cache::…`, the effect a file has on the macro table is `index::…`, a feature a
 // cursor asks for is `session::…` — and these re-exports keep every path that was written before the move resolving.
-// Two of them are said from outside this crate: `cpp_ls` calls `cpp_code_analysis::alloc::live()` on every stage it
-// measures, and `inspect` reaches `TypeHintKind` through the root.
-#[cfg(feature = "perf-probe")]
-pub use cache::perf;
-pub use cache::{align, alloc, env, memory, summary, summary_codec, unit_codec};
+// One of them is said from outside this crate: `inspect` reaches `TypeHintKind` through the root.
+pub use cache::{align, env, memory, summary, summary_codec, unit_codec};
 pub use index::{effect, surface};
 pub use session::{completion, cuda, definition, doc, folding, format, inlay, semantic, signature};
 
@@ -103,7 +100,7 @@ pub use session::{completion, cuda, definition, doc, folding, format, inlay, sem
 //
 // * `sema`     — names, scopes, types, overloads: what the parsed text *means*
 // * `file`     — one file analysed: the VFS holding texts, a view parsed, and the coordinates between them
-// * `cache`    — the on-disk store and **what it stores**: a summary, its two codecs, and the byte counter
+// * `cache`    — the on-disk store and **what it stores**: a summary, its two codecs, and the cost report
 // * `index`    — the summaries in memory, the store, and every query over them (plus a file's macro `effect`)
 // * `session`  — a project opened: the pump, the caches, the reads, and **every request a client can make**
 //

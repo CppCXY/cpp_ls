@@ -1422,8 +1422,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // twenty files open) came from a counter that only ever added, so it was churn. The budget and the pricing are
         // both gone; see the note where the constants were in `session/mod.rs`.
         self.units_read.insert(queue_key(root));
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("commit");
         Some(committed)
     }
 

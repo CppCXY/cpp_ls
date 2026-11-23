@@ -156,9 +156,12 @@ fn the_read_ahead_on_a_real_project() {
         slices += 1;
     }
     println!(
-        "{} file(s), {slices} slice(s): read-ahead peak {} MB, settled at {} MB",
+        "{} file(s), {slices} slice(s): read-ahead peak {} MB, settled at {} MB of session tables",
         files.len(),
         peak / (1024 * 1024),
-        cpp_code_analysis::alloc::live() / (1024 * 1024),
+        // **The session's own estimate, not the process's resident set.** The allocator byte counter this line used
+        // to read is gone (see `docs/open-questions.md`); what a probe about *read-ahead* wants is the bytes the
+        // session says it holds, and `MemoryReport` is that number by construction.
+        session.memory_report().total() / (1024 * 1024),
     );
 }

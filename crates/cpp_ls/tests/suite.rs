@@ -13,6 +13,8 @@ mod common;
 mod diagnostics_stable;
 #[path = "suite/formatter_choice.rs"]
 mod formatter_choice;
+#[path = "suite/global_allocator.rs"]
+mod global_allocator;
 #[path = "suite/handshake.rs"]
 mod handshake;
 #[path = "suite/hover_attributes.rs"]

@@ -752,7 +752,7 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
-        if crate::probes::allocs() {
+        if crate::probes::cooking() {
             eprintln!(
                 "[cook] inserted {path}, cooked map now {}",
                 self.cooked.len()

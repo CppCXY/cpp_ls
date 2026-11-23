@@ -242,7 +242,6 @@ dependencies = [
  "cpp_toolchain",
  "glob",
  "log",
- "mimalloc-safe",
  "redb",
  "rust-i18n",
  "rustc-hash 2.1.3",

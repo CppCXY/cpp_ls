@@ -119,14 +119,8 @@ pub async fn on_inlay_hint(
         // — which is what the report said, in those words. What makes the incomplete answer repairable is the
         // refresh the pump sends when the queue drains, not a refusal here.
         let visible = visible_range(&view, requested)?;
-        // **The one request that grows the process by a gigabyte, measured where it can be attributed.** A report of
-        // "the server uses 4.5 GB" is a number about the process; this line says which of the two calls did it, how
-        // long it took, and — the pair that decides everything — **how many bytes it asked for and how many it kept**.
-        // A stage whose churn is a thousand times what it holds is a stage the allocator, not the session, is paying
-        // for: mimalloc keeps the pages it was handed, so the resident set follows the first number and no live-byte
-        // budget can bound it.
-        let live_before = cpp_code_analysis::alloc::live();
-        let churn_before = cpp_code_analysis::alloc::total();
+        // **The two heaviest calls in a request, timed apart.** A report of "inlay hints are slow" cannot say which
+        // of them went to the index; this line does, and the view's own parse above is the third number.
         let hints_started = std::time::Instant::now();
         let hints = session.inlay_hints(&view, visible);
         let hints_done = hints_started.elapsed();
@@ -134,15 +128,10 @@ pub async fn on_inlay_hint(
         let types = session.type_hints(&view, visible);
         if cpp_code_analysis::probes::inlay() {
             eprintln!(
-                "[inlay] {} parameter hint(s) in {hints_done:?}, {} type hint(s) in {:?} — live {} MB -> {} MB, churn \
-                 {} MB, peak {} MB",
+                "[inlay] {} parameter hint(s) in {hints_done:?}, {} type hint(s) in {:?}",
                 hints.len(),
                 types.len(),
                 types_started.elapsed(),
-                cpp_code_analysis::alloc::live().saturating_sub(live_before) / (1024 * 1024),
-                cpp_code_analysis::alloc::live() / (1024 * 1024),
-                cpp_code_analysis::alloc::total().saturating_sub(churn_before) / (1024 * 1024),
-                cpp_code_analysis::alloc::peak() / (1024 * 1024),
             );
         }
         if cpp_code_analysis::probes::inlay() {

@@ -679,12 +679,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         };
 
         let parsed = parsing.elapsed();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("parse");
         let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("index_tree");
         if crate::probes::units() {
             eprintln!(
                 "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
@@ -710,8 +706,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             &mut files,
             &mut unplaced,
         );
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("files");
 
         // **One entry per file, however many times the walk entered it.** A preprocessor re-reads an included file
         // every time it is included — `bits/version.h` is the shape, unguarded and included by every libstdc++
@@ -848,12 +842,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             None => &crate::sema::scopes::NoMacroBodies,
         };
         let scoping = std::time::Instant::now();
-        let scopes = {
-            let built = build_scopes_with(&root, evidence, keep_locals);
-            #[cfg(feature = "perf-probe")]
-            crate::perf::mark("scopes");
-            built
-        };
+        let scopes = build_scopes_with(&root, evidence, keep_locals);
         let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and

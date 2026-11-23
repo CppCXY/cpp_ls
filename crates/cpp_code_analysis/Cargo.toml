@@ -24,19 +24,7 @@ zstd.workspace = true
 rustc-hash.workspace = true
 # **A summary's text is an identifier, not a document.** `SmolStr` keeps up to 22 bytes inline, so a declaration's name
 # costs no allocation at all — and a `FileSummary` is made of them: 486 783 declarations over 1 761 files on
-# `EmmyLuaCodeStyle`, 517 bytes each. See `tests/summary_cost_probe.rs`. The `serde` feature is on because a name
-# ends up in an LSP payload (`typeHierarchyItem.data`), and converting at each site is what the type should not need.
+# `EmmyLuaCodeStyle`, 517 bytes each (measured by a probe that has since been removed with the other probes). The
+# `serde` feature is on because a name ends up in an LSP payload (`typeHierarchyItem.data`), and converting at each
+# site is what the type should not need.
 smol_str.workspace = true
-
-[features]
-# **The performance probe's observation points.** Off by default and **not compiled** when off: the marks in the
-# read are `#[cfg(feature = "perf-probe")]`, so the default build has no counter, no atomic and no branch on the path a
-# reader's keystroke takes. On, it lets `tests/allocation_probe.rs` split one read's allocations by phase.
-perf-probe = []
-
-[dev-dependencies]
-# **The memory probe measures the allocator the server actually uses.** `cpp_ls` installs mimalloc as its global
-# allocator, and the question `docs/memory-audit.md` asks — "is the resident set the live tables or pages the
-# allocator is holding" — cannot be answered with a different allocator underneath. The wrapper is
-# `mimalloc-safe`, the one `cpp_ls` depends on, so the probe and the server cannot drift apart.
-mimalloc-safe.workspace = true

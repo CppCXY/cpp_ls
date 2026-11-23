@@ -1017,7 +1017,8 @@ allocation counter around `AnalysisState::catch_up`, `AnalysisState::prepare` an
 per request — that names the call in one run.
 
 
-**The pull path, split** (`CPPLS_TRACE_ALLOCS` prints `[pull]` and `[query]`):
+**The pull path, split** (the allocator counter that printed `[pull]` has since been removed; `CPPLS_TRACE_QUERY`
+still prints the `[query]` half):
 
 ```text
 [pull] prepare done, 117 MB       ← prepare_for_a_diagnostic, per pull
@@ -1151,9 +1152,10 @@ move the shape.
 ## The 4.5 GB is one inlay-hint request, and every ceiling above was aimed at the wrong thing
 
 Every memory bound in this codebase was justified by a number read off a counter that **only ever added** — no free was
-subtracted — so it measured *churn* and was compared against the resident set. `cpp_code_analysis::alloc` counts both
-sides now (`live`, `peak`, `total`), the pump's trace prints live bytes with signed stage deltas, and
-`crates/cpp_code_analysis/tests/cold_start_memory_probe.rs` drives a whole session with the honest counter.
+subtracted — so it measured *churn* and was compared against the resident set. A counter that counted both sides
+(`cpp_code_analysis::alloc`, since removed with the global allocator that fed it) was written for this section, the
+`live`/`peak` table below is what it measured, and `crates/cpp_code_analysis/tests/cold_start_memory_probe.rs` (also
+removed) drove a whole session with it.
 
 **What the session actually holds** (`test_cpp`, live bytes, not churn):
 
@@ -1285,8 +1287,9 @@ anything).
    `completion/request.rs`, `use super::super::*` because one `super` is now the feature rather than the crate.
 
 **What did not change**: no behaviour, no test assertion beyond the style allowlist above. 145 toolchain tests, 3 039
-in 200 suites for the workspace, clippy clean, and `cargo check` green with and without `perf-probe` --- which is the
-one feature that would notice a module being declared in the wrong place.
+in 200 suites for the workspace, clippy clean, and `cargo check` green with and without `perf-probe` --- which was the
+one feature that would notice a module being declared in the wrong place. (The feature has since been removed: its only
+driver was one of the probes deleted in `2dc17c8d`, so every mark it recorded read a counter nothing incremented.)
 
 **Next** is the same "next" as the section above, and this reorganisation exists to make it a small change: the cache
 and the index are rewritten in place. A request returns what it knows plus the misses it needs; a program read becomes
@@ -3144,3 +3147,151 @@ alias), and it **fails without the change** — `table["k"]` answers `int&`. A c
 the defect: its members come from its own scope tree, where the bindings are filed under the name they were declared
 with. `CPPLS_TRACE_INFERENCE` prints the candidate list and the chosen member (`[candidates]`, `[rank]`), which is how
 this was found.
+
+## The global allocator carried a debugging counter — removed
+
+Found by reading `crates/cpp_ls/src/bin/cpp_ls.rs` rather than by a failing test, which is the point: the
+`#[global_allocator]` installed in every release was not `MiMalloc` but a wrapper around it.
+
+```rust
+struct Counting;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        cpp_ls::note_allocation(layout.size());      // -> cpp_code_analysis::alloc::note
+        unsafe { MiMalloc.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        cpp_ls::note_release(layout.size());
+        unsafe { MiMalloc.dealloc(pointer, layout) }
+    }
+    // realloc and alloc_zeroed the same
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+```
+
+The counter was **off by default** — `CPPLS_TRACE_ALLOCS` decided it once at start-up — so the bytes it collected cost
+nothing when unset. What it always cost is the path: every allocation, free and reallocation in the process entered a
+Rust function, forwarded to `cpp_code_analysis`, and made a **relaxed atomic load** before the allocator was called.
+An instrument whose numbers nobody reads, paid for by every user on the hottest path a program has.
+
+### What it fed, and what each trace became
+
+| trace | numbers | now |
+| --- | --- | --- |
+| `[memory] live … peak … churn …` per pump round | the counter's | **deleted** |
+| `[memory] STOPPED … CPPLS_LIVE_CEILING_MB` | the counter's | **deleted** (the guard cannot exist without a live total) |
+| `[pull] prepare done / diagnose_file / query returned`, MB | the counter's | **deleted**; `[memory] pull:`, the session's own report, stays under `CPPLS_TRACE_MEMORY` |
+| `[inlay] … live → live, churn, peak` | the counter's | **deleted**; the two hint counts and their timings stay under `CPPLS_TRACE_INLAY` |
+| `[tables]` | `Session::memory_report` | **kept**, under `CPPLS_TRACE_MEMORY`, without the process total beside it |
+| `[inbox] [rounds] [read] [program]` | none | re-gated: **`CPPLS_TRACE_PUMP`** (they were the pump's own account, riding the allocator switch) |
+| `[query] permit / gate / session / ran`, ms | none | re-gated: **`CPPLS_TRACE_QUERY`** |
+
+Deleted with it: `cpp_ls`'s six forwarding functions, `cpp_code_analysis::cache::alloc`, `probes::allocations`,
+`probes::live_ceiling_mb`, the `CPPLS_TRACE_ALLOCS` and `CPPLS_LIVE_CEILING_MB` variables, and the two calls in
+`run_ls`/the pump that read them. The binary is now what it should have been:
+
+```rust
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+```
+
+**What remains is a different question, and it is still answered.** `Session::memory_report()` estimates what the
+analysis *holds by structure* — summaries, cooked readings, units, renderings, views, the index tables — and
+`CPPLS_TRACE_MEMORY` prints it, with a file dropped at `%TEMP%\cpp_ls-memory.txt` when the queue drains. That is not
+the resident set: the gap between them is the allocator's slack, which is exactly why a process-level question needs a
+profiler rather than a counter in the allocator. The memory numbers recorded earlier in this file were measured with
+the counter and stand as measurements; the instrument that produced them does not.
+
+### The `perf-probe` feature was the same defect, and already dead
+
+`cpp_code_analysis` had an opt-in `perf-probe` feature whose marks (`crate::perf::mark("cook")` and seventeen others)
+recorded allocation counts per phase. Its **only driver was `tests/allocation_probe.rs`**, a probe the test
+reorganisation deleted (`2dc17c8d`), so from then on every mark recorded a counter nothing incremented: `perf::note` had
+**no caller anywhere in the tree** (on the parent commit, `git grep perf::note` finds nothing) and `per_phase()` had no
+caller either. The feature still compiled — the baseline `cargo test --all-features` run is what proves that — and it
+measured nothing, which is worse than not existing. So the feature went: `cache/perf.rs`, the
+`#[cfg(feature = "perf-probe")]` gates and marks in five files, the feature table, and the unused `mimalloc-safe`
+dev-dependency it needed. The comments that
+quote what it measured (`24.9 M allocations` of a `import std;` read, `11.3 M` for the reflection pass) stay, labelled
+as a removed instrument's numbers.
+
+### The rule is a test now
+
+`crates/cpp_ls/tests/suite/global_allocator.rs`:
+
+* the binary's source must contain `static GLOBAL: MiMalloc = MiMalloc;` and a `#[global_allocator]`;
+* **no `crates/*/src` file may `impl GlobalAlloc`** — a test may install its own counter (that is the only way to count
+  allocations), but a shipped crate may not.
+
+A global allocator has no runtime API to ask, so the test reads the source — the same trade
+`cpp_code_analysis/tests/suite/no_global_state.rs` makes for `thread_local!` and process-wide caches.
+
+### Verification
+
+```text
+cargo test --release --workspace --all-features                      3 354 passed, 0 failed, 30 ignored
+cargo clippy --workspace --all-targets --all-features -- -D warnings 0 warnings
+cargo fmt --all -- --check                                           clean
+```
+
+The targets, from that run:
+
+| target | passed | ignored |
+| --- | --- | --- |
+| `cpp_code_analysis` lib / suite | 895 / 1 140 | 3 / 9 |
+| `cpp_parser` lib / suite | 52 / 514 | 0 / 0 |
+| `cpp_toolchain` lib / suite | 161 / 21 | 0 / 0 |
+| `cpp_ls` lib / suite | 197 / 116 | 1 / 10 |
+| `cpp_formatter` lib / suite | 116 / 128 | 2 / 1 |
+| `cpp_check` / `cpp_inspect` / `edit_version` | 6 / 1 / 4 | 0 |
+| doctests | 3 | 4 |
+
+**The end-to-end half is the part that matters for this change**: ten `cpp_ls` suite modules spawn
+`target/release/cpp_ls.exe` — the binary with the new allocator — and speak LSP to it (`handshake`, `latency`,
+`progress`, `idle`, `diagnostics_stable`, `lsp_status`, `real_project`, `watch_rescan`, `a_header_language`,
+`formatter_choice`). They pass, so the allocator is proven by a running server and not only by a compile.
+
+**The guard was checked against the defect, not only against today's tree.** A temporary
+`crates/cpp_ls/src/temporary_allocator_probe.rs` holding an `impl GlobalAlloc` made
+`no_shipped_source_wraps_a_global_allocator` fail with that path; deleting the file made the two allocator tests pass
+again.
+
+
+## Found while reading for the allocator: stale documents and references — measured, not fixed
+
+Same pass, not the same change. Each item below is counted so the next round starts from evidence; none of it is fixed
+here.
+
+**Five headings in this file appear twice.** Two commits inserted a second copy of a block instead of replacing the
+first:
+
+```text
+heading                                               first copy   second copy   commit
+`std::endl` drawn as a variable …                     line 6       line 113      83e7b632 (+94 lines)
+An inlay hint rendering a deduced type … **fixed**    line 37      line 144      83e7b632
+What this run did learn about `inspect` itself        line 65      line 172      83e7b632
+Diagnostic false positives: …                         line 73      line 180      83e7b632
+Why `std::vector` itself is missing …                 line 413     line 616      4e70be1f (+32 lines)
+```
+
+For the first four, the first copy is `83e7b632`'s updated text — it ends "After the fixes … 32 findings to 0" — and
+the second is the older copy, which still lists the `is_convertible` finding as open. The `std::vector` pair is not a
+copy: `4e70be1f` gave the long body (until then part of the `size()` section) its own `## Why \`std::vector\`` heading,
+while a shorter section with that heading already existed (added by `c89f6360`). The long copy is the newer record — it
+carries "Fixed, measured 2026-11-16" — but it ends on a dangling paragraph starting "— and the index holds no fact for
+it", so something was already cut out of it. Merging the two needs a read, which is why this is a note and not a diff.
+
+**Twenty source comments cite documents the cleanup deleted** — `docs/indexing-review.md` ×8, `docs/module-cache.md` ×9,
+`docs/memory.md` ×1, "see the audit" ×2 — in eleven files under `cache/`, `session/` and `index/`. Each is a finding's
+only pointer to its reproducer, so the fix is to name a live record (a test, or a section of this file), not to delete
+the sentence.
+
+**Twenty-six test commands name targets the test reorganisation removed**: 26 `cargo test … --test <name>` invocations
+in 21 files, naming 21 distinct targets, none of which exists as a target now. The target is `suite`, and the module
+name is the filter — `cargo test -p cpp_code_analysis --test suite types`. They were correct when written; `2dc17c8d`,
+the commit that merged the targets, did not update them.
+
+

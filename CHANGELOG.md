@@ -7,6 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 fix many parser and toolchain bug
 
+### Removed
+
+- **The global allocator's byte counter.** `cpp_ls` installed a `Counting` wrapper around `MiMalloc` so
+  `CPPLS_TRACE_ALLOCS` could report a stage's *held* bytes; every allocation and free in every release paid a relaxed
+  atomic load for a trace that was off by default. The binary now installs `MiMalloc` directly, and the counter, its
+  module (`cpp_code_analysis::alloc`), the `CPPLS_TRACE_ALLOCS` and `CPPLS_LIVE_CEILING_MB` variables and every
+  `[memory]` line it fed are gone. What remains is `CPPLS_TRACE_MEMORY`, the session's own table estimate
+  (`Session::memory_report`) — a measurement of what the analysis holds, not of the process. The pump and query traces
+  the counter had been gating are now `CPPLS_TRACE_PUMP` and `CPPLS_TRACE_QUERY`.
+- **The dead `perf-probe` feature.** Its only driver was `tests/allocation_probe.rs`, deleted with the other probes in
+  `2dc17c8d`; every mark recorded a counter nothing incremented. The feature, `cache/perf.rs`, its marks and the
+  `mimalloc-safe` dev-dependency are gone.
+
 ## [0.4.0]
 
 ### Added

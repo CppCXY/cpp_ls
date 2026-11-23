@@ -69,17 +69,12 @@ pub mod cache_db;
 pub mod cache_lru;
 
 // **What the cache stores, and what it reads back.** A summary is the unit the whole cache is built from, the two
-// codecs are its bytes, and memory/alloc are the two numbers a report about it needs. align is here because
-// the thing it compares against a compiler is a RenderedUnit --- the cached reading of a program.
+// codecs are its bytes, and memory is the report a question about its cost needs. align is here because the thing it
+// compares against a compiler is a RenderedUnit --- the cached reading of a program.
 pub mod align;
-pub mod alloc;
-/// **The environment as a value** — see `docs/module-cache.md`.
+/// **The environment as a value** — a file's reachable macro definitions, reduced to what a cache key folds.
 pub mod env;
 pub mod memory;
-/// **Where a read's allocations go**, when the perf-probe feature is on --- a stage's own marks, next to the
-/// counter that reads them.
-#[cfg(feature = "perf-probe")]
-pub mod perf;
 pub mod summary;
 pub mod summary_codec;
 pub mod unit_codec;

@@ -11,12 +11,10 @@
 //! thousands of times a second — so *every* round paid for a lock and an allocation to answer a question whose answer
 //! cannot change after start-up. It also made the loop's own trace slower than the stages it was measuring.
 //!
-//! So: one `OnceLock` per switch, one environment read for the life of the process, and an atomic load at the use
-//! site. **Do not add a `std::env::var_os` at a use site in this crate.** Add it here.
-//!
-//! [`allocations`] is not a switch of its own: the allocator's counter already decides that question, once, at
-//! start-up ([`cpp_code_analysis::alloc::turn_on_from_the_environment`]), so asking it is that state and nothing has to
-//! be read at all.
+//! That particular variable is gone with the allocator counter it read (an allocator is not a place for a
+//! measurement), but the lesson is why this module stays the only reader in this crate: one `OnceLock` per switch, one
+//! environment read for the life of the process, and an atomic load at the use site. **Do not add a
+//! `std::env::var_os` at a use site in this crate.** Add it here.
 
 /// Read one switch, once, for the life of the process.
 ///
@@ -42,37 +40,11 @@ switch! {
     no_program_read => "CPPLS_NO_PROGRAM_READ", "Do not read whole programs — an experiment switch for telling a program read's cost from the pump's.";
     no_cooks => "CPPLS_NO_COOKS", "Do not cook anything, so a run measures the per-file index alone.";
     no_watch => "CPPLS_NO_WATCH", "Do not register the file watchers.";
-    memory_tables => "CPPLS_TRACE_MEMORY", "Print the session's table costs beside the pump's memory line.";
+    memory_tables => "CPPLS_TRACE_MEMORY", "Print the session's own table costs when the queue drains — `Session::memory_report`, which is what the analysis estimated, not what the allocator handed out.";
+    pump => "CPPLS_TRACE_PUMP", "The pump's own account: its rounds, the open file it reads next, whether a program read is owed, and the two queues once a second.";
+    query => "CPPLS_TRACE_QUERY", "One line per query: what it waited for (a permit, the gate, the session) and how long its own work took.";
     hover => "CPPLS_TRACE_HOVER", "Where one hover request's milliseconds went, and what the card was built from.";
     debug_card => "CPPLS_DEBUG_CARD", "Write the hover card being built to `%TEMP%`, for a card that renders wrong.";
-}
-
-/// **Whether the allocator is counting** — the switch for every memory trace the pump prints.
-///
-/// Not a `var_os` here because the answer already exists: the binary installs a counting allocator and the engine turns
-/// it on once at start-up. Asking is an atomic load, and the trace it gates cannot disagree with the numbers it prints,
-/// which is the defect two separate reads of the same variable invite.
-#[inline]
-pub fn allocations() -> bool {
-    cpp_code_analysis::alloc::counting()
-}
-
-/// **A ceiling the server stops itself at**, in megabytes — `CPPLS_LIVE_CEILING_MB`.
-///
-/// A probe that reproduces a multi-gigabyte spike must not take the machine down to report it. This was written after
-/// one did: `CPPLS_MEMORY_OPEN_ALL=1 CPPLS_MEMORY_EDITOR=1` on `EmmyLuaCodeStyle` drove a server to **4.8 GB** and the
-/// run had to be killed by hand, which is the one outcome worse than a slow measurement — no numbers at all.
-///
-/// Read once, like every switch here; the pump asks it per round against [`cpp_code_analysis::alloc::live`], which is
-/// the same counter the memory trace prints, so the ceiling is stated in the unit it is enforced in.
-pub fn live_ceiling_mb() -> Option<usize> {
-    static HELD: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    *HELD.get_or_init(|| {
-        std::env::var("CPPLS_LIVE_CEILING_MB")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|megabytes| *megabytes > 0)
-    })
 }
 
 #[cfg(test)]

@@ -1,41 +1,17 @@
 use clap::Parser;
 use cpp_ls::cmd_args::CmdArgs;
 use mimalloc_safe::MiMalloc;
-use std::alloc::{GlobalAlloc, Layout};
 use std::error::Error;
 
-/// **mimalloc, plus a byte counter the pump can read** — see `cpp_ls::note_allocation` and `CPPLS_TRACE_ALLOCS`.
-/// The counting is off unless that variable is set, and the check is one relaxed load.
+/// **The allocator the server ships with, and nothing wrapped around it.**
 ///
-/// **Both halves are reported.** A counter that only sees allocations is a running total: it answers "how much churn
-/// did this stage cause", not "how much is it holding", and the two differ by an order of magnitude on a parse. The
-/// difference is the whole of [`cpp_code_analysis::alloc`]'s module documentation, and the reason the frees are here.
-struct Counting;
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        cpp_ls::note_allocation(layout.size());
-        unsafe { MiMalloc.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        cpp_ls::note_release(layout.size());
-        unsafe { MiMalloc.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        cpp_ls::note_reallocation(layout.size(), new_size);
-        unsafe { MiMalloc.realloc(pointer, layout, new_size) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        cpp_ls::note_allocation(layout.size());
-        unsafe { MiMalloc.alloc_zeroed(layout) }
-    }
-}
-
+/// It used to be a `Counting` wrapper that reported every allocation and free to a process-wide byte counter, so a
+/// trace (`CPPLS_TRACE_ALLOCS`) could print a stage's *held* bytes. The numbers it produced are in
+/// `docs/open-questions.md`, and the instrument is gone: an allocator whose hot path carries a counter for a switch
+/// that is off in every release is a cost paid by every user for a measurement nobody is taking. A profile now comes
+/// from a profiler, not from the binary.
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let cmd_args = CmdArgs::parse();

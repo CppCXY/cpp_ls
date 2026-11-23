@@ -97,7 +97,6 @@ switch! {
     layout => "CPPLS_TRACE_LAYOUT", "Why a call's layout question answered what it answered.";
     hover => "CPPLS_TRACE_HOVER", "Which rendering a hover card was answered from, and what it was built from.";
     no_cooks => "CPPLS_NO_COOKS", "Do not cook anything, so a run measures the per-file index alone.";
-    allocs => "CPPLS_TRACE_ALLOCS", "Count every allocation and every free, so a stage's *held* bytes can be reported — see `cpp_code_analysis::alloc`. The counter itself is what decides this; the switch exists so the code that turns it on reads the variable once.";
 }
 
 /// **Where the index writes the text it parses**, when the variable names a directory — `CPPLS_DUMP_RENDERING_DIR`.

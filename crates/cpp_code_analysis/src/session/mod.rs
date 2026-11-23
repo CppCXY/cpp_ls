@@ -293,13 +293,13 @@ const PROGRAM_READ_ATTEMPTS: u8 = 3;
 // `PROGRAM_READ_BYTES_PER_SOURCE_BYTE = 48` priced one before the walk. Their justification was "5 GB of private
 // bytes", read off a counter that only ever **added** — no free was subtracted — so it measured churn.
 //
-// Measured with a counter that counts both sides (`cpp_code_analysis::alloc`, and
-// `tests/cold_start_memory_probe.rs` which drives a whole session with it): a cold index of `test_cpp` holds 147 MB,
-// seventeen open files with the pump drained hold 250 MB (peak 281), and seventeen whole-program reads take it to
-// 478 MB (peak 528) — about 13 MB each, and 2.7–4.4 s each for 340 000–594 000 tokens. Churn does not inflate the
-// resident set at all: forty reads of a 218 KB header churn 1 723 MB in 32 million allocations and the working set
-// never leaves **11 MB**. The 4.5 GB was one request path — `docs/open-questions.md` has the measurement — and no
-// program is too large to read.
+// Measured with a counter that counted both sides (the allocator wrapper that used to live in `cpp_ls`, driven by
+// `tests/cold_start_memory_probe.rs` — both the wrapper and the probe have since been deleted): a cold index of
+// `test_cpp` holds 147 MB, seventeen open files with the pump drained hold 250 MB (peak 281), and seventeen
+// whole-program reads take it to 478 MB (peak 528) — about 13 MB each, and 2.7–4.4 s each for 340 000–594 000
+// tokens. Churn does not inflate the resident set at all: forty reads of a 218 KB header churn 1 723 MB in 32 million
+// allocations and the working set never leaves **11 MB**. The 4.5 GB was one request path — `docs/open-questions.md`
+// has the measurement — and no program is too large to read.
 
 /// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
 ///
@@ -1845,8 +1845,6 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // headers are full of. See [`Session::render_the_unit`].
                 let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
                 let cooking = std::time::Instant::now();
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("before the cook");
                 let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,
@@ -1854,8 +1852,6 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                     true,
                     Some(&search),
                 );
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("cook");
                 if crate::probes::units() {
                     eprintln!(
                         "[unit] cook  {:>6.1} ms  ({} file(s), {} bytes)",

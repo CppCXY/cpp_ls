@@ -581,13 +581,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     path.display()
                 );
             }
-            if crate::probes::allocs() {
-                eprintln!(
-                    "[cook] committing {} with {} declaration(s)",
-                    path.display(),
-                    cooked.declarations.len()
-                );
-            }
             let declared = cooked.declarations.len();
             let writing = std::time::Instant::now();
             self.store

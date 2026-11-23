@@ -942,12 +942,13 @@ impl DeclarationShapes {
     /// search assumes.
     /// # What it costs, and why callers must not rebuild it
     ///
-    /// One pass over every node of the tree. Measured on `import std;` with `perf-probe` marks placed around this
-    /// function: **24.9 M allocations** between them — about a fifth of the whole read's 143 M — while the indexer
-    /// itself calls it only once per file plus once for the unit. The rest are query paths that hold a `root` and no
-    /// table: `declared_type_of`, `declared_alias_target`, `declared_returns_of`, `declared_template_parameters`,
-    /// `declared_parameter_defaults` and `declared_bases_of` each build a fresh `DeclarationShapes::of(root)` per call.
-    /// A caller that has one — `semantic` keeps it in its view — should pass the `_with` variant instead.
+    /// One pass over every node of the tree. Measured on `import std;` by counting allocations around this function
+    /// (the allocation probe that did it has since been removed): **24.9 M allocations** between them — about a fifth
+    /// of the whole read's 143 M — while the indexer itself calls it only once per file plus once for the unit. The
+    /// rest are query paths that hold a `root` and no table: `declared_type_of`, `declared_alias_target`,
+    /// `declared_returns_of`, `declared_template_parameters`, `declared_parameter_defaults` and `declared_bases_of`
+    /// each build a fresh `DeclarationShapes::of(root)` per call. A caller that has one — `semantic` keeps it in its
+    /// view — should pass the `_with` variant instead.
     ///
     /// **Where the calls are is not where one would guess.** Hoisting `NamedDeclaration::Here`'s three rebuilds in
     /// `index::project` into one was tried and measured: the read changed by **−340 allocations**, because that arm
@@ -2047,10 +2048,11 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
 /// the result is filed under the **declared name's** offset, which is what a fact carries in `name_range`.
 /// # What it costs, and what to change first
 ///
-/// Measured on `import std;` with `perf-probe`: **11.3 M allocations** of a read's 143 M, and the shape points at a
-/// false positive rather than at the annotations. `the_annotation_before` accepts **any** macro call that ends just
-/// before a declaration — a declaration preceded by `foo(...)` is "annotated" too — so the `specifiers` `Vec<String>` is
-/// built for every such pair, and the map keeps a `String` and a `Vec` for an answer no `ReflectionFact` may ever need.
+/// Measured on `import std;` with an allocation counter (the probe has since been removed): **11.3 M allocations** of
+/// a read's 143 M, and the shape points at a false positive rather than at the annotations. `the_annotation_before`
+/// accepts **any** macro call that ends just before a declaration — a declaration preceded by `foo(...)` is
+/// "annotated" too — so the `specifiers` `Vec<String>` is built for every such pair, and the map keeps a `String` and
+/// a `Vec` for an answer no `ReflectionFact` may ever need.
 /// The next change: store the annotation's **byte range** and split it only when a fact actually matches, which is
 /// behaviour-preserving and removes the allocation for the pairs nothing reads.
 fn fill_the_reflection(
@@ -4845,18 +4847,8 @@ impl<'a> DeclarationFacts<'a> {
             scopes,
             preprocessing,
             root,
-            shapes: {
-                let built = DeclarationShapes::of(root);
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("shapes");
-                built
-            },
-            declarations: {
-                let built = Declarations::of(root, errors);
-                #[cfg(feature = "perf-probe")]
-                crate::perf::mark("declarations");
-                built
-            },
+            shapes: DeclarationShapes::of(root),
+            declarations: Declarations::of(root, errors),
             guards: SummaryGuards::default(),
             facts: Vec::new(),
         }
@@ -4973,8 +4965,6 @@ impl<'a> DeclarationFacts<'a> {
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
         let walked = walking.elapsed();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("facts loop");
         let qualifying = std::time::Instant::now();
         // **By offset, because the scan this replaces was quadratic in the program.** The loop below used to ask
         // `facts.iter_mut().find(..)` for every qualified declaration — a linear scan of a list a standard-library
@@ -5048,16 +5038,12 @@ impl<'a> DeclarationFacts<'a> {
         let freeing = std::time::Instant::now();
         fill_the_frees(root, &mut facts);
         let freed = freeing.elapsed();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("frees");
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
         let reflecting = std::time::Instant::now();
         fill_the_reflection(root, &rendered, &mut facts);
         let reflected = reflecting.elapsed();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("reflection");
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
@@ -5066,8 +5052,6 @@ impl<'a> DeclarationFacts<'a> {
         let guarding = std::time::Instant::now();
         assign_guards(&mut targets, preprocessing, &mut guards);
         let guarded = guarding.elapsed();
-        #[cfg(feature = "perf-probe")]
-        crate::perf::mark("guards");
 
         // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
         // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.
