@@ -1381,7 +1381,11 @@ impl<F: FileProvider + Clone> Session<F> {
         let root = self.the_program_to_read()?;
         let materials = self.gather_a_unit_read(&root);
         let prepared = materials.and_then(UnitReadMaterials::read_the_program);
-        self.commit_a_program(&root, prepared)
+        let records = match &prepared {
+            Some(prepared) => self.prepare_the_unit_records(prepared),
+            None => Vec::new(),
+        };
+        self.commit_a_program(&root, prepared, records)
     }
 
     /// **File what a program read produced** — the third phase, and the one place `units_read` is written.
@@ -1393,6 +1397,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &mut self,
         root: &Path,
         prepared: Option<PreparedUnitReading>,
+        records: Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)>,
     ) -> Option<UnitReading> {
         let Some(prepared) = prepared else {
             // **A declined read is retried — three times.** The walk can be refused for a reason that heals: a
@@ -1416,7 +1421,7 @@ impl<F: FileProvider + Clone> Session<F> {
             log::debug!("discarding a program prepared for an older session revision");
             return None;
         }
-        let committed = self.commit_a_unit_reading(prepared)?;
+        let committed = self.commit_a_unit_reading(prepared, records)?;
         // **Nothing is charged for it.** This used to add the read's priced cost to `program_read_bytes`, the session's
         // budget for whole-program reads — and the number that budget existed for (1 094 MB in 34 s on `test_cpp` with
         // twenty files open) came from a counter that only ever added, so it was churn. The budget and the pricing are

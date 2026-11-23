@@ -495,6 +495,43 @@ impl AnalysisState {
             None => None,
         };
 
+        // **The per-file cache records, prepared with a read lock and no writer.**
+        //
+        // Each record's key needs its file's **environment fingerprint** — the file's whole closure, built — and a
+        // program read writes one record per file it read: **460** of them for neovim's `ui.c`, measured at **17.9 s**
+        // of environment building against **0.4 s** of encoding and writing. Under the writer that froze every request
+        // in flight for the full 17.9 s (reported as the editor hanging), so the two halves are apart now, the way a
+        // slice's prepare and commit already are. See `Session::prepare_the_unit_records`.
+        //
+        // The `Arc` is what lets the read-lock phase borrow the reading on a blocking thread that must be `'static`;
+        // it is handed back with `try_unwrap` because the phase that borrowed it has returned.
+        let prepared = prepared.map(std::sync::Arc::new);
+        let records = match &prepared {
+            Some(reading) => {
+                let reading = reading.clone();
+                // **`spawn_blocking`, not `run_blocking`**: the latter takes one of the **permits a request waits for**,
+                // and this is eighteen seconds of environment building for neovim's `ui.c` — the background's work, on
+                // the same terms as the program read above, which takes no permit for exactly this reason.
+                let inner = self.inner.clone();
+                tokio::task::spawn_blocking(move || {
+                    let session = inner
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    session
+                        .as_ref()
+                        .map(|session| session.prepare_the_unit_records(&reading))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        let prepared = match prepared {
+            Some(reading) => std::sync::Arc::try_unwrap(reading).ok(),
+            None => None,
+        };
+
         // **And the inserts, under the writer.** The root is marked read even when the read declined, so a program
         // that cannot be built is not chosen again on the next wake.
         let read = self
@@ -503,7 +540,7 @@ impl AnalysisState {
                     log::debug!("discarding a program read from an older session revision");
                     return None;
                 }
-                session.commit_a_program(&root, prepared)
+                session.commit_a_program(&root, prepared, records)
             })
             .await
             .flatten();

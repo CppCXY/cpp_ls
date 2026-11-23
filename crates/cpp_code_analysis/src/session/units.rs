@@ -1195,7 +1195,29 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the only part of a unit read that needs `&mut self`.
     ///
     /// Returns `None` when the session or its inputs changed after preparation.
-    pub fn commit_a_unit_reading(&mut self, prepared: PreparedUnitReading) -> Option<UnitReading> {
+    /// **The per-file cache records a program read writes, prepared with a read lock.**
+    ///
+    /// The environment fingerprint each key needs builds the file's whole closure — **~39 ms**, so 460 of them are
+    /// 17.9 s — and doing that under the writer froze every request for that long (measured on neovim's `ui.c`, whose
+    /// program is 460 files). Prepared here, the writer is left with encode-and-insert: **~0.4 s** for the same 460.
+    pub fn prepare_the_unit_records(
+        &self,
+        prepared: &PreparedUnitReading,
+    ) -> Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)> {
+        let mut records = Vec::with_capacity(prepared.indexed.files.len());
+        for (path, cooked) in &prepared.indexed.files {
+            if let Some(record) = self.store.prepare_a_cooked_record(path, cooked) {
+                records.push(record);
+            }
+        }
+        records
+    }
+
+    pub fn commit_a_unit_reading(
+        &mut self,
+        prepared: PreparedUnitReading,
+        records: Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)>,
+    ) -> Option<UnitReading> {
         if !self.is_current(&prepared.revision) {
             log::debug!("discarding a unit reading prepared for an older session revision");
             return None;
@@ -1282,7 +1304,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // reading; this is the disk's: the same record a per-file cook writes, and the one a warm start's
             // 	ake_the_stored_refinements serves instead of re-reading the program. Without it the per-file
             // readings of a whole program were written nowhere, so the next session rebuilt every one of them.
-            self.store.put_the_cooked_reading(&path, &cooked);
             self.store
                 .index_mut()
                 .insert_cooked_in_a_program(&path, program, cooked);
@@ -1302,6 +1323,11 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
+        // **The writer's half only**: the records were prepared with a read lock (see
+        // `prepare_the_unit_records`), and what is left is the encode-and-insert this loop does in milliseconds.
+        for (key, bytes) in records {
+            self.store.put_a_cooked_record(key, &bytes);
+        }
         Some(UnitReading {
             root,
             files: placed,
@@ -1347,9 +1373,12 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
         let gathering = std::time::Instant::now();
         let prepared = self.prepare_a_unit_reading(root)?;
+        // The per-file records are prepared here, while the same read-side state is in hand — see
+        // `prepare_the_unit_records` for the 17.9 s this keeps out of the writer.
+        let records = self.prepare_the_unit_records(&prepared);
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
-        let reading = self.commit_a_unit_reading(prepared)?;
+        let reading = self.commit_a_unit_reading(prepared, records)?;
         if crate::probes::units() {
             eprintln!(
                 "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",

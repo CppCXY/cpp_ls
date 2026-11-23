@@ -2019,21 +2019,26 @@ impl<F: FileProvider> SummaryStore<F> {
         let rendered = rendered.ok_or("no rendering")?;
         Ok((cooked, rendered))
     }
-    pub fn put_the_cooked_reading(&self, path: &Path, reading: &CookedFile) {
-        let Some(source) = self.files.read(path) else {
-            return;
-        };
-        let Some(fingerprint) = self.the_record_environment(path) else {
-            return;
-        };
+    /// **The record a per-file cook writes, prepared and not written** — what the split of a program read needs.
+    ///
+    /// The two halves are apart because of a measurement: a program read commits **460** per-file records, and the
+    /// **environment fingerprint** each key needs costs ~39 ms (it builds the file's whole closure). Under the writer
+    /// that was **17.9 s of held analysis**, so every request in flight waited for it — measured on neovim's `ui.c`,
+    /// whose program is 460 files. Preparing here (a read lock is enough) and writing in the commit leaves the writer
+    /// with the encode-and-insert half, **394 ms** for the same 460.
+    pub fn prepare_a_cooked_record(
+        &self,
+        path: &Path,
+        reading: &CookedFile,
+    ) -> Option<(CacheKey, Vec<u8>)> {
+        let source = self.files.read(path)?;
+        let fingerprint = self.the_record_environment(path)?;
         let key = CacheKey {
             content: content_hash(&source),
             config: self.context_hash(path),
             env: fingerprint,
         };
-        let Some(database) = self.summary_database() else {
-            return;
-        };
+        let database = self.summary_database()?;
         // **A record with a rendering is not replaced by one without.** Both write the same key, and the program read
         // — which has no per-file spans to keep — runs *after* the cooks that do. Without this, every full record was
         // overwritten by a facts-only one, and the next session's hit answered `no rendering` for all of them
@@ -2044,10 +2049,27 @@ impl<F: FileProvider> SummaryStore<F> {
             .cooked_reading(key)
             .is_some_and(|existing| existing.get(KIND_AT) == Some(&1))
         {
-            return;
+            return None;
         }
-        let bytes = crate::summary_codec::encode_the_cooked_reading(reading);
-        database.put_cooked_reading(key, &bytes);
+        Some((
+            key,
+            crate::summary_codec::encode_the_cooked_reading(reading),
+        ))
+    }
+
+    /// **Write a record [`SummaryStore::prepare_a_cooked_record`] prepared.**
+    pub fn put_a_cooked_record(&self, key: CacheKey, bytes: &[u8]) {
+        if let Some(database) = self.summary_database() {
+            database.put_cooked_reading(key, bytes);
+        }
+    }
+
+    /// **The per-file cooked reading stored for `path`** — prepare and write in one call, the shape the per-file cook
+    /// and every caller that has one file uses.
+    pub fn put_the_cooked_reading(&self, path: &Path, reading: &CookedFile) {
+        if let Some((key, bytes)) = self.prepare_a_cooked_record(path, reading) {
+            self.put_a_cooked_record(key, &bytes);
+        }
     }
 
     /// **The cooked reading stored for `path`, when it is still the reading for this text and this closure.**

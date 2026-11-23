@@ -277,13 +277,21 @@ fn a_program_prepared_before_an_edit_is_discarded_and_remains_due() {
         .read_the_program()
         .expect("prepare the old program");
 
+    // The per-file records are prepared where the read is — with the store, not with the writer; see
+    // Session::prepare_the_unit_records. Prepared **before** the edit, like the reading itself, so the commit has to
+    // discard both.
+    let records = session.prepare_the_unit_records(&prepared);
     session.did_change(&path, new);
     session.advance(1);
     assert_eq!(
         session.index().summary(&path).unwrap().key.content_hash,
         content_hash(new)
     );
-    assert!(session.commit_a_program(&path, Some(prepared)).is_none());
+    assert!(
+        session
+            .commit_a_program(&path, Some(prepared), records)
+            .is_none()
+    );
     assert!(
         session
             .index()
