@@ -292,6 +292,42 @@ new path. `cpp_inspect rendering` (added here) is the command that shows it: `--
   indexing them, and cooks each one the way `--cook` does. The number a `sweep` reports is now the number a pull
   reports.
 
+## A freeze at startup: a program read's commit held the writer for 19 s
+
+Reported from an editor: opening neovim with a cold cache, the status line sat at *"Load workspace: 238 files to read,
+8 to re-read"* and the editor stopped responding. Reproduced headlessly by speaking LSP to the release binary with
+`src/nvim/ui.c` open — the same shape the editor's own log showed.
+
+**What it was.** The pump reads a **program** for each open file once the queue drains: the closure stitched in include
+order, parsed once, and every declaration handed to the file it was written in. For `ui.c` that is **460 files** and
+**711 023 tokens**, and the commit held the analysis **write** lock for **19.4 s** — every request in flight waited, and
+so did the next keystroke's `didChange`. Timing the commit's parts, on that program:
+
+```text
+unit commit: 460 file(s), store 19356 ms, index 2 ms, total 19360 ms
+unit commit parts: read 46 ms, env 17888 ms, write 394 ms
+```
+
+Not the writes and not the index: the **environment fingerprint** of each per-file cache record builds that file's whole
+closure (~39 ms), 460 times.
+
+**What changed** (`7966a197`). The record work is split the way a slice's prepare/commit already is:
+`SummaryStore::prepare_a_cooked_record` does everything that needs no writer (the text, the fingerprint, the key, the
+encode), `Session::prepare_the_unit_records` runs it for every file the program read, and the commit under the writer
+keeps only `put_a_cooked_record` — measured at the 394 ms above. The preparation runs on a `spawn_blocking` thread with a
+**read** lock, and **without a request permit**: `run_blocking` would have starved the pool a request waits on, which is
+the same freeze under another name.
+
+**Measured after.** No "held the analysis" warning for the read at all (the commit is under the 50 ms budget). A hover
+sent every two seconds through the whole window — 30 samples — answered in **0.01–0.02 s**; before the change the same
+requests waited the full 19 s.
+
+**Not fixed, and recorded as the next investigation.** That program parses with **1 962 errors**, and the count is
+identical on `cede07d1` (before the five commits of 20:31/20:58), so it is not a regression from that batch: the closure
+mixes mingw's headers with the project's and something in the rendering is not what gcc sees. A program the parser cannot
+read cleanly should not be filed as "the compiler's reading" without saying so — and its errors are why the read costs 18 s
+in the first place.
+
 ## The language-server review: batch 1, workspace and reload
 
 `docs/language-server-review.md` is the third review, of `cpp_ls` itself. Its central claim — that a second state machine
