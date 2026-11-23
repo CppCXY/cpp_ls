@@ -221,6 +221,8 @@ pub fn decode(bytes: &[u8]) -> Result<RenderedUnit, DecodeError> {
         // one, so both are the empty answer.
         pending_break: false,
         previous: None,
+        previous_spelling: String::new(),
+        join: String::new(),
     })
 }
 
@@ -331,6 +333,8 @@ mod tests {
             unbalanced: vec![PathBuf::from("/p/b.h")],
             pending_break: false,
             previous: None,
+            previous_spelling: String::new(),
+            join: String::new(),
         }
     }
 

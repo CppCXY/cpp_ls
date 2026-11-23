@@ -674,6 +674,53 @@ fn an_unguarded_header_is_read_again_and_defines_what_its_second_reader_asked_fo
 // **`a_walked_unit_can_be_kept_and_read_back` is gone, with the cache it tested.** A built timeline is no
 // longer persisted: it outlives the files it was built from, and rebuilding one is 38 ms — see
 // `Session::translation_unit_of`. The other tests in this file are about the walk itself, which is unchanged.
+/// **A macro that writes an attribute after a type keeps the space that tells them apart.**
+///
+/// `int __cdecl abs(int _X);` is a declaration of `abs`; `int__attribute__((__cdecl__)) abs(int _X)` is a single
+/// identifier where a type and an attribute were. The expander's `space_before` says whether the *source* had a space
+/// before the invocation, and that is not the same question as whether the expansion's first spelling may be joined to
+/// what precedes it — so the program's renderer asks the lexer, as the per-file one already did.
+///
+/// Measured on neovim's `ui.c`, whose program is mingw's `stdlib.h` and its neighbours: **1 626 errors** were a cascade
+/// from this one gluing, and the assertion below is written in **tokens** rather than in spacing, because the tokens are
+/// the part a change of the separator rule cannot honestly move.
+#[test]
+fn a_macro_that_writes_an_attribute_after_a_type_keeps_them_apart() {
+    let files = [(
+        "/p/attr.c",
+        "#define CDECL __attribute__((__cdecl__))\nint CDECL abs(int _X);\nlong CDECL labs(long _X);\n",
+    )];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/attr.c", &mut definitions);
+    let shared = timeline.definitions();
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
+
+    let spellings = the_spellings_of(&stitched.text);
+    assert!(
+        the_stream_says(&spellings, &["int", "__attribute__", "(", "(", "__cdecl__"]),
+        "`int` and the expansion are two tokens: {:?}",
+        &spellings[..spellings.len().min(24)]
+    );
+    assert!(
+        the_stream_says(
+            &spellings,
+            &["long", "__attribute__", "(", "(", "__cdecl__"]
+        ),
+        "and so are `long` and the expansion: {:?}",
+        &spellings[..spellings.len().min(40)]
+    );
+    // The failure itself, named: one spelling that holds a type and an attribute is a gluing, whatever the spacing
+    // around it is.
+    assert!(
+        !spellings
+            .iter()
+            .any(|spelling| spelling.starts_with("int__") || spelling.starts_with("long__")),
+        "no spelling may join a type to the attribute that follows it: {spellings:?}"
+    );
+}
+
 /// **The unit cooks as one program**, not as a pile of headers.
 ///
 /// Cooking one file at a time answers "does this header read on its own" — it cannot answer "does the program

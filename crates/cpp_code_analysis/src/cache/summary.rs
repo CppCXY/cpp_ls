@@ -3534,6 +3534,12 @@ pub struct RenderedUnit {
     /// [`RenderedUnit::push`]: two tokens that touch in the same file were one spelling there, and rendering them
     /// apart is what would make `a >> b` unreadable as a shift.
     pub(crate) previous: Option<(u32, cpp_parser::SourceRange)>,
+    /// **The spelling appended last**, kept because the separator rule asks the lexer about it: an expansion's first
+    /// token may only be joined to this one when the join does not change the first token. See
+    /// [RenderedUnit::push].
+    pub(crate) previous_spelling: String,
+    /// The buffer [crate::preprocess::cooked::joining_would_merge] lexes into, reused per pair rather than allocated.
+    pub(crate) join: String,
 }
 
 /// **One `#error` or `#warning` the compilation would have said**, with where it was written.
@@ -3774,7 +3780,19 @@ impl RenderedUnit {
     ) {
         if !self.text.is_empty() {
             let touching = match space_before {
-                Some(space) => !space,
+                // **A space the source had can still be the one that must stay.** `space_before` answers "was there a
+                // space before the macro invocation"; leaving it out is safe only if the expansion's first spelling
+                // does not lex together with what precedes it — `int` and `__attribute__` do, into one identifier.
+                // Measured: a mingw program parsed with **1 962 errors** because of it, every one a cascade from
+                // `int__attribute__((__cdecl__)) abs(int _X);`.
+                Some(space) => {
+                    !space
+                        && !crate::preprocess::cooked::joining_would_merge(
+                            &mut self.join,
+                            &self.previous_spelling,
+                            text,
+                        )
+                }
                 None => self.previous.is_some_and(|(previous_file, previous)| {
                     previous_file == file && previous.end_offset() == written.start_offset
                 }),
@@ -3787,6 +3805,8 @@ impl RenderedUnit {
             }
         }
         self.previous = Some((file, written));
+        self.previous_spelling.clear();
+        self.previous_spelling.push_str(text);
         self.pending_break = false;
         match text {
             "{" => self.braces += 1,

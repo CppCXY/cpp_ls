@@ -467,7 +467,7 @@ use std::path::{Path, PathBuf};
 /// branch of `#if __has_builtin(__builtin_expect)` where the compiler takes the then branch — a difference in which
 /// declarations exist, not merely in how they are described. The key is content plus `context_hash`, neither of which
 /// moves for either change, so only the version reaches the old rows.
-pub const FORMAT_VERSION: u32 = 61;
+pub const FORMAT_VERSION: u32 = 62;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

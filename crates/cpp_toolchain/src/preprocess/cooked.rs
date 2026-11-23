@@ -354,7 +354,15 @@ impl RenderedCooked {
 /// and then cached; being wrong costs a name that reads as two.
 ///
 /// An empty side is not a join at all, and a call with nothing to lex would answer about the wrong thing.
-fn joining_would_merge(join: &mut String, left: &str, right: &str) -> bool {
+/// **Would spelling `left` and `right` together lex as something other than `left` first?**
+///
+/// The question both renderers ask before they leave a space out, asked **once** for both: the per-file renderer
+/// ([`RenderedCooked`]) from the beginning, the program's ([`crate::RenderedUnit`]'s) since it was measured gluing
+/// `int __attribute__((__cdecl__)) abs(int)` into `int__attribute__((__cdecl__)) abs(int)` — a single identifier where a
+/// type and an attribute were, which is the cascade a mingw program parsed with **1 962 errors** for. A macro's
+/// `space_before` says whether the *source* had a space; it cannot say whether the expansion's first spelling may be
+/// joined to what precedes it.
+pub fn joining_would_merge(join: &mut String, left: &str, right: &str) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
     }

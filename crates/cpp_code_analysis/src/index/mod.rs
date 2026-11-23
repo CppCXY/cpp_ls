@@ -678,6 +678,31 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             )
         };
 
+        // **The errors this parse reported, and which file each one is in** — written only when a dump directory is
+        // named. A rendering has no file markers in it, so a bare offset says nothing about which header is wrong.
+        if let Some(directory) = crate::probes::dump_rendering_dir() {
+            let boundaries = stream.file_boundaries();
+            let lines: Vec<String> = tree
+                .get_errors()
+                .iter()
+                .take(400)
+                .map(|error| {
+                    let at = usize::from(error.range.start());
+                    let index = boundaries
+                        .iter()
+                        .take_while(|boundary| **boundary <= at)
+                        .count();
+                    let file = stream
+                        .files
+                        .get(index)
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    format!("{at}\t{file}\t{:?}", error.message)
+                })
+                .collect();
+            let _ = std::fs::write(directory.join("unit.errors"), lines.join("\n"));
+        }
+
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
