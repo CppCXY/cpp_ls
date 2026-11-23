@@ -312,11 +312,14 @@ pub(crate) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
             // to the declarator, and a kernel written with `__launch_bounds__` lost the body that followed.
             let spelling = p.current_token_text().to_string();
             p.bump();
-            if p.cuda()
+            if ((p.cuda()
                 && matches!(
                     spelling.as_str(),
                     "__launch_bounds__" | "__maxnreg__" | "__align__" | "__cluster_dims__"
-                )
+                ))
+                // **`__based(p)` names the storage a pointer is based on**, and its argument is the compiler's
+                // pointer language (`void`, a name, an expression) — kept as a token group for the same reason.
+                || spelling == "__based")
                 && p.current_token() == CppTokenKind::LeftParen
             {
                 let _ =

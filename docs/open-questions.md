@@ -3423,8 +3423,8 @@ on this machine. The claims and their verdicts:
 
 | The review said | Verdict | Evidence |
 |---|---|---|
-| `Feature::NestedFunction` is defined but no grammar reads it | **confirmed** | the only occurrences are in `features.rs` (the bit and its name); `parse_function_suffix_or_initializer` refuses a block-scope definition |
-| `__auto_type` is not lexed as `auto` | **confirmed** | a `NamedType` in the tree; the analysis special-cases the spelling in `deductions.rs`/`type_of.rs` |
+| `Feature::NestedFunction` is defined but no grammar reads it | **confirmed, fixed** | a block-scope definition is accepted when the configuration is GNU **and** the family is C (g++ refuses the construct); the definition is a `Declaration` inside the body |
+| `__auto_type` is not lexed as `auto` | **confirmed, fixed** | the lexer maps it to `AutoKeyword`, the specifier is a `BuiltinType`, and the hover deduces the initializer's type (`n = 2` → `int`); the fact keeps the spelling, as an ordinary `auto` fact does |
 | `__alignof__` is not an `alignof` keyword | **confirmed, fixed** | the lexer maps it now; the tree is a `UnaryExpr` over the keyword |
 | `__typeof_unqual__` is missing | **confirmed, fixed** | lexer + the three analysis spelling lists (`deductions`, `types`, `undefined_name`); a GNU parse makes it a `BuiltinType` decltype specifier instead of a `MacroCall` |
 | `_Nullable`/`_Nonnull`/… are not qualifiers, so an unnamed parameter takes the qualifier as its name | **confirmed, fixed** | `void f(int * _Nullable);` was a parameter **named** `_Nullable`; it now has no name (`Parameter` has no `NameExpr`) |
@@ -3433,7 +3433,7 @@ on this machine. The claims and their verdicts:
 | `__label__` is not a keyword | **confirmed, open** | facts record `done` as a variable of type `__label__` |
 | MSVC `__uuidof`/`__assume`/`__super`/`__leave` have no dedicated nodes | **confirmed, tolerated** | `__uuidof(p)` and `__super::f()` are in the MSVC parse table and parse as a call and a qualified name; the AST has no node of its own |
 | MSVC `__asm` needs `(`/`{`, so the traditional `__asm mov eax, 1;` fails | **confirmed, fixed** | three errors before; `AsmStat` now, and `AsmBlock` covers MSVC as well as GNU |
-| `__based`/`__sptr`/`__uptr` are missing | **confirmed, open** | no occurrence in the parser |
+| `__based`/`__sptr`/`__uptr` are missing | **confirmed, fixed** | all three are implementation keywords now; `__based(p)` keeps its parenthesised argument as a token group |
 | `__has_builtin`/`__has_feature`/`__has_extension`/`__has_attribute`/`__has_declspec_attribute` answer `Unknown`, so the branch is skipped | **confirmed, open** | rendering of `#if __has_feature(cxx_lambdas)` and `#if __has_builtin(__builtin_expect)` keeps only `feature_no` and `builtin_no` |
 
 What was changed, with the tests that pin it:
@@ -3448,23 +3448,25 @@ What was changed, with the tests that pin it:
 * `_Decimal32/64/128`, `_Float32x/64x` and `__float80` are types for a GNU target, and a declaration-start anchor
   makes a compiler-spelled type begin a declaration.
 * `AsmBlock` now covers both vendors; MSVC's traditional `__asm mov eax, 1;` consumes to its `;` as an `AsmStat`.
+* **GNU nested functions** are read where the language has them: a block-scope definition is legal in a GNU **C**
+  configuration, and the definition is a `Declaration` inside the enclosing body. A C++ parse keeps the old rule.
+* **`__auto_type`** maps to `AutoKeyword`, so the declaration is a deduced-`builtin` specifier and the use-site
+  deduction answers the initializer's type (measured: `__auto_type n = 1; n = 2;` hovers `int`).
+* **`__based`/`__sptr`/`__uptr`** are read as bare implementation keywords; `__based(p)` consumes its group.
 
-Tests: `the_gnu_spellings_are_read_as_their_constructs`, `atomic_is_a_type_specifier_and_nullability_is_not_a_name`
-and `msvc_asm_forms_are_statements`, plus the constructs added to the three `extensions_*.rs` tables. The parser suite
-is 517 passed, 0 failed.
+Tests: `the_gnu_spellings_are_read_as_their_constructs`, `a_nested_function_is_a_declaration_inside_a_body`,
+`atomic_is_a_type_specifier_and_nullability_is_not_a_name` and `msvc_asm_forms_are_statements`, plus the constructs
+added to the three `extensions_*.rs` tables. The parser suite is 518 passed, 0 failed.
 
 What is still open:
 
-* **Nested functions** — the feature bit is still not read by the grammar; a block-scope definition is refused.
-* **`__auto_type`** — still a `NamedType`; the analysis deduces it from the spelling, and the fact records
-  `__auto_type` rather than the deduced type.
-* **`__label__`** — a local label declaration is read as a variable whose type is `__label__`.
+* **`__label__`** — a local label declaration is read as a variable whose type is `__label__`; the label namespace is
+  not modelled.
 * **A complex type** — `_Complex`/`__complex__` need a `Type` the parser can name; the spelling alone was measured not
   to change the recorded type.
 * **`_Imaginary`/`__ibm128`** — the measured compiler rejects them, so there is nothing to parse for this target; a
   PowerPC or another C implementation is a different measurement.
 * **The `__has_*` operators** — answering them needs the compiler's own feature table (a probe, like the predefines),
   not a guess; until then their branches take the else arm.
-* **`__based`/`__sptr`/`__uptr`** — spelled nowhere in the grammar; they would need their own pointer-modifier rules.
 * **`__uuidof`/`__assume`/`__super`/`__leave`** — parse through the general call/name rules; a dedicated node is a
   later refinement, not a parse failure.

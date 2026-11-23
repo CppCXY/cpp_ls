@@ -2732,7 +2732,15 @@ pub fn parse_function_suffix_or_initializer(
     // its class is the most ordinary definition there is — `struct S { T f(U) { … } };` was the case that showed
     // the difference. What is excluded is a **block**: there `T x(y) { }` is a declaration followed by a block, and
     // defining a function is not something this language does.
-    let a_definition_is_legal_here = !p.is_inside_a_body() || p.is_at_class_member_level();
+    // **GNU nested functions**: a function defined inside another function's body. The extension is C's — g++
+    // refuses it — so the language's family is asked as well as the feature, and a C++ parse keeps the rule that a
+    // block-scope `T x(y) { … }` is a declaration followed by a block.
+    let a_definition_is_legal_here = !p.is_inside_a_body()
+        || p.is_at_class_member_level()
+        || (p
+            .language()
+            .support(crate::features::Feature::NestedFunction)
+            && p.language().family() == Some(crate::features::Family::C));
 
     if a_definition_is_legal_here {
         let before_the_function_reading = p.checkpoint();

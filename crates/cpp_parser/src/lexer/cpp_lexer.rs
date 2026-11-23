@@ -125,6 +125,9 @@ impl<'a> CppLexer<'a> {
         match name {
             // Basic keywords
             "auto" => CppTokenKind::AutoKeyword,
+            // **GNU's `__auto_type`** is C's `auto` for a declaration whose type is the initializer's: the same
+            // contextual type specifier, under a spelling no program can take for a variable name.
+            "__auto_type" => CppTokenKind::AutoKeyword,
             "bool" => CppTokenKind::BoolLiteral,
             "break" => CppTokenKind::BreakKeyword,
             "case" => CppTokenKind::CaseKeyword,

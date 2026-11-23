@@ -39,7 +39,8 @@ fix many parser and toolchain bug
   `__typeof_unqual__` lex as their keywords; `_Atomic` (C11) is a type specifier in both spellings and a qualifier
   after `*`; Clang's `_Nullable`/`_Nonnull`/`_Null_unspecified` are consumed instead of becoming a parameter's name;
   `_Decimal32/64/128`, `_Float32x/64x` and `__float80` are types for a GNU target; and MSVC's `__asm` is a statement
-  in both its braced and its traditional brace-less form.
+  in both its braced and its traditional brace-less form. GNU nested functions are read in a GNU C configuration,
+  `__auto_type` is the `auto` keyword, and `__based`/`__sptr`/`__uptr` are read where they are written.
 
 ## [0.4.0]
 

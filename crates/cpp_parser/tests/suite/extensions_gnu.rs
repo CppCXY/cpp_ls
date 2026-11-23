@@ -299,6 +299,39 @@ fn the_complex_operators_do_not_swallow_the_rest_of_the_class() {
     );
 }
 #[test]
+fn a_nested_function_is_a_declaration_inside_a_body() {
+    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
+    use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
+
+    // **GNU nested functions are C's**, so the configuration is a GNU C one; g++ refuses the construct and a
+    // C++ parse must keep reading `T x(y) { … }` as a declaration followed by a block.
+    let language = LanguageConfig::new()
+        .with_standard(Standard::C11)
+        .with_vendor(Vendor::Gnu);
+    let tree = CppParser::parse(
+        "void outer(void) { int inner(int x) { return x + 1; } (void)inner(1); }\n",
+        ParserConfig::default().with_language(language),
+    );
+
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let nested = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+        .any(|declaration| {
+            declaration
+                .text()
+                .to_string()
+                .trim_start()
+                .starts_with("int inner")
+                && declaration
+                    .descendants()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CompoundStat)
+        });
+    assert!(nested, "the definition is a declaration inside the body");
+}
+
+#[test]
 fn the_gnu_spellings_are_read_as_their_constructs() {
     use cpp_parser::features::{LanguageConfig, Standard, Vendor};
     use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};

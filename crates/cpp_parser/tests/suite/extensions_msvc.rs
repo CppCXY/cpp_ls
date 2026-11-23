@@ -27,6 +27,8 @@ const CONSTRUCTS: &[(&str, &str)] = &[
         "struct B { void f(); }; struct D : B { void g() { __super::f(); } };",
     ),
     ("a __ptr32 pointer", "void f(int __ptr32* p);"),
+    ("__sptr and __uptr", "void f(int __sptr* p, int* __uptr q);"),
+    ("__based", "void f(int __based(p)* q);"),
     ("__asm block", "void f() { __asm { mov eax, 1 } }"),
     ("bare __asm", "void f() { __asm mov eax, 1; }"),
 ];

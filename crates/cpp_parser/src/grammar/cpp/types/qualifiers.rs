@@ -228,9 +228,12 @@ pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<Implement
         }
         "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
         "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
-        | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => {
-            ImplementationKeyword::Bare
-        }
+        | "__extension__" | "__unaligned" | "__ptr64" | "__ptr32" | "__w64"
+        // **The signed/unsigned pointer modifiers and the based pointer.** `__sptr`/`__uptr` say whether a
+        // pointer is sign-extended or zero-extended when it is converted to a wider one, and `__based(p)` names
+        // the storage a pointer is based on. None of them changes which type or name the declaration records —
+        // the pointer's own shape does — so they are consumed where they are written, as the `__ptr32` family is.
+        | "__sptr" | "__uptr" | "__based" => ImplementationKeyword::Bare,
         // **GCC's unary operators** — `__real__ x`, `__imag__ x`, the spellings `_Complex` support is written in.
         // They are operators rather than specifiers, and the arm that matters is the **expression** one
         // (`parse_unary_expr`'s implementation-keyword case, which steps the keyword and parses the operand); this
