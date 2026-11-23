@@ -3,7 +3,11 @@
 All notable changes to `cpp_ls` are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0]
+
+fix many parser and toolchain bug
+
+## [0.4.0]
 
 ### Added
 
