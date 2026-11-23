@@ -7,20 +7,20 @@
 //! answer was looking at two different things.
 
 use cpp_code_analysis::{
-    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
-    file::coordinates::FileOffset,
+    CompileCommand, CompileCommands, CompilerConfig, MemoryFiles, OpenDocuments, Session,
+    SessionFiles, WatchFilter, file::coordinates::FileOffset,
 };
 
 /// A session over one file, cooked, with the offset of the *use* the fixture is about.
 fn expanded(source: &str, at: &str) -> String {
+    expanded_with(source, at, CompilerConfig::default())
+}
+
+/// The same, under a configuration the caller chose — a compile database, for the spelling of `__FILE__`.
+fn expanded_with(source: &str, at: &str, config: CompilerConfig) -> String {
     let memory = MemoryFiles::new().with_file("/p/a.cpp", source);
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session = Session::with_config(
-        "/p",
-        providers,
-        WatchFilter::new("/p"),
-        CompilerConfig::default(),
-    );
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
     session.index_everything();
@@ -119,5 +119,33 @@ const char *file = FILE_;
         expansion.trim(),
         "\"/p/a.cpp\"",
         "the file this fixture is written in: {expansion}"
+    );
+}
+
+/// **And with a compile database, the command's spelling wins** — a compiler reports the name it was invoked with,
+/// not the path the analysis opens, and the card is asked for the compiler's answer.
+#[test]
+fn a_macro_expansion_answers_the_commands_spelling_of_the_file() {
+    let source = "\
+#define FILE_ __FILE__
+const char *file = FILE_;
+";
+    let config = CompilerConfig {
+        database: Some(std::sync::Arc::new(CompileCommands {
+            commands: vec![CompileCommand {
+                file: std::path::PathBuf::from("/p/a.cpp"),
+                file_as_written: "src/a.cpp".to_string(),
+                directory: Some(std::path::PathBuf::from("/p")),
+                arguments: Vec::new(),
+            }],
+            malformed: 0,
+        })),
+        ..CompilerConfig::default()
+    };
+    let expansion = expanded_with(source, "FILE_;", config);
+    assert_eq!(
+        expansion.trim(),
+        "\"src/a.cpp\"",
+        "the spelling the compile command used: {expansion}"
     );
 }

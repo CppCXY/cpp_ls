@@ -854,7 +854,11 @@ impl<F: FileProvider + Clone> Session<F> {
             &source,
             &tokens,
             &start_state,
-            Some(&view.path),
+            Some(
+                self.config
+                    .presumed_name_for(&view.path)
+                    .unwrap_or(view.path.as_path()),
+            ),
         )
         .render();
         let text = rendered.text.trim().to_string();

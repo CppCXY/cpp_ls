@@ -3280,18 +3280,54 @@ The argument keeps its call — the card in the report appeared to show `println
 is the whole `println("Starting main function")`; if the original text had the argument split across lines, that is a
 separate report.
 
-### What the file is called, and what is left
+### What the file is called: the command's spelling, not the path — done
 
-`__FILE__` answers the analysis's name for the file — its **path**. A compiler answers the *presumed* name, which is how
-the file was spelled on its command line (`main.cpp`, `src/main.cpp`, an absolute path); the analysis does not keep that
-spelling at this layer, and the frame carries the resolved path. If a project needs the command's spelling, the frame
-has to carry it, which is a change to `TranslationFrame`, not to the expander.
+`__FILE__` answers the *presumed* name: the spelling on the compiler's command line. The analysis now keeps that
+spelling. `CompileCommand` gained `file_as_written`, filled from `compile_commands.json`'s `file` and
+`build_database.json`'s `source` **before** the path is resolved against the directory; `CompilerConfig::presumed_name_for`
+answers it for a file. It reaches the cook through three doors:
 
-`__LINE__` in a `#if` is still not answered: the condition evaluator has no positions, so `#if __LINE__ > 1` takes the
-undefined-name branch. That predates this report and is not what the card shows.
+* the unit cook passes the root frame's spelling (`TranslationUnit::root_presumed_name`, set by the session that has
+  the database) and an included file's own path, which is what a compiler reports inside a header;
+* the per-file cooks (`Session::render_cook`, `rendering_of`, the index's two renderings) look it up per file;
+* the hover card does too, so the card says `"src/a.cpp"` rather than the path the analysis opened.
 
-Tests: `the_file_and_the_line_macros_answer_the_use` (`cpp_toolchain/tests/suite/rendering.rs`, a cook given
-`src\main.cpp` answers line 4 and the escaped literal) and `a_macro_expansion_answers_the_line_of_the_use` /
-`..._the_file_of_the_use` (`cpp_code_analysis/tests/suite/macro_expansion.rs`, the card itself).
+The path remains the fallback: a header, a file outside the database, a unit built from summaries alone. Measured: a
+database entry `{"directory": "/p/build", "file": "../src/a.cpp"}` answers `file_as_written == "../src/a.cpp"` and
+`presumed_name_for("/p/src/a.cpp") == "../src/a.cpp"`; a card over that database expands `__FILE__` to `"src/a.cpp"`.
+
+**The key has to cover it.** A rendering with `"src/a.cpp"` is not the rendering with `""` or with the resolved path, so
+`context_hash` folds the presumed name and `FORMAT_VERSION` moved 57 → 58. `COOKED_VERSION` is the record's format and
+does not move for what the text says.
+
+### `#line`, which is the standard's other half
+
+`Directive::Line` was parsed and then dropped by the cook's `_ => {}`, so `#line 100 "x.c"` changed nothing. It is
+applied now: the cook keeps `(presumed_file, line_base)` across directives, passes them to each run, and the expander
+adds the base to `__LINE__` and uses the name for `__FILE__`. The directive's own line keeps its number; the **next**
+line is `N`. A `#line` in a region nobody compiles changes nothing.
+
+Measured: `int a = __LINE__;` (1), `#line 100 "x.c"`, `int b = __LINE__;` (100), `__FILE__` → `"x.c"`, and the next
+line's `__LINE__` is 102 — the numbering continues from 100.
+
+**A defect the `#line` test found, one layer under it:** a `__LINE__` written directly in a run answered the run's
+**first line**, because `a_position_dependent_macro` used `region.start_offset` before the token's own offset (the
+region fallback exists for argument prescans, whose synthetic ranges are not in the run). The token's own offset is
+used when it falls inside the run; the prescan still gets the region. Without that, two `__LINE__`s in one run answered
+the same number.
+
+**What is still not covered**: `#line` in the hover card's synthetic source — the card builds a source of `#define`s and
+the invocation, so a file whose `#line` is in force at the call shows the physical line; GNU linemarkers (`# 100 "x"`)
+are not a `#line`; and a `#line` whose number is a macro (`#line __LINE__`) is read as a non-number and ignored. The
+card's own compile-command spelling is covered, which is what the report was about.
+
+Tests: `the_file_and_the_line_macros_answer_the_use` and `a_line_directive_changes_the_line_and_the_file` in
+`cpp_toolchain/tests/suite/rendering.rs`; `a_macro_expansion_answers_the_line_of_the_use`,
+`..._the_file_of_the_use`, `..._the_commands_spelling_of_the_file` in
+`cpp_code_analysis/tests/suite/macro_expansion.rs`; `the_presumed_name_is_the_spelling_the_database_wrote` in
+`config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 143 + 162 + 23
+passed, 0 failed, 11 ignored.
+
+
 
 

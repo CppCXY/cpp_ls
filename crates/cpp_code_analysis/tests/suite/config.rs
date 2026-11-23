@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 fn from_arguments(arguments: &[&str]) -> CompilerConfig {
     let command = cpp_code_analysis::CompileCommand {
         file: PathBuf::from("src/main.cpp"),
+        file_as_written: "src/main.cpp".to_string(),
         directory: Some(PathBuf::from("/project")),
         arguments: arguments.iter().map(|it| it.to_string()).collect(),
     };

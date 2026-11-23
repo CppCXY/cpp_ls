@@ -435,7 +435,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     text,
                     &tokens,
                     &macros,
-                    Some(path.as_path()),
+                    Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
                 )
             }
             (None, Some(configuration)) => {
@@ -444,7 +444,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     text,
                     &tokens,
                     &start,
-                    Some(path.as_path()),
+                    Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
                 )
             }
             (None, None) => return None,
@@ -905,7 +905,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 &text,
                 &tokens,
                 &macros,
-                Some(path.as_path()),
+                Some(
+                    self.config
+                        .presumed_name_for(&path)
+                        .unwrap_or(path.as_path()),
+                ),
             )
             .render(),
         )

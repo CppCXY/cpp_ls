@@ -33,7 +33,7 @@
 //! [`CookedStream::assumed_undefined`] rather than being silently believed. With a real configuration (the
 //! architecture's ladder, levels 1 and 2) the count is zero, and the stream is the compiler's own.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppTokenData, SourceRange};
 
@@ -1636,6 +1636,12 @@ pub fn cook_with_search_and_state(
     let mut run_from = 0usize;
     let mut directive_index = 0usize;
 
+    // **The `#line` state** — the name `__FILE__` reports and the difference between the physical line and the
+    // number `__LINE__` reports. A directive cannot sit inside a run, so both are constant across one, and each
+    // run is expanded with the values in force at it.
+    let mut presumed_file: Option<PathBuf> = file.map(Path::to_path_buf);
+    let mut line_base: isize = 0;
+
     for token_index in 0..=tokens.len() {
         let is_a_directive = directives
             .get(directive_index)
@@ -1650,7 +1656,16 @@ pub fn cook_with_search_and_state(
         // inside a run, so the table is constant across it, and the lookup offset is the run's start.
         if run_from < token_index {
             if was_live {
-                expand_run(source, tokens, run_from, token_index, &live, file, &mut out);
+                expand_run(
+                    source,
+                    tokens,
+                    run_from,
+                    token_index,
+                    &live,
+                    presumed_file.as_deref(),
+                    line_base,
+                    &mut out,
+                );
             } else {
                 let span = span_of(tokens, run_from, token_index);
                 merge_span(&mut out.inactive, span);
@@ -1773,9 +1788,40 @@ pub fn cook_with_search_and_state(
                 // every pragma — made us differ by exactly those tokens.
                 if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
                     let before = out.tokens.len();
-                    expand_run(source, tokens, first, last, &live, file, &mut out);
+                    expand_run(
+                        source,
+                        tokens,
+                        first,
+                        last,
+                        &live,
+                        presumed_file.as_deref(),
+                        line_base,
+                        &mut out,
+                    );
                     if out.tokens.len() > before {
                         out.pragma_lines.push(before..out.tokens.len());
+                    }
+                }
+            }
+            // **`#line N "name"` changes what the following lines report.** `__LINE__` and `__FILE__` are the two
+            // macros with no `#define`, and this is the standard's only way to change them. The directive's own line
+            // keeps its number; the **next** line is `N`, so the difference is fixed from there on and the name, if
+            // written, replaces the file's for everything after it. A `#line` in a region nobody compiles changes
+            // nothing — the guard on the arm is that.
+            DirectiveKind::Line if was_live => {
+                if let Directive::Line { tokens } = &spanned.directive {
+                    let directive_line = 1 + source[..spanned.line.end_offset().min(source.len())]
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count();
+                    if let Some(number) = tokens
+                        .first()
+                        .and_then(|token| token.text().parse::<isize>().ok())
+                    {
+                        line_base = number - (directive_line as isize + 1);
+                    }
+                    if let Some(name) = tokens.get(1) {
+                        presumed_file = Some(PathBuf::from(a_presumed_file_name(name.text())));
                     }
                 }
             }
@@ -1802,7 +1848,8 @@ pub fn cook_with_search_and_state(
                 run_from,
                 tokens.len(),
                 &live,
-                file,
+                presumed_file.as_deref(),
+                line_base,
                 &mut out,
             );
         } else {
@@ -2046,6 +2093,35 @@ fn branch_of(directive: &Directive, range: SourceRange) -> Option<Branch> {
     Some(Branch::new(kind, tokens, name, range))
 }
 
+/// **The name a `#line` directive writes**, as the literal's contents with `\\` and `\"` undone.
+///
+/// The literal has already been lexed, so this is not a second string reader: it undoes the two escapes that can
+/// appear in a path and leaves every other sequence as written, which is what a compiler's presumed name is.
+fn a_presumed_file_name(literal: &str) -> String {
+    let inner = literal
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(literal);
+    let mut name = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            name.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('\\') => name.push('\\'),
+            Some('"') => name.push('"'),
+            Some(other) => {
+                name.push('\\');
+                name.push(other);
+            }
+            None => name.push('\\'),
+        }
+    }
+    name
+}
+
 /// Expand the tokens `from..to` against the macros in force there, and keep what is not trivia.
 fn expand_run(
     source: &str,
@@ -2054,6 +2130,7 @@ fn expand_run(
     to: usize,
     live: &dyn crate::macros::MacroBindings,
     file: Option<&Path>,
+    line_base: isize,
     out: &mut CookedStream,
 ) {
     let run = crate::directive::to_tokens(source, &tokens[from..to]);
@@ -2075,8 +2152,9 @@ fn expand_run(
             .count()
             + 1
     };
-    let expansion =
-        crate::preprocess::expand::expand_with_positions(&run, &macros, &lines, &counters, file);
+    let expansion = crate::preprocess::expand::expand_with_positions(
+        &run, &macros, &lines, &counters, file, line_base,
+    );
     out.counters = counters.get();
     out.diagnostics.extend(expansion.diagnostics);
     out.exhausted |= expansion.exhausted;

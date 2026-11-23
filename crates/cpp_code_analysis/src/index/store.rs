@@ -403,7 +403,11 @@ impl<F: FileProvider> DetachedRead<F> {
                     &self.source,
                     &tokens,
                     &macros,
-                    Some(self.path.as_path()),
+                    Some(
+                        self.config
+                            .presumed_name_for(&self.path)
+                            .unwrap_or(self.path.as_path()),
+                    ),
                 )
                 .render();
                 let indexed =
@@ -1313,7 +1317,13 @@ impl<F: FileProvider> SummaryStore<F> {
         let macros =
             { crate::preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
         let rendered = {
-            crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path)).render()
+            crate::preprocess::cooked::cook_with_file(
+                source,
+                &tokens,
+                &macros,
+                Some(self.config.presumed_name_for(path).unwrap_or(path)),
+            )
+            .render()
         };
 
         // **The directives the caller may have read already.** For a file the index cannot describe — the one a
@@ -2676,8 +2686,13 @@ impl<F: FileProvider> SummaryStore<F> {
                     true,
                 );
                 let rendered = {
-                    crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path))
-                        .render()
+                    crate::preprocess::cooked::cook_with_file(
+                        source,
+                        &tokens,
+                        &macros,
+                        Some(self.config.presumed_name_for(path).unwrap_or(path)),
+                    )
+                    .render()
                 };
                 let dead = self.dead_macros_for(path);
                 let indexed = indexer
@@ -2740,8 +2755,13 @@ impl<F: FileProvider> SummaryStore<F> {
             let macros =
                 crate::preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
             let rendered = {
-                crate::preprocess::cooked::cook_with_file(source, &tokens, &macros, Some(path))
-                    .render()
+                crate::preprocess::cooked::cook_with_file(
+                    source,
+                    &tokens,
+                    &macros,
+                    Some(self.config.presumed_name_for(path).unwrap_or(path)),
+                )
+                .render()
             };
 
             // **And what the walk decided is not compiled.** The unit has already evaluated every guarded `#define`
@@ -3339,6 +3359,11 @@ impl<F: FileProvider> SummaryStore<F> {
             // root. The walk's contribution cache is what makes a repeat walk cheap, and that is passed below.
             false,
             self.contributions(),
+        )
+        .with_the_command_spelling(
+            self.config
+                .presumed_name_for(&root.path)
+                .map(std::path::Path::to_path_buf),
         );
         Some(std::sync::Arc::new(unit))
     }
@@ -3647,6 +3672,15 @@ impl<F: FileProvider> SummaryStore<F> {
         bytes.push(b'c');
         bytes.push(u8::from(self.index.macros().is_incomplete()));
         bytes.push(0);
+
+        // **And the name `__FILE__` will answer**, because a rendering reads it: a file whose command spells it
+        // `src/a.cpp` and the same file spelled `/project/src/a.cpp` are one file to the index and two names to a
+        // compiler, so a summary built under one must not answer the other. `None` — no command names the file — is
+        // an empty segment, and the path itself is already what the row is stored under.
+        bytes.push(b'|');
+        if let Some(presumed) = self.config.presumed_name_for(path) {
+            bytes.extend_from_slice(presumed.to_string_lossy().as_bytes());
+        }
 
         bytes.push(b'|');
         bytes.extend_from_slice(

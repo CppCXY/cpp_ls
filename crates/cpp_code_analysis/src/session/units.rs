@@ -319,6 +319,11 @@ impl<F: FileProvider + Clone> Session<F> {
                             !provisional && self.share_contributions,
                             self.store.contributions(),
                         )
+                        .with_the_command_spelling(
+                            self.config
+                                .presumed_name_for(path)
+                                .map(std::path::Path::to_path_buf),
+                        )
                     });
                     let walk_took = walk_started.elapsed();
 

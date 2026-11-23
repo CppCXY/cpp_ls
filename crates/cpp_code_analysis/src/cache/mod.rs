@@ -432,7 +432,17 @@ use std::path::{Path, PathBuf};
 /// summary holds a C++ reading, and the client's `languageId: "c"` (redis 8.x: **73 `cstyle-cast` findings, all in
 /// `.h` files**, `docs/c-support.md` §8) changes the reading rather than only the rules. `context_hash` covers the
 /// configuration, and the client's answer is not part of it.
-pub const FORMAT_VERSION: u32 = 57;
+///
+/// # Why this moved to 58
+///
+/// **`__FILE__` answers the compile command's spelling, and a stored rendering was cooked with the file's path.**
+/// `expand.rs` answered `__FILE__` with the empty literal before this round; the name now comes from the translation
+/// frame (the command's `file`/`source` spelling, see `CompilerConfig::presumed_name_for`), so the rendering of a file
+/// whose command writes `src/a.cpp` contains `"src/a.cpp"` where an old one contains `""`. `context_hash` now folds
+/// that spelling, so a new summary is keyed differently — but a row written by the old reader sits under the old key,
+/// and only the version makes the cache directory unreachable. `COOKED_VERSION` is the record's *format* and does not
+/// move for what the text says.
+pub const FORMAT_VERSION: u32 = 58;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

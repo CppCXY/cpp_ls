@@ -84,6 +84,46 @@ fn an_identifier_that_starts_with_a_keyword_lexes_whole() {
     assert_eq!(range.end_offset(), "staticconstexpr".len(), "{kind:?}");
 }
 
+/// **`#line N "name"` changes what the following lines report** — the standard's only way to change `__LINE__` and
+/// `__FILE__`. The directive's own line keeps its physical number; the next line is `N`, and the name, when written,
+/// replaces the file's from there on.
+#[test]
+fn a_line_directive_changes_the_line_and_the_file() {
+    let source = "\
+int a = __LINE__;
+#line 100 \"x.c\"
+int b = __LINE__;
+const char *f = __FILE__;
+int c = __LINE__;
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let nothing_defined = MacroTable::new();
+    let text = cook_with_file(
+        source,
+        &tokens,
+        &nothing_defined,
+        Some(std::path::Path::new("src\\a.cpp")),
+    )
+    .render()
+    .text;
+    assert!(
+        text.contains("int a = 1;"),
+        "before the directive the physical line is the answer: {text}"
+    );
+    assert!(
+        text.contains("int b = 100;"),
+        "the line after `#line 100` is 100, not 3: {text}"
+    );
+    assert!(
+        text.contains("\"x.c\""),
+        "and the name replaces the file's from there on: {text}"
+    );
+    assert!(
+        text.contains("int c = 102;"),
+        "the line after it continues the presumed numbering: {text}"
+    );
+}
+
 /// **`__FILE__` and `__LINE__` answer the use** — the file the caller named and the line the token is written on.
 ///
 /// `__FILE__` used to be the empty literal everywhere, and a cook told no file keeps that answer (a fixture has no

@@ -311,6 +311,7 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
         lines: None,
         counters: None,
         file: None,
+        line_base: 0,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -334,7 +335,8 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
 /// token inside a macro body is the line of the *call*, `__COUNTER__` is a count per translation unit, and `__FILE__`
 /// is the name of the file the use is written in. None can live in a table read from the compiler's predefines, so
 /// they are answered here instead — `lines` maps a byte offset to its line, `counters` is the count shared by every
-/// run of the unit, and `file` is the name `__FILE__` reports.
+/// run of the unit, `file` is the name `__FILE__` reports, and `line_base` is what a `#line` has added to the physical
+/// line `lines` counts.
 ///
 /// Without this doctest's `DOCTEST_CAT(x, __LINE__)` pasted the **name** onto `x` and every capture in a test file
 /// became the identifier `DOCTEST_CAPTURE___LINE__` — 86 `redefinition` findings across nlohmann/json's tests, all of
@@ -345,6 +347,7 @@ pub fn expand_with_positions(
     lines: &dyn Fn(usize) -> usize,
     counters: &std::cell::Cell<usize>,
     file: Option<&Path>,
+    line_base: isize,
 ) -> Expansion {
     let mut expander = Expander {
         macros,
@@ -358,6 +361,7 @@ pub fn expand_with_positions(
         lines: Some(lines),
         counters: Some(counters),
         file,
+        line_base,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -383,6 +387,7 @@ pub fn expand_with_budget(
         lines: None,
         counters: None,
         file: None,
+        line_base: 0,
     };
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
@@ -418,6 +423,10 @@ struct Expander<'a, M: MacroValues + ?Sized> {
     /// with no file behind it (a condition, a synthetic source), where `__FILE__` is an empty literal: a valid string
     /// and the honest answer, rather than a made-up name.
     file: Option<&'a Path>,
+    /// **What a `#line` changes** — the difference between the physical line the `lines` closure counts and the
+    /// number `__LINE__` reports. `0` until a `#line` is in force; each run carries its own, because a directive is
+    /// what changes it and a directive separates two runs.
+    line_base: isize,
 }
 
 impl<M: MacroValues + ?Sized> Expander<'_, M> {
@@ -435,23 +444,32 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         if token.kind != cpp_parser::CppTokenKind::Identifier {
             return None;
         }
-        // **The outermost call site** — the one the reader wrote — then the span this run was expanded in, and only
-        // then the token itself.
+        // **The outermost call site** — the one the reader wrote — then the token's own place in the run, and the
+        // run's start only for a token whose range is not in it.
         //
-        // The middle fallback is the argument **prescan**: it expands an argument before the call is pushed, so there
-        // is no invocation yet, and the body tokens it is expanding carry offsets in the *reconstruction* of a
-        // `#define` line (a few bytes long) — so their own range answers a line like 2. Every capture in a file then
-        // got the same name, and `redefinition` reported 86 of them across nlohmann/json (`docs/worklog.md`).
-        let at = self
-            .invocations
-            .first()
-            .map(|invocation| invocation.call_site.start_offset)
-            .or_else(|| region.map(|region| region.start_offset))
-            .unwrap_or(token.range.start_offset);
+        // The middle case is the ordinary one: `__LINE__` written directly in the file carries its own offset, and
+        // two of them in one run answer their own lines. The last is the argument **prescan**: it expands an argument
+        // before the call is pushed, so there is no invocation yet, and the body tokens it is expanding carry offsets
+        // in the *reconstruction* of a `#define` line (a few bytes long) — so their own range answers a line like 2.
+        // Every capture in a file then got the same name, and `redefinition` reported 86 of them across
+        // nlohmann/json (`docs/worklog.md`).
+        let at = match self.invocations.first() {
+            Some(invocation) => invocation.call_site.start_offset,
+            None => match region {
+                Some(region)
+                    if token.range.start_offset >= region.start_offset
+                        && token.range.end_offset() <= region.end_offset() =>
+                {
+                    token.range.start_offset
+                }
+                Some(region) => region.start_offset,
+                None => token.range.start_offset,
+            },
+        };
         match token.text.as_str() {
             "__LINE__" => Some(Token::new(
                 cpp_parser::CppTokenKind::IntegerLiteral,
-                lines(at).to_string(),
+                (lines(at) as isize + self.line_base).max(1).to_string(),
                 token.range,
             )),
             "__COUNTER__" => {

@@ -328,6 +328,7 @@ fn command_line(compiler: &str) -> CompileCommands {
     CompileCommands {
         commands: vec![CompileCommand {
             file: "/p/main.cpp".into(),
+            file_as_written: "/p/main.cpp".to_string(),
             directory: None,
             arguments: vec![compiler.to_string(), "-c".to_string()],
         }],

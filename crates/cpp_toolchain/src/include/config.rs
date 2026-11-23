@@ -244,6 +244,22 @@ impl CompilerConfig {
             .is_some_and(|database| database.command_for(file).is_some())
     }
 
+    /// **The name `__FILE__` reports for this file** — the spelling its compile command used.
+    ///
+    /// A compiler answers the *presumed* name: how the file was written on the command line, which
+    /// `compile_commands.json` names in its `file` field and `build_database.json` in its `source`
+    /// field. [`CompileCommand::file_as_written`] keeps that spelling beside the resolved path this
+    /// analysis opens.
+    ///
+    /// `None` when no command names the file — a header, a file outside the database. The caller then
+    /// uses the file's own path, which is what a compiler invoked with that path reports.
+    pub fn presumed_name_for(&self, file: &Path) -> Option<&Path> {
+        self.database
+            .as_ref()
+            .and_then(|database| database.command_for(file))
+            .map(|command| Path::new(&command.file_as_written))
+    }
+
     pub fn language_for(&self, file: &Path) -> cpp_parser::features::LanguageConfig {
         let from_the_command = self
             .database
@@ -678,8 +694,17 @@ impl CompilerConfig {
 /// works on the author's machine and fails everywhere else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileCommand {
-    /// The file this command compiles.
+    /// The file this command compiles, resolved against `directory` — what every reader of the project
+    /// uses to name the file.
     pub file: PathBuf,
+    /// **The spelling the database wrote**, before [`CompileCommand::file`] resolved it.
+    ///
+    /// This is the name a compiler would report for `__FILE__`: the *presumed* name is how the file was
+    /// spelled on the command line, not the path this analysis later opens. `compile_commands.json`
+    /// usually writes it relative to `directory` (or absolute); `build_database.json` writes `source` the
+    /// same way. Keeping both is what lets the cook answer `__FILE__` with the command's spelling while
+    /// the index keeps one identity per file.
+    pub file_as_written: String,
     /// The directory the command runs in.
     pub directory: Option<PathBuf>,
     /// The command, split into arguments.
@@ -1057,7 +1082,8 @@ fn parse_translation_unit(object: &str) -> Option<CompileCommand> {
     // **`source` is relative to `work-directory`** — that is how CMake writes it — so a relative one is resolved here
     // rather than left for every later reader to remember. A reader that does not resolve it asks
     // `command_for(/project/src/a.cpp)` about a database entry spelled `src/a.cpp` and gets nothing.
-    let file = PathBuf::from(source);
+    let file_as_written = source;
+    let file = PathBuf::from(&file_as_written);
     let file = match (&directory, file.is_absolute()) {
         (Some(directory), false) => directory.join(&file),
         _ => file,
@@ -1065,6 +1091,7 @@ fn parse_translation_unit(object: &str) -> Option<CompileCommand> {
 
     Some(CompileCommand {
         file,
+        file_as_written,
         directory,
         arguments,
     })
@@ -1413,6 +1440,8 @@ fn resolve_relative(directory: &Path, file: &Path) -> PathBuf {
 fn parse_command_object(object: &str) -> Option<CompileCommand> {
     let directory = string_field(object, "directory").map(PathBuf::from);
     let file = string_field(object, "file")?;
+    // **The spelling, before it is resolved** — what `__FILE__` answers. See [`CompileCommand::file_as_written`].
+    let file_as_written = file.clone();
 
     // Either shape: `arguments` is a list, `command` is a shell string. Both are in the wild, and a
     // project may use either, so neither can be treated as the real one.
@@ -1435,6 +1464,7 @@ fn parse_command_object(object: &str) -> Option<CompileCommand> {
 
     Some(CompileCommand {
         file,
+        file_as_written,
         directory,
         arguments,
     })
@@ -1818,6 +1848,10 @@ mod tests {
             Path::new("/p/src/a.cpp"),
             "the `..` is applied, not left spelled in the path"
         );
+        assert_eq!(
+            command.file_as_written, "../src/a.cpp",
+            "and the spelling a compiler would report for `__FILE__` is kept beside it"
+        );
         assert!(
             command
                 .arguments
@@ -1825,6 +1859,30 @@ mod tests {
                 .any(|argument| argument == "-DFROM_BUILD"),
             "and the flags are the ones that command carried: {:?}",
             command.arguments
+        );
+    }
+
+    /// **The name `__FILE__` answers is the database's spelling, not the resolved path.** A compiler reports the
+    /// name it was invoked with; the index needs one identity per file, so the command keeps both.
+    #[test]
+    fn the_presumed_name_is_the_spelling_the_database_wrote() {
+        let database = crate::config::parse_compile_commands(
+            r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-c"]}]"#,
+        );
+        let config = CompilerConfig {
+            database: Some(std::sync::Arc::new(database)),
+            ..CompilerConfig::default()
+        };
+
+        assert_eq!(
+            config.presumed_name_for(Path::new("/p/src/a.cpp")),
+            Some(Path::new("../src/a.cpp")),
+            "the command's spelling is kept for `__FILE__`"
+        );
+        assert_eq!(
+            config.presumed_name_for(Path::new("/p/src/other.cpp")),
+            None,
+            "a file no command names has no presumed name; the caller uses its path"
         );
     }
 
@@ -1955,6 +2013,7 @@ mod tests {
         let command = |file: &str, standard: &str| CompileCommand {
             directory: None,
             file: PathBuf::from(file),
+            file_as_written: file.to_string(),
             arguments: vec![format!("/std:{standard}"), "/c".to_string()],
         };
 
@@ -2074,6 +2133,7 @@ mod database_search_path_tests {
         let database = CompileCommands {
             commands: vec![CompileCommand {
                 file: source.clone(),
+                file_as_written: source.to_string_lossy().into_owned(),
                 directory: Some(root.clone()),
                 arguments: vec![
                     "cc".to_string(),
@@ -2134,6 +2194,7 @@ mod database_search_path_tests {
         let database = CompileCommands {
             commands: vec![CompileCommand {
                 file: file.clone(),
+                file_as_written: file.to_string_lossy().into_owned(),
                 directory: Some(root.clone()),
                 // The shape CMake's Ninja generator writes: the standard, warnings, and the input file.
                 arguments: vec![
@@ -2193,6 +2254,7 @@ mod database_search_path_tests {
         let database = CompileCommands {
             commands: vec![CompileCommand {
                 file: file.clone(),
+                file_as_written: file.to_string_lossy().into_owned(),
                 directory: Some(root.clone()),
                 arguments: vec![
                     "c++".to_string(),

@@ -1848,6 +1848,14 @@ fn walk_the_translation_unit<'a>(
 pub struct TranslationUnit {
     pub(crate) events: Vec<TuEvent>,
     pub(crate) frames: Vec<TuFrame>,
+    /// **The name `__FILE__` reports for the root file** — its compile command's spelling, when the
+    /// session has one. `None` for a unit built from summaries alone (a test, a decode), where the
+    /// root frame's own path is the name.
+    ///
+    /// The included frames keep their resolved paths: a compiler opens an `#include` at the path its
+    /// search produced, and that is what `__FILE__` reports inside the header. Only the root's spelling
+    /// is the build's choice, and it is the one a reader sees at the top of the file.
+    pub(crate) root_presumed_name: Option<std::path::PathBuf>,
     /// **The name index**: one entry per macro name the walk saw, holding its events' indices in walk order.
     ///
     /// This is what makes a file's environment a *view* rather than a map. Without it, answering "what is `_STD`
@@ -2024,6 +2032,16 @@ impl TimelineBuilder {
 }
 
 impl TranslationUnit {
+    /// **Tell the unit how its root file was spelled on the compile command** — see
+    /// [`TranslationUnit::root_presumed_name`].
+    ///
+    /// A session that has the database calls this after the walk; a unit built without one keeps `None`, and the
+    /// root frame's path is the name `__FILE__` reports.
+    pub(crate) fn with_the_command_spelling(mut self, name: Option<std::path::PathBuf>) -> Self {
+        self.root_presumed_name = name;
+        self
+    }
+
     /// **What this unit costs in memory** — frames, events, the name index, and the definitions cache.
     ///
     /// A unit is a *timeline*: one event per `#define`/`#undef` in the whole closure, each holding shared name and
@@ -2042,6 +2060,9 @@ impl TranslationUnit {
         }
         for key in self.entered.keys() {
             bytes += key.len() + std::mem::size_of::<u32>();
+        }
+        if let Some(name) = &self.root_presumed_name {
+            bytes += name.as_os_str().len();
         }
         bytes
     }
@@ -2154,6 +2175,7 @@ impl TranslationUnit {
         TranslationUnit {
             events,
             frames,
+            root_presumed_name: None,
             by_name,
             paths,
             entered,
@@ -2535,6 +2557,15 @@ impl UnitCook<'_> {
             .parent()
             .unwrap_or_else(|| Path::new("."));
 
+        // **The name `__FILE__` reports for this frame.** The root's is the compile command's spelling; an included
+        // file's is the path the include search opened it at, which is what a compiler reports there.
+        let presumed = if frame == 0 {
+            unit.root_presumed_name.as_deref()
+        } else {
+            None
+        };
+        let presumed = presumed.or(Some(unit.frames[frame as usize].file.as_path()));
+
         let mut from = 0usize;
         let mut produced = 0usize;
         let mut depth = 0i64;
@@ -2553,7 +2584,7 @@ impl UnitCook<'_> {
                 &mut self.state,
                 search,
                 directory,
-                Some(&unit.frames[frame as usize].file),
+                presumed,
             );
             produced += cook.tokens.len();
             depth += self.emit(frame, &cook, out);
@@ -2567,7 +2598,7 @@ impl UnitCook<'_> {
             &mut self.state,
             search,
             directory,
-            Some(&unit.frames[frame as usize].file),
+            presumed,
         );
         produced += cook.tokens.len();
         depth += self.emit(frame, &cook, out);
