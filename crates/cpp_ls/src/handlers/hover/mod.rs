@@ -1995,11 +1995,8 @@ fn declaration_markdown(
             // typedef of a class rendered as `using T = T;` — the self-alias the ancestor can explain.
             .or_else(|| node.ancestors().find_map(cpp_parser::CppDeclaration::cast))
     });
-    let mut declaration = cpp_code_analysis::sema::render::an_item(
-        fact,
-        the_declaration.as_ref(),
-        constant_value,
-    );
+    let mut declaration =
+        cpp_code_analysis::sema::render::an_item(fact, the_declaration.as_ref(), constant_value);
     if !attributes.is_empty() {
         declaration.insert(0, attributes.join(" "));
     }
