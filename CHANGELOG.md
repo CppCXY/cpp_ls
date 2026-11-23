@@ -41,6 +41,8 @@ fix many parser and toolchain bug
   `_Decimal32/64/128`, `_Float32x/64x` and `__float80` are types for a GNU target; and MSVC's `__asm` is a statement
   in both its braced and its traditional brace-less form. GNU nested functions are read in a GNU C configuration,
   `__auto_type` is the `auto` keyword, and `__based`/`__sptr`/`__uptr` are read where they are written.
+  `_Complex`/`__complex__` are type spellings, so a file-scope `_Complex double z;` is one declaration whose recorded
+  type is `_Complex double`, not a macro followed by a separate `double z;`.
 
 ## [0.4.0]
 

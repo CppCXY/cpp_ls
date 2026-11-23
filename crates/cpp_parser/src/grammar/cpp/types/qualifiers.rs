@@ -260,9 +260,14 @@ pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<Implement
 /// *which* implementation — which is the dialect:
 ///
 /// ```text
-/// GNU       __int128, _Float16, _Float32, _Float64, _Float128, __float128, __fp16, __bf16
+/// GNU       __int128, _Float16, _Float32, _Float64, _Float128, _Float32x, _Float64x, __float80,
+///           __float128, __fp16, __bf16, _Decimal32, _Decimal64, _Decimal128, _Complex, __complex__
 /// MSVC      __int8, __int16, __int32, __int64
 /// ```
+///
+/// **`_Complex`/`__complex__` are adjectives**, and the type reader joins their word with the floating type that
+/// follows (`_Complex double`, `double _Complex`); that is why the declaration's specifier sequence must keep both
+/// words rather than treat the second as a new declaration — see `at_a_macro_that_stands_for_a_declaration`.
 ///
 /// Read as names — which is what happened before this existed — the failure is silent and shaped like a
 /// declaration of something else: `unsigned __int128 x;` came out as a declaration of a variable named
@@ -301,6 +306,8 @@ pub(crate) fn a_type_the_compiler_spells(p: &CppParser) -> bool {
                 // type `_Complex double` — it only moved the failure. The missing piece is the type model, not the
                 // word. `_Imaginary` (not implemented by gcc) and `__ibm128` (PowerPC only) are out for the same
                 // reason plus their own compilers' answers.
+                | "_Complex"
+                | "__complex__"
                 | "_Decimal32"
                 | "_Decimal64"
                 | "_Decimal128"

@@ -344,6 +344,7 @@ fn the_gnu_spellings_are_read_as_their_constructs() {
     let source = "\
 void f() { __typeof_unqual__(1) n = 1; int a = __alignof__(int); }
 _Decimal64 d; _Float32x x; __float80 g;
+_Complex double z; double _Complex w; __complex__ float c;
 ";
     let tree = CppParser::parse(source, ParserConfig::default().with_language(language));
 
@@ -367,7 +368,13 @@ _Decimal64 d; _Float32x x; __float80 g;
         }),
         "`__alignof__` is read as the operator"
     );
-    for spelling in ["_Decimal64", "_Float32x", "__float80"] {
+    for spelling in [
+        "_Decimal64",
+        "_Float32x",
+        "__float80",
+        "_Complex",
+        "__complex__",
+    ] {
         assert!(
             root.descendants().any(|node| {
                 CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType

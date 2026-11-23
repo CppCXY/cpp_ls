@@ -932,6 +932,13 @@ fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
         return false;
     }
 
+    // **A type the compiler spells is not a macro**, even when a declaration-start token follows it. `_Complex
+    // double z;` is one declaration whose type is `_Complex double`, and the `double` is the adjective's operand —
+    // read as a macro standing for a declaration, it left a `MacroCall` and a separate `double z;` behind.
+    if types::a_type_the_compiler_spells(p) {
+        return false;
+    }
+
     let after = decls::kind_after_the_run_of_names(p);
     starts_a_new_declaration(after) || ends_the_scope(after)
 }

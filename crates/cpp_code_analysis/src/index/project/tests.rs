@@ -1303,6 +1303,24 @@ fn a_function_pointer_typedef_records_the_whole_type() {
 }
 
 #[test]
+fn a_complex_type_keeps_the_adjective_in_its_spelling() {
+    // **`_Complex` is an adjective on the floating type**, not a type of its own: the two words are one type. The
+    // file-scope shape used to be read as a `MacroCall` followed by a separate `double z;`, so the recorded type
+    // was `double`; both spellings now record the whole type.
+    let source = "_Complex double z;\ndouble _Complex w;\n";
+    let (index, _tree) = analysed(&[], "/p/a.c", source);
+
+    let Known::Yes(z) = index.definition("z", Path::new("/p/a.c")) else {
+        panic!("`z` is a declaration")
+    };
+    assert_eq!(z.fact.type_of.as_deref(), Some("_Complex double"));
+    let Known::Yes(w) = index.definition("w", Path::new("/p/a.c")) else {
+        panic!("`w` is a declaration")
+    };
+    assert_eq!(w.fact.type_of.as_deref(), Some("double _Complex"));
+}
+
+#[test]
 fn a_member_list_of_an_alias_is_the_member_list_of_its_target() {
     // The other query that turns a spelling into a class, and it has to agree with the single-member one:
     // completion for `std::string` that listed nothing would be a member list of the alias rather than of the
