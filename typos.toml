@@ -5,6 +5,7 @@ extend-exclude = [
   "*.yaml",
   "*test.rs",          # 已覆盖 test.rs，无需单独列出
   "open-questions.md",
+  "worklog.md",
   # "target/",         # 按需添加目录排除
 ]
 
