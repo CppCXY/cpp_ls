@@ -39,10 +39,11 @@
 //! and a Windows build never opens that header, so a resolver that looked and failed has answered a question about
 //! a line that is not in the program. The file's summary stores its guards as **questions, never answers** (a
 //! compilation decides them, and a summary is keyed without one), so the answer is asked where it lives —
-//! [`ProjectIndex::the_guard_is_taken`] — and only a **decided** `Inactive` silences the finding: a guard this
-//! layer cannot decide keeps it, because "I could not tell" must not become "nothing to see". Measured on the
-//! neovim census: the four remaining include misses are glibc and sanitizer headers, and the platform-only ones
-//! behind `#if defined(__linux__)` are silent.
+//! [`ProjectIndex::the_guard_is_taken`]. That is the first filter; the second is the cook's own inactive regions,
+//! applied to **every** finding in [`CheckContext::push`]: when the guard layer cannot decide a name the macro walk
+//! does not know, the cook still decided the branch, and a finding on text the rendering does not contain is not a
+//! finding about the program. Measured on neovim: `os/fs.c`'s `<sys/acl.h>` (and its dead `unused` variable) went
+//! silent, while live findings in `buffer.c` and `window.c` stayed.
 //!
 //! # Severity
 //!

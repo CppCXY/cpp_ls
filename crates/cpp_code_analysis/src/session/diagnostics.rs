@@ -487,6 +487,10 @@ impl<F: FileProvider + Clone> Session<F> {
             inside.dedup();
             inside
         };
+        let inactive = self
+            .inactive_regions(key)
+            .map(|regions| regions.spans)
+            .unwrap_or_default();
         let findings = crate::sema::check::run(crate::sema::check::CheckContext::new(
             key,
             summary,
@@ -497,6 +501,7 @@ impl<F: FileProvider + Clone> Session<F> {
             view.written_text().unwrap_or(&view.source),
             view.tree.get_errors(),
             view,
+            &inactive,
             config,
             // **The language this file is compiled as**, which is what makes a C-only rule quiet in C: the compile flags say
             // `-std=c11`, and `cstyle_cast` is then not a rule about this file at all. Asked through

@@ -46,6 +46,12 @@ fix many parser and toolchain bug
 - **GNU's `__label__` declares labels, not variables.** `__label__ done, again;` binds each name in the label
   namespace, so the facts are labels (`Other`, no type) — the same kind a `done:` line produces — instead of variables
   whose type is `__label__`.
+- **A diagnostic is never drawn on a branch the cook did not compile.** Checks read the file's own summary, which
+  keeps every `#if` branch; `include-not-found` already asked the guard layer, but that layer answers `Unknown` for a
+  name the macro walk does not know. Every finding now passes one more filter in `CheckContext::push`: the cook's
+  inactive regions, in the file's own coordinates. Measured on neovim's `os/fs.c`, the four dead-branch includes
+  (`<sys/acl.h>`, `<sys/access.h>`, `<sys/xattr.h>`, `<sys/uio.h>`) and one dead `unused` variable went silent, while
+  live findings in `buffer.c`, `window.c`, `tui.c` and `api/vim.c` were unchanged.
 - **A struct of `_BitInt` bitfields has a layout.** `_BitInt(N)` is sized from the measured rule (1/2/4/8 bytes up to
   64 bits, then multiples of eight, alignment 8 above 8 bytes), and bitfields are placed by the Itanium/GCC x64
   storage-unit rules instead of withholding the whole class: the `:` and its literal width are read from the member's

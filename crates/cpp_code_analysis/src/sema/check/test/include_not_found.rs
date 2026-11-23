@@ -107,16 +107,20 @@ fn an_include_in_a_branch_that_is_taken_is_still_reported() {
     );
 }
 
-/// **A guard this layer cannot decide keeps the finding** — `Unknown` answers visible, the same rule the
-/// declaration lookup follows: "I could not tell" must not become "nothing to see".
+/// **A branch the cook skipped is silent, even when the guard layer cannot evaluate the name.**
+///
+/// `#ifdef NEVER_DEFINED_ANYWHERE` is a branch C says is not compiled (an undefined name in `#ifdef` is false), and
+/// the cook puts it in its inactive regions. The guard layer alone would answer `Unknown` and keep the finding —
+/// which is why this used to assert that it was reported. The central filter in [`CheckContext::push`] now asks the
+/// reading that actually decided the branch, so a diagnostic is never drawn on text the cook did not compile.
 #[test]
-fn an_include_behind_an_undecided_guard_is_still_reported() {
+fn an_include_behind_an_undecided_guard_is_silent_when_the_cook_skipped_it() {
     let codes = codes_of(
         "#ifdef NEVER_DEFINED_ANYWHERE\n#include <vectr>\n#endif\nint main() { return 0; }\n",
     );
-    assert_reported(
+    assert_silent_about(
         &codes,
         DiagnosticCode::IncludeNotFound,
-        "nothing defines that macro, but this layer cannot know it",
+        "the cook did not put that branch in the program",
     );
 }

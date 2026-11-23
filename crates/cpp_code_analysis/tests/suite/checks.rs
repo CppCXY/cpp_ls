@@ -245,7 +245,7 @@ fn include_not_found_is_reported_for_a_header_nobody_has() {
 #[test]
 fn an_unresolved_include_is_underlined_on_its_own_line() {
     const SOURCE: &str = "#include <asio.hpp>\n// https://stackoverflow.com/questions/1598985/c-read-binary-stdin\n\
-                          #ifdef _WIN32\n#include <fcntl.h>\n#endif\nint main() { return 0; }\n";
+                          #if 1\n#include <fcntl.h>\n#endif\nint main() { return 0; }\n";
     let files = MemoryFiles::new().with_file("/p/a.cpp", SOURCE);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
     let mut session = Session::with_config(

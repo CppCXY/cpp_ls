@@ -267,6 +267,15 @@ pub struct CheckContext<'a> {
     /// Held for that one crossing and nothing else: a check that reached through it could parse, which is the
     /// thing [`CheckContext`]'s own documentation says this layer must not be able to do.
     pub view: &'a FileView,
+    /// **The regions the cook decided not to compile**, in the file's own coordinates.
+    ///
+    /// A finding whose range starts inside one of these is about text the program does not contain: an `#include`
+    /// in an `#ifdef HAVE_ACL` branch a Windows build never enters, a declaration behind `#if 0`. The checks read
+    /// the file's **own** summary, which keeps every branch, so the guard a fact records is only one way to decide
+    /// this — and the one that cannot answer when the macro walk does not know the name. The cook already answered:
+    /// its inactive regions are what it did not put in the rendering, and this is the same answer applied to every
+    /// finding rather than to `include-not-found` alone.
+    pub inactive: &'a [SourceRange],
     /// Which codes may be reported — see [`CheckConfig`].
     pub config: CheckConfig,
     /// **The language this file is compiled as** — `-std=c++17`, `-std=gnu89`, or "not told".
@@ -309,6 +318,7 @@ impl<'a> CheckContext<'a> {
         written: &'a str,
         errors: &'a [cpp_parser::CppParseError],
         view: &'a FileView,
+        inactive: &'a [SourceRange],
         config: CheckConfig,
         language: cpp_parser::features::LanguageConfig,
         unreal: bool,
@@ -321,8 +331,9 @@ impl<'a> CheckContext<'a> {
             source,
             written,
             errors,
-            config,
             view,
+            inactive,
+            config,
             language,
             unreal,
             inside,
@@ -519,6 +530,17 @@ impl<'a> CheckContext<'a> {
         message: impl Into<String>,
     ) {
         if !self.config.is_enabled(code) {
+            return;
+        }
+
+        // **A finding in a branch nobody compiles is not a finding about the program.** The checks read the file's
+        // own summary, which keeps every branch; the cook is the reading that decided which of them exist, and its
+        // inactive spans are in this same coordinate system. Filtered here rather than in each rule so that a new
+        // check cannot forget it — measured on neovim's `os/fs.c`, whose `<sys/acl.h>` is written inside
+        // `#ifdef HAVE_ACL` and was reported although the cooked rendering has no such include.
+        if self.inactive.iter().any(|span| {
+            span.start_offset <= range.start_offset && range.start_offset < span.end_offset()
+        }) {
             return;
         }
 

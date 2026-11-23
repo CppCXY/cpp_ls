@@ -3531,3 +3531,43 @@ and `cpp_ls/tests/suite/hover_layout.rs` pins it.
 Still not covered: **unnamed bitfields** (a fact has no name to ask about, so `unsigned : 0;` is invisible to this
 walk), **`#pragma pack`**, and **MSVC's bitfield ABI** — a bitfield in an MSVC project is withheld rather than placed
 by gcc's rule, because the two ABIs disagree on bitfields.
+## A diagnostic in a branch nobody compiles — fixed
+
+`include-not-found` was reported for an `#include` written inside a branch the compilation does not take. On neovim's
+`os/fs.c`:
+
+```text
+#include <sys/acl.h>     inside #ifdef HAVE_ACL / #ifdef HAVE_SYS_ACL_H
+#include <sys/access.h>
+#include <sys/xattr.h>
+#include <sys/uio.h>
+```
+
+The check did ask the guard layer (`the_guard_is_taken`), but `HAVE_ACL` is a name the macro walk does not know, so the
+answer was `Unknown` and the finding survived. The cook had already decided the branch: its rendering contains no such
+include, and `inactive` listed lines 24–30 as one of its dead regions.
+
+**The filter is now central.** `CheckContext::push` drops any finding whose range starts inside one of the cook's
+inactive spans (`Session::inactive_regions`), in the file's own coordinates. Every check goes through it, so no rule
+can forget the question; `include-not-found`'s guard query stays as the cheaper first filter.
+
+Measured on neovim (219 translation units):
+
+```text
+                                   before   after
+include-not-found                      12       1
+unused                                 12       0
+macro-parentheses                      28      27
+all findings                          433     409
+syntax-error                            0       0
+```
+
+`os/fs.c` itself went from **5** findings (the four includes and a dead `unused` variable) to **0**. Live findings
+were unchanged: `buffer.c` 2 unresolved calls, `window.c` 2, `tui.c` 2 assign-type-check, `api/vim.c` 3 — so the
+filter is dropping dead-branch findings, not findings in general.
+
+The spans may be **assumed** (`assumed_undefined` was 23 for `fs.c`): the cook applied C's "an undefined identifier
+is 0" rule, and the UI's `inactive` answer says those spans must not be painted. Diagnostics take the stricter reading
+— a finding about text the reading did not compile is not published — because a squiggle on a line the analysis did
+not read is worse than silence. A live include (`#if 1`) is still reported, and the test that used to require an
+undecided-guard finding now asserts silence once the cook has skipped the branch.
