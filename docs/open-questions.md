@@ -3479,3 +3479,55 @@ What is still open:
   `Unknown` in an MSVC project until that flag spelling is added and measured.
 * **`__uuidof`/`__assume`/`__super`/`__leave`** — parse through the general call/name rules; a dedicated node is a
   later refinement, not a parse failure.
+
+## A `_BitInt` bitfield struct had no layout — fixed
+
+The hover on `struct bits` in `c-project/include/corpus.h` said:
+
+```text
+Layout — not computed: three, signed_wide, plain, other cannot be sized here
+(a bitfield, a dependent type ... or the index does not hold).
+```
+
+Two independent refusals produced it:
+
+* **A bitfield was withheld by rule**, because a declaration fact carries no width and an offset after one would be a
+  guess. That is why `three`, `signed_wide` and `other` were named.
+* **`_BitInt(N)` was not a type the layout reader knew**, so the non-bitfield `plain` was unsized too.
+
+Measured with MinGW's gcc 15 under `-std=gnu2x`:
+
+```text
+sizeof(struct bits) = 6, _Alignof = 2
+three        bits 0..2      (byte 0, a 1-byte unit)
+signed_wide  bits 16..28    (byte 2, a 2-byte unit aligned to 2 — the type change starts a new unit)
+plain        byte 4
+other        bits 40..41    (byte 5, a 1-byte unit)
+```
+
+The sizes are measured too: `_BitInt(1..8)` is 1 byte, `9..16` 2, `17..32` 4, `33..64` 8, `65..128` 16,
+`129..192` 24, `193..256` 32; alignment is the size up to eight, then eight. The implementation:
+
+* `ClassLayout::of_members` places a bitfield in a storage unit the size of its declared type, aligned to that type;
+  it shares the current unit only when the previous field had the same unit type and the bits still fit, and a normal
+  member ends the unit. The measured cases are the doc comment and the tests (`Flags` 8 bytes, the `three`/`30`/`3`
+  case 12 bytes, `struct bits` 6).
+* `Session::a_bitfield_width` reads the `:` and a decimal literal at the member's own file offset; a macro or
+  expression width (`: BITS`) still withholds the layout rather than guessing.
+* `a_builtin_in_memory` sizes `_BitInt(N)` from the measured rule above.
+
+Measured after: the real `corpus.h` card reads
+
+```text
+size 6 byte(s), alignment 2
+  three        offset   0, 1 byte(s) (bits 0..3)
+  signed_wide  offset   2, 2 byte(s) (bits 16..29)
+  plain        offset   4, 1 byte(s)
+  other        offset   5, 1 byte(s) (bits 40..42)
+```
+
+and `cpp_ls/tests/suite/hover_layout.rs` pins it.
+
+Still not covered: **unnamed bitfields** (a fact has no name to ask about, so `unsigned : 0;` is invisible to this
+walk), **`#pragma pack`**, and **MSVC's bitfield ABI** — a bitfield in an MSVC project is withheld rather than placed
+by gcc's rule, because the two ABIs disagree on bitfields.

@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
-use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
+use cpp_code_analysis::{
+    CompilerConfig, DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+};
 
 /// The card for the declaration `needle` names, from a one-file project.
 fn the_card(source: &str, needle: &str) -> String {
@@ -14,10 +16,14 @@ fn the_card(source: &str, needle: &str) -> String {
     let file = root.join("a.cpp");
     std::fs::write(&file, source).expect("the fixture writes");
 
-    let mut session = Session::open(
+    // **A stated configuration, not a discovered compiler.** The card's layout rules are the x64 ones, and the
+    // bitfield rules are the GNU/Itanium ones; a session that discovers whichever compiler is installed on the test
+    // machine would answer differently per machine. `CompilerConfig::default()` is the GNU dialect this test pins.
+    let mut session = Session::with_config(
         &root,
         SessionFiles::new(OpenDocuments::new(), DiskFiles),
         WatchFilter::new(&root),
+        CompilerConfig::default(),
     );
     session.add_project_files([file.clone()]);
     session.did_open(&file, source);
@@ -43,6 +49,39 @@ fn the_card(source: &str, needle: &str) -> String {
     };
     let _ = std::fs::remove_dir_all(&root);
     text
+}
+
+/// **A `_BitInt` struct with bitfields is priced, not withheld**: the card from the report says 6 bytes and names the
+/// bit ranges, because the width is in the file and the type's size is a function of N.
+#[test]
+fn a_bitint_bitfield_structs_card_has_its_bits() {
+    let card = the_card(
+        "\
+struct bits {
+    unsigned _BitInt(3) three : 3;
+    _BitInt(13) signed_wide : 13;
+    _BitInt(5) plain;
+    unsigned _BitInt(4) other : 2;
+};
+",
+        "struct bits",
+    );
+    assert!(
+        card.contains("size 6 byte(s), alignment 2"),
+        "measured with gcc: {card}"
+    );
+    assert!(
+        card.contains("offset   2, 2 byte(s) (bits 16..29)"),
+        "the 13-bit field's unit is at byte 2: {card}"
+    );
+    assert!(
+        card.contains("offset   5, 1 byte(s) (bits 40..42)"),
+        "the last field takes two bits of byte 5: {card}"
+    );
+    assert!(
+        !card.contains("not computed"),
+        "the layout is answered: {card}"
+    );
 }
 
 /// **A struct's card says what it costs**: 4 + pad + 8 is 16 bytes, and the `double` is at offset 8 — not 4.
@@ -107,20 +146,24 @@ fn a_member_written_unsigned_is_sized() {
     );
 }
 
-/// **A class whose layout cannot be computed says which member stopped it**, rather than showing numbers that are
-/// wrong about every member after it.
+/// **A bitfield is placed, not withheld** — its width is read from the file, and the storage-unit rule puts the next
+/// member where the compiler does.
 #[test]
-fn a_bitfield_withholds_the_numbers_and_names_the_member() {
+fn a_bitfield_is_placed_by_its_storage_unit() {
     let card = the_card(
         "struct Flags {\n    unsigned a : 3;\n    int tail;\n};\n",
         "struct Flags",
     );
     assert!(
-        card.contains("not computed: `a`"),
-        "the member is named: {card}"
+        card.contains("size 8 byte(s), alignment 4"),
+        "`a` takes a four-byte unit and `tail` follows it: {card}"
     );
     assert!(
-        !card.contains("offset"),
-        "and no offset is shown for a layout that cannot be trusted: {card}"
+        card.contains("offset   0, 4 byte(s) (bits 0..3)"),
+        "the bit range is shown: {card}"
+    );
+    assert!(
+        card.contains("offset   4, 4 byte(s)"),
+        "the next member starts after the unit: {card}"
     );
 }

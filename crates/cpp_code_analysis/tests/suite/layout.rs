@@ -120,9 +120,10 @@ struct Holder {
     assert_eq!(layout.fields.len(), 1);
 }
 
-/// **A bitfield withholds it too**, because a fact carries no width and every offset after one would be wrong.
+/// **Bitfields are placed, not withheld** — the `:` and its literal width are read out of the file, and the
+/// storage-unit rules put each field where the compiler does.
 #[test]
-fn a_bitfield_member_is_named_rather_than_placed_wrongly() {
+fn bitfields_are_placed_by_their_storage_units() {
     let layout = layout(
         "\
 struct Flags {
@@ -133,7 +134,86 @@ struct Flags {
 ",
         "Flags",
     );
-    assert_eq!(layout.unknown, ["a", "b"]);
+    assert_eq!(layout.size, 8);
+    assert_eq!(layout.alignment, 4);
+    let placed: Vec<(&str, usize, Option<usize>, Option<usize>)> = layout
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.as_str(),
+                field.offset,
+                field.bit_offset,
+                field.bit_width,
+            )
+        })
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            ("a", 0, Some(0), Some(3)),
+            ("b", 0, Some(3), Some(5)),
+            ("tail", 4, None, None),
+        ]
+    );
+}
+
+/// **The struct from the report**: `_BitInt(N)` members and bitfields, with the compiler's own layout.
+///
+/// Measured with MinGW's gcc under `-std=gnu2x`: `sizeof` 6, alignment 2; `three` bits 0–2, `signed_wide` bits 16–28
+/// (a 2-byte unit at byte 2), `plain` at byte 4, `other` bits 40–41.
+#[test]
+fn a_struct_of_bitint_bitfields_has_a_layout() {
+    let layout = layout(
+        "\
+struct bits {
+    unsigned _BitInt(3) three : 3;
+    _BitInt(13) signed_wide : 13;
+    _BitInt(5) plain;
+    unsigned _BitInt(4) other : 2;
+};
+",
+        "bits",
+    );
+    assert_eq!(layout.size, 6);
+    assert_eq!(layout.alignment, 2);
+    let placed: Vec<(&str, usize, Option<usize>, Option<usize>)> = layout
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.as_str(),
+                field.offset,
+                field.bit_offset,
+                field.bit_width,
+            )
+        })
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            ("three", 0, Some(0), Some(3)),
+            ("signed_wide", 2, Some(16), Some(13)),
+            ("plain", 4, None, None),
+            ("other", 5, Some(40), Some(2)),
+        ]
+    );
+}
+
+/// **A bitfield whose width is not a literal withholds the layout**, because the fields after it would be guesses.
+#[test]
+fn a_bitfield_with_a_macro_width_is_still_unknown() {
+    let layout = layout(
+        "\
+#define WIDTH 3
+struct Flags {
+    unsigned int a : WIDTH;
+    int tail;
+};
+",
+        "Flags",
+    );
+    assert_eq!(layout.unknown, ["a"]);
 }
 
 /// **An empty class is one byte**, which is the language's rule rather than arithmetic.

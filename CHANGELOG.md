@@ -46,6 +46,12 @@ fix many parser and toolchain bug
 - **GNU's `__label__` declares labels, not variables.** `__label__ done, again;` binds each name in the label
   namespace, so the facts are labels (`Other`, no type) — the same kind a `done:` line produces — instead of variables
   whose type is `__label__`.
+- **A struct of `_BitInt` bitfields has a layout.** `_BitInt(N)` is sized from the measured rule (1/2/4/8 bytes up to
+  64 bits, then multiples of eight, alignment 8 above 8 bytes), and bitfields are placed by the Itanium/GCC x64
+  storage-unit rules instead of withholding the whole class: the `:` and its literal width are read from the member's
+  own file text, the card prints `(bits a..b)`, and `struct bits { unsigned _BitInt(3) three : 3; … }` now reports
+  `size 6 byte(s), alignment 2` with offsets 0/2/4/5 — measured against gcc. A width that is a macro, an MSVC
+  bitfield (whose ABI differs), and unnamed bitfields still withhold the layout rather than guess.
 - **The `__has_*` operators are asked of the compiler.** `__has_builtin`, `__has_feature`, `__has_extension`,
   `__has_attribute` and `__has_declspec_attribute` were `Unknown`, so their branches took the else arm. A
   `CompilerFeatureProbe` renders the question as a tiny translation unit and runs the project's compiler over it

@@ -443,7 +443,7 @@ impl<F: FileProvider + Clone> Session<F> {
             arguments: &arguments,
             members: &list.members,
         };
-        let mut sized: Vec<(String, usize, usize)> = Vec::new();
+        let mut sized: Vec<(String, usize, usize, Option<usize>)> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
         // **Declaration order**, which is what decides the offsets: `members_of` answers in the index's own order
         // (names sorted, because a lookup by name is what it is for), and a layout computed in that order is a
@@ -470,16 +470,27 @@ impl<F: FileProvider + Clone> Session<F> {
                 unknown.push(fact.name.to_string());
                 continue;
             };
-            // **A bitfield has no width in a fact**, and a layout computed without it puts the next member at the
-            // wrong offset — so the class is not answered rather than answered plausibly. The `:` is found at the
-            // member's **file** offset, which is why the class was read out of its summary above: a member fact that
-            // came from a cooked reading carries the rendering's offsets instead.
-            if as_written.as_ref().is_some_and(|written| {
-                written
-                    .members
-                    .get(fact.name.as_str())
-                    .is_some_and(|at| Self::a_bitfield(&written.text, *at))
-            }) {
+            // **A bitfield's width is in the file's text, not in its fact.** It is read at the member's own file
+            // offset, which is why the class was read out of its summary above: a member fact that came from a cooked
+            // reading carries the rendering's offsets instead. A width that is not a literal (`: BITS`) stays
+            // unknown — the layout after it would be a guess.
+            let mut bit_width = None;
+            if let Some(written) = &as_written
+                && let Some(at) = written.members.get(fact.name.as_str())
+                && Self::a_bitfield(&written.text, *at)
+            {
+                match Self::a_bitfield_width(&written.text, *at) {
+                    Some(width) => bit_width = Some(width),
+                    None => {
+                        unknown.push(fact.name.to_string());
+                        continue;
+                    }
+                }
+            }
+            // **MSVC's bitfield ABI is not the one the layout rules implement.** The card states the Itanium/GCC x64
+            // rules, which MSVC agrees with for whole members and disagrees with for bitfields; until that ABI is
+            // measured, a bitfield in an MSVC project is withheld rather than placed by the other compiler's rule.
+            if bit_width.is_some() && self.config.dialect() == cpp_parser::Dialect::Msvc {
                 unknown.push(fact.name.to_string());
                 continue;
             }
@@ -503,7 +514,15 @@ impl<F: FileProvider + Clone> Session<F> {
                     self.the_size_of_a_type_in(view, &expanded, depth, Some(&instantiation))
                 });
             match measured {
-                Some((size, alignment)) => sized.push((fact.name.to_string(), size, alignment)),
+                Some((size, alignment)) => {
+                    // A bitfield wider than its declared type is not something a compiler accepts; a layout with it
+                    // would be arithmetic on an invalid program.
+                    if bit_width.is_some_and(|width| width > size * 8) {
+                        unknown.push(fact.name.to_string());
+                        continue;
+                    }
+                    sized.push((fact.name.to_string(), size, alignment, bit_width));
+                }
                 None => unknown.push(fact.name.to_string()),
             }
         }
@@ -522,7 +541,9 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
-        Known::Yes(crate::sema::layout::ClassLayout::of(&sized, union, unknown))
+        Known::Yes(crate::sema::layout::ClassLayout::of_members(
+            &sized, union, unknown,
+        ))
     }
 
     /// The layout of one of a class's **bases**, read in the class's own instantiation.
@@ -564,7 +585,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .index()
             .definition(written_type, asked_from)
             .value()?;
-        let text = self.view_of_the_file(&found.file)?.source;
+        let text = self.files.read(&found.file)?;
         let summary = self.store.index().summary(&found.file)?;
         let simple = written_type.rsplit("::").next().unwrap_or(written_type);
         let class = summary.declarations.iter().find(|fact| {
@@ -602,6 +623,38 @@ impl<F: FileProvider + Clone> Session<F> {
         let after = text.get(at..).unwrap_or_default();
         let end = after.find(';').unwrap_or(after.len().min(80));
         after[..end].trim_start().starts_with(':')
+    }
+
+    /// **A bitfield's width**, when it is a literal — `: 3`, `: (13)`, `: 2,` — at the same file offset
+    /// [`Session::a_bitfield`] is asked about.
+    ///
+    /// `None` for a width that is an expression or a macro (`: BITS`): the class's layout after that point cannot be
+    /// computed without it, and a card that guessed would be wrong in a way a reader could not see.
+    pub(crate) fn a_bitfield_width(text: &str, at: usize) -> Option<usize> {
+        let after = text.get(at..)?;
+        let end = after.find(';').unwrap_or(after.len().min(120));
+        let declaration = after[..end].trim_start();
+        let rest = declaration.strip_prefix(':')?.trim_start();
+        let (digits, after) = if let Some(parenthesised) = rest.strip_prefix('(') {
+            let close = parenthesised.find(')')?;
+            (
+                parenthesised[..close].trim(),
+                parenthesised[close + 1..].trim_start(),
+            )
+        } else {
+            let end = rest
+                .find(|character: char| !character.is_ascii_digit())
+                .unwrap_or(rest.len());
+            (&rest[..end], rest[end..].trim_start())
+        };
+        if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
+            return None;
+        }
+        // **The literal must be the whole width**, not the first term of `: 3 + 2` or the start of a name.
+        if !after.is_empty() && !matches!(after.chars().next(), Some(';' | ',' | '}')) {
+            return None;
+        }
+        digits.parse().ok()
     }
 
     /// The size and alignment of a member's written type, **in the instantiation the member is written in**.

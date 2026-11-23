@@ -9,11 +9,13 @@
 //! multiple of its own alignment, the class's alignment is the largest member's, and its size is rounded up to that
 //! alignment. A `union` puts every member at 0 and takes the largest.
 //!
-//! # What is deliberately not answered
+//! # What is answered, and what is deliberately not
 //!
-//! **Bitfields** change where the next member starts, and a fact does not record the width — a layout computed without
-//! them would be a wrong number rather than a missing one, so a class with a bitfield reports no offsets at all.
-//! **`#pragma pack`** does the same thing by hand. **Virtual bases** add a vtable pointer that depends on the bases a
+//! **Bitfields** are placed by the Itanium/GCC x64 storage-unit rules — see [`ClassLayout::of_members`] for the
+//! measured cases. **MSVC's bitfield ABI differs**, so the caller withholds a bitfield layout in that dialect rather
+//! than applying gcc's rule to a cl.exe build.
+//!
+//! **`#pragma pack`** changes the rules by hand. **Virtual bases** add a vtable pointer that depends on the bases a
 //! class has, which the fact does record (`bases`), but the size of a base is another class — that is handled, while a
 //! vtable pointer is not added. A class that inherits therefore reports "no layout" rather than a plausible wrong one.
 
@@ -21,10 +23,14 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldLayout {
     pub name: String,
-    /// Bytes from the start of the object.
+    /// Bytes from the start of the object — the **storage unit's** offset for a bitfield.
     pub offset: usize,
-    /// The member's own size.
+    /// The member's own size — the storage unit's size for a bitfield.
     pub size: usize,
+    /// **Where the bits start**, for a bitfield: the absolute bit position in the object. `None` for a whole member.
+    pub bit_offset: Option<usize>,
+    /// **How many bits the declaration takes**, for a bitfield; `None` for a whole member.
+    pub bit_width: Option<usize>,
 }
 
 /// **A class's memory layout**, as the target gives it.
@@ -48,41 +54,113 @@ impl ClassLayout {
     /// The layout of a class from its data members' sizes and alignments, in declaration order.
     ///
     /// `members` is what the caller could work out; a member whose type it could not size is in `unknown` and makes
-    /// the result unusable — see [`ClassLayout::unknown`].
+    /// the result unusable — see [`ClassLayout::unknown`]. No member is a bitfield in this form; [`ClassLayout::of_members`]
+    /// is the one that takes a width.
     pub fn of(members: &[(String, usize, usize)], union: bool, unknown: Vec<String>) -> Self {
-        let mut offset = 0usize;
-        let mut size = 0usize;
-        let mut alignment = 1usize;
+        let members: Vec<(String, usize, usize, Option<usize>)> = members
+            .iter()
+            .map(|(name, size, alignment)| (name.clone(), *size, *alignment, None))
+            .collect();
+        Self::of_members(&members, union, unknown)
+    }
+
+    /// **The layout of a class whose members may be bitfields**, in declaration order.
+    ///
+    /// The bitfield rules are the Itanium/GCC x64 ones, measured on the compiler this project builds with:
+    ///
+    /// * A bitfield occupies a **storage unit** the size of its declared type, aligned to that type. A field starts
+    ///   in the current unit only when the previous field had the *same* unit type and the bits still fit; otherwise
+    ///   the next unit starts at the next multiple of the type's alignment.
+    /// * `struct { unsigned _BitInt(8) a:3; unsigned _BitInt(8) b:5; unsigned _BitInt(8) c:3; }` is **2** bytes: `a`
+    ///   and `b` share byte 0, `c` starts byte 1.
+    /// * `struct { unsigned a:3; unsigned b:30; unsigned c:3; }` is **12** bytes: `b` does not fit the 29 remaining
+    ///   bits of the first `unsigned` unit, and `c` does not fit the two remaining after it.
+    /// * A **normal member** ends the current bitfield unit and starts at the next multiple of its own alignment;
+    ///   the class's size is the bit cursor rounded up to its alignment.
+    ///
+    /// A zero-width bitfield asks for the next unit boundary and occupies no storage; it names no field.
+    pub fn of_members(
+        members: &[(String, usize, usize, Option<usize>)],
+        union: bool,
+        unknown: Vec<String>,
+    ) -> Self {
         let mut fields = Vec::with_capacity(members.len());
-        for (name, member_size, member_alignment) in members {
-            let member_alignment = (*member_alignment).max(1);
-            alignment = alignment.max(member_alignment);
-            if union {
+        let mut alignment = 1usize;
+        if union {
+            let mut size = 0usize;
+            for (name, member_size, member_alignment, bit_width) in members {
+                alignment = alignment.max((*member_alignment).max(1));
                 fields.push(FieldLayout {
                     name: name.clone(),
                     offset: 0,
                     size: *member_size,
+                    bit_offset: bit_width.map(|_| 0),
+                    bit_width: *bit_width,
                 });
                 size = size.max(*member_size);
+            }
+            return ClassLayout {
+                size: size.max(1),
+                alignment,
+                union: true,
+                fields,
+                unknown,
+            };
+        }
+
+        // The bit cursor, and the unit type of the bitfield immediately before it — the two facts the next field's
+        // placement depends on.
+        let mut bit_cursor = 0usize;
+        let mut previous_unit: Option<(usize, usize)> = None;
+        for (name, member_size, member_alignment, bit_width) in members {
+            let member_size = *member_size;
+            let member_alignment = (*member_alignment).max(1);
+            alignment = alignment.max(member_alignment);
+            let Some(width) = bit_width else {
+                // A whole member: the next multiple of its alignment, and the bit cursor follows it.
+                let offset = bit_cursor.div_ceil(member_alignment * 8) * member_alignment;
+                fields.push(FieldLayout {
+                    name: name.clone(),
+                    offset,
+                    size: member_size,
+                    bit_offset: None,
+                    bit_width: None,
+                });
+                bit_cursor = (offset + member_size) * 8;
+                previous_unit = None;
+                continue;
+            };
+            if *width == 0 {
+                // A zero-width bitfield aligns the cursor to the type's unit and declares no field.
+                bit_cursor = bit_cursor.div_ceil(member_alignment * 8) * member_alignment * 8;
+                previous_unit = None;
                 continue;
             }
-            // **The member starts at the next multiple of its alignment**, which is the whole rule for everything
-            // that is not a bitfield.
-            let at = offset.div_ceil(member_alignment) * member_alignment;
+            let unit_bits = member_size * 8;
+            let shares = previous_unit == Some((member_size, member_alignment))
+                && bit_cursor % unit_bits + *width <= unit_bits;
+            let (unit_start, within) = if shares {
+                let unit_start = bit_cursor.div_euclid(unit_bits) * unit_bits;
+                (unit_start, bit_cursor - unit_start)
+            } else {
+                let start = bit_cursor.div_ceil(member_alignment * 8) * member_alignment * 8;
+                (start, 0)
+            };
             fields.push(FieldLayout {
                 name: name.clone(),
-                offset: at,
-                size: *member_size,
+                offset: unit_start / 8,
+                size: member_size,
+                bit_offset: Some(unit_start + within),
+                bit_width: Some(*width),
             });
-            offset = at + member_size;
-            size = offset;
+            bit_cursor = unit_start + within + *width;
+            previous_unit = Some((member_size, member_alignment));
         }
-        // An empty class is one byte in C++: `sizeof` of it is never 0.
-        let size = size.max(1);
+        let size = bit_cursor.div_ceil(alignment * 8) * alignment;
         ClassLayout {
-            size: size.div_ceil(alignment) * alignment,
+            size: size.max(1),
             alignment,
-            union,
+            union: false,
             fields,
             unknown,
         }
@@ -101,8 +179,12 @@ impl ClassLayout {
         );
         out.push_str(&format!("{name}\n"));
         for field in &self.fields {
+            let bits = match (field.bit_offset, field.bit_width) {
+                (Some(at), Some(width)) => format!(" (bits {at}..{})", at + width),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "  {:<32} offset {:>3}, {} byte(s)\n",
+                "  {:<32} offset {:>3}, {} byte(s){bits}\n",
                 field.name, field.offset, field.size
             ));
         }
@@ -163,6 +245,14 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
     }
     // `unsigned long long`-style spellings are normalized by the caller's spelling, which may hold any of the words in
     // any order — so the answer is decided by the *set* of words that name a type.
+    //
+    // **C23's `_BitInt(N)`** first, because its size is a function of N and no word in the spelling says it: measured
+    // with gcc 15 (MinGW) under `-std=gnu2x`, `_BitInt(1..8)` is 1 byte, `9..16` is 2, `17..32` is 4, `33..64` is 8,
+    // `65..128` is 16, `129..192` is 24, `193..256` is 32 — powers of two up to 64 bits, then multiples of eight
+    // bytes — and the alignment is the size up to eight, then eight.
+    if let Some(bitint) = a_bitint_in_memory(word) {
+        return Some(bitint);
+    }
     let words: Vec<&str> = word
         .split(|character: char| character.is_whitespace() || character == '*' || character == '&')
         .filter(|word| !word.is_empty())
@@ -219,9 +309,62 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// **The size and alignment of a `_BitInt(N)` spelling**, or `None` when the spelling is not one.
+///
+/// The measured rule is in [`a_builtin_in_memory`]'s note; this reads the width and applies it. Only the two
+/// signedness words may stand beside it — `unsigned _BitInt(13)`, `_BitInt(13) signed` — so an unrelated spelling
+/// that happens to contain the word is not sized as one.
+fn a_bitint_in_memory(spelling: &str) -> Option<(usize, usize)> {
+    let at = spelling.find("_BitInt")?;
+    let before = spelling[..at].trim();
+    if !matches!(before, "" | "unsigned" | "signed") {
+        return None;
+    }
+    let rest = spelling[at + "_BitInt".len()..].trim_start();
+    let rest = rest.strip_prefix('(')?.trim_start();
+    let close = rest.find(')')?;
+    let bits: usize = rest[..close].trim().parse().ok()?;
+    let after = rest[close + 1..].trim();
+    if !matches!(after, "" | "unsigned" | "signed") || bits == 0 {
+        return None;
+    }
+    let bytes = bits.div_ceil(8);
+    let size = if bits <= 64 {
+        bytes.next_power_of_two()
+    } else {
+        bytes.div_ceil(8) * 8
+    };
+    Some((size, size.min(8)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Measured with gcc 15 (MinGW) under `-std=gnu2x`: power-of-two sizes through 64 bits, then multiples of eight
+    /// bytes; alignment is the size up to eight, and eight above that.
+    #[test]
+    fn a_bitint_is_sized_by_its_width() {
+        for (bits, expected) in [
+            (1usize, (1usize, 1usize)),
+            (3, (1, 1)),
+            (8, (1, 1)),
+            (9, (2, 2)),
+            (13, (2, 2)),
+            (17, (4, 4)),
+            (33, (8, 8)),
+            (64, (8, 8)),
+            (65, (16, 8)),
+            (128, (16, 8)),
+            (129, (24, 8)),
+            (193, (32, 8)),
+        ] {
+            let spelling = format!("unsigned _BitInt({bits})");
+            assert_eq!(a_builtin_in_memory(&spelling), Some(expected), "{spelling}");
+        }
+        assert_eq!(a_builtin_in_memory("_BitInt(13)"), Some((2, 2)));
+        assert_eq!(a_builtin_in_memory("_BitInt(3) unsigned"), Some((1, 1)));
+    }
 
     #[test]
     fn a_struct_packs_its_members_with_their_own_alignment() {
