@@ -15,8 +15,6 @@ cpp_parser = { path = "crates/cpp_parser", version = "0.5.0" }
 cpp_toolchain = { path = "crates/cpp_toolchain", version = "0.5.0" }
 cpp_formatter = { path = "crates/cpp_formatter", version = "0.5.0" }
 cpp_code_analysis = { path = "crates/cpp_code_analysis", version = "0.5.0" }
-# Named by `tools/inspect` only: the hover card is the server's rendering, and a tool asking the analysis instead would
-# answer a different question from the one an editor asks.
 cpp_ls = { path = "crates/cpp_ls", version = "0.5.0" }
 
 # external
