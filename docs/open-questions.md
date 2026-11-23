@@ -3368,7 +3368,50 @@ it actually missed.
 
 Not changed: the fixture (3 000 lines) is what makes the race window measurable, and in release it costs ~1.7 s.
 
+## An elaborated tag declared a type, and hid the real one — fixed
 
+`struct bits make_bits(...)`, `struct bits value;` and a `struct bits` parameter use the tag as a **type**, but the
+scope builder bound every bodyless `StructDef` as a class declaration in that file. The summary then held a `bits` Type
+fact with no members and no body, and it shadowed the definition in the header: from `bits.c`, `members --class bits`
+answered **0** and `pointer->three` reported "`const bits*` has no member `three`", while `corpus.h`'s own summary held
+all four (including the `_BitInt` ones). The same fabricated fact is what a jump on the parameter's `bits` resolved to
+— the function's own line, not the struct.
 
+The rule is the declaration's own: a **bodyless** class-like node declares the tag only when the declaration it sits in
+has **no init-declarator** (`struct bits;`). A body is always a declaration (`struct bits { … };`, `typedef struct { … }
+Name;`), and an elaborated specifier of another declarator is a use.
 
+**The same shape on an enumeration had the same effect, by a different node.** `enum Color pick(void);` is a
+`BuiltinType` holding a `NamedType` rather than a `StructDef`, and the elaborated-tag binding there (`class Widget w;`
+gained its tag by the same code) filed `Color` in the file that used it: `define` on the parameter's `Color` answered
+`bits.c:2:6` instead of the enumeration. A tag is now bound only when the declaration introduces nothing else —
+`struct bits;`, `class Widget;` — which is the case [basic.lookup.elab] is about.
 
+Measured on `C:\Users\zc\Desktop\c-project` (`corpus.h`'s four members):
+
+* before: `members --class bits` from `bits.c` → **0**; hover `pointer->three` → "`const bits*` has no member
+  `three`"; `define` on the parameter's `bits` → `bits.c:8:8` (the fabricated fact on `make_bits`'s line);
+* after: **4** members from `corpus.h`; hover → `unsigned _BitInt(3) three`, `bits::three` at `corpus.h:11:25`;
+  `define` → `corpus.h:10:8`.
+
+And the enumeration fixture (`enum Color { Red, Green };` in `corpus.h`, `enum Color pick(void);` in `bits.c`): before,
+`define` → `bits.c:2:6`; after, `corpus.h:1:6`.
+
+Neither the content nor `context_hash` moved, so `FORMAT_VERSION` 59 → 60 makes the stale summaries unreachable.
+Tests: `a_c_struct_in_a_header_has_its_members`, `an_elaborated_type_specifier_does_not_declare_the_tag` and
+`an_elaborated_enum_specifier_does_not_declare_the_tag` in
+`crates/cpp_code_analysis/src/index/project/tests.rs`.
+## A GNU statement expression in a hover card is not formatted correctly — open
+
+Linux trees expand several allocation macros through a GNU statement expression: `mark_allocated(...)` is
+`alloc_hooks(mark_allocated_noprof(__VA_ARGS__))`, and `alloc_hooks` is `({ … })`, so the card shows a statement body.
+`cpp_formatter::reflow` treats the `{` after `(` as an **initializer list** (`breaks.rs` and `layout.rs` classify a
+brace introduced by `(` as `Brace::Nothing`), so its contents get no block indent and the line breaker wraps at
+parentheses: reproduced with a fixture, the card prints `({ typeof(...) _res; if (...) {` then `struct alloc_tag ...` at
+column 0, then `} else {` and `_res; })`, where clang-format writes `({\n    typeof(...) _res;\n    if (...) {\n …`.
+
+The fix belongs in the formatter, not the card: a `{` whose `(` is a statement-expression opener is a **block** (the
+parenthesis is transparent for line breaking), so its statements end lines and indent, and the matching `})` closes it.
+That is a change to `breaks::logical_lines_with` and `layout::classify_braces`, with the shape clang-format 19.1.7
+writes as the expectation, and a test on the fixture. Not done — this turn moved to the C member lookup and jump
+defects (above), which were reported next.

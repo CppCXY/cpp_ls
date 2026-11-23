@@ -793,7 +793,9 @@ impl ScopeWalker<'_> {
             .or_else(|| the_typedef_name_around(node))
             .or_else(|| Self::the_declarators_name_around(node));
 
-        if let Some((name, name_range)) = declared {
+        if let Some((name, name_range)) = declared
+            && (body.is_some() || declares_its_own_tag(node))
+        {
             self.bind(outer, name, kind, node, name_range);
         }
 
@@ -871,6 +873,16 @@ impl ScopeWalker<'_> {
     /// which is a second binding rather than a different one, and is left to the lookup step to model, because
     /// adding it here would make the enum scope report names it does not own.
     fn enum_like(&mut self, node: &CppSyntaxNode, outer: ScopeId, inner: ScopeId) {
+        // **A bodyless enum specifier of another declarator is a use of the type, not a declaration of it** — the
+        // rule [`declares_its_own_tag`] applies to a class, one kind over. `enum Color pick(void);` named `Color` in
+        // the file that used it and shadowed the header's definition, which is the same defect the corpus project
+        // showed for `struct bits`. `CppEnumDef::get_body` is the parser's own answer to "does this define anything".
+        let defines_a_body = cpp_parser::CppEnumDef::cast(node.clone())
+            .and_then(|definition| definition.get_body())
+            .is_some();
+        if !defines_a_body && !declares_its_own_tag(node) {
+            return;
+        }
         // **The name is read by the parser's own enum node**, not by [`declared_name`]: an enumeration has no
         // declarator, so that function falls back to a node's *last* identifier — which for `enum class E { Yes, No };`
         // is `No`, the last enumerator. Measured on a header declaring
@@ -1759,7 +1771,15 @@ impl ScopeWalker<'_> {
                                 .iter()
                                 .any(|held| held.name.is(&tag.spelled()) && held.kind == binding)
                         });
-                        if !already {
+                        // **A tag written beside another declarator is a use, not a declaration.**
+                        //
+                        // `class Widget w;` and `enum Color pick(void);` name the declarator's *type*; the entity the
+                        // declaration introduces is `w`/`pick`. Binding the tag here filed an empty type in the file
+                        // that used it, which shadowed the definition a header writes: measured on the corpus project,
+                        // `enum Color pick(void);` made a jump on `Color` land on `pick`'s line, and the same shape on
+                        // `struct bits` made `members_of("bits")` answer 0. [basic.lookup.elab]'s declaration of the
+                        // tag belongs to a declaration that introduces nothing else, which is the empty case below.
+                        if declarators(node).is_empty() && !already {
                             self.bind(target, tag, binding, &child, tag_range);
                         }
                         if declarators(node).is_empty() {
@@ -2906,6 +2926,30 @@ fn named_in_a_declarator(declarator: &CppSyntaxNode) -> bool {
 fn first_child(node: &CppSyntaxNode, kind: CppSyntaxKind) -> Option<CppSyntaxNode> {
     node.children()
         .find(|child| CppSyntaxKind::from(child.kind()) == kind)
+}
+
+/// **Is a bodyless class-like node a declaration of the tag, or the type of another name?**
+///
+/// `struct bits;` declares the tag: the declaration holds no init-declarator, so the specifier *is* what the
+/// declaration says. `struct bits make_bits(...)`, `struct bits value;` and a `struct bits` parameter use the tag as
+/// a type, and the declaration's init-declarator names the entity it declares — binding the tag there would file a
+/// **new, empty class** in this file and shadow the definition the header wrote.
+///
+/// Measured on the corpus project (`c-project`): `bits` was filed in `bits.c` as a type with no members, so
+/// `members_of("bits")` answered **0** and `pointer->three` reported "`const bits*` has no member `three`", while the
+/// header's own summary held all four members. The same spurious fact is what a jump on the parameter's `bits`
+/// landed on (`make_bits`) instead of the struct.
+fn declares_its_own_tag(node: &CppSyntaxNode) -> bool {
+    let Some(declaration) = node
+        .ancestors()
+        .find(|ancestor| cpp_parser::CppDeclaration::can_cast(ancestor.kind().into()))
+    else {
+        // A specifier in a cast or a `sizeof` is a use of a type, not a declaration of one.
+        return false;
+    };
+    cpp_parser::CppDeclaration::cast(declaration)
+        .and_then(|declaration| declaration.get_init_declarator())
+        .is_none()
 }
 
 /// The name a `MacroCall` invokes, as the file spells it.

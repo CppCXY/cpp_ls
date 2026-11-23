@@ -29,6 +29,12 @@ fix many parser and toolchain bug
   read as well, and a condition may ask the two names (`#if __LINE__`, `#elif`, `#ifdef`, `defined`); `__LINE__`
   written directly in a run also answers its own line now, where it used to answer the run's first line.
   `context_hash` folds the spelling, so `FORMAT_VERSION` moved 57 → 58.
+- **An elaborated `struct bits` no longer declares a type of its own.** `struct bits make_bits(...)`, `struct bits
+  value;` and a `struct bits` parameter use the tag as a type, but the scope builder bound the bodyless class as a
+  declaration in that file: a `bits` type with no members shadowed the header's definition, so `members_of("bits")`
+  answered 0 and `pointer->three` reported no member while the header's summary held all four. The same held for
+  `enum Color pick(void);`, where a jump on `Color` landed on the function. A tag is now bound only when its
+  declaration introduces nothing else (`struct bits;`, `class Widget;`). `FORMAT_VERSION` 59 → 60.
 
 ## [0.4.0]
 

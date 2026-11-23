@@ -1938,6 +1938,89 @@ char colour;\n\
     );
 }
 
+/// **A C struct declared in a header has its members for a file that includes it.** The C23 `_BitInt` specifier is
+/// part of a declaration, not a reason to drop the declaration: the corpus project's four members are recorded by
+/// the header's own summary and must be visible from the source that includes it.
+#[test]
+fn a_c_struct_in_a_header_has_its_members() {
+    let header = "struct bits {\n  unsigned _BitInt(3) three : 3;\n  _BitInt(13) signed_wide : 13;\n  _BitInt(5) plain;\n  unsigned _BitInt(4) other : 2;\n};\n";
+    let source = "#include \"corpus.h\"\nstruct bits make_bits(unsigned seed) {\n  struct bits value = {0};\n  value.three = seed;\n  return value;\n}\n";
+    let found = members_of_class(&[("/p/corpus.h", header)], "/p/bits.c", source, "bits");
+
+    let Known::Yes(list) = found else {
+        panic!("`bits` is declared in the header this file includes: {found:?}");
+    };
+    let mut found = names(&list);
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        ["other", "plain", "signed_wide", "three"],
+        "every member the header writes is in the list: {:?}",
+        names(&list)
+    );
+}
+
+#[test]
+fn an_elaborated_type_specifier_does_not_declare_the_tag() {
+    // `struct bits make_bits(...)` is the *use* the corpus project's `bits.c` opens with, and binding the tag there
+    // created a type fact in that file with no members. A jump on the parameter's `bits` then resolved to it —
+    // reported as landing on `make_bits` — instead of the definition the header writes.
+    let header = "struct bits {\n  unsigned _BitInt(3) three : 3;\n};\n";
+    let source = "#include \"corpus.h\"\nstruct bits make_bits(unsigned seed) {\n  struct bits value = {0};\n  return value;\n}\n";
+    let (index, tree) = analysed(&[("/p/corpus.h", header)], "/p/bits.c", source);
+
+    let root = tree.get_red_root();
+    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let found = super::definition_across_files(
+        &index,
+        &mut |_: &Path| None,
+        &scopes,
+        &root,
+        Path::new("/p/bits.c"),
+        at(source, "struct bits make_bits") + 7,
+    );
+
+    let Known::Yes(definition) = found else {
+        panic!("`struct bits` names the header's type: {found:?}");
+    };
+    assert_eq!(
+        definition.file,
+        Path::new("/p/corpus.h"),
+        "the jump goes to the definition, not to this file's `make_bits`"
+    );
+    assert_eq!(definition.fact.name, "bits");
+}
+
+#[test]
+fn an_elaborated_enum_specifier_does_not_declare_the_tag() {
+    // The class rule, one kind over: `enum Color pick(void);` is a use of `Color`, and binding it in this file made
+    // the jump land on the function's own line instead of the enumeration the header writes.
+    let header = "enum Color { Red, Green };\n";
+    let source = "#include \"corpus.h\"\nenum Color pick(void) {\n  return Red;\n}\n";
+    let (index, tree) = analysed(&[("/p/corpus.h", header)], "/p/bits.c", source);
+
+    let root = tree.get_red_root();
+    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let found = super::definition_across_files(
+        &index,
+        &mut |_: &Path| None,
+        &scopes,
+        &root,
+        Path::new("/p/bits.c"),
+        at(source, "enum Color pick") + 5,
+    );
+
+    let Known::Yes(definition) = found else {
+        panic!("`enum Color` names the header's enumeration: {found:?}");
+    };
+    assert_eq!(
+        definition.file,
+        Path::new("/p/corpus.h"),
+        "the jump goes to the definition, not to this file's `pick`"
+    );
+    assert_eq!(definition.fact.name, "Color");
+}
+
 #[test]
 fn a_class_declared_more_than_once_still_reports_the_bases_it_could_not_read() {
     // MSVC's `<istream>`, in miniature: the class, and an explicit instantiation of it. Measured on the real

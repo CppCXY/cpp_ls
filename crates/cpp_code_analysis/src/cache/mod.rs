@@ -450,7 +450,17 @@ use std::path::{Path, PathBuf};
 /// the region's live flag — and every fact filed under it — was the other branch. The same round made GNU line
 /// markers and a macro-expanded `#line` change a rendering. The key is content plus `context_hash`, neither of which
 /// moved for these, so only the version reaches the old rows.
-pub const FORMAT_VERSION: u32 = 59;
+///
+/// # Why this moved to 60
+///
+/// **An elaborated type specifier no longer declares the tag.** `struct bits make_bits(...)` used to bind `bits` in
+/// the file it appears in (a bodyless `StructDef` whose declaration has an init-declarator), so a summary held a
+/// type fact with no members and no body, shadowing the header's real definition: `members_of("bits")` answered 0,
+/// `pointer->three` reported no member, and a jump on the parameter's `bits` landed on the function. The scope
+/// builder now binds only a bodyless class whose declaration has no init-declarator (`struct bits;`). The key is
+/// content plus `context_hash`, neither of which moves for a reader's change, so only the version reaches the old
+/// summaries.
+pub const FORMAT_VERSION: u32 = 60;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
