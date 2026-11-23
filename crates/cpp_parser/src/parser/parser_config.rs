@@ -191,7 +191,7 @@ impl<'cache> ParserConfig<'cache> {
     /// (`ParserConfig::default().with_dialect(dialect).with_language(language)`): `with_dialect` added the vendor to the
     /// language config and then `with_language` **replaced** the whole config, so a `/std:c++20` command that named MSVC
     /// came out without MSVC — and `LanguageConfig` and `Dialect` then saw two different targets
-    /// (`docs/parser-toolchain-review.md` P1-2).
+    /// (`docs/worklog.md` P1-2).
     ///
     /// Naming a compiler also says the *other* compilers are not the one building this: the vendors are cleared before
     /// the dialect's own is added. Without that, `with_dialect(Msvc)` over the permissive default kept GNU's and Clang's

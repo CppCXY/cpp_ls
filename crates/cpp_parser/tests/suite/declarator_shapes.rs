@@ -18,7 +18,7 @@
 //! pin the invariants that already hold so that a change to the grammar cannot break them silently.
 //!
 //! ```text
-//! cargo test --release -p cpp_parser --test declarator_shapes -- --nocapture
+//! cargo test --release -p cpp_parser --test suite declarator_shapes -- --nocapture
 //! ```
 
 use cpp_parser::{
@@ -295,7 +295,7 @@ fn debug_initialised_variable() {
 /// The table of local type names used to be a map from name to *the brace depth it was declared at*, and
 /// visibility was `declared_at <= depth`. Two sibling functions share a depth, so `Leaked` stayed a type name for
 /// the rest of the file, and the call below was read as a **declaration** of `Leaked` with a parameter list — no
-/// `CallExpr`, no diagnostic, and a binding that does not exist. `docs/parser-toolchain-review.md` P1-1.
+/// `CallExpr`, no diagnostic, and a binding that does not exist. `docs/worklog.md` P1-1.
 #[test]
 fn a_typedef_in_one_function_is_not_a_type_name_in_its_sibling() {
     let text = "void first()\n{\n    typedef long Leaked;\n}\n\nvoid second()\n{\n    auto Leaked = [] {};\n    \

@@ -161,7 +161,7 @@ impl<F: FileProvider + Clone> Session<F> {
             offset.get(),
         );
         let found = self.with_the_reflection(view, found);
-        // **The answer came from L1, so ask for L2** — phase 1 of `docs/indexing-design.md`. A declaration the reader
+        // **The answer came from L1, so ask for L2** — the L1/L2 split `docs/open-questions.md` records. A declaration the reader
         // jumped into is a file they are now looking at, and its refined reading is what its own members, types and
         // macro-shaped declarations are answered from. Asking here costs a `HashSet` insert under its own lock; the pump
         // then refines that one file (measured: **93.6 ms**, one timeline) while this answer is already on screen.

@@ -66,7 +66,7 @@ pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 ///
 /// `CMakeCache.txt` is here because the language server's watcher globs already asked clients to report it — a glob and a
 /// rule that disagree leave the event delivered and treated as an edit to a source that is not one
-/// (`docs/language-server-review.md` P1-5/P1-6's shared root: two lists of the same thing).
+/// (`docs/worklog.md` P1-5/P1-6's shared root: two lists of the same thing).
 pub const CONFIGURATION_FILE_NAMES: &[&str] = &[
     PROJECT_CONFIG_FILE,
     "compile_commands.json",

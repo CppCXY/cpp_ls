@@ -19,7 +19,7 @@
 //!
 //! ```text
 //! $env:CPPLS_TEST_LOG_LEVEL = "info"    (optional; the default here is info)
-//! cargo test -p cpp_ls --test watch_rescan -- --nocapture
+//! cargo test -p cpp_ls --test suite watch_rescan -- --nocapture
 //! ```
 //!
 //! The client capabilities are the ones that route a server to its own watcher: a client that does **not** advertise

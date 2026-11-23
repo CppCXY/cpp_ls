@@ -753,7 +753,7 @@ pub fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
         // **Every quoted operand of `#include` is a header name**, a backslash included: an h-char is not escaped, so
         // `"sub\header.h"` is a Windows project's path rather than a string literal. Refusing it left the directive
         // with no target at all, which is worse than a wrong one — the include simply vanished
-        // (`docs/parser-toolchain-review.md` P2-2, measured with `target/bench/bs_main.c`).
+        // (`docs/worklog.md` P2-2, measured with `target/bench/bs_main.c`).
         tokens[target].kind = CppTokenKind::HeaderName;
     }
 }
@@ -764,7 +764,7 @@ mod tests {
     /// **A quoted `#include` with a backslash is still an include.** The quoted operand of `#include` is a header name,
     /// and a header name has no escape sequences, so `"sub\header.h"` is a path. Three readers used to refuse it and the
     /// directive then had **no target at all** — the include vanished rather than pointing somewhere wrong
-    /// (`docs/parser-toolchain-review.md` P2-2).
+    /// (`docs/worklog.md` P2-2).
     #[test]
     fn a_quoted_include_with_a_backslash_keeps_its_target() {
         for source in [

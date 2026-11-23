@@ -1311,7 +1311,7 @@ pub fn callee_name_of(callee: &cpp_parser::CppExpr) -> Option<String> {
 ///
 /// The list is found through the **typed** AST ([`CppParamList`](cpp_parser::CppParamList)) rather than by comparing
 /// node kinds: the kind is `ParameterList`, a kind this grammar does not have under that name, so a kind comparison
-/// silently matched nothing — which is the trap `status.md` §5 records and the reason its rule is to use `cast`.
+/// silently matched nothing — which is the trap the `cast` rule exists for.
 ///
 /// The **token** is returned rather than its text, because the two callers want different halves of it and both are
 /// cheaper from here: [`name_declared_by`] takes the spelling, and a diagnostic takes the range.

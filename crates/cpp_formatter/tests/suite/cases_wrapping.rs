@@ -103,7 +103,7 @@ void Widget::run()
 ///
 /// GNU's answer is **not asserted**: that style also puts the return type on its own line (`void` / `f ()`) and
 /// indents the brace (`IndentBraces`), neither of which is implemented — they are recorded in
-/// `docs/formatter-diff.md` rather than approximated here.
+/// `crates/cpp_formatter/tests/suite/against_clang_format.rs` rather than approximated here.
 #[test]
 fn a_case_body_brace_is_attached_where_the_style_says() {
     let input =

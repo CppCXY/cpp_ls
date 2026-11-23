@@ -26,7 +26,7 @@ use super::{
 ///
 /// The dispatcher used to drop a malformed one silently (`if let Ok(params)` with no `else`), so a client bug — or a
 /// field this server reads and the client does not send — left the analysis a document behind with nothing in the log to
-/// say why (`docs/language-server-review.md` P2-6).
+/// say why (`docs/worklog.md` P2-6).
 ///
 /// It takes the notification **by value** because `Notification::extract` consumes it, and it reads the URI out of the
 /// raw params *before* extracting, which is the only place it exists once extraction has failed. The params themselves
@@ -104,7 +104,7 @@ pub async fn on_notification_handler(
             // **Read here, apply in the queue.** The read is a server→client round trip and the queue worker must never
             // await the client — it holds the apply lock a request's barrier waits on, so the two would wait for each
             // other. The **application** is an update event, which is what gives a following request the barrier and an
-            // in-flight one `ContentModified` (`docs/language-server-review.md` P1-2).
+            // in-flight one `ContentModified` (`docs/worklog.md` P1-2).
             let snapshot = server_context.snapshot();
             if let Some(config) = configuration::the_clients_configuration(&snapshot).await {
                 snapshot.enqueue(UpdateEvent::Configuration(config)).await;

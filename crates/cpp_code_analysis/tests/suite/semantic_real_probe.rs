@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
-//! cargo test -p cpp_code_analysis --test semantic_real_probe -- --ignored --nocapture
+//! cargo test -p cpp_code_analysis --test suite semantic_real_probe -- --ignored --nocapture
 //! ```
 
 use std::path::PathBuf;

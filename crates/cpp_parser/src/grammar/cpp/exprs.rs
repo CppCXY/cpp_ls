@@ -1401,7 +1401,7 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
 
     // **To the end of the file, not to a fixed window.** The match it is looking for is the `)` that closes the cursor's
     // `(`, and a group longer than the window used to answer "no closing parenthesis" - which is not an answer about the
-    // grammar but about the budget (`docs/parser-toolchain-review.md` P2-1). The loop already stops at that `)` and at
+    // grammar but about the budget (`docs/worklog.md` P2-1). The loop already stops at that `)` and at
     // EOF, so the file's own length bounds it.
     let from = p.current_token_index() + 1;
     let reach = p.token_count().saturating_sub(from);
@@ -3119,7 +3119,7 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
 
     // **The GNU statement expression**, decided at the one token that tells it apart — and only where the
     // configuration says the extension exists: `({ … })` in a strict C++23 parse is a `{` where an expression belongs,
-    // which is an error rather than a construct (`docs/parser-toolchain-review.md` P3-2, found by the vendor matrix).
+    // which is an error rather than a construct (`docs/worklog.md` P3-2, found by the vendor matrix).
     if p.current_token() == CppTokenKind::LeftBrace
         && p.language()
             .support(crate::features::Feature::StatementExpression)

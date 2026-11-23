@@ -1239,7 +1239,7 @@ pub fn definitions_at(
         let found = bindings_named(scope_data, &name);
         if !found.is_empty() {
             // **A declaration is visible from its own point onward** — the first slice of the program-point rule
-            // (`docs/code-analysis-review.md` P1-1). `void f() { later(); } void later() {}` is not a program, and the
+            // (`docs/worklog.md` P1-1). `void f() { later(); } void later() {}` is not a program, and the
             // name resolved to the declaration written after it; a compiler rejects the call.
             //
             // A **class scope** is the exception the language states: a member is visible throughout the class body
@@ -1376,7 +1376,7 @@ fn using_directive_targets(scopes: &ScopeTree, offset: usize) -> Vec<ScopeId> {
     // **Only the directives written before the use.** A directive is a declaration like any other: `using namespace A;`
     // written below a use makes nothing visible at that use, and the review's third reproducer —
     // `namespace A { int secret; } void f() { secret; } using namespace A;` — resolved `secret` through the directive
-    // below it (`docs/code-analysis-review.md` P1-1).
+    // below it (`docs/worklog.md` P1-1).
     let named: Vec<String> = scopes
         .scopes()
         .iter()

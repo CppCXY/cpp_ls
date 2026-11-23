@@ -10,7 +10,7 @@
 //! that read goes through the provider the session was opened with.
 //!
 //! ```text
-//! cargo test --release -p cpp_ls --test module_implementation
+//! cargo test --release -p cpp_ls --test suite module_implementation
 //! ```
 
 use std::path::PathBuf;

@@ -15,14 +15,14 @@
 //! # What is counted
 //!
 //! ```text
-//! vfs            the text and line index of every file the session has read — **no budget, see the audit**
+//! vfs            the text and line index of every file the session has read — **no budget**
 //! summaries      the raw reading of every indexed file
 //! cooked         the second reading (the compiler's), per cooked file
 //! definitions    `MacroDefinitions`: every `#define` read back, keyed by (path, offset)
 //! units          the held translation units: events, frames, name index
 //! renderings     the LRU cache of rendered closures
 //! bookkeeping    dead macros, directive signatures, include searches, units-read keys
-//! walk cache     the process-wide contribution table (a static — see the audit)
+//! walk cache     the process-wide contribution table (a static)
 //! ```
 //!
 //! [`MemoryReport`] is a value: it can be printed, compared across two runs, or asserted in a test.

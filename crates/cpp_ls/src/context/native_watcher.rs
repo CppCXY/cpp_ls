@@ -56,7 +56,7 @@ impl NativeFileWatcher {
         filter: WatchFilter,
         // **Files outside the root that still configure the project** — a `--config` a caller pointed elsewhere. A
         // recursive watch of the root cannot see one, and a configuration that is only read when the session opens is
-        // exactly what this watcher exists to notice changing (`docs/language-server-review.md` P1-5).
+        // exactly what this watcher exists to notice changing (`docs/worklog.md` P1-5).
         also: Vec<PathBuf>,
     ) -> notify::Result<()> {
         let mut current = self.state.lock().await;

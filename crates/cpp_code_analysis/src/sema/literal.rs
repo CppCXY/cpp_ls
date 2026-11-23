@@ -10,7 +10,7 @@
 //! answered the type of an expression, and `sema/constant.rs` folded a value. Each had its own reading, and all three
 //! dropped the suffix — `1u` was `int`, `1.0f` was `double`, `u8"x"` was `const char*` — so `auto a = 1u;` was `int`,
 //! `pick(1u)` picked the `int` overload, and a hover on `1.0f` said `double`
-//! (`docs/code-analysis-review.md` P1-4).
+//! (`docs/worklog.md` P1-4).
 //!
 //! # The standard is not a parameter, and this is the one place that hurts
 //!
@@ -151,7 +151,7 @@ fn trailing(written: &str, allowed: impl Fn(char) -> bool) -> &str {
 mod tests {
     use super::a_literal_type_for;
 
-    /// The answers `docs/code-analysis-review.md` P1-4 named as wrong, plus the neighbours they sit beside.
+    /// The answers `docs/worklog.md` P1-4 named as wrong, plus the neighbours they sit beside.
     #[test]
     fn a_literal_keeps_its_suffix_and_its_encoding() {
         for (written, expected) in [

@@ -4,7 +4,7 @@
 //! $env:CPPLS_CLANG_FORMAT = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-format.exe"
 //! $env:CPPLS_FMT_CORPUS  = "E:\EmmyLuaCodeStyle\CodeFormatCore\src"
 //! $env:CPPLS_FMT_STYLE   = "LLVM"            # or Microsoft, Google, or an inline YAML object
-//! cargo test --release -p cpp_formatter --test against_clang_format -- --ignored --nocapture
+//! cargo test --release -p cpp_formatter --test suite against_clang_format -- --ignored --nocapture
 //! ```
 //!
 //! The question this answers is not "do the two agree on a fixture" — `tests/cases_*.rs` already holds the shapes

@@ -569,7 +569,7 @@ pub fn is_breakable(
     // `std::unique_ptr<frame[]>` then `heap{};` (measured), but adding it as a candidate moved the whole-file columns the
     // wrong way by a lot — nlohmann json 20 426 → 20 536 `LLVM` and 20 512 → 20 580 `Google`, EmmyLuaCodeStyle 1 434 →
     // 1 442 — because the search then breaks after every template closer where the author's line already fitted. See
-    // `docs/formatter-diff.md` ("What the remaining difference is", item 3).
+    // `crates/cpp_formatter/tests/suite/against_clang_format.rs` classifies the differences that remain.
     match current {
         // Before a member access and after an opening bracket.
         Dot | Arrow => true,

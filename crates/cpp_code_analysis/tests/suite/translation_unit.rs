@@ -1446,7 +1446,7 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
 /// **Does the cook leave a `_STD_BEGIN`/`_STD_END` pair open when two headers use it?** — a probe, not a test.
 ///
 /// ```text
-/// cargo test --release -p cpp_code_analysis --test translation_unit a_scope_macro -- --ignored --nocapture
+/// cargo test --release -p cpp_code_analysis --test suite a_scope_macro -- --ignored --nocapture
 /// ```
 ///
 /// The modules fixture files `std::format` under `std::std::std::std::std::std::std::std::std::std` — ten levels —

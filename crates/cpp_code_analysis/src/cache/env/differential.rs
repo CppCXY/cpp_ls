@@ -18,7 +18,7 @@
 //! * **seed names** — the compiler's predefines and `-D`, which the walk's view does not enumerate either;
 //! * **`unknown_guards`** — a directive whose region the fold could not decide is not applied (the conservative arm of
 //!   `compose`), so a name can be missing from the fold on purpose. The count is reported beside the mismatches; a
-//!   corpus is expected to be non-zero here until `Definition` answers values (`docs/module-cache.md` §8).
+//!   corpus is expected to be non-zero here until `Definition` answers values (`docs/open-questions.md`).
 //!
 //! # The two runs
 //!
@@ -201,7 +201,7 @@ fn composition<F: FileProvider + Clone>(
 ) -> UnitComposition {
     // **A resolver for the includes the summary could not resolve**, from the paths the walk reached: a spelling
     // with no cached path is matched against the last two segments of a known file. This is a probe's stand-in for
-    // the session's resolver, and it exists to test the diagnosis in docs/module-cache.md §6a: the fold reaches
+    // the session's resolver, and it exists to test the diagnosis in docs/open-questions.md: the fold reaches
     // 251 of the walk's 1 053 files because 778 includes did not resolve when the summaries were built.
     let mut by_suffix: HashMap<String, PathBuf> = HashMap::new();
     for path in known {

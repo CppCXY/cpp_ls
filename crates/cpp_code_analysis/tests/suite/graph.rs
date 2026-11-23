@@ -1418,7 +1418,7 @@ fn a_chain_deeper_than_the_limit_stops() {
 
 /// **A quoted include with a backslash reaches its header.** The separator is a character of the header name, so
 /// `#include "sub\header.h"` must resolve to `sub/header.h` — the spelling every Windows project uses. Before the fix the
-/// directive had no target at all, so this header was never read: `docs/parser-toolchain-review.md` P2-2.
+/// directive had no target at all, so this header was never read: `docs/worklog.md` P2-2.
 #[test]
 fn a_quoted_include_with_a_backslash_reaches_its_header() {
     let files = MemoryFiles::new()

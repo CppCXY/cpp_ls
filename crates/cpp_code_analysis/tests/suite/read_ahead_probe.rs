@@ -1,9 +1,9 @@
 //! **How much read-ahead a session holds while it indexes**, and that the budget holds it.
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test read_ahead_probe -- --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite read_ahead_probe -- --nocapture
 //! CPPLS_REAL_PROJECT=… CPPLS_PROBE_DIRS=… \
-//!   cargo test --release -p cpp_code_analysis --test read_ahead_probe -- --ignored --nocapture
+//!   cargo test --release -p cpp_code_analysis --test suite read_ahead_probe -- --ignored --nocapture
 //! ```
 //!
 //! # Why the read-ahead needed a budget at all

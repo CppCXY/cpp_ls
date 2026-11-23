@@ -7761,7 +7761,7 @@ int after_this;
 /// **A `using` alias whose initializer carries a long template argument list.** The scan that finds the matching `>`
 /// of a template-id used to give up after 128 tokens, and the alias's own `<` was then reported as `` expected `;` ``.
 /// 120 arguments is about 240 tokens, which is what an alias built by a generator looks like
-/// (`docs/parser-toolchain-review.md` P2-1, measured with `target/bench/threshold_probe.py`).
+/// (`docs/worklog.md` P2-1, measured with `target/bench/threshold_probe.py`).
 #[test]
 fn a_using_alias_with_a_long_template_argument_list_parses() {
     let arguments: Vec<String> = (0..120).map(|n| format!("T{n}")).collect();
@@ -7792,7 +7792,7 @@ fn a_cast_with_a_long_template_argument_list_parses() {
 ///
 /// It is a public entry point that takes whatever token stream a caller hands over, and every later step slices
 /// `text[start..end]`: a range past the end of the text, one that lands inside a character, and a stream that goes
-/// backwards all reached a panic inside a safe API (`docs/parser-toolchain-review.md` P2-4). The answer is the shape a
+/// backwards all reached a panic inside a safe API (`docs/worklog.md` P2-4). The answer is the shape a
 /// parse of garbage already produces — an empty translation unit and one error — so nothing downstream needs a new case.
 #[test]
 fn parse_tokens_refuses_a_stream_that_does_not_describe_its_text() {

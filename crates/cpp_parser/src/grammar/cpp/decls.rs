@@ -5491,7 +5491,7 @@ fn a_qualified_name_is_followed_by_an_equals(p: &CppParser) -> bool {
     // a grammar: a `using` alias whose initializer begins more than 96 tokens later — a long template argument list, a
     // macro-generated name — was answered "no `=` here" and read as the other construct. The loop already ends at every
     // terminator, so the file's own length is the budget and no window is needed
-    // (`docs/parser-toolchain-review.md` P2-1).
+    // (`docs/worklog.md` P2-1).
     let from = p.current_token_index();
     for offset in 0..p.token_count().saturating_sub(from) {
         match p.token_kind_at(from + offset) {

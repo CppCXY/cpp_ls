@@ -146,7 +146,7 @@ pub struct FileEntry {
     /// certainly not, and it is **also** marked uncertain, so a later `#ifdef` on it answers "unknown" rather than a
     /// confident true or false. Names, sorted, one entry each.
     ///
-    /// This is the half of `docs/parser-toolchain-review.md` P1-7 that a consumer can act on: `Marked::mark_uncertain`
+    /// This is the half of `docs/worklog.md` P1-7 that a consumer can act on: `Marked::mark_uncertain`
     /// already carried the doubt through the conditions, and until now nothing outside the walk could see it.
     pub uncertain: Vec<Box<str>>,
     /// Whether macros that could not be accounted for might still have been in force here.
@@ -715,7 +715,7 @@ fn visit<F: FileProvider>(
 ///
 /// The pass this replaces computed every directive's visibility **before** the loop that applies `#define`s, all from
 /// the state the file was entered with. That is not what a compiler does, and the cost was the most basic ordering there
-/// is (`docs/parser-toolchain-review.md` P1-6):
+/// is (`docs/worklog.md` P1-6):
 ///
 /// ```c
 /// #define FEATURE 1
@@ -941,7 +941,7 @@ fn decide_visit(
     // **The guard's own condition decides, not "a guard exists".** `Guard::Macro(NAME)` means the file is skipped
     // only while `NAME` is defined *and* it was this file that defined it: two headers that happen to use the same
     // guard name are common when projects copy each other's, and an `#undef NAME` between two includes means the
-    // compiler reads the header again. Both were skipped before (`docs/parser-toolchain-review.md` P1-8), which is the
+    // compiler reads the header again. Both were skipped before (`docs/worklog.md` P1-8), which is the
     // opposite of what `Guard::blocks_a_visit` documents.
     if let Some(entry) = graph.entry(file)
         && entry.guard.is_guarded()
@@ -1567,7 +1567,7 @@ mod tests {
     ///
     /// A macro guard is a *condition*, not a flag: `#ifndef GUARDED_H` is true again once the name is gone, and the
     /// header's body is compiled a second time. The walk skipped the second include anyway
-    /// (`docs/parser-toolchain-review.md` P1-8).
+    /// (`docs/worklog.md` P1-8).
     #[test]
     fn an_undef_between_includes_reads_the_header_again() {
         let header = "#ifndef GUARDED_H\n#define GUARDED_H\nint guarded;\n#endif\n";
@@ -1656,7 +1656,7 @@ mod tests {
     }
     /// **A `#define` above a `#if` decides that branch** — the most basic ordering there is, and the one the walk had
     /// wrong: every condition was decided from the state the file was *entered* with, so the include below was never
-    /// reached and its edge never existed (`docs/parser-toolchain-review.md` P1-6).
+    /// reached and its edge never existed (`docs/worklog.md` P1-6).
     #[test]
     fn a_define_above_a_condition_decides_the_branch() {
         let source = "#define FEATURE 1\n#if FEATURE\n#  include \"feature.h\"\n#endif\n";

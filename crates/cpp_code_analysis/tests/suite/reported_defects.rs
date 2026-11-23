@@ -1,6 +1,6 @@
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test reported_defects -- --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite reported_defects -- --nocapture
 //! ```
 //!
 //! Each of these was found by using the editor on a real project, not by reading the code, and each has a *fact-level*

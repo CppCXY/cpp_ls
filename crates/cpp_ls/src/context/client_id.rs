@@ -39,7 +39,7 @@ impl ClientId {
 /// One function, because there used to be two answers: `LspServer::new` built `LspFeatures` from `clientInfo` alone while
 /// the client-configuration path consulted `--editor`, so `--editor vscode` spoke with one identity where a *setting* is
 /// chosen and another where a *command* is chosen — a VS Code lens command and a Neovim semantic-token list from the same
-/// session (`docs/language-server-review.md` P2-2).
+/// session (`docs/worklog.md` P2-2).
 pub fn the_effective_client_id(
     editor: Option<&crate::cmd_args::Editor>,
     client_info: &Option<ClientInfo>,

@@ -283,7 +283,7 @@ pub(crate) fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
         // **To the end of the file, not to a fixed window.** This scan looks for the `>` that closes the cursor's `<`,
         // and answering "no matching angle" because 128 tokens went by is a budget reported as a grammatical fact: a
         // template-id with 64 arguments (about 130 tokens) was refused, and the alias or type that used it was reported
-        // as ``expected `;` `` at its own `<` (`docs/parser-toolchain-review.md` P2-1, measured with
+        // as ``expected `;` `` at its own `<` (`docs/worklog.md` P2-1, measured with
         // `target/bench/threshold_probe.py`). The loop stops at the matching `>` or at EOF, so the file's length is the
         // only budget it needs.
         let from = p.current_token_index() + 1;

@@ -135,7 +135,7 @@ pub(crate) fn a_body_edit_does_not_cost_the_program_again() {
 }
 
 #[test]
-#[ignore = "a query still answers from the summary's conditional fact — the reading choice does not reach this question yet (design §4.1)"]
+#[ignore = "a query still answers from the summary's conditional fact — the reading choice does not reach this question yet"]
 /// **Once a file is read as a program, the lookup-time guard filter has nothing left to do** — patch number two's
 /// remaining work, measured.
 ///
@@ -153,8 +153,7 @@ pub(crate) fn a_body_edit_does_not_cost_the_program_again() {
 /// `unknown:ConditionalCompilation` instead of being found, while with the filter off it is found. That is exactly
 /// what this test was written to detect ("if they ever differ, this file's reading is not the rendering"), and they
 /// now differ: after phase 2 the session builds no timelines, so an open file's summary is the **raw** reading again
-/// and the lookup-time guard filter has a user it did not have. `docs/indexing-review.md` §3.1 is the same root
-/// cause, measured a second way.
+/// and the lookup-time guard filter has a user it did not have. The same root cause was measured a second way.
 ///
 /// Ignored rather than rewritten: the assertion is right and the behaviour is wrong, and an assertion that accepted
 /// `unknown` here would be pinning a regression as the contract. Deleting it would remove the instrument.
@@ -703,7 +702,7 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
     let fixture = Memory::new("a-body-edit-is-not-a-walk", &files);
 
     // **The first session cooks, and nothing walks** — a cook composes its environment from the index
-    // (`docs/module-cache.md`), so the per-file record is affordable and no timeline is built for it.
+    // (`docs/open-questions.md`), so the per-file record is affordable and no timeline is built for it.
     let mut first = fixture.session();
     first.add_project_files([PathBuf::from("/p/main.cpp")]);
     first.did_open("/p/main.cpp", main);
@@ -798,15 +797,15 @@ pub(crate) fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
 /// test is "`one::Widget` is in the index after one step, with no second pass to fix it". It cannot be written
 /// today, and the reason is not this change: **`one::Widget` is not in the index after a full
 /// `index_everything` either** — the cooked reading places `Widget` at file scope, with the macro unexpanded.
-/// That is one of the five failures `status.md` §6 records, and
+/// That is one of the five failures the refined reading still has, and
 /// `editing_a_header_invalidates_the_readings_that_depend_on_it` fails through exactly this fixture and
 /// exactly this name.
 ///
 /// So this asserts what the change is about — **which files the second pass is handed** — and the doc comment
 /// is the note to tighten it into the scope assertion the moment that defect is fixed. A test that asserted the
-/// scope now would be red for a reason that has nothing to do with the flag, which is the shape of test
-/// `status.md` §6 warns about in its second rule.
-// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
+/// scope now would be red for a reason that has nothing to do with the flag — a red test with two possible causes,
+/// which is the trap these five failures share.
+// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/open-questions.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
 pub(crate) fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass() {
@@ -850,8 +849,8 @@ pub(crate) fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_sec
     // **And this is the assertion to tighten.** `one::Widget` is what the environment is *for* — it is now in
     // the index (`scope: Some("one")`, the macro's `namespace` placed) where before this round it was
     // `NotDeclaredHere`, and a test that pinned that would be the sharpest statement of what was fixed. It is
-    // deliberately not asserted here, because the same name is the subject of two of the failures
-    // `status.md` §6 records, and a red test with two possible causes is worse than a narrow green one.
+    // deliberately not asserted here, because the same name is the subject of two of the five known failures,
+    // and a red test with two possible causes is worse than a narrow green one.
     //
     // What *is* asserted is this change's own subject: which files the second pass is handed.
     //
@@ -918,7 +917,7 @@ pub(crate) fn a_wave_with_nothing_to_parse_still_carries_the_drains_timelines() 
         "there is nothing to parse, which is the state this test is about"
     );
     // **Phase 2 removed the units, and this assertion went with them.** The pass used to prepare one timeline per
-    // file it was about to re-read; it now composes each reading from the index (`docs/indexing-design.md` §2.3), so
+    // file it was about to re-read; it now composes each reading from the index (`docs/open-questions.md`), so
     // `units` is always empty — see the note at `prepare_a_wave`, where `Vec::new()` replaced the walk.
     //
     // What the drain still owes is the **refinements**: the files the pass is about to re-read, which is what
@@ -1045,7 +1044,7 @@ pub(crate) fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive()
     // **A header no longer has a unit of its own, and that is the composed reading working.** `ns.h` is included by
     // `api.h`, so it cannot be the root of its own program; it used to be walked as one so that the *unit table*
     // had an entry to check, and `Session::cook` now composes its environment from the index instead (see
-    // `docs/indexing-review.md` §3.1 — the walk required a held timeline, which after phase 2 nothing holds).
+    // `docs/open-questions.md` — the walk required a held timeline, which after phase 2 nothing holds).
     // What this test is about — a **body** edit keeps the unit a directive edit would drop — is asserted on the file
     // that does have one.
     let typed = format!("{api}void body() {{ int inside; }}\n");
@@ -1070,7 +1069,7 @@ pub(crate) fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive()
     // **A header no longer has a unit of its own, and that is the composed reading working.** `ns.h` is included by
     // `api.h`, so it cannot be the root of its own program; it used to be walked as one so that the *unit table*
     // had an entry to check, and `Session::cook` now composes its environment from the index instead (see
-    // `docs/indexing-review.md` §3.1 — the walk required a held timeline, which after phase 2 nothing holds).
+    // `docs/open-questions.md` — the walk required a held timeline, which after phase 2 nothing holds).
     // What this test is about — a **body** edit keeps the unit a directive edit would drop — is asserted on the file
     // that does have one.
 }

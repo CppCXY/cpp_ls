@@ -227,7 +227,7 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
     //
     // **Two, not one, measured.** The window's boundary is 50 ms and the attempts near it are not distinct populations: a
     // render budget of 116-123 ms sits beside a second attempt at 51-60 ms often enough that "at most one" failed
-    // **one run in three** on an idle machine (`cargo test --test latency -- --test-threads=1`, three runs: ok, failed,
+    // **one run in three** on an idle machine (`cargo test --test suite latency -- --test-threads=1`, three runs: ok, failed,
     // ok). A test that fails a third of the time on unchanged code is not measuring the code.
     //
     // **How many attempts may exceed the budget is a question about the machine, and the budget above is about the
@@ -235,7 +235,7 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
     // on 2026-11-22 this assertion failed on four separate runs while the *fill-time* bound and the median beside it
     // passed every time — which is the honest reading: the count is noise once something else is running. So the count
     // is only asserted when `CPPLS_LATENCY_STRICT` is set, which is how it is meant to be run —
-    // `CPPLS_LATENCY_STRICT=1 cargo test --test latency -- --test-threads=1` on an idle machine. The two assertions
+    // `CPPLS_LATENCY_STRICT=1 cargo test --test suite latency -- --test-threads=1` on an idle machine. The two assertions
     // that are about the code (a render inside its budget, and the median) run always.
     const A_RENDER_MAY_TAKE: Duration = Duration::from_millis(300);
     const RENDERS_IN_THE_WINDOW: usize = 2;

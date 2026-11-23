@@ -425,7 +425,7 @@ pub(crate) fn type_of_expression_inner(
     {
         let literal = match kind {
             // **The literal's own spelling is the type** — `1u` is `unsigned int`, `1.0f` is `float`, `L'x'` is
-            // `wchar_t` — and one function reads it for every site that asks (`docs/code-analysis-review.md` P1-4).
+            // `wchar_t` — and one function reads it for every site that asks (`docs/worklog.md` P1-4).
             cpp_parser::CppTokenKind::IntegerLiteral
             | cpp_parser::CppTokenKind::FloatingLiteral
             | cpp_parser::CppTokenKind::CharLiteral => {
@@ -439,7 +439,7 @@ pub(crate) fn type_of_expression_inner(
             // Answering `const char*` for every literal made `std::format(L"x {}", 1)` deduce `string` — the width
             // rule that picks between `format_string` and `wformat_string` was reading the wrong half.
             // **The encoding prefix is the element type** — `L"…"` is `const wchar_t*`, `u8"…"` is `const char8_t*` —
-            // and one function reads every literal's spelling (`docs/code-analysis-review.md` P1-4).
+            // and one function reads every literal's spelling (`docs/worklog.md` P1-4).
             cpp_parser::CppTokenKind::StringLiteral => {
                 crate::sema::literal::a_literal_type(&written_as)
             }

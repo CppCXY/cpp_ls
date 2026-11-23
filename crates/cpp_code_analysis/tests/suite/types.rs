@@ -4241,7 +4241,7 @@ fn each_declarator_of_one_declaration_has_its_own_type() {
 ///
 /// `Type::Qualified` recorded *that* a type was qualified and not which qualifiers, so every answer spelled `const`:
 /// `volatile S v; auto x = v;` typed `x` as `const S`, and a `volatile` member function was read as a `const` one — the
-/// two are different overloads (`docs/code-analysis-review.md` P1-3).
+/// two are different overloads (`docs/worklog.md` P1-3).
 #[test]
 fn a_volatile_object_keeps_its_qualifier() {
     assert_eq!(

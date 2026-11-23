@@ -7,7 +7,7 @@
 //!
 //! # Why `clang-format` is the default, and why a missing one is a warning rather than an error
 //!
-//! `cpp_formatter` does not yet reflow lines the way clang-format does (see `docs/formatter-diff.md`: on the
+//! `cpp_formatter` does not yet reflow lines the way clang-format does (see `crates/cpp_formatter/tests/suite/against_clang_format.rs`: on the
 //! corpus's own style it matches 27 of 29 files on spacing, but a file whose lines clang-format *moves* is a different
 //! file). A project that has clang-format installed therefore gets a better answer from it, and that is what the
 //! default asks for. A project that does not has two honest choices, and this module takes the one that keeps

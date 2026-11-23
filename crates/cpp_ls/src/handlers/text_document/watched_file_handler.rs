@@ -119,7 +119,7 @@ pub async fn process_did_change_watched_files(
         // reading in the analysis at all — the project's configuration is read from disk when a session opens — and
         // `didSave` carries no text (the server asks for none), so treating an open `.cppls.toml` like an open source
         // file left a save with **no effect at all** until the file was closed or the server restarted
-        // (`docs/language-server-review.md` P1-4).
+        // (`docs/worklog.md` P1-4).
         let (open, configuration) = {
             let workspace_manager = context.workspace_manager().lock().await;
             (

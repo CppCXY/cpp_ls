@@ -969,7 +969,7 @@ fn a_strict_standard_refuses_the_vendor_spellings() {
 }
 
 /// **Every vendor extension has a negative row**: the construct parses in the configuration that names its compiler, and a
-/// strict standard reports it. The matrix the review asks for (`docs/parser-toolchain-review.md` P3-2), because the P1-2
+/// strict standard reports it. The matrix the review asks for (`docs/worklog.md` P3-2), because the P1-2
 /// defect was exactly a rule that matched a token shape and never asked the configuration — one construct at a time is
 /// how that comes back.
 ///

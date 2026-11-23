@@ -97,7 +97,7 @@ pub enum UpdateEvent {
     /// before — and nothing told an in-flight request that the world had changed. Through the queue it gets both
     /// properties the document events have: a request's barrier waits for it (`record_request` / `wait_until_applied`),
     /// and `started_change` cancels a request already running with `ContentModified`
-    /// (`docs/language-server-review.md` P1-2).
+    /// (`docs/worklog.md` P1-2).
     ///
     /// It carries the configuration the client **already reported**, not the params of the notification: the read is a
     /// server→client round trip, and awaiting one here would hold the queue's apply lock across a wait for a client that
@@ -134,7 +134,7 @@ impl UpdateEvent {
             Self::WatchedFilesChanged(params) => !params.changes.is_empty(),
             Self::Reconcile { .. } => true,
             // **A request answered from the old configuration is stale the moment the settings change**, which is the
-            // ContentModified the review asks for (docs/language-server-review.md P1-2).
+            // ContentModified the review asks for (docs/worklog.md P1-2).
             Self::Configuration(_) => true,
             _ => true,
         }

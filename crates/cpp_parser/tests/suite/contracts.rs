@@ -125,7 +125,7 @@ int f(int x) {
 /// **In C++23 contract_assert is an ordinary identifier**, in all three positions a name can stand in: a variable, a
 /// function, and a call. A lexer that claims the keyword unconditionally fails all three — and the error node then
 /// swallows the declarations after it, so the damage is larger than one line
-/// (\docs/parser-toolchain-review.md\ P1-3).
+/// (`docs/worklog.md` P1-3).
 #[test]
 fn contract_assert_is_an_identifier_before_cpp26() {
     let source = "\

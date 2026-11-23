@@ -63,7 +63,7 @@ pub async fn initialized_handler(
     let log_file = init_logger(roots.first().and_then(|root| root.to_str()), &cmd_args);
 
     // **The session's identity, not a second computation of it** — see `the_effective_client_id`, and the capability
-    // side that reads the same value (`docs/language-server-review.md` P2-2).
+    // side that reads the same value (`docs/worklog.md` P2-2).
     let client_id = context.lsp_features().client_id();
     let supports_config_request = params
         .capabilities
@@ -76,7 +76,7 @@ pub async fn initialized_handler(
     // **The workspace is installed before anything is asked about it.** `workspace/configuration` takes its scope from
     // the roots — a folder-scoped setting is asked for under a `scopeUri`, and what a client answers without one is its
     // *global* setting, which is a different thing from the folder's — so the roots have to exist before the ask
-    // (`docs/language-server-review.md` P1-1). Measured: the request went out as
+    // (`docs/worklog.md` P1-1). Measured: the request went out as
     // `{"items": [{"section": "cppls"}]}` with no `scopeUri` at all.
     //
     // Nothing here needs the session: setting the roots, the log file and the `--config` path are three plain fields,
@@ -101,7 +101,7 @@ pub async fn initialized_handler(
 
     // **The watch is registered before the analysis starts**, because whether the client took it decides whether this
     // server watches the project itself — and `start_analysis` is where that decision is made
-    // (`docs/language-server-review.md` P2-3). On a reload the order is the same: `start_analysis` runs again and reads
+    // (`docs/worklog.md` P2-3). On a reload the order is the same: `start_analysis` runs again and reads
     // the answer the previous registration left.
     register_files_watch(context.clone()).await;
     start_analysis(context.clone()).await;

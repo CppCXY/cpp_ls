@@ -1,7 +1,7 @@
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
-//! cargo test --release -p cpp_ls --test lsp_status -- --ignored --nocapture
+//! cargo test --release -p cpp_ls --test suite lsp_status -- --ignored --nocapture
 //! ```
 //!
 //! It opens two files of a real project — a `.cpp` and the header next to it — waits for the index, then asks each

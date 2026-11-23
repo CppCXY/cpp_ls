@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
-//! cargo test --release -p cpp_ls --test real_project -- --ignored --nocapture
+//! cargo test --release -p cpp_ls --test suite real_project -- --ignored --nocapture
 //! ```
 //!
 //! # Why this exists, and why it is `#[ignore]`d

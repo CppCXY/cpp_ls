@@ -122,7 +122,7 @@ impl CppSyntaxId {
 ///
 /// The kind is a **discriminant**, which means the spelling `1:0:3` is only an id because this version of the crate says
 /// what `1` is. A variant inserted in the middle of the enum - an ordinary thing to do - would silently change what every
-/// stored id meant, and no reader could tell (`docs/parser-toolchain-review.md` P2-5). The tag makes that a rejection
+/// stored id meant, and no reader could tell (`docs/worklog.md` P2-5). The tag makes that a rejection
 /// instead: a cache written by another schema is refused, and the reader says so rather than pointing at the wrong node.
 const WIRE_SCHEMA: &str = "v1";
 
@@ -164,7 +164,7 @@ impl serde::Serialize for CppSyntaxId {
 /// ```
 ///
 /// — the first two inside a `serde` deserialiser, which is to say a malformed cache entry could take the reader process
-/// down instead of returning an error (`docs/parser-toolchain-review.md` P1-5).
+/// down instead of returning an error (`docs/worklog.md` P1-5).
 fn from_hex(value: &str) -> Result<CppSyntaxId, String> {
     let mut parts = value.split(':');
     let (Some(schema), Some(kind), Some(start), Some(end), None) = (

@@ -1,5 +1,5 @@
 //! **Category: blocks and empty bodies** — the shapes every file has, taken from clang-format 23.1.5 and re-checked
-//! against it with `tests/against_clang_format.rs`.
+//! against it with `tests/suite/against_clang_format.rs`.
 //!
 //! Two rules, and they are not the same rule:
 //!
@@ -116,7 +116,7 @@ fn blocks_21_an_unbraced_control_body() {
     );
     // A `do { … } while (…)` tail is not a head that opens a body: the line after it is at the block level. (The macro
     // body itself is not formatted — a `#define` whose body holds braces is a separate, unimplemented feature, and
-    // `docs/formatter-diff.md` records it — so this fixture keeps the macro out and tests the statement after it.)
+    // `crates/cpp_formatter/tests/suite/against_clang_format.rs` records it — so this fixture keeps the macro out and tests the statement after it.)
     check(
         "void f() {\n  do {\n    g();\n  } while (x);\n  h();\n}\n",
         "void f() {\n  do {\n    g();\n  } while (x);\n  h();\n}\n",

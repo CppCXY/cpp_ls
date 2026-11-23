@@ -233,7 +233,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **A wave is only worth what the text it read is worth.** A file written between `prepare_a_wave` and this
         // commit makes the prepared summary a reading of text nobody has; committing it would record the new file's
         // stamp beside the old file's facts, and reconciliation — which compares stamps — would never ask again
-        // (`docs/code-analysis-review.md` P1-7). A wave whose text moved is dropped, and the file is read here.
+        // (`docs/worklog.md` P1-7). A wave whose text moved is dropped, and the file is read here.
         let ready =
             ready.filter(|ready| self.store.the_wave_still_describes_the_file(&path, ready));
         let summary = match ready {
@@ -659,7 +659,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // the re-read of a one-file fixture produces a reading the checks decline). That is a defect in the
             // **refined reading** — the same family as the C++ corpus at 41/52 — so the ask waits for it. A *request*
             // still asks (`catch_up`), which is the contract; a batch "index everything" does not, and the tests that
-            // need it are listed in `docs/indexing-review.md` §4.
+            // need it are the `#[ignore]`d refinement tests in `session::tests`.
             total += read;
 
             // **Every stage of the cook is counted, because a file can be claimed and then lost.**

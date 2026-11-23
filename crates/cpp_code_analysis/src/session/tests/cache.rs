@@ -49,7 +49,7 @@ pub(crate) fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
     // that is the answer a *query* must get.
     //
     // **What the summary says is a different question, and the answer changed with the design** (§2.1 of
-    // `docs/indexing-design.md`): a summary is the **environment-free** reading, so it keeps *both* branches of the
+    // `docs/open-questions.md`): a summary is the **environment-free** reading, so it keeps *both* branches of the
     // `#if` and the **lookup** decides which one the program takes. That is why the assertion below is two assertions:
     // the summary holding `Live` twice is the new contract, and the query answering the `#else` one is the guarantee
     // this test exists for — a summary made from `main.cpp`'s rendering would answer the `int` branch instead.
@@ -106,7 +106,7 @@ pub(crate) fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
 /// The entry names the file's **own** closure (`the_closure_fingerprint`), so only a reading of that closure is served;
 /// the direction that must never happen — a reading taken inside *another* file's program — is pinned by
 /// `a_rendering_is_not_left_in_the_cache_for_the_next_session`.
-// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/indexing-review.md`
+// **Ignored while the refined reading is being fixed** — the defect and its reproducer are in `docs/open-questions.md`
 // §6: refining a file makes three `checks` fixtures see a reading their rules decline, so `index_everything` does not
 // ask for it yet, and this test needs the ask. The assertion is right; the behaviour is what is wrong.
 pub(crate) fn a_refinement_is_served_to_the_next_session() {

@@ -233,7 +233,7 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
         // A **quoted** include only, deliberately — an inferred directory must not be able to shadow `<vector>`, and
         // an angle include in this project is a system header. The loop below used to run for every form, which made
         // the rule in this comment false: a checkout with `include/vector` resolved `<vector>` to its own file, and
-        // the inferred root was searched **before** the compile command's `-I` paths. `docs/parser-toolchain-review.md`
+        // the inferred root was searched **before** the compile command's `-I` paths. `docs/worklog.md`
         // P1-9.
         if include.form == IncludeForm::Quote && skip_through.is_none() {
             for root in include_roots_above(including, name, self.case_insensitive(), self.files) {
@@ -678,7 +678,7 @@ mod tests {
     /// The root is a guess — `include/` beside `src/` is the CMake convention, and the closure of a project nobody
     /// has configured is otherwise a small fraction of itself — and a guess must not shadow a system header. The loop
     /// this tests ran for both forms, so a checkout with `include/vector` resolved `<vector>` to its own file (and
-    /// searched that root before the compile command's `-I` paths); `docs/parser-toolchain-review.md` P1-9.
+    /// searched that root before the compile command's `-I` paths); `docs/worklog.md` P1-9.
     #[test]
     fn an_inferred_include_root_does_not_shadow_an_angle_include() {
         let files = MemoryFiles::new()

@@ -423,7 +423,7 @@ pub(crate) fn a_conditional_macros_value_is_folded_when_every_definition_agrees(
 /// **A header cooked with no unit is read in its own environment, not in an includer's.**
 ///
 /// This replaces a test of the old rule ("the lowest root path decides the context"), which belonged to cooking a
-/// header by *walking* the unit that includes it. A cook composes now (`docs/module-cache.md`), and the composed
+/// header by *walking* the unit that includes it. A cook composes now (`docs/open-questions.md`), and the composed
 /// environment of a header is its own closure — which does not contain a `#define` written by the *includer* before the
 /// `#include`. So `KIND` stays an identifier and neither `value_b` nor `value_c` appears: the reading is the header's
 /// own, and a program that wants `b.cpp`'s reading asks for `b.cpp` to be read as a program.

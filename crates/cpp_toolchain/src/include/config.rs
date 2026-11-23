@@ -493,7 +493,7 @@ impl CompilerConfig {
             // project's `[compile].args` has, and read in the same order — the arguments it states, its `remove_args`
             // dropped, its `extra_args` appended — but it belongs to the files this target describes rather than to
             // every file. This was accepted by `TargetSection` and never applied, which is the worst of both: a
-            // configuration that parses and changes nothing (`docs/parser-toolchain-review.md` P2-7).
+            // configuration that parses and changes nothing (`docs/worklog.md` P2-7).
             if let Some(declared) = &target.args {
                 let arguments: Vec<String> = declared
                     .iter()
@@ -914,7 +914,7 @@ pub fn project_config_from_flags(
 /// `cl.exe` commands are what an MSVC compile database holds, and this reader knew only the GNU spellings, so a Windows
 /// project lost its include directories **and** its feature macros: conditionals chose the wrong branch, generated
 /// config headers were not found, and the include closure was a fraction of the program
-/// (`docs/parser-toolchain-review.md` P1-10).
+/// (`docs/worklog.md` P1-10).
 ///
 /// The supported set is written down rather than inferred, because `/D` is also the beginning of ordinary flags:
 ///
@@ -1203,7 +1203,7 @@ impl CompileCommands {
     pub fn command_for(&self, file: &Path) -> Option<&CompileCommand> {
         // **Exact spelling first**, and case-folding only when nothing matched — a database from another machine may
         // spell a path with a different case, but one that names both `Foo.cpp` and `foo.cpp` means both
-        // (`docs/parser-toolchain-review.md` P2-9).
+        // (`docs/worklog.md` P2-9).
         self.command_for_with(file, false)
             .or_else(|| self.command_for_with(file, true))
     }
@@ -1327,7 +1327,7 @@ fn path_suffixes(path: &str) -> Vec<&str> {
 /// `case_insensitive` is a parameter because the filesystem decides it and this function does not: folding case on a
 /// case-sensitive volume makes `Foo.cpp` and `foo.cpp` the same translation unit, so a database that lists both answers
 /// whichever it reaches first — a plausible wrong compilation rather than a missing one
-/// (`docs/parser-toolchain-review.md` P2-9). [`CompileCommands::command_for`] asks exactly first and folds only as a
+/// (`docs/worklog.md` P2-9). [`CompileCommands::command_for`] asks exactly first and folds only as a
 /// fallback, which is the same order the review describes: the machine's own rule first, case-folding for a database
 /// written on another machine.
 fn normalize_for_comparison(path: &Path, case_insensitive: bool) -> String {
@@ -1425,7 +1425,7 @@ fn parse_command_object(object: &str) -> Option<CompileCommand> {
     // (`build_database.json`'s `parse_translation_unit` already joins its `source` with its `work-directory`). It is not
     // only a display path: header borrowing compares the command file's directory with the header's, so a relative
     // command path never matched and the header was analysed without the flags of the source beside it
-    // (`docs/parser-toolchain-review.md` P2-8).
+    // (`docs/worklog.md` P2-8).
     let file = match &directory {
         Some(directory) if Path::new(&file).is_relative() => {
             resolve_relative(directory, Path::new(&file))
@@ -1751,7 +1751,7 @@ mod tests {
     /// **A database that names both `Foo.cpp` and `foo.cpp` means both.** Matching used to fold case before comparing,
     /// so on a case-sensitive filesystem — where the two are different translation units — a request for either could
     /// select the other's command: a plausible wrong compilation rather than a missing one
-    /// (`docs/parser-toolchain-review.md` P2-9).
+    /// (`docs/worklog.md` P2-9).
     #[test]
     fn an_exact_case_match_wins_over_a_folded_one() {
         let database = crate::config::parse_compile_commands(
@@ -1802,7 +1802,7 @@ mod tests {
     /// **A relative `file` in a `compile_commands.json` is relative to `directory`.** The other database format already
     /// joined its pair, and this one did not — which is not only a display path: header borrowing compares the command
     /// file's directory with the header's, so a relative command path never matched and a header was analysed without the
-    /// flags of the source beside it (`docs/parser-toolchain-review.md` P2-8).
+    /// flags of the source beside it (`docs/worklog.md` P2-8).
     #[test]
     fn a_relative_command_file_is_resolved_against_its_directory() {
         let database = crate::config::parse_compile_commands(
@@ -1830,7 +1830,7 @@ mod tests {
 
     /// **MSVC's `/I`, `/D` and `/U`, joined and separated.** A `cl.exe` database loses its include directories and its
     /// feature macros without these, and the loss is silent: conditionals take the other branch and generated headers
-    /// are not found (`docs/parser-toolchain-review.md` P1-10).
+    /// are not found (`docs/worklog.md` P1-10).
     #[test]
     fn msvc_include_define_and_undef_arguments_are_read() {
         let arguments: Vec<String> = [

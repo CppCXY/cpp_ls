@@ -27,7 +27,7 @@ use super::RegisterCapabilities;
 /// **server→client round trip**, so it must not happen inside the update queue's worker. The worker holds the queue's
 /// apply lock while it applies an event, and a request's barrier waits on that lock — a worker awaiting the client
 /// would therefore wait for a client that is itself waiting for an answer queued behind the same lock
-/// (`docs/language-server-review.md` P1-2). The notification handler reads (its own async context, no queue lock); the
+/// (`docs/worklog.md` P1-2). The notification handler reads (its own async context, no queue lock); the
 /// queue applies the result, which is what gives the change the barrier and the `ContentModified` cancellation.
 ///
 /// `None` when the client cannot be asked, or when what it says is what was already in force — the second is the rule

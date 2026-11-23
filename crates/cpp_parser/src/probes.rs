@@ -13,8 +13,6 @@
 //!          `int f(int a);` 16 000 times, which has no trivia at all: 417 ms → 118 ms
 //! ```
 //!
-//! Measure it yourself: `cargo test --release -p cpp_parser --test parse_cost -- --ignored --nocapture` prints the
-//! large-unit line (4 MB, 1 091 827 tokens), and `CPPLS_PROJECT_ROOT` picks the corpus.
 //!
 //! On Windows a `var_os` takes the process environment lock and builds an `OsString`; on every platform it is a
 //! lookup in a map with a `String` key. Either way it is a function call that allocates, made once per token, to

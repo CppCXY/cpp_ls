@@ -245,7 +245,7 @@ impl<'a> CppLexer<'a> {
             // ordinary identifier in C++23 and every earlier standard, so claiming it unconditionally breaks a valid
             // program — `int contract_assert = 1;` failed to parse, and the error node swallowed the declarations after
             // it. `pre` and `post` are *not* here: they are context-sensitive and stay identifiers. See
-            // `docs/parser-toolchain-review.md` P1-3.
+            // `docs/worklog.md` P1-3.
             "contract_assert" if self.accepts(crate::features::Feature::ContractAssert) => {
                 CppTokenKind::ContractAssertKeyword
             }
@@ -437,7 +437,7 @@ impl<'a> CppLexer<'a> {
                         // **<=> is C++20's**, and this lexer knows which standard it is reading: without the feature
                         // the three characters are <= followed by >, which is what a C++17 compiler makes of them
                         // (two tokens, and then a parse error at the >). Reading them as one token in every mode is
-                        // what docs/parser-toolchain-review.md P1-2 lists first among the ungated vendor spellings.
+                        // what docs/worklog.md P1-2 lists first among the ungated vendor spellings.
                         if self.reader.current_char() == '>'
                             && self.accepts(crate::features::Feature::ThreeWayComparison)
                         {
@@ -1321,7 +1321,7 @@ impl<'a> CppLexer<'a> {
                 // **A backslash is a character of the name here, not an escape.** A header name has no escape
                 // sequences — an h-char is any character but a newline and the closing delimiter — so
                 // `#include "sub\header.h"` is the Windows spelling of a path, and declining it left the file's include
-                // unresolved (`docs/parser-toolchain-review.md` P2-2).
+                // unresolved (`docs/worklog.md` P2-2).
                 '\0' | '\n' | '\r' | ';' => return None,
                 ch if ch == terminator => {
                     return (length > 0).then_some(length);

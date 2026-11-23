@@ -10,7 +10,7 @@
 //! chain's five defects were separated. Measured today: **`v.at(1)` is `int&`** and `v[0]` is `int`.
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test allocator_probe -- --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite allocator_probe -- --nocapture
 //! ```
 
 use cpp_code_analysis::{

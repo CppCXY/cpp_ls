@@ -121,7 +121,7 @@ impl ClientProxy {
     /// This used to be fire-and-forget: the response went to `on_response`, found no waiter and was dropped, so a client
     /// that answered `MethodNotFound` — or did not answer at all — looked exactly like one that agreed. The consequence
     /// was the watcher disappearing: the server believes the client reports changes, so it starts none of its own, and
-    /// nothing reports anything (`docs/language-server-review.md` P2-3).
+    /// nothing reports anything (`docs/worklog.md` P2-3).
     ///
     /// `Err` carries the reason a caller can put in a log: the client's error message, or a timeout. A client that
     /// answers with an error has **not** registered, which is what a fallback needs to know.

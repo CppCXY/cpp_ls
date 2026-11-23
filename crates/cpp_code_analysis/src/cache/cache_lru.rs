@@ -80,7 +80,7 @@ pub const RENDERING_VIEW_BYTES: usize = 256 * 1024 * 1024;
 /// 64 MB of *estimated tree*, which is about 3–8 MB of rendering text. The number is chosen from what a view is worth:
 /// rebuilding one is a parse at the parser's 6 MB/s (120 ms for a 0.74 MB unit), so a miss on a file the reader is
 /// working in is a visible stall, while 64 MB is a fifth of what the index's tables hold on a mid-sized project
-/// (`docs/memory.md`).
+/// (`docs/open-questions.md`).
 pub const VIEW_BYTES: usize = 64 * 1024 * 1024;
 
 /// A least-recently-used map with a weight budget.

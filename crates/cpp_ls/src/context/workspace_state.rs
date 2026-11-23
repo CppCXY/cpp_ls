@@ -113,7 +113,7 @@ impl WorkspaceState {
     ///
     /// `None` until a registration was attempted; `Some(false)` when the client refused or never answered. The native
     /// watcher's decision reads it: a client that advertises dynamic registration and then refuses it is a client with no
-    /// watcher at all unless this server starts one (`docs/language-server-review.md` P2-3).
+    /// watcher at all unless this server starts one (`docs/worklog.md` P2-3).
     pub fn the_client_watches(&self) -> Option<bool> {
         self.the_client_watches
     }
@@ -301,7 +301,7 @@ impl WorkspaceState {
         // **The `--config` a caller named is a configuration file too.** The filter's own default is the project's
         // `compile_commands.json`; a session opened with `--config <somewhere else>` reads its configuration from a
         // path no convention predicts, and without this an event about that file was classified as an edit to a source
-        // — or, outside the root, never seen at all (`docs/language-server-review.md` P1-5).
+        // — or, outside the root, never seen at all (`docs/worklog.md` P1-5).
         if let Some(configuration) = &self.config_file {
             filter = filter.with_configuration(configuration.clone());
         }

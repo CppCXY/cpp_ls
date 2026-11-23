@@ -1,6 +1,6 @@
 //! **`unresolved-call-or-receiver`**: a name read where nothing declares it.
 //!
-//! **The name is the whole of P2-4 of `docs/code-analysis-review.md`.** It used to be `undefined-name`, which promises a
+//! **The name is the whole of P2-4 of `docs/worklog.md`.** It used to be `undefined-name`, which promises a
 //! complete undefined-name check and delivers two positions: the object of a member access, and a call's callee. An
 //! ordinary assignment to a name nothing declares — `missing = 1;` — is silent here, and a reader told the code is
 //! `undefined-name` reads that silence as "the analysis believes this is declared". The check is unchanged; the code now

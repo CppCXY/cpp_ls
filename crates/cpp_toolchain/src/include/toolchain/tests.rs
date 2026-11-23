@@ -1168,7 +1168,7 @@ fn the_search_list_flags_of_a_command_are_taken_and_nothing_else() {
     );
 
     // **`-m32` is one of them.** It is the other spelling of "which architecture", and asking a native compiler would
-    // report the 64-bit search paths and predefines for a 32-bit build (`docs/parser-toolchain-review.md` P2-10).
+    // report the 64-bit search paths and predefines for a 32-bit build (`docs/worklog.md` P2-10).
     assert_eq!(
         flags(&["g++", "-m32", "-std=c++17", "-c", "src/main.cpp"]),
         vec!["-m32".to_string()],

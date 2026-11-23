@@ -71,7 +71,7 @@ async fn publish(context: &ServerContextSnapshot, uri: Uri, version: i32) -> boo
     };
     // **One snapshot for the answer and the text it is measured in.** These were two `with_snapshot` calls, so a
     // keystroke between them turned the first reading's byte offsets into line/column ranges over the second reading's
-    // text — a grey band over whatever happened to be at those offsets (`docs/language-server-review.md` P1-3).
+    // text — a grey band over whatever happened to be at those offsets (`docs/worklog.md` P1-3).
     let Some((answer, text)) = context
         .analysis()
         .with_snapshot(|session| (session.inactive_regions(&path), session.text(&path)))

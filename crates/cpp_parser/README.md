@@ -53,7 +53,7 @@ probes        the tracing switches this crate answers to
 
 Every node is typed: `CppDeclaration`, `CppDeclarator`, `CppParamList`, `CppClassDef`, … and each accessor is a
 question about a shape rather than a walk of the text. The two rules those accessors follow are recorded where they
-matter, e.g. [`docs/declarator-shapes.md`](../../docs/declarator-shapes.md) for why a declarator keeps its own
+matter, e.g. [`tests/suite/declarator_shapes.rs`](tests/suite/declarator_shapes.rs) for why a declarator keeps its own
 suffixes.
 
 ## Two invariants worth knowing before changing the grammar

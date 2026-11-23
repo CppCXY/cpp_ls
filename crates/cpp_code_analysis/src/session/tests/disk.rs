@@ -87,7 +87,7 @@ pub(crate) fn the_scan_finds_the_projects_sources_and_leaves_the_rest() {
 }
 
 // **The ask this test needed is here** — `index_everything` reads a file through its timeline, so a class behind
-// another file's macro body is scoped by the session (the defect and its reproducer are in `docs/indexing-review.md`
+// another file's macro body is scoped by the session (the defect and its reproducer are in `docs/open-questions.md`
 // §6, and `a_keystroke_in_a_body_reads_the_file_through_its_timeline` pins the keystroke half).
 /// **Two fixtures with one name get two directories** — the state that made a failing run keep failing.
 ///
@@ -250,7 +250,7 @@ pub(crate) fn a_keystroke_in_a_body_reads_the_file_through_its_timeline() {
     session.want_refinement(&widget);
     session.index_everything();
     // **The reading is the cooked one, not the summary.** A summary is the file's environment-free reading
-    // (`docs/indexing-design.md` §2.1), so `_STD_BEGIN` — a body from `open.h` — is not in it; the reading the program
+    // (`docs/open-questions.md`), so `_STD_BEGIN` — a body from `open.h` — is not in it; the reading the program
     // implies is the file's cooked reading, and that is where a macro-opened scope lives.
     assert!(
         session
@@ -505,7 +505,7 @@ pub(crate) fn a_stored_cook_answers_the_next_session() {
 
     // **Nothing on disk, so this session pays for the cook** and writes the record with its rendering. It pays with a
     // *composition*, not a timeline: the environment a file needs is a function of its text and the macros in force
-    // where it is included, so cooking one file no longer walks its closure (`docs/module-cache.md`).
+    // where it is included, so cooking one file no longer walks its closure (`docs/open-questions.md`).
     let mut first = open();
     first.add_project_files([main.clone()]);
     first.did_open(&main, source);
@@ -602,7 +602,7 @@ pub(crate) fn a_comment_edit_to_a_header_keeps_the_cook_record() {
 /// `resolution_still_holds` uses those remembered answers to decide whether a stored summary is still current. A
 /// header created mid-session makes both wrong in the same direction: the *fresh* search would find the new file, but
 /// the remembered answer — the old file — matches what the summary recorded, so the summary is kept and the file whose
-/// include should now resolve earlier keeps the old reading (`docs/code-analysis-review.md` P1-5).
+/// include should now resolve earlier keeps the old reading (`docs/worklog.md` P1-5).
 ///
 /// The watcher does its part: `naming_files` asks for the includer to be re-read. The memo is what defeated it.
 #[test]
@@ -672,7 +672,7 @@ pub(crate) fn a_header_that_appears_earlier_on_the_path_moves_the_include() {
 /// database so a later session does not repeat it. A header that then appears in `first/` — earlier on the path —
 /// makes that remembered answer wrong, and nothing about the *summary's* key can notice: the text, the configuration
 /// and the directory are all unchanged. The summary is a candidate and `resolution_still_holds` is what makes it an
-/// answer, so the check has to ask the filesystem, not a recorded search (`docs/code-analysis-review.md` P1-5).
+/// answer, so the check has to ask the filesystem, not a recorded search (`docs/worklog.md` P1-5).
 #[test]
 pub(crate) fn a_second_session_does_not_trust_a_stored_include_search() {
     use crate::include::config::IncludePath;
@@ -739,7 +739,7 @@ pub(crate) fn a_second_session_does_not_trust_a_stored_include_search() {
 /// `prepare_a_wave` reads and parses a file; `commit_a_wave` applies the result and then records where the disk is
 /// *now*. A file written between the two is the one state reconciliation can never leave: the index holds the reading of
 /// the old text while the stamp describes the new one, so the next reconcile sees nothing to re-read and the stale facts
-/// stay (`docs/code-analysis-review.md` P1-7).
+/// stay (`docs/worklog.md` P1-7).
 #[test]
 pub(crate) fn a_wave_prepared_against_one_text_is_not_committed_against_another() {
     let project = Project::new("wave-race");

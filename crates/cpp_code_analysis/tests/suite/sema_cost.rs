@@ -5,7 +5,7 @@
 //! number is a **measurement, not a check**: the test is `#[ignore]`d and prints.
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test sema_cost -- --ignored --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite sema_cost -- --ignored --nocapture
 //! ```
 
 use std::path::PathBuf;

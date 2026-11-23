@@ -297,7 +297,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // (held), which is the case the fast path above exists for.
         // **S1: a cook composes, and never walks.** The environment a file needs is a function of its text and the
         // macros in force where it is included, so the composed arm is the answer at file scale; walking the whole
-        // closure was measured at 2.8-8.8 s and +174-355 MB for each open file (`docs/module-cache.md`).
+        // closure was measured at 2.8-8.8 s and +174-355 MB for each open file (`docs/open-questions.md`).
         // **A timeline answers positionally and stays preferred**; the composed configuration is the fallback for a
         // file no walk covers. Converting both to a `Configuration` was tried and is *not* equivalent: the two
         // `semantic.rs` tests about a directive-split return type failed with it, because a materialised table is the

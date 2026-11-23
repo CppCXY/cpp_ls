@@ -3,8 +3,8 @@
 //!
 //! A refinement (L2) is a file's reading **through its closure**: the macro bodies its includes define are expanded,
 //! so `_STD_BEGIN` opens `namespace std` and the declarations inside it are scoped. The first pass (L1) parses the
-//! file's own text with no environment, and phase 0 of `docs/indexing-design.md` stopped a start from refining the
-//! project: a file is refined when a request **asks**, and the answer is kept.
+//! file's own text with no environment, and the refinement queue, recorded in `docs/open-questions.md`, stopped a
+//! start from refining the project: a file is refined when a request **asks**, and the answer is kept.
 //!
 //! Kept *how long* is what this file asks. `Session::want_refinement` refuses when `Session::is_refined` says the
 //! reading is already the refined one, and `is_refined` answers from three places — a session set, a store set, and

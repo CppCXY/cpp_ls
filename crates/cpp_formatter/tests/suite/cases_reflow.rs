@@ -38,7 +38,7 @@ fn a_fitting_statement_joins() {
 }
 
 /// A statement that does not fit keeps the author's lines (the breaking half is not implemented: `break_line`'s model
-/// is incomplete, measured in `docs/formatter-diff.md`).
+/// is incomplete, measured in `crates/cpp_formatter/tests/suite/against_clang_format.rs`).
 #[test]
 fn a_statement_that_does_not_fit_keeps_its_lines() {
     let input = "void f() {\n  int x = some_function_with_a_long_name(first_argument, second_argument,\n                                         third_argument, fourth_argument);\n}\n";

@@ -615,7 +615,7 @@ impl<'a> CppParser<'a> {
         // **The caller's token ranges are input, and input is checked here.** This is a public entry point that takes
         // whatever a caller hands over, and every later slice is `text[start..end]`: a range past the end of the text,
         // one that ends before it starts, one that lands inside a character, or a stream that goes backwards all panicked
-        // inside a safe API (`docs/parser-toolchain-review.md` P2-4). A tree that is one empty translation unit and one
+        // inside a safe API (`docs/worklog.md` P2-4). A tree that is one empty translation unit and one
         // error is the honest answer — the same shape a parse of garbage produces, so every consumer already handles it.
         if let Some(problem) = why_the_tokens_do_not_fit(text, tokens) {
             return (
@@ -994,7 +994,7 @@ impl<'a> CppParser<'a> {
             //
             // This used to refuse every quoted name containing `\`, on the reasoning that an escape means a real
             // string. Nothing in a header name is escaped, so that reading refused the file the compiler reads, and the
-            // include was never resolved (`docs/parser-toolchain-review.md` P2-2).
+            // include was never resolved (`docs/worklog.md` P2-2).
             let text = &self.text[start.range.start_offset..start.range.end_offset()];
             let is_a_header_name = text.len() >= 2 && text.starts_with('"') && text.ends_with('"');
             if is_a_header_name {

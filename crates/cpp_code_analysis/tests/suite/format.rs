@@ -5,7 +5,7 @@
 //! questions that matter — which function was called, what its name resolved to, and which argument the literal is.
 //!
 //! ```text
-//! cargo test -p cpp_code_analysis --test format
+//! cargo test -p cpp_code_analysis --test suite format::
 //! ```
 //!
 //! # The two shapes the parser writes, and why this test has both
@@ -403,7 +403,7 @@ void f(int y, double d) {
 ///
 /// ```text
 /// $env:CPPLS_FILE = "E:\neovim\src\nvim\message.c"
-/// cargo test --release -p cpp_code_analysis --test format -- --ignored --nocapture
+/// cargo test --release -p cpp_code_analysis --test suite format:: -- --ignored --nocapture
 /// ```
 ///
 /// It prints the token count, how many string literals the file has, how many the walk kept, and the time — next to

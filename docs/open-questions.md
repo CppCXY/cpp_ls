@@ -110,113 +110,7 @@ reported.
 What that does **not** measure is false negatives: a rule that is quiet is not a rule that is right, and this pass only
 asked "did any rule say something that is not so". A negative sweep — known-good findings that must fire — is the next
 instrument, and the 139 check tests are what stands in for it today.
-## `std::endl` drawn as a variable, i.e. with no semantic token at all
 
-**Not reproduced.** Both halves of the question are now tests, and they answer the opposite of the report.
-
-* **Resolution works through the path the server takes.** In a real MSVC 18 project — `#include <iostream>` and
-  `std::cout << std::endl;` — asking for every project file's reading and letting the pump refine the closure answers
-  the declaration:
-
-  ```text
-  $ cargo test -p cpp_code_analysis --test std_visibility_probe std_endl_resolves -- --ignored
-  test result: ok
-  ```
-
-  That is `std_endl_resolves_through_the_servers_path`, an **ignored probe**: it needs the machine's own standard
-  library and costs about six seconds, so it is run on demand rather than with the suite. The fact is a `function` in
-  scope `std`, declared at `__msvc_ostream.hpp:1007` — MSVC 18 moved `endl` one hop past `<ostream>`, which is what
-  made this look like a visibility problem.
-
-* **The `NotDeclaredHere` this file used to record was an artefact of `inspect`.** `inspect` asks for **one** file's
-  reading; a header two hops out then has no summary, so the visibility walk enters it and finds nothing to report.
-  Measured on a three-file fixture (`c.cpp` → `b.h` → `a.h`): `inspect` answers `NotDeclaredHere`, while the same
-  chain through the session's path answers the declaration —
-  `reported_defects::a_declaration_two_includes_away_is_visible`.
-
-* **The classifier was never the problem.** A namespace-scope function named by a qualified expression is drawn as
-  `Function`/`Method`, never as a value — `a_qualified_function_is_drawn_as_a_function`.
-
-So what would produce the report in a project where the name resolves is either a fact the classifier's `claimed`
-set already holds (`_`-prefixed predefined macros, module declarations) or a region the cook dropped. Neither is
-reproducible here. **The file it happened in is needed**, with the line.
-
-## An inlay hint rendering a deduced type expanded instead of the alias the source wrote — **fixed**
-
-Reported with a screenshot, and five fixtures of the reported shape all printed `std::string`, so the entry ended
-with "a file and a line number are needed, not another guess". The line arrived: `LuaCodeFormat.cpp:131`,
-`auto formattedText = f.GetFormatResult(t);` where `RangeFormatBuilder::GetFormatResult` returns `std::string`.
-
-Reproduced over stdio (`cpp_ls/tests/real_project_hover_probe.rs`): **both** the hover and the inlay hint said
-`basic_string<char, char_traits<char>, allocator<char>>` — and kept saying it for ninety seconds. A session built by
-the crate's own probe answered `std::string` about the same offset, which is why five fixtures missed it.
-
-The difference is the **state of the index**, and the step is `finish_a_nested_name`. It exists to make a *member's*
-spelling usable — `pointer` becomes `_Val*` — and it treated `std::string` as "the member `string` of the class `std`",
-looked that member up, and replaced the spelling with the member's *type*: the alias's target. It only does that once
-the index holds the `using string = basic_string<…>` declaration, which is why an early request answered correctly by
-accident and a warm one did not.
-
-The rule now: **a name qualified by a namespace is not a member of a class, and is left as written**
-(`names_a_namespace`, used by `finish_a_nested_name` and by `a_spelling_through_the_aliases_in`). Measured after the
-change, over the same stdio probe:
-
-```text
-hover  at 130:12   std::string formattedText
-inlay  at 130:22   ": std::string"
-```
-
-`tests/types.rs`' `a_deduced_type_keeps_the_alias_the_source_wrote` is the unit-level statement; it failed with the
-expanded spelling before the guard and passes after.
-
-## What this run did learn about `inspect` itself
-
-A question asked by `inspect` is not always the question the server answers: it asks for one file's reading, so any
-cross-file answer that depends on the **closure** — two hops of `#include`, a module's interface, a header behind a
-`#include` a cook never read — can be wrong there while being right in the editor. The two fixtures above are the
-minimal reproduction of that difference, and they are tests, so the next person to be misled by `inspect` can see it
-in one run rather than in six rounds.
-
-## Diagnostic false positives: how they are found, and what is left
-
-`crates/cpp_code_analysis/tests/diagnostics_sweep_probe.rs` pulls every file's diagnostics in one process and prints
-the findings grouped by code, with `file:line` and the message — the sweep a false-positive review needs. Run it with
-`--ignored`, and `CPPLS_SWEEP_FILES=<n>` to look at a slice:
-
-```text
-cargo test --release -p cpp_code_analysis --test diagnostics_sweep_probe -- --ignored --nocapture
-```
-
-Measured on `EmmyLuaCodeStyle`, the first 142 files (its `3rd/asio-1.24.0` included):
-
-```text
-before   32 findings:  macro-parentheses 27, missing-include 5
-after     1 finding:   missing-include  1
-```
-
-The two classes it found, and the fix each got:
-
-* **`macro-parentheses` on macros that expand to a type.** `typename ::asio::detail::async_result_helper<ct, sig>`
-  has a `<` and a `>`, and the scanner read the first as a binary operator. The scanner now recognises a **template-id**
-  (`template_id_end`: names, qualified names, numbers, nested template-ids, `*`, `&`, `,` and spaces, and it closes),
-  and a body headed by `typename` is a type fragment. A type has no precedence to get wrong — a caller's expression
-  never reaches it.
-* **`missing-include` naming a source file.** Four asio headers were told to include `gtest_unittest.cc`, because a
-  template parameter named `T` is also a *type fact* in a test file. A `.cc`, `.c` or `.cpp` is compiled rather than
-  included, so its declarations can never be made visible by naming it — the rule now skips a candidate that is a
-  source file.
-
-**What is left** (1 finding in the slice):
-
-```text
-associated_executor.hpp:155  `is_convertible` is declared in buffers_iterator.hpp, which this file does not include
-```
-
-`is_convertible` is used inside a dependent template-argument list (`constraint<is_convertible<…>::value>`), and the
-declaration the index offers for that spelling is a different entity in a header this file does not reach. The rule
-works from declaration *spellings* and cannot resolve a name, so the honest next step is to skip a spelling that
-appears **inside a template argument list of a template declaration** — a dependent name resolved at instantiation —
-rather than to add a word list.
 ## Rename: a local is exact, and a file-scope name is too
 
 The failure was one guard in `name_references`:
@@ -607,13 +501,7 @@ reports `3 of 6 declaration(s)`, the primary and both specializations. Which cha
 section above is the record of the readings that did *not*); the red it describes no longer reproduces, so the
 `size_type` chain it blamed is a separate question, not this one.
 
-— and the index holds no fact for it (`17000` is the principal, `17304` is the next declaration: nothing between).
-`the_bool_a_trait_has` therefore falls back to the principal's `false_type`, `allocator_traits` takes the
-`_Normal_allocator_traits` branch, and `size_type` is `typename _Get_size_type<_Alloc>::type` where it should be
-`size_t`. The parser is not at fault; the next step is the fact builder's class-declaration path, where the head
-with a template-id in its first argument is not being turned into a fact.
-
-## Why `std::vector` itself is missing, and the wrong lever I pulled at it
+## `std::vector` itself was missing because nobody asked for the header's refinement
 
 This section replaces an earlier conclusion in `docs/plan-three-fixes.md` ("the initial pass builds summaries without
 their closure's macros, so the refinement has to be taught to build them"). That conclusion was **wrong about the
@@ -633,8 +521,8 @@ So the earlier finding was not an artefact of `inspect` (which cannot see includ
 
 1. **The summary of `<vector>` has no scope at all.** `993 fact(s), 0 with a std scope, namespace fact(s): []`, and
    each `vector` fact is `scope: None`. `macro_readings: 0` — the plain reading never saw `_STD_BEGIN` as a macro.
-2. **That is by design, and the scoped reading lives elsewhere.** A summary is the shape-only reading
-   (`docs/indexing-design.md` §2.1); the reading with bodies in force is the **cooked** one, built by the second pass.
+2. **That is by design, and the scoped reading lives elsewhere.** A summary is the shape-only reading;
+   the reading with bodies in force is the **cooked** one, built by the second pass.
 3. **The second pass is demand-driven, and nobody demands `<vector>`.** `Session::advance`'s `finish_a_slice` takes
    `take_the_files_wanted_for_refinement(RE_READ_SLICE)` — files somebody called `want_refinement` for — and
    `catch_up(path)` asks for *the file a request is about*, never for the header that declares what it names. Traced:
@@ -2854,7 +2742,7 @@ rendering cannot name a token written inside an invocation's argument list) and 
 
 ## Greying out inactive code — implemented
 
-The feature request that produced [`inactive-regions.md`](inactive-regions.md) is now implemented, server and VS Code
+The feature request recorded in the since-deleted `inactive-regions.md` is now implemented, server and VS Code
 client: `RenderedCooked::inactive` → the cooked record (`COOKED_VERSION` 2 → 4, with `assumed_undefined`) →
 `Session::inactive_regions` → clangd's `textDocument/inactiveRegions` notification (`version` in the params, sent when
 a cook commits, an empty list on `didClose`) → the decoration in `E:\vscode-cppls` (opacity, stale-version drop, clear
@@ -3024,9 +2912,8 @@ in the rendering — `session.commit_a_unit_reading` is what files them, and the
 
 ## The declarator's shape was not reasonable — measured, and fixed
 
-Asked after the parenthesised-declarator fix: whether the tree that needed it is the tree it should be. The answer is
-in [`declarator-shapes.md`](declarator-shapes.md), with the table printed from the grammar by
-`crates/cpp_parser/tests/declarator_shapes.rs`. Two defects, both consequences of one rule:
+Asked after the parenthesised-declarator fix: whether the tree that needed it is the tree it should be. The answer is the table printed from the grammar by
+`crates/cpp_parser/tests/suite/declarator_shapes.rs`. Two defects, both consequences of one rule:
 
 * **A suffix after `( ptr-declarator )` is left as a sibling of the declarator**, not inside it
   (`int (*fp)(int);` is `Declarator[(*fp)] ParameterList`). Six of the surveyed shapes do it, and the "list is my
@@ -3042,7 +2929,7 @@ is a direct child again, `CppDeclaration::get_param_list` walks for the declarat
 `sema::scopes`'s function-or-variable question is structural (rise from the naming declarator, list first, stopping at
 a pointer) — which also stopped the returned pointer's parameter (`b` of `(int b)`) being filed at file scope. Measured
 after: `int (*maker(int a))(int b);` is a **function** with parameters `(int a)`, `void (*signal(…))(int);` likewise,
-`int (*fp)(int);` stays a variable, and the whole suite is green (`docs/declarator-shapes.md`).
+`int (*fp)(int);` stays a variable, and the whole suite is green.
 
 **Including the type half:** a function returning a function pointer now records the returned type from the shape —
 `maker` answers `returns int (*)(int b)`, `signal` `returns void (*)(int)` — through
@@ -3260,13 +3147,14 @@ The targets, from that run:
 again.
 
 
-## Found while reading for the allocator: stale documents and references — measured, not fixed
+## Found while reading for the allocator: the cleanup's duplicates and citations — fixed
 
-Same pass, not the same change. Each item below is counted so the next round starts from evidence; none of it is fixed
-here.
+Same pass, not the same change. Everything below was found while reading for the allocator, measured, and then fixed
+in the same round; the counts are the before numbers.
 
-**Five headings in this file appear twice.** Two commits inserted a second copy of a block instead of replacing the
-first:
+### Five headings this file held twice
+
+Two commits left a second copy of a block instead of replacing the first:
 
 ```text
 heading                                               first copy   second copy   commit
@@ -3277,21 +3165,76 @@ Diagnostic false positives: …                         line 73      line 180   
 Why `std::vector` itself is missing …                 line 413     line 616      4e70be1f (+32 lines)
 ```
 
-For the first four, the first copy is `83e7b632`'s updated text — it ends "After the fixes … 32 findings to 0" — and
-the second is the older copy, which still lists the `is_convertible` finding as open. The `std::vector` pair is not a
-copy: `4e70be1f` gave the long body (until then part of the `size()` section) its own `## Why \`std::vector\`` heading,
-while a shorter section with that heading already existed (added by `c89f6360`). The long copy is the newer record — it
-carries "Fixed, measured 2026-11-16" — but it ends on a dangling paragraph starting "— and the index holds no fact for
-it", so something was already cut out of it. Merging the two needs a read, which is why this is a note and not a diff.
+For the first four, the first copy was `83e7b632`'s updated text — it ends "After the fixes … 32 findings to 0" — and
+the second was the older copy, which still listed the `is_convertible` finding as open. The two copies were
+byte-identical outside the diagnostic section, so the older one went: **107 lines removed**, and one blank line put
+where the heading had run into the previous paragraph.
 
-**Twenty source comments cite documents the cleanup deleted** — `docs/indexing-review.md` ×8, `docs/module-cache.md` ×9,
-`docs/memory.md` ×1, "see the audit" ×2 — in eleven files under `cache/`, `session/` and `index/`. Each is a finding's
-only pointer to its reproducer, so the fix is to name a live record (a test, or a section of this file), not to delete
-the sentence.
+The `std::vector` pair was not a copy: `4e70be1f` gave the long body (until then part of the `size()` section) its own
+heading, while a shorter section with that heading already existed (added by `c89f6360`). The long copy is the newer
+record — it carries "Fixed, measured 2026-11-16" — and it ended on a dangling paragraph starting "— and the index holds
+no fact for it", left by an earlier cut. That fragment went (**6 lines**; its claim is contradicted by the "Fixed"
+paragraph above it). The older section keeps its measurements under its own heading — `std::vector` itself was
+missing because nobody asked for the header's refinement, which is what `c89f6360` was about. The file went from
+**3 297 to 3 185 lines and 67 to 63 headings**, and each of the four duplicated headings now appears once.
 
-**Twenty-six test commands name targets the test reorganisation removed**: 26 `cargo test … --test <name>` invocations
-in 21 files, naming 21 distinct targets, none of which exists as a target now. The target is `suite`, and the module
-name is the filter — `cargo test -p cpp_code_analysis --test suite types`. They were correct when written; `2dc17c8d`,
-the commit that merged the targets, did not update them.
+### 149 citations of deleted documents, in `crates/`
 
+Counted at the commit before this round:
+
+```text
+docs/parser-toolchain-review.md       45      docs/indexing-design.md   9      docs/memory.md          1
+docs/language-server-review.md        35      docs/indexing-review.md   8      docs/formatter-diff.md 10
+docs/code-analysis-review.md          23      docs/module-cache.md      9      status.md               7
+                                                                               "see the audit"         2
+```
+
+The rule is the one `a7de65fa` set for four other documents: **name the live document that holds the record, and let the
+section numbers go with the document they belonged to.** The review documents are recorded item by item in
+`docs/worklog.md` (its P1/P2/P3 lists, with the commit each item closed in), so those **103** citations point there and
+keep their item code, which the worklog itself uses. The design documents are the cache rewrite's archaeology, which
+`docs/open-questions.md` holds, so the **27** citations point there with no `§`; where the sentence said "phase 0/1/2
+of …", the phase label was the deleted document's, and it now names the thing instead (the refinement queue, the L1/L2
+split, the composition). The formatter differential's **10** point at the audit that produces it,
+`crates/cpp_formatter/tests/suite/against_clang_format.rs`. `status.md`'s **7** and the two "see the audit" citations
+had no live record and no fact that needed one — the sentence around each already said it — so the citation went and
+the sentence stayed.
+
+Two READMEs pointed at other deleted documents, and `docs/configuration.md` at the formatter differential; those went
+with them. A relative-link check over every markdown file in the repository now finds no missing target. (`docs/worklog.md`'s
+own mentions of the review documents are the record of those reviews, and are left, as `a7de65fa` left the ones it
+found.)
+
+### 26 test commands named targets the reorganisation removed
+
+`cargo test … --test <name>` in 21 files, naming 21 distinct targets, none of which exists as a target since
+`2dc17c8d` merged 152 files into one `tests/suite.rs` per crate. Each is now `--test suite <module>`; `format` uses
+`--test suite format::`, because the bare `format` filter would also select `format_scanner`. `translation_unit`'s two
+arguments were a target and a filter, so it keeps only the filter (`--test suite a_scope_macro`). Measured with
+`--list`: `--test suite format::` lists **17** `format::` tests and no `format_scanner::` one, and
+`--test suite read_ahead_probe` lists **2**.
+
+One was not rewritten: `crates/cpp_parser/src/probes.rs` told a reader to run `--test parse_cost`, and `parse_cost.rs`
+was one of the probes deleted in `2dc17c8d`. The sentence that described it went; the measured numbers above it stayed.
+
+### What is left of the same kind, measured
+
+These are **not** the cleanup's residue but older debt the same scan found, and none of it is a markdown link, so the
+link check does not see it.
+
+```text
+diagnostics-performance.md   6      plan-units.md         3      notes.md         2
+perf-review.md               6      perf-progress.md      3      hover-render.md  1
+inactive-regions.md          5      ranges.md             3
+refinement.md                4      declarator-shapes.md  4
+```
+
+**37 named citations to ten further documents.** Three have live material to point at — `inactive-regions.md` (the
+handler module), `refinement.md` (the stored-refinement suite) and `declarator-shapes.md`
+(`tests/suite/declarator_shapes.rs`); the other seven are performance and planning notes with no live record.
+
+**And 38 lines that lean on an unnamed plan**: "the plan's rule 3", "the plan's §5.2", "gate ①", "design note §2.1";
+70 lines in `crates/` carry a `§` with no live document behind it. A re-point is not the fix here: the
+sentence uses the plan as the *authority* for a rule, so the rule has to be stated in the sentence — most already state
+it beside the citation — and the reference dropped. That is a prose edit per site, and it is the next pass.
 

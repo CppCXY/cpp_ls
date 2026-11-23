@@ -81,7 +81,7 @@ job. Everything else is hermetic.
 ## See also
 
 - [`docs/configuration.md`](../../docs/configuration.md) — the build description, `.cppls.toml`, and the limits
-- [`docs/inactive-regions.md`](../../docs/inactive-regions.md) — what "this region does not compile" means here
+- [`crates/cpp_ls/src/handlers/inactive_regions`](../cpp_ls/src/handlers/inactive_regions) — what "this region does not compile" means here
 - [`crates/cpp_code_analysis`](../cpp_code_analysis) — the layer above, which asks this one for readings
 
 ## License

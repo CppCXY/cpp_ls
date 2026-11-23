@@ -188,7 +188,7 @@ impl<'a> CppTreeBuilder<'a> {
 /// (close the marker where the construct ends, error paths included), which is what [`EventStreamAudit`] enforces in
 /// tests; what this function adds is that the tree **says** it happened: [`balance_events`] counts the nodes it had to
 /// close and [`CppTreeBuilder::unbalanced_events`] reports it, so a release build can log a wrongly shaped tree instead
-/// of returning it silently (`docs/parser-toolchain-review.md` P1-4).
+/// of returning it silently (`docs/worklog.md` P1-4).
 ///
 /// The comment here used to claim the end was "the true local end of each node". It is not, and saying so hid that this
 /// fallback is a damage report rather than a repair.

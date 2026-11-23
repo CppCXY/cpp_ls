@@ -361,7 +361,7 @@ const SOURCE_EXTENSIONS: &[&str] = &[
 ///
 /// Public because a second list is a second thing to drift: the language server asks a client to report changes to the
 /// files the *analysis* reads, and it had its own copy — which had no `.cu`/`.cuh` and no `cppm`/`ixx` (`P1-6` of
-/// `docs/language-server-review.md`). The copy is gone; the client is asked to watch exactly these, plus
+/// `docs/worklog.md`). The copy is gone; the client is asked to watch exactly these, plus
 /// [`CUDA_SOURCE_EXTENSIONS`] and the project's own `workspace.source_extensions`.
 pub fn source_extensions() -> &'static [&'static str] {
     SOURCE_EXTENSIONS
@@ -757,7 +757,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// only the chunk that happened to drain the queue is what left MSVC's `<xstring>` and `<vector>` — both read in
     /// the first chunk, both scoped by a macro body defined in a later one — reading at file scope for ever.
     parsed_since_the_last_pass: Vec<PathBuf>,
-    /// **The files somebody has asked to have refined** — phase 0 of `docs/indexing-design.md`.
+    /// **The files somebody has asked to have refined** — the refinement queue, recorded in `docs/open-questions.md`.
     ///
     /// The second pass used to drain the whole backlog at startup: on `EmmyLuaCodeStyle` that was 1745 files and
     /// **59–120 s**, for answers about files the reader had not opened. A start now refines nothing; `catch_up` marks

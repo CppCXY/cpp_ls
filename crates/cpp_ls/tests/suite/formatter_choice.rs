@@ -327,7 +327,7 @@ fn a_missing_program_falls_back_to_the_built_in_formatter_and_says_so_once() {
 ///
 /// ```text
 /// $env:CPPLS_CLANG_FORMAT = "C:\Program Files\LLVM\bin\clang-format.exe"   # or leave it to PATH
-/// cargo test --release -p cpp_ls --test formatter_choice -- --ignored --nocapture
+/// cargo test --release -p cpp_ls --test suite formatter_choice -- --ignored --nocapture
 /// ```
 ///
 /// It asserts the two things a probe can assert exactly: **the server's answer is clang-format's own answer** for the
@@ -416,7 +416,7 @@ fn the_real_clang_format_answers_and_keeps_a_range_to_its_lines() {
     );
 
     // The built-in formatter, printed rather than asserted: this probe is about the program path, and the distance
-    // between the two formatters is `docs/formatter-diff.md`'s subject.
+    // between the two formatters is `crates/cpp_formatter/tests/suite/against_clang_format.rs`'s subject.
     let built_in = cpp_formatter::format_file(
         &file,
         &source,

@@ -25,8 +25,9 @@ not decided    **line breaking.** The line structure of the input is kept: a lin
 
 That last line is the honest limit, and it is why the language server does not run this formatter by default:
 `[format] formatter` names the program `textDocument/formatting` runs, and its default is `clang-format` from `PATH`;
-this one answers when a project asks for it (`formatter = "cpp_formatter"`). [`docs/formatter-diff.md`](../../docs/formatter-diff.md)
-measures the gap against a named clang-format version and says what closing it costs.
+this one answers when a project asks for it (`formatter = "cpp_formatter"`). The differential is
+[`tests/suite/against_clang_format.rs`](tests/suite/against_clang_format.rs): it runs both formatters over a real
+corpus and reports where the text differs.
 
 ## The safety argument
 
@@ -78,7 +79,7 @@ The audit needs a `clang-format` binary and is `#[ignore]`d; the case suites are
 
 ## See also
 
-- [`docs/formatter-diff.md`](../../docs/formatter-diff.md) — the measurement against clang-format, and the plan
+- [`tests/suite/against_clang_format.rs`](tests/suite/against_clang_format.rs) — the differential measurement against clang-format
 - [`docs/configuration.md`](../../docs/configuration.md) — `[format] formatter`, and how the server chooses one
 
 ## License

@@ -75,8 +75,8 @@ The type of every reflection expression is `std::meta::info`, whichever operand 
 language whose type does not depend on what it names. What is **not** there is the library and the evaluation:
 `std::meta`'s metafunctions (`members_of`, `type_of`, …) are ordinary undeclared names unless a project supplies a
 `<meta>` header, and a splice's *type* is the entity the reflection names, which this layer does not compute — so
-`auto x = [: r :];` leaves `x`'s type unknown rather than guessing. [`crates/cpp_parser/tests/reflection.rs`](../crates/cpp_parser/tests/reflection.rs)
-pins the syntax and [`crates/cpp_code_analysis/tests/reflection.rs`](../crates/cpp_code_analysis/tests/reflection.rs)
+`auto x = [: r :];` leaves `x`'s type unknown rather than guessing. [`crates/cpp_parser/tests/suite/reflection.rs`](../crates/cpp_parser/tests/suite/reflection.rs)
+pins the syntax and [`crates/cpp_code_analysis/tests/suite/reflection.rs`](../crates/cpp_code_analysis/tests/suite/reflection.rs)
 pins the absence of false diagnostics.
 
 **Verified against a compiler.** A MinGW-w64 GCC 16.2 toolchain (`-std=c++26 -freflection`, with libstdc++'s own
@@ -129,7 +129,7 @@ a spelling that could not collide with one.
 What is **not** there is the semantics: no contract is evaluated, no violation mode is modelled, and the standard's
 ill-formed cases — a contract on a virtual function, or on the first declaration of a `= default`ed function — are
 not diagnosed. The result name in `post(r: …)` is read as syntax and is not bound as a variable, so the predicate's
-type is not checked against it. [`crates/cpp_parser/tests/contracts.rs`](../crates/cpp_parser/tests/contracts.rs)
+type is not checked against it. [`crates/cpp_parser/tests/suite/contracts.rs`](../crates/cpp_parser/tests/suite/contracts.rs)
 pins the syntax.
 ## 3. Preprocessing
 

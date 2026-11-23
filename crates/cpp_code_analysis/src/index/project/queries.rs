@@ -501,7 +501,7 @@ pub fn definitions_across_files(
             // tree cannot place — a name from an include, a macro, a file the closure has not read. Without the filter
             // a file's *own* later declaration comes back and the forward jump survives the walk that was just fixed:
             // `void f() { later(); } void later() {}` resolved to the second line
-            // (`docs/code-analysis-review.md` P1-1).
+            // (`docs/worklog.md` P1-1).
             //
             // Class-member questions are exempt, for the reason the walk's own filter is: a member is visible
             // throughout its class body.

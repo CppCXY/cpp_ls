@@ -29,7 +29,7 @@ const WATCH_FILES_REGISTRATION_ID: &str = "cpp_ls_watched_files";
 ///
 /// The extensions come from `cpp_code_analysis` rather than from a copy here, because a copy is a second list to drift:
 /// this one had no `.cu`/`.cuh` (a CUDA project's own sources, which the analysis scans for) and no `cppm`/`ixx`
-/// (`docs/language-server-review.md` P1-6). A client using its own watcher, as a client that registers dynamically does,
+/// (`docs/worklog.md` P1-6). A client using its own watcher, as a client that registers dynamically does,
 /// then reported nothing for a `.cu` file whose changes the session kept serving an old reading of.
 ///
 /// The configuration names are the same arrangement on the other side of the question: they come from
@@ -135,7 +135,7 @@ mod tests {
     ///
     /// The glob list used to be a copy of the extension list, and the copy had no `.cu`/`.cuh` — so a client using its
     /// own watcher, which is what dynamic registration is for, reported nothing when a CUDA source changed
-    /// (`docs/language-server-review.md` P1-6). The two lists are one now, and this pins that the globs cover **every**
+    /// (`docs/worklog.md` P1-6). The two lists are one now, and this pins that the globs cover **every**
     /// extension the analysis scans, CUDA's included, rather than the particular set that happened to be written down.
     #[test]
     fn the_watched_globs_cover_every_extension_the_analysis_reads() {

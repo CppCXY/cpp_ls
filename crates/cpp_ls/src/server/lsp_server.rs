@@ -38,7 +38,7 @@ impl LspServer {
         // otherwise — **one** value for the whole session. It is computed here and read back from the features by every
         // handler, because the two computations this replaced disagreed under `--editor`: the capability side used the
         // client's own info and the configuration side the argument, so one session held two identities
-        // (`docs/language-server-review.md` P2-2). The capability list cannot answer the question at all: a client names
+        // (`docs/worklog.md` P2-2). The capability list cannot answer the question at all: a client names
         // the standard semantic token types it knows, so a custom type is never in it even for a client whose theme can
         // draw it.
         let client_id =

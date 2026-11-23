@@ -680,7 +680,7 @@ fn a_word_cpp_reserves_is_a_name_in_c() {
 /// `#include "sub\header.h"` is a Windows project's own spelling. Three readers used to refuse it and one of them
 /// (`parse_include`) then had no target at all, so the **include vanished**: the header was never read, its macros and
 /// declarations were missing from the program, and the fixture measured here reported `includes: []`.
-/// `docs/parser-toolchain-review.md` P2-2.
+/// `docs/worklog.md` P2-2.
 #[test]
 fn lex_header_name_accepts_a_backslash_in_a_quoted_name() {
     for source in [

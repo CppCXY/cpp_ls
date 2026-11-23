@@ -138,7 +138,7 @@ pub type TypeOf = Arc<Type>;
 ///
 /// A wrapper on [`Type::Qualified`] recorded only *that* a type was qualified, so every spelling came out `const`:
 /// `volatile S v; auto x = v;` typed `x` as `const S`, and `int f() volatile` was read as a `const` member function —
-/// a different overload (`docs/code-analysis-review.md` P1-3). The two are separate bits because they are separate
+/// a different overload (`docs/worklog.md` P1-3). The two are separate bits because they are separate
 /// questions: `volatile` says every access is an observable side effect, `const` says assignment is not allowed, and a
 /// member list can hold `f()`, `f() const` and `f() volatile` at once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -344,7 +344,7 @@ impl Type {
     }
 
     /// **Is the object this type describes `volatile`** — the same rule as [`Type::is_const`], and a separate bit
-    /// because `volatile int` is neither a const object nor an unqualified one (`docs/code-analysis-review.md` P1-3).
+    /// because `volatile int` is neither a const object nor an unqualified one (`docs/worklog.md` P1-3).
     pub fn is_volatile(&self) -> bool {
         match self {
             Type::Qualified { qualifiers, .. } => qualifiers.is_volatile(),
@@ -1332,7 +1332,7 @@ fn strip_trailing_qualifiers(written: &str) -> (Qualifiers, &str) {
             return (stripped, end);
         }
         // **Every word, not the last one**: `Widget const volatile` has two, and recording only the last made the
-        // first one vanish (`docs/code-analysis-review.md` P1-3).
+        // first one vanish (`docs/worklog.md` P1-3).
         stripped = stripped.with(qualifier);
         end = end[..end.len() - word.len()].trim_end();
     }
@@ -1354,7 +1354,7 @@ fn split_leading_qualifiers(written: &str) -> (Qualifiers, &str) {
         }
         match Qualifiers::of_a_word(word) {
             // **Both, in either order** — `const volatile S` and `volatile const S` are one type, and the second word
-            // used to be dropped (`docs/code-analysis-review.md` P1-3).
+            // used to be dropped (`docs/worklog.md` P1-3).
             Some(found) => qualifier = qualifier.with(found),
             None => match word {
                 "struct" | "class" | "enum" | "typename" => {}
@@ -2047,7 +2047,7 @@ pub(crate) fn read_specifiers_named(
             // **Except `const` and `volatile`, which are part of the type they are written on** — see the end of this
             // function. `volatile` used to be in the list below, which is how `volatile S v;` became `const S`: the
             // word was skipped and the answer was then built as if every qualified type were a `const` one
-            // (`docs/code-analysis-review.md` P1-3).
+            // (`docs/worklog.md` P1-3).
             CppSyntaxKind::ConstQual => {
                 qualifiers_written = qualifiers_written.with(Qualifiers::CONST);
             }

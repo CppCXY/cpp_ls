@@ -10,7 +10,7 @@
 //! off the disk.
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test stored_refinement -- --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite stored_refinement -- --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};

@@ -22,7 +22,7 @@ impl LineIndex {
     /// accepts. This used to count only `\n`, so a file with old-Mac `\r` endings was **one line** to the index and many
     /// to the lexer: every diagnostic in it pointed at line 0, every LSP range was a column of a line the client had
     /// never heard of, and `get_offset(line, col)` answered positions inside a different line's syntax
-    /// (`docs/parser-toolchain-review.md` P2-3).
+    /// (`docs/worklog.md` P2-3).
     pub fn parse(text: &str) -> LineIndex {
         let mut line_offsets = Vec::new();
         let mut line_only_ascii_vec = Vec::new();
@@ -232,7 +232,7 @@ mod tests {
 
     /// **Every spelling of a line break is one break** — `\n`, `\r\n`, a lone `\r`, and the `\n\r` pair the lexer also
     /// accepts. Counting only `\n` made an old-Mac file one line to the index and many to the parser
-    /// (`docs/parser-toolchain-review.md` P2-3).
+    /// (`docs/worklog.md` P2-3).
     #[test]
     fn every_spelling_of_a_line_break_starts_one_line() {
         assert_eq!(starts("a\nb"), [0, 2], "LF");

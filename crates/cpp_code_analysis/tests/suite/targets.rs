@@ -203,7 +203,7 @@ fn patterns_mean_what_the_documentation_says() {
 ///
 /// `TargetSection` accepts `args`, `extra_args` and `remove_args` and documents them exactly as `[compile]`'s own — and
 /// `for_file` applied none of them, so `args = ["-Igenerated", "-DFEATURE=1"]` parsed and changed nothing: the include
-/// directory was not searched and the macro was not defined (`docs/parser-toolchain-review.md` P2-7).
+/// directory was not searched and the macro was not defined (`docs/worklog.md` P2-7).
 #[test]
 fn a_targets_own_command_line_is_applied_to_the_files_it_describes() {
     let section = compile_section(

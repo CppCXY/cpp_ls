@@ -109,7 +109,7 @@ fn a_method_after_the_macro_shaped_try_catch_is_still_a_member() {
 ///
 /// ```text
 /// $env:CPPLS_REAL_PROJECT = "E:\EmmyLuaCodeStyle"
-/// cargo test -p cpp_code_analysis --test class_body_continuity -- --ignored --nocapture
+/// cargo test -p cpp_code_analysis --test suite class_body_continuity -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "a probe: parses one file of a real project"]

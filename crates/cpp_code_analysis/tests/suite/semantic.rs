@@ -533,7 +533,7 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
     let view = session.view("/p/a.cpp").expect("the file is held");
 
     // The body's `Widget w;` — the local, and not the class of the same name above it.
-    // **The reading the program implies, which is the cooked one** (`docs/indexing-design.md` §2.1): a summary is the
+    // **The reading the program implies, which is the cooked one** (`docs/open-questions.md`): a summary is the
     // file's environment-free reading, and `BEGIN_APP` — a body from `ns.h` — is not in it.
     let cooked = session
         .index()
@@ -2703,7 +2703,7 @@ fn a_literal_has_a_type_at_the_cursor() {
 /// `segments.dedup()` before it is joined, because a **unit rendering** — the stitched stream a module's interface unit
 /// produces — nests one file's `namespace std` inside another's, and ten spliced headers spelled `std::std::…::format`.
 /// Collapsing every run of equal names fixed the stitching and broke the language
-/// (`docs/code-analysis-review.md` P2-3).
+/// (`docs/worklog.md` P2-3).
 #[test]
 fn a_namespace_inside_one_of_the_same_name_keeps_both_segments() {
     use cpp_code_analysis::{
@@ -2742,7 +2742,7 @@ fn a_namespace_inside_one_of_the_same_name_keeps_both_segments() {
 ///
 /// The lookup walked scopes and took the first one that declared the name *anywhere*, so a call resolved to a
 /// declaration written below it, and a `using namespace` directive below a use made its names visible at that use.
-/// Neither is a program a compiler accepts (`docs/code-analysis-review.md` P1-1).
+/// Neither is a program a compiler accepts (`docs/worklog.md` P1-1).
 #[test]
 fn a_use_before_the_declaration_finds_nothing() {
     use cpp_code_analysis::file::coordinates::FileOffset;

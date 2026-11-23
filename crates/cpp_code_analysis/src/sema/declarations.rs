@@ -4647,7 +4647,7 @@ fn enclosing_namespaces_of(scopes: &ScopeTree, from: ScopeId) -> Option<String> 
     // module's interface unit produces) nested one file's `namespace std` inside another's, and ten spliced MSVC headers
     // spelled `std::std::…::format`. That was a bug in the stitching, and the collapse paid for it with a real name:
     // `namespace A { namespace A { void f(); } }` is `A::A::f` to a compiler, and this answered `A::f`
-    // (`docs/code-analysis-review.md` P2-3).
+    // (`docs/worklog.md` P2-3).
     //
     // The collapse turned out to be unnecessary: with it removed the whole suite — module and unit fixtures included —
     // passes, so the splicing is closed where the unit is stitched. If a nested-`std` regression ever appears, the fix

@@ -492,7 +492,7 @@ pub fn normalize_path(path: &Path, case_insensitive: bool) -> String {
     // **Every spelling of the verbatim prefix.** `\\?\` is what `canonicalize` returns; `\?\` — with **one**
     // leading separator — is what a `file:///` URI round trip produced for an event path on Windows, and it is the same
     // file. Recognising only the first spelling made a configuration path named on the command line compare unequal to
-    // the identical file's event path, so a reload was never asked for (`docs/language-server-review.md` P1-5); the
+    // the identical file's event path, so a reload was never asked for (`docs/worklog.md` P1-5); the
     // normalized form of the one-backslash spelling began `/?/c:/…`.
     let mut raw: &str = &raw;
     let mut unc = false;

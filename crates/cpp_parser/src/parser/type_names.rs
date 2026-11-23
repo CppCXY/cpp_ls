@@ -44,7 +44,7 @@
 //! came out as a **declaration** of `Leaked` with a parameter list — no `CallExpr`, no diagnostic, a binding that
 //! does not exist. The other half was lost in the same way: a name declared in an inner scope *replaced* the
 //! outer entry, so the outer type never came back when the inner scope closed. Both are the review's P1-1
-//! (`docs/parser-toolchain-review.md`), and both are gone with a stack of maps.
+//! (`docs/worklog.md`), and both are gone with a stack of maps.
 //!
 //! # What is still not modelled
 //!

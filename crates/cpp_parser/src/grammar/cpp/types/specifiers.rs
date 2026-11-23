@@ -975,7 +975,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
 
         // **`volatile` is its own qualifier node**, and it used to be a `ConstQual`: the two share one rule here, so
         // every reader that asked the tree "is this const" was told yes for a `volatile` declaration, and
-        // `volatile S v; auto x = v;` typed `x` as `const S` (`docs/code-analysis-review.md` P1-3). The kinds are
+        // `volatile S v; auto x = v;` typed `x` as `const S` (`docs/worklog.md` P1-3). The kinds are
         // separate because the questions are: `const` says assignment is not allowed, `volatile` says every access is
         // observable, and a member list can hold `f()`, `f() const` and `f() volatile` at once.
         CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword => {
@@ -1173,8 +1173,8 @@ pub(crate) fn parse_one_decl_specifier_inner(
             // ```
             //
             // The kind was answering "is this a template instantiation?" with *yes* for every named type in a
-            // specifier sequence — a claim a reader matching on kind would believe, and one `status.md` §5 records
-            // the cost of four times over.
+            // specifier sequence — a claim a reader matching on kind would believe, and one this parser paid for four
+            // times over.
             //
             // **A name still gets a node**, and that is not a detail: leaving it a bare `NameExpr` failed four tests
             // at once, because the parser itself asks whether a *type name* has been written by looking for

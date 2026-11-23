@@ -1937,7 +1937,7 @@ fn a_members_members_are_offered_over_the_wire() {
 /// It runs in release, and that is how it was written and verified:
 ///
 /// ```text
-/// cargo test --release -p cpp_ls --test handshake -- --ignored a_standard_library
+/// cargo test --release -p cpp_ls --test suite handshake -- --ignored a_standard_library
 /// ```
 ///
 /// What covers the same ground in a debug run: `cpp_code_analysis/tests/completion.rs`'s
@@ -2408,7 +2408,7 @@ fn a_completion_sees_a_change_to_an_included_header() {
 /// a header of the project's own.
 ///
 /// ```text
-/// cargo test --release -p cpp_ls --test handshake -- --ignored a_member_access_on_the_last_line
+/// cargo test --release -p cpp_ls --test suite handshake -- --ignored a_member_access_on_the_last_line
 /// ```
 #[test]
 #[ignore = "needs the release profile: the answer comes from the standard library's include closure (156 files)"]
@@ -2640,7 +2640,7 @@ fn an_incremental_edit_is_visible_to_the_next_completion() {
     );
     // **The save-time formatting request is advertised**, because it is implemented: a client that asks before saving
     // gets the formatter's edits, and a capability that answers `None` means no compliant client ever asks
-    // (docs/language-server-review.md P2-1).
+    // (docs/worklog.md P2-1).
     assert_eq!(
         initialized["result"]["capabilities"]["textDocumentSync"]["willSaveWaitUntil"],
         json!(true),
@@ -5657,7 +5657,7 @@ fn what_the_completion_answers_here() {
 /// watch the process from outside:
 ///
 /// ```text
-/// cargo test --release -p cpp_ls --test handshake probe_the_cpu_shape -- --ignored --nocapture
+/// cargo test --release -p cpp_ls --test suite handshake probe_the_cpu_shape -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "a probe, run by hand: four minutes on the real project, and it asserts nothing"]
@@ -7586,7 +7586,7 @@ int live_name = 2;
 /// The open-buffer rule — "the buffer is the text, the disk is not" — is right for source and wrong for the project's
 /// own configuration, which is not edited into the analysis but **re-read**. `if open { continue }` skipped the reload,
 /// and `didSave` carries no text (the server asks for none), so saving `.cppls.toml` in an editor changed nothing until
-/// a restart (`docs/language-server-review.md` P1-4).
+/// a restart (`docs/worklog.md` P1-4).
 #[test]
 fn a_configuration_file_saved_from_the_editor_reloads_the_project() {
     let project = Project::new("config-save-reload");
@@ -7686,7 +7686,7 @@ fn a_configuration_file_saved_from_the_editor_reloads_the_project() {
 /// A folder-scoped setting can only be asked for under a `scopeUri`, and what a client answers without one is its global
 /// setting — a different thing from the folder's. The handler asked for the client's configuration **before** installing
 /// the roots, so the request went out with no `scopeUri` at all and a folder-level configuration was unreachable however
-/// the client had set it (`docs/language-server-review.md` P1-1).
+/// the client had set it (`docs/worklog.md` P1-1).
 #[test]
 fn the_first_configuration_request_names_the_workspace() {
     let project = Project::new("config-scope-uri");
@@ -7751,7 +7751,7 @@ fn the_first_configuration_request_names_the_workspace() {
 /// `--config` is kept on the workspace and used when the session opens, but the watch filter was built from the root
 /// alone — the explicit path was not a configuration file to the server and, being outside the root, a recursive watch
 /// could not see it. A configuration that is only read at startup is not a live one
-/// (`docs/language-server-review.md` P1-5).
+/// (`docs/worklog.md` P1-5).
 ///
 /// The client here advertises **no** dynamic registration, so the server's own watcher is the one that has to notice —
 /// the path no client-side glob could mention either.
@@ -7848,7 +7848,7 @@ fn a_configuration_file_outside_the_workspace_is_watched() {
 /// Two computations of "which editor is this" disagreed under the argument: the capability side used
 /// `initialize.clientInfo` and the configuration side used `--editor`, so a session started with `--editor vscode` from a
 /// client that calls itself something else chose its *settings* as VS Code and its *commands* as that other client
-/// (`docs/language-server-review.md` P2-2).
+/// (`docs/worklog.md` P2-2).
 ///
 /// The observable is a code lens: VS Code is sent `cppls.showReferences` (its extension registers it, and it refuses the
 /// editor's internal command), an IntelliJ client is sent `editor.action.showReferences`, and anything else gets no
@@ -7924,7 +7924,7 @@ int f() { return grow(1); }
 ///
 /// `--load-stdlib` and `--resources-path` were declared and never consumed: a user could pass them and get no behaviour
 /// change, which reads as "this is supported and did not help" rather than "this does nothing"
-/// (`docs/language-server-review.md` P2-2). They are deleted, and the help text is the contract that says so — `--editor`,
+/// (`docs/worklog.md` P2-2). They are deleted, and the help text is the contract that says so — `--editor`,
 /// which *is* read (the session's identity), stays listed.
 #[test]
 fn the_cli_does_not_offer_switches_nothing_reads() {
@@ -7951,7 +7951,7 @@ fn the_cli_does_not_offer_switches_nothing_reads() {
 /// `publish_all` took the version from the buffer store and the regions and text from two separate analysis snapshots,
 /// so a keystroke could pair one version's `textDocument` with another version's ranges — a client that checks the
 /// version (which the notification exists to let it do) would either drop a correct notification or paint a range over
-/// text it never described (`docs/language-server-review.md` P1-3).
+/// text it never described (`docs/worklog.md` P1-3).
 ///
 /// The edits here alternate between a text with a dead branch and one without, so the expected ranges differ by version:
 /// a notification whose ranges are not the ones its own text produces is a pairing failure, whatever the interleaving.
@@ -8039,7 +8039,7 @@ fn every_inactive_regions_publication_matches_the_version_it_names() {
 /// The notification used to be handled in a detached task: reading the client's configuration, updating the manager and
 /// scheduling the reload all ran *beside* the update queue, so the next request could be answered from the configuration
 /// that was in force before — and nothing told an in-flight request the world had changed
-/// (`docs/language-server-review.md` P1-2).
+/// (`docs/worklog.md` P1-2).
 ///
 /// The observable is the client's own configuration request: the test client counts those (it answers `[null]` to each),
 /// so if the count has grown by the time the hover's answer comes back, the server finished the read **before** it
@@ -8135,7 +8135,7 @@ fn a_request_after_a_configuration_change_sees_the_new_settings() {
 ///
 /// The dispatcher dropped one silently — `if let Ok(params)` with no `else` — so a client bug or a field this server
 /// reads and the client does not send left the analysis a document behind with nothing in the log to say why
-/// (`docs/language-server-review.md` P2-6). The log is a file here (`--log-path`), which is also the only way a test can
+/// (`docs/worklog.md` P2-6). The log is a file here (`--log-path`), which is also the only way a test can
 /// see what a **notification** did: nothing is sent back to a client for one.
 #[test]
 fn a_malformed_notification_is_logged_and_does_not_stop_the_server() {
@@ -8207,7 +8207,7 @@ fn a_malformed_notification_is_logged_and_does_not_stop_the_server() {
 /// The registration was fire-and-forget: the response found no waiter and was dropped, so `MethodNotFound` looked like
 /// agreement. The server then starts no watcher of its own — it believes the client reports changes — and nothing
 /// reports anything, which is a session that silently stops noticing the filesystem
-/// (`docs/language-server-review.md` P2-3).
+/// (`docs/worklog.md` P2-3).
 ///
 /// The log is the observable: the refusal is named, and the native watcher starts in its place.
 #[test]

@@ -4,7 +4,7 @@
 //! is the runs a client would paint.
 //!
 //! ```text
-//! cargo test -p cpp_code_analysis --test format_scanner
+//! cargo test -p cpp_code_analysis --test suite format_scanner
 //! ```
 //!
 //! The table is written as `(literal, expected)` where an expected piece is `(kind, text)` — the *text* rather than

@@ -1,7 +1,7 @@
 //! **The environment as a value** — the macros in force at one point of one translation unit, and the number that
 //! identifies them.
 //!
-//! See `docs/module-cache.md` for why this exists and what it replaces. In one sentence: a file's reading is a
+//! See `docs/open-questions.md` for why this exists and what it replaces. In one sentence: a file's reading is a
 //! function of its own text and the macros in force where it sits, not of its translation unit, so the macros have to
 //! be a **value** a cache can key on rather than a state a walk happens to be in.
 //!
@@ -21,7 +21,7 @@
 //! It is deliberately *not* order-insensitive: two folds that reach the same final table by different routes are two
 //! values here, because the fold is deterministic per file and the cheaper hash is worth more than a property no
 //! caller needs. The order-insensitive number — the one that decides whether two *programs* share a file's rendering
-//! — is the **reachable** environment of `docs/module-cache.md` §4, a separate key computed over the names a file
+//! — is the **reachable** environment of `docs/open-questions.md`, a separate key computed over the names a file
 //! mentions.
 //!
 //! # What the table says about a name it does not hold
@@ -365,7 +365,7 @@ impl Default for Env {
 /// unknown" and every branch gated on a predefine is undecidable. With it, a fold decides exactly the conditions the
 /// walk decides: a name the environment `#undef`ed answers `Undefined` and does **not** fall through to the seed (that
 /// is what `#undef` means), a name the environment defines answers `DefinedWithoutAValue` (its body is a shape plus
-/// one literal, not the token list the evaluator wants — `docs/module-cache.md` §8), and everything else is the
+/// one literal, not the token list the evaluator wants — `docs/open-questions.md`), and everything else is the
 /// seed's answer.
 /// How many alias hops a value may take before the answer is `defined, value unknown`.
 pub const MAX_ALIAS_HOPS: usize = 8;

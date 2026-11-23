@@ -3,7 +3,7 @@
 //! rather than of the raw text.
 //!
 //! ```text
-//! cargo test --release -p cpp_code_analysis --test rendering_scope -- --nocapture
+//! cargo test --release -p cpp_code_analysis --test suite rendering_scope -- --nocapture
 //! ```
 //!
 //! The session test asserts that `std::Widget` is found and that the summary records the body that opened the scope.

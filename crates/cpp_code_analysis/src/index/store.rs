@@ -1000,7 +1000,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// A wave is **prepared** and **committed** at two different moments, and a file can be written in between. The
     /// commit would then insert the summary of the old text and record where the disk is *now* — the one state
     /// reconciliation can never leave, because the stamp matches the file, so nothing asks for a re-read and the index
-    /// keeps facts about text nobody has (`docs/code-analysis-review.md` P1-7). The wave carries the hash of the text it
+    /// keeps facts about text nobody has (`docs/worklog.md` P1-7). The wave carries the hash of the text it
     /// was built from for exactly this question.
     pub(crate) fn the_wave_still_describes_the_file(
         &self,
@@ -2330,7 +2330,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // path a unit covers, and after phase 2 stopped building units the answer was `None` for all of them.
             // Measured on the C++ corpus and on `a_class_scoped_by_another_files_macro_body…`: `bodied` came out
             // empty, `re-read: … 0 candidate file(s) … nothing bodied`, and no summary was ever refined (§3.1 of
-            // `docs/indexing-review.md`). With no units the per-candidate arm below builds the defining file's own
+            // `docs/open-questions.md`). With no units the per-candidate arm below builds the defining file's own
             // composed environment instead, which is the reading phase 2 introduced.
             if !environments.is_empty() {
                 candidates.retain(|summary| bodies_of(&environments, &summary.path).is_some());
@@ -2936,7 +2936,7 @@ impl<F: FileProvider> SummaryStore<F> {
         )
     }
 
-    /// **The macro bodies in force in a file, from the index alone** — phase 2 of `docs/indexing-design.md`.
+    /// **The macro bodies in force in a file, from the index alone** — the composition change, recorded in `docs/open-questions.md`.
     ///
     /// [`SummaryStore::closure_environment`] answers the same question by walking the closure with the preprocessor's
     /// conditionals evaluated, which is a whole-program parse. This one walks **summaries**: the closure in reading
