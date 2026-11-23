@@ -1949,7 +1949,13 @@ fn declaration_markdown(
         session.the_attributes_before_a_declaration(&found.file, fact.range.start_offset)
     };
     let (attributes, specifiers) = the_annotations_as_the_card_shows_them(&annotations);
-    let node = session.the_declaration_node(&found.file, fact.range.start_offset);
+    // **The declaration's node, from the name when the range starts before it.** A typedef's fact starts at its
+    // `struct`/`union` body (its target), and the reader's name is the declarator at the end — asking at the range's
+    // start found no declaration at all, so `an_item` got no syntax and a typedef of a class rendered as
+    // `using T = T;`. The name's own offset is inside the `TypedefDecl` both spellings share.
+    let node = session
+        .the_declaration_node(&found.file, fact.range.start_offset)
+        .or_else(|| session.the_declaration_node(&found.file, fact.name_range.start_offset));
     // **The qualifiers a declaration keeps in its own specifier sequence.** They are not in the fact: `type_of` is a
     // name for lookup and drops the specifier words on purpose (`static const Widget` records `Widget`, so a lookup by
     // name finds the class). The node has them, and it is the *parameter's* node here even for a parameter — the
@@ -1980,14 +1986,18 @@ fn declaration_markdown(
     {
         fact.type_of = Some(format!("{qualifiers}{written}").into());
     }
+    let the_declaration = node.as_ref().and_then(|node| {
+        use cpp_parser::CppAstNode as _;
+        cpp_parser::CppDeclaration::cast(node.clone())
+            // **The hover is on a name inside the declaration, not on its first token.** `} T;` puts the
+            // cursor on the typedef's name, whose node is a `NameExpr`; the declaration that carries the
+            // `typedef` keyword and the body is an ancestor. Without this walk `an_item` got `None`, and a
+            // typedef of a class rendered as `using T = T;` — the self-alias the ancestor can explain.
+            .or_else(|| node.ancestors().find_map(cpp_parser::CppDeclaration::cast))
+    });
     let mut declaration = cpp_code_analysis::sema::render::an_item(
         fact,
-        node.as_ref()
-            .and_then(|node| {
-                use cpp_parser::CppAstNode as _;
-                cpp_parser::CppDeclaration::cast(node.clone())
-            })
-            .as_ref(),
+        the_declaration.as_ref(),
         constant_value,
     );
     if !attributes.is_empty() {

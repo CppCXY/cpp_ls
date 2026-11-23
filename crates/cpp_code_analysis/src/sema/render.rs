@@ -132,11 +132,86 @@ pub fn an_item(
     lines
 }
 
+/// **A declaration's text without comments**, whitespace collapsed — the one place a card copies source text.
+///
+/// The generated renderer has no type spelling for an anonymous class body, so a typedef of one falls back to the
+/// declaration's own bytes; its `///<` member notes must not travel into the code block. Strings and character
+/// literals are copied as written, so a `//` inside one is not a comment.
+fn without_comments(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(character) = chars.next() {
+        if let Some(open) = quote {
+            out.push(character);
+            if character == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if character == open {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '"' || character == '\'' {
+            quote = Some(character);
+            out.push(character);
+            continue;
+        }
+        if character == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            break;
+                        }
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut previous = '\0';
+                    for next in chars.by_ref() {
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(character);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// **The declaration's own line**, without a template head — what an overload list prints per declaration.
 pub fn a_line(fact: &DeclFact, syntax: Option<&CppDeclaration>, value: Option<i64>) -> String {
     match fact.kind {
         DeclKind::Function => a_function(fact),
         DeclKind::Type if fact.type_of.is_some() => {
+            let target = fact.type_of.as_deref().unwrap_or("").trim();
+            // **A typedef of a class has itself as its recorded type.** `typedef struct { … } T;` binds one name for
+            // both the anonymous class and the alias, and the type reader answers the name it was asked about — so
+            // the generic alias line printed `using T = T;`, which says nothing. The source's own `typedef` line is
+            // the only spelling that carries the body, and it is the one exception to this module's "generated, not
+            // sliced" rule: there is no type spelling to generate it from. Whitespace is collapsed, so a multi-line
+            // body is still one card line.
+            if target == fact.name
+                && let Some(syntax) = syntax.filter(|syntax| syntax.is_a_typedef())
+            {
+                // **Without its comments**, so a member's `///<` note does not become part of the card line. The
+                // source is still the right text here: no type spelling can carry an anonymous class's body.
+                let written = without_comments(&syntax.syntax().text().to_string());
+                if !written.is_empty() {
+                    return written;
+                }
+            }
             format!(
                 "using {} = {};",
                 fact.name,
@@ -1001,6 +1076,9 @@ mod tests {
     }
 
     /// **An alias is a `using` line**, whatever the file wrote it as — the target rendered by the type writer.
+    ///
+    /// A typedef of a class is the exception: its recorded target is its own name, and the source's `typedef` line is
+    /// rendered instead so the body is not lost — see [`a_line`].
     #[test]
     fn an_alias_is_a_using_line() {
         assert_eq!(
@@ -1010,6 +1088,10 @@ mod tests {
         assert_eq!(
             rendered("typedef const char* Name;\n", "Name"),
             ["using Name = const char*;"]
+        );
+        assert_eq!(
+            rendered("typedef struct { int x; } T;\n", "T"),
+            ["typedef struct { int x; } T;"]
         );
     }
 

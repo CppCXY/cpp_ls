@@ -559,8 +559,12 @@ impl<F: FileProvider + Clone> Session<F> {
         use cpp_parser::CppAstNode as _;
         token.parent_ancestors().find(|node| {
             let kind = cpp_parser::CppSyntaxKind::from(node.kind());
+            // **`cast`, not `can_cast`.** `can_cast` is the narrow test a tree walk uses, and it deliberately
+            // leaves `TypedefDecl` out; a *lookup* wants every spelling of a declaration, and `cast` is the accessor
+            // that says so. Without this a typedef's name found no declaration at all, and its hover card had no
+            // syntax to render from.
             kind == cpp_parser::CppSyntaxKind::Parameter
-                || cpp_parser::CppDeclaration::can_cast(kind)
+                || cpp_parser::CppDeclaration::cast(node.clone()).is_some()
         })
     }
 

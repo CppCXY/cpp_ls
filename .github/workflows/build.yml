@@ -29,8 +29,8 @@ jobs:
           - { os: windows-latest, target: aarch64-pc-windows-msvc,     platform: win32-arm64,   cross: general }
     runs-on: ${{ matrix.os }}
     env:
-      PACKAGE_ARGS: -p cpp_ls -p cpp_formatter
-      BINARY_NAMES: cpp_ls
+      PACKAGE_ARGS: -p cpp_ls -p cpp_formatter -p cpp_inspect
+      BINARY_NAMES: cpp_ls cpp_inspect cppfmt
     steps:
       - uses: actions/checkout@v4
         with:
