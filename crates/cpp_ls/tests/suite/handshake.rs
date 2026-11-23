@@ -1076,12 +1076,12 @@ impl Server {
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("the server did not answer within {TIMEOUT:?}"));
+                .unwrap_or_else(|| panic!("the server did not answer within {within:?}"));
 
             let message = match self.messages.recv_timeout(remaining) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
-                    panic!("the server did not answer within {TIMEOUT:?}")
+                    panic!("the server did not answer within {within:?}")
                 }
                 Err(RecvTimeoutError::Disconnected) => panic!("the server closed its stdout"),
             };
@@ -7960,6 +7960,12 @@ fn every_inactive_regions_publication_matches_the_version_it_names() {
     // **Large enough that the answer takes measurable time.** The window the gate closes is between the analysis
     // answering and the text being read; a four-line file makes it microseconds wide, and a test that cannot enter the
     // window is a pin rather than a reproducer. Measured on this fixture: the answer takes ~10 ms, which is the width.
+    //
+    // **Those are release numbers, and the suite is a measurement workspace** — `.cargo/config.toml` defines `cargo t`
+    // as `test --release` for exactly this reason. The same single test, same fixture, same commit, measured on
+    // Windows: **1.69 s** in release and **61.30 s** unoptimised, where the extra minute is the pump's program reads
+    // and cook slices (~5 s each in the log), not a race. CI ran the unoptimised profile until this round, and this
+    // budget was the first one that no longer fit.
     let filler: String = (0..3000)
         .map(|line| format!("int filler_{line} = {line};\n"))
         .collect();

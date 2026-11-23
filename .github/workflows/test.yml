@@ -58,4 +58,4 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run Tests
-        run: cargo test --workspace --all-features
+        run: cargo test --release --workspace --all-features

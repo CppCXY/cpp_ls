@@ -3348,6 +3348,27 @@ and `..._honours_a_line_directive` in `cpp_code_analysis/tests/suite/macro_expan
 `the_presumed_name_is_the_spelling_the_database_wrote` in `config.rs`. `cargo test --release -p cpp_toolchain -p cpp_code_analysis --all-features`: 895 + 1 144 + 162 + 30
 passed, 0 failed, 14 ignored.
 
+## CI's handshake suite ran unoptimised, and a 60 s budget is a release budget — fixed
+
+`every_inactive_regions_publication_matches_the_version_it_names` timed out on CI with "the server did not answer
+within 30s" — a message that printed the helper's `TIMEOUT` constant, not the **60 s** the test actually passed. The
+test passes locally, and the difference is the **profile**: the workflow ran `cargo test --workspace --all-features`
+(unoptimised), while `.cargo/config.toml` — since `8c632761` — says the suite is a measurement workspace and defines
+`cargo t` as `test --release`.
+
+Measured on Windows, same commit, same fixture, single test: **1.69 s** in release, **61.30 s** unoptimised. The
+unoptimised run passed, at 61.30 s; a 2-core CI runner under the whole suite is slower, so one version's 60 s wait
+ran out. The server log names the unoptimised cost: index slices, a "read a program as one piece: 1 file(s),
+15000 token(s)" and cook slices about five seconds apart. It is slow, not racing.
+
+The fix is the profile rather than a longer wait: `.github/workflows/test.yml` now runs `cargo test --release
+--workspace --all-features`, which is what the repository's own `.cargo/config.toml` has asked for since it was
+written. `wait_for_within` now prints the caller's `within` instead of `TIMEOUT`, so a future failure says the budget
+it actually missed.
+
+Not changed: the fixture (3 000 lines) is what makes the race window measurable, and in release it costs ~1.7 s.
+
+
 
 
 
