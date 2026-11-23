@@ -246,6 +246,13 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
     // `unsigned long long`-style spellings are normalized by the caller's spelling, which may hold any of the words in
     // any order — so the answer is decided by the *set* of words that name a type.
     //
+    // **The standard fixed-width typedefs, by name.** Their definitions live in `stdint.h`/`stddef.h`, which are
+    // toolchain headers and have no summary in a project index, so a member spelled `int64_t` was unsizable in every
+    // real header — measured on neovim's `buffer_defs.h`, where `OptInt` is `typedef int64_t`, `tp_old_Rows_avail` is
+    // `int64_t`, and every struct containing one reported "not computed". The sizes are the x64 ABI the card states.
+    if let Some(size) = a_standard_integer_typedef(word) {
+        return Some((size, size));
+    }
     // **C23's `_BitInt(N)`** first, because its size is a function of N and no word in the spelling says it: measured
     // with gcc 15 (MinGW) under `-std=gnu2x`, `_BitInt(1..8)` is 1 byte, `9..16` is 2, `17..32` is 4, `33..64` is 8,
     // `65..128` is 16, `129..192` is 24, `193..256` is 32 — powers of two up to 64 bits, then multiples of eight
@@ -307,6 +314,24 @@ pub fn a_builtin_in_memory(spelling: &str) -> Option<(usize, usize)> {
         return Some((1, 1));
     }
     None
+}
+
+/// **The standard integer typedefs, in the x64 ABI the card states**, or `None` when the spelling is not one.
+///
+/// They are typedefs, so the index could in principle follow them — but they are defined in the compiler's own
+/// `stdint.h`/`stddef.h`, and those headers are not project summaries, so the lookup has nothing to answer with. A
+/// member spelled `int64_t` is ordinary C, not a dependent type; sizing it by name is the same reading as `int` and
+/// `char`.
+fn a_standard_integer_typedef(word: &str) -> Option<usize> {
+    Some(match word {
+        "int8_t" | "uint8_t" => 1,
+        "int16_t" | "uint16_t" => 2,
+        "int32_t" | "uint32_t" => 4,
+        "int64_t" | "uint64_t" => 8,
+        "intptr_t" | "uintptr_t" | "ptrdiff_t" | "size_t" | "ssize_t" | "intmax_t"
+        | "uintmax_t" => 8,
+        _ => return None,
+    })
 }
 
 /// **The size and alignment of a `_BitInt(N)` spelling**, or `None` when the spelling is not one.
@@ -409,6 +434,23 @@ mod tests {
     ///
     /// Measured on Lua 5.5.0's `lstate.h`: `StkIdRel` is `typedef union { StkId p; ptrdiff_t offset; } StkIdRel;`,
     /// and every `StkIdRel` member of `lua_State` was withheld.
+    #[test]
+    fn the_standard_fixed_width_typedefs_are_sized() {
+        for (spelling, expected) in [
+            ("int8_t", (1usize, 1usize)),
+            ("uint16_t", (2, 2)),
+            ("int32_t", (4, 4)),
+            ("uint64_t", (8, 8)),
+            ("size_t", (8, 8)),
+            ("ssize_t", (8, 8)),
+            ("ptrdiff_t", (8, 8)),
+            ("intptr_t", (8, 8)),
+            ("const uint32_t", (4, 4)),
+        ] {
+            assert_eq!(a_builtin_in_memory(spelling), Some(expected), "{spelling}");
+        }
+    }
+
     #[test]
     fn the_sized_integer_keywords_are_sized() {
         assert_eq!(a_builtin_in_memory("__int64"), Some((8, 8)));

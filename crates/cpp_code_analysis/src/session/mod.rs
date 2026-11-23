@@ -324,9 +324,11 @@ const COOK_ONE_LEVEL_FURTHER: usize = 64;
 
 /// How many data members a class may have before the hover stops pricing its layout.
 ///
-/// See the note in [`Session::the_layout_of`]: a layout is a visibility walk per member, and a header's registry
-/// struct (neovim's `file_buffer` has eighty members) cost **7.2 s** of hover with no bound.
-const LAYOUT_MEMBER_BUDGET: usize = 64;
+/// See the note in [`Session::the_layout_of`]: a layout sizes every member, and neovim's `file_buffer` is the largest
+/// core struct at **253** data members. The bound was 64, which hid every registry struct — and, through one
+/// `winopt_T` member of 68, even the small `wininfo_S`. 256 covers neovim's core; the measured `file_buffer` card
+/// costs about **1.2 s** of layout on top of its cold cook, against 7.2 s with no bound before the type work.
+const LAYOUT_MEMBER_BUDGET: usize = 256;
 /// How many files a project scan will list before it stops.
 ///
 /// A bound on a directory walk whose size is a fact about a machine rather than about the project: a checkout with

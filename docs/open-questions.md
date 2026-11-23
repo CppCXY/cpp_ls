@@ -3571,3 +3571,47 @@ is 0" rule, and the UI's `inactive` answer says those spans must not be painted.
 — a finding about text the reading did not compile is not published — because a squiggle on a line the analysis did
 not read is worse than silence. A live include (`#if 1`) is still reported, and the test that used to require an
 undecided-guard finding now asserts silence once the cook has skipped the branch.
+## `buffer_defs.h` layouts — three reasons, all but one fixed
+
+Hovering the structs of neovim's `buffer_defs.h` mostly said "not computed". The reasons were independent:
+
+1. **The 64-member budget.** `file_buffer` has 253 data members and `window_S` 161, so both were refused before any
+   member was priced. `winopt_T` has 68, and `wininfo_S` (seven members) contains one — so a small card was silent
+   because of a large member. The budget is now **256**.
+2. **The standard fixed-width typedefs.** `int64_t`, `uint32_t`, `size_t`, `ptrdiff_t` and their siblings are
+   typedefs in the compiler's `stdint.h`/`stddef.h`, which has no summary in a project index. `OptInt` is
+   `typedef int64_t`, and neovim's `tp_old_Rows_avail` is an `int64_t`, so a single such member withheld a struct.
+   They are now sized by name, in the x64 ABI the card states.
+3. **Arrays of non-builtins and computed dimensions.** `lpos_T startpos[NSUBEXP]`, `fmark_T b_namedm[NMARKS]`,
+   `sctx_T wo_script_ctx[kWinOptCount]` and `buf_T *tp_diffbuf[DB_COUNT]` were all unsized: the array branch only
+   read a literal dimension and only for a builtin element. Any trailing `[dimension]` is now peeled and `element
+   size × count` answered; the dimension is a literal, a macro body, an enumerator (`NSUBEXP = 10`), or a constant
+   expression such as `NMARKS`'s `('z' - 'a' + 1)`, read from the text. A flexible array (`[]`) is zero extent.
+
+Measured after the change (x64 card):
+
+```text
+wininfo_S          1816   (was: wi_mark, wi_opt unsized)
+diffblock_S         104   (was: df_lnum, df_count unsized)
+diffline_change_S   128
+diffline_S           24
+frame_S              64
+matchitem           472   (was: mit_match, mit_hl)
+file_buffer         —     changedtick_di, b_bufvar, b_marktree
+tabpage_S           —     tp_winvar
+window_S            —     w_winvar, w_config
+```
+
+The first six numbers were checked against the project's compiler (`sizeof` in a tiny translation unit built from the
+same compile command). That comparison also found a defect behind the earlier 1848/72: neovim's `Callback` is a
+**struct** containing an anonymous `union { … } data`, but the keyword reader took the nearest `union` before the
+typedef's name — which sits after the body — and laid the whole thing out as a union. `Callback` is 16 bytes, not 40;
+with it fixed, `winopt_T` is 1720 and `wininfo_S` 1816, both matching the compiler. The fix is general: the class's own
+opening brace decides the keyword, and an anonymous union member is recognized from its parent's text.
+
+So six of the nine now compute, and the three that do not name **only macro-generated types**: `TV_DICTITEM_STRUCT`
+(`ScopeDictDictItem`, `ChangedtickDictItem`), `PMap`/`Map` (`MarkTree`) and `kvec_t` (`VirtText` inside `WinConfig`).
+Those macros expand to declarations — `PMap(T)` is `Map_##T##_##ptr_t`, a name another macro defines — so there is no
+struct fact to lay out. That is the next layer if the card should cover all nine; it needs the preprocessed type, not
+another type spelling in this layer. `file_buffer` at 253 members costs about **1.2 s** of layout on top of its cold
+cook; the 256 budget is where that was measured.

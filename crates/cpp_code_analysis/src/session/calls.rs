@@ -70,9 +70,313 @@ fn spelled_without_its_qualifiers(spelled: &str) -> &str {
         }
     }
 }
+
+/// **Split a trailing `[dimension]` from a type spelling**, or `None` when the spelling does not end in one.
+///
+/// The declarator's name is already gone — `DeclFact::type_of` holds a type, not a declaration — so the last bracket
+/// is the outermost array. A parenthesised declarator (`int (*table[3])(int)`) does not end in `]` and is left to the
+/// steps that can read it; a flexible array's dimension is empty, which the caller reads as zero extent.
+fn split_an_array_dimension(spelling: &str) -> Option<(&str, &str)> {
+    let spelling = spelling.trim();
+    let inside = spelling.strip_suffix(']')?;
+    let open = inside.rfind('[')?;
+    let element = inside[..open].trim();
+    if element.is_empty() || element.contains("(*") || element.ends_with('(') {
+        return None;
+    }
+    Some((element, inside[open + 1..].trim()))
+}
+
+/// **A constant integer expression, as a macro body or an enumerator's initialiser spells one** — `8`, `(53)`,
+/// `('z' - 'a' + 1)`, `1 << 4` — or `None` for anything with a name or a call in it.
+///
+/// The array dimensions real headers use are not all literals: neovim's `NMARKS` is `('z' - 'a' + 1)` and its
+/// `NSUBEXP` is an enumerator. Reading those as numbers is what keeps a struct with `fmark_T b_namedm[NMARKS]` and
+/// `lpos_T startpos[NSUBEXP]` from being "not computed" for a reason that is not about its layout at all. This is a
+/// reader of the operators C gives a constant expression, not an evaluator of the language: a name, a `sizeof`, or a
+/// cast is `None` and the member stays unsized.
+fn a_constant_expression(text: &str) -> Option<usize> {
+    let mut parser = IntegerExpression {
+        text: text.as_bytes(),
+        at: 0,
+    };
+    let value = parser.a_sum()?;
+    parser.skip_space();
+    if parser.at != parser.text.len() {
+        return None;
+    }
+    usize::try_from(value).ok()
+}
+
+struct IntegerExpression<'a> {
+    text: &'a [u8],
+    at: usize,
+}
+
+impl IntegerExpression<'_> {
+    fn skip_space(&mut self) {
+        while self
+            .text
+            .get(self.at)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, byte: u8) -> bool {
+        self.skip_space();
+        if self.text.get(self.at) == Some(&byte) {
+            self.at += 1;
+            return true;
+        }
+        false
+    }
+
+    fn a_sum(&mut self) -> Option<i128> {
+        let mut value = self.a_product()?;
+        loop {
+            if self.eat(b'+') {
+                value = value.checked_add(self.a_product()?)?;
+            } else if self.eat(b'-') {
+                value = value.checked_sub(self.a_product()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn a_product(&mut self) -> Option<i128> {
+        let mut value = self.a_shift()?;
+        loop {
+            if self.eat(b'*') {
+                value = value.checked_mul(self.a_shift()?)?;
+            } else if self.eat(b'/') {
+                let divisor = self.a_shift()?;
+                value = value.checked_div(divisor)?;
+            } else if self.eat(b'%') {
+                let divisor = self.a_shift()?;
+                value = value.checked_rem(divisor)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn a_shift(&mut self) -> Option<i128> {
+        let mut value = self.a_bitand()?;
+        loop {
+            self.skip_space();
+            let rest = self.text.get(self.at..).unwrap_or_default();
+            if rest.starts_with(b"<<") {
+                self.at += 2;
+                value = value.checked_shl(u32::try_from(self.a_bitand()?).ok()?)?;
+            } else if rest.starts_with(b">>") {
+                self.at += 2;
+                value = value.checked_shr(u32::try_from(self.a_bitand()?).ok()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn a_bitand(&mut self) -> Option<i128> {
+        let mut value = self.a_bitxor()?;
+        loop {
+            self.skip_space();
+            // `&` and not `&&`: the latter is not a constant integer expression this reader claims.
+            if self.text.get(self.at..self.at + 2) == Some(b"&&") {
+                return None;
+            }
+            if self.eat(b'&') {
+                value &= self.a_bitxor()?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn a_bitxor(&mut self) -> Option<i128> {
+        let mut value = self.a_bitor()?;
+        while self.eat(b'^') {
+            value ^= self.a_bitor()?;
+        }
+        Some(value)
+    }
+
+    fn a_bitor(&mut self) -> Option<i128> {
+        let mut value = self.a_unary()?;
+        loop {
+            if self.eat(b'|') {
+                value |= self.a_unary()?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn a_unary(&mut self) -> Option<i128> {
+        if self.eat(b'+') {
+            return self.a_unary();
+        }
+        if self.eat(b'-') {
+            return self.a_unary()?.checked_neg();
+        }
+        if self.eat(b'~') {
+            return Some(!self.a_unary()?);
+        }
+        self.a_primary()
+    }
+
+    fn a_primary(&mut self) -> Option<i128> {
+        self.skip_space();
+        if self.eat(b'(') {
+            let value = self.a_sum()?;
+            return self.eat(b')').then_some(value);
+        }
+        let byte = *self.text.get(self.at)?;
+        if byte == b'\'' {
+            return self.a_character();
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        let start = self.at;
+        while self
+            .text
+            .get(self.at)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            self.at += 1;
+        }
+        let spelling = std::str::from_utf8(&self.text[start..self.at]).ok()?;
+        let (radix, digits) = if let Some(rest) = spelling
+            .strip_prefix("0x")
+            .or_else(|| spelling.strip_prefix("0X"))
+        {
+            (16, rest)
+        } else if let Some(rest) = spelling
+            .strip_prefix("0b")
+            .or_else(|| spelling.strip_prefix("0B"))
+        {
+            (2, rest)
+        } else if spelling.len() > 1 && spelling.starts_with('0') {
+            (8, &spelling[1..])
+        } else {
+            (10, spelling)
+        };
+        // A C suffix (`u`, `U`, `l`, `L`) is not part of the number; anything else is not this reader's.
+        let digits = digits.trim_end_matches(['u', 'U', 'l', 'L']);
+        i128::from_str_radix(digits, radix).ok()
+    }
+
+    fn a_character(&mut self) -> Option<i128> {
+        self.at += 1; // the opening quote
+        let byte = *self.text.get(self.at)?;
+        self.at += 1;
+        let value = match byte {
+            b'\\' => {
+                let escaped = *self.text.get(self.at)?;
+                self.at += 1;
+                match escaped {
+                    b'n' => b'\n',
+                    b't' => b'\t',
+                    b'r' => b'\r',
+                    b'0' => 0,
+                    b'\\' => b'\\',
+                    b'\'' => b'\'',
+                    b'"' => b'"',
+                    b'x' => {
+                        let start = self.at;
+                        while self
+                            .text
+                            .get(self.at)
+                            .is_some_and(|byte| byte.is_ascii_hexdigit())
+                        {
+                            self.at += 1;
+                        }
+                        let digits = std::str::from_utf8(&self.text[start..self.at]).ok()?;
+                        u8::from_str_radix(digits, 16).ok()?
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        };
+        self.eat(b'\'').then_some(i128::from(value))
+    }
+}
+
+/// **Is the class at `class_at` introduced by `union`?**
+///
+/// The name of a typedef of an anonymous class comes **after** its body (`typedef struct { … } Name;`), while the name
+/// of `struct Foo { … }` comes before it. Reading the keyword from all text before the name therefore sees the last
+/// member's `union` in the first form — neovim's `Callback` was laid out as a union because its `data` member is one.
+/// So the body's opening brace is found on the side the name implies, and the nearest `union`/`struct`/`class` before
+/// that brace is the declaration's own.
+fn the_class_is_a_union(text: &str, class_at: usize) -> bool {
+    let at = class_at.min(text.len());
+    let before = text[..at].trim_end();
+    let opener = if before.ends_with('}') {
+        // A typedef of an anonymous class: walk back to the brace that opened this body.
+        an_opening_brace_before(text, at)
+    } else {
+        text[at..].find('{').map(|offset| at + offset)
+    };
+    let Some(opener) = opener else {
+        return false;
+    };
+    the_nearest_class_keyword(&text[..opener]) == Some("union")
+}
+
+/// **The brace that opened the body a member name follows**, or `None` when there is no `}` before `at`.
+///
+/// `at` is the end of a name: for a class name it follows the closing `}` of its body (`typedef struct { … } Name`),
+/// and for a member name it follows the closing `}` of the anonymous class the member declares
+/// (`union { … } data`). The last `}` before the name is therefore the one whose opener is wanted.
+fn an_opening_brace_before(text: &str, at: usize) -> Option<usize> {
+    let before = text[..at.min(text.len())].trim_end();
+    let close = before.rfind('}')?;
+    let before = &before[..=close];
+    let mut depth = 0usize;
+    for (index, character) in before.char_indices().rev() {
+        match character {
+            '}' => depth += 1,
+            '{' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The nearest `union`/`struct`/`class` keyword in `before`, as a word, or `None` when there is none.
+fn the_nearest_class_keyword(before: &str) -> Option<&str> {
+    let mut nearest: Option<(usize, &str)> = None;
+    for keyword in ["union", "struct", "class"] {
+        for (index, _) in before.match_indices(keyword) {
+            let previous = before[..index].chars().next_back();
+            let following = before[index + keyword.len()..].chars().next();
+            let a_word = |character: Option<char>| {
+                character.is_some_and(|character| character.is_alphanumeric() || character == '_')
+            };
+            if a_word(previous) || a_word(following) {
+                continue;
+            }
+            if nearest.is_none_or(|(nearest_at, _)| index > nearest_at) {
+                nearest = Some((index, keyword));
+            }
+        }
+    }
+    nearest.map(|(_, keyword)| keyword)
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// **The declarations a call at this offset can reach** — indices into `parameter_lists`.
-    ///
     /// The same resolution the argument checks and the signature popup use, asked over the declarations a caller already
     /// holds: a hover has the facts of the name under the cursor and needs to know which of them the call can mean.
     ///
@@ -390,11 +694,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // read out of, at file offsets. `None` when the index cannot place the class: the layout is still computed for
         // a class the asking file declares, and reported without the two spelling facts it cannot read.
         let as_written = self.the_class_as_its_file_wrote_it(&head, &view.path);
-        // **A hover is a request, and a layout is a visibility walk per member.** A class with more than this many
-        // data members is a registry — a header's `struct file_buffer` has eighty — and pricing every member costs
-        // seconds for a card the reader scrolls past. Measured on neovim: `file_buffer`'s card took **7.2 s** with
-        // no cap, and the layout it printed was incomplete anyway. The budget is per class and per request: what a
-        // reader opens is a struct with a handful of members.
+        // **A hover is a request, and a layout sizes every member.** A class with more than this many data members is
+        // a registry — neovim's `file_buffer` has 253 — and the bound is a card the reader scrolls past versus one
+        // that costs seconds. It was 64, which was too small in a way that was not visible on the large structs
+        // alone: `wininfo_S` is seven members, but one of them is a `winopt_T` of 68, so the whole card was silent.
+        // Measured on neovim: `file_buffer` at 253 members costs about 1.2 s of layout on top of its cold cook, and
+        // the older no-bound 7.2 s was before the type and constant work this file does now. The budget is per class
+        // and per request.
         let data_members = list
             .own()
             .filter(|member| {
@@ -412,15 +718,14 @@ impl<F: FileProvider + Clone> Session<F> {
             return Known::No;
         }
         let union = as_written.as_ref().is_some_and(|written| {
-            let before = &written.text[..written.class_at.min(written.text.len())];
-            // The last keyword before the name wins: `template <class T> union U` is a union, and a `class` earlier
-            // in the text belongs to something else.
-            ["union", "struct", "class"]
-                .into_iter()
-                .filter_map(|keyword| before.rfind(keyword).map(|at| (at, keyword)))
-                .max_by_key(|(at, _)| *at)
-                .is_some_and(|(_, keyword)| keyword == "union")
-        });
+            // **The keyword that introduces this class**, not the last one anywhere before its name. A typedef of
+            // an anonymous struct may contain a member `union { … } data;`, and scanning all text before the name —
+            // which sits after the closing brace — found that inner `union` and laid the whole struct out as one:
+            // neovim's `Callback` came out 32 bytes and `a union`, against the compiler's 16. The body is before
+            // the name for such a typedef and after it for `struct Foo {`, so the opener is found on the correct
+            // side and the nearest keyword before it is the declaration's own.
+            the_class_is_a_union(&written.text, written.class_at)
+        }) || self.an_anonymous_member_is_a_union(&head, view);
         // **The environment a member's type is read in** — the class's parameters, the arguments the use wrote (or
         // the declaration's own defaults), and the class's own members, which is where a member alias lives.
         if crate::probes::layout() {
@@ -544,6 +849,104 @@ impl<F: FileProvider + Clone> Session<F> {
         Known::Yes(crate::sema::layout::ClassLayout::of_members(
             &sized, union, unknown,
         ))
+    }
+
+    /// **The value of an array dimension** — a literal, a macro whose body is one, or an enumerator.
+    ///
+    /// The macros are the ordinary C way to size an array (`#define DB_COUNT 8`), and neovim's core structs use them
+    /// on nearly every array. A macro's body is in force in the class's own translation unit, which is what
+    /// [`Session::macro_body_at`] reads; an enumerator (`NSUBEXP = 10`) is a declaration the constant folder can
+    /// evaluate. Anything else — `sizeof(x)`, an expression, a macro another macro builds — is `None`, and the
+    /// member stays unsized rather than guessed.
+    fn the_value_of_an_array_dimension(&self, view: &FileView, dimension: &str) -> Option<usize> {
+        let dimension = dimension.trim();
+        if dimension.is_empty() {
+            // A flexible array member: C's `sizeof` leaves it out.
+            return Some(0);
+        }
+        if let Ok(value) = dimension.parse::<usize>() {
+            return Some(value);
+        }
+        // **The fact's spelling may already hold the expansion** — `int [('z'-'a'+1)]` rather than
+        // `int [NMARKS]` — because the class's members came from a reading that expanded macros. So the dimension is
+        // evaluated as written first, and only a bare name is looked up.
+        if let Some(value) = a_constant_expression(dimension) {
+            return Some(value);
+        }
+        if !dimension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+        let at = view.source.len();
+        if let Some(body) = self.macro_body_at(&view.path, at, dimension) {
+            if crate::probes::layout() {
+                eprintln!(
+                    "[layout] dimension {dimension:?} macro body {body:?} -> {:?}",
+                    a_constant_expression(&body)
+                );
+            }
+            if let Some(value) = a_constant_expression(&body) {
+                return Some(value);
+            }
+        }
+        if let Known::Yes(found) = self.store.index().definition(dimension, &view.path) {
+            if let Some(value) = self.the_constant_a_declaration_writes(&found) {
+                return Some(value);
+            }
+            if let Some(value) =
+                self.constant_value_of_a_declaration(&found.file, found.fact.name_range, &view.path)
+                && value >= 0
+            {
+                return Some(value as usize);
+            }
+        }
+        if crate::probes::layout() {
+            eprintln!("[layout] dimension {dimension:?} is not a number this layer can read");
+        }
+        None
+    }
+
+    /// **A declaration's initialiser, read from the text the declaration wrote** — `NSUBEXP = 10` in an enum, or
+    /// `const int N = 8;`.
+    ///
+    /// The constant folder answers a variable's value, but an enumerator is a declaration rather than an expression
+    /// node, and `NSUBEXP` is how neovim sizes `lpos_T startpos[NSUBEXP]`. The segment before the next `,`, `;` or `}`
+    /// is the declaration's own; no `=` there means an enumerator that inherits its value, which this leaves to the
+    /// folder rather than counting by hand.
+    fn the_constant_a_declaration_writes(
+        &self,
+        found: &crate::index::project::ProjectDefinition,
+    ) -> Option<usize> {
+        let text = self.text(&found.file)?;
+        let after = text.get(found.fact.name_range.end_offset()..)?;
+        let boundary = after.find([',', ';', '}', '{'])?;
+        let declaration = &after[..boundary];
+        let equals = declaration.find('=')?;
+        a_constant_expression(&declaration[equals + 1..])
+    }
+
+    /// **Is this a member of a class whose type is the anonymous class the member declares?**
+    ///
+    /// `Callback::data` is the type of `data` in `union { … } data;`, and the class fact has no written body of its
+    /// own (`as_written` is `None`), so nothing said the four members are alternatives. Without this the union was
+    /// laid out as a struct — 32 bytes where the compiler says 8 — and every containing class inherited the error.
+    /// The parent's written text still holds the declaration, and the member's offset names it.
+    fn an_anonymous_member_is_a_union(&self, head: &str, view: &FileView) -> bool {
+        let Some((parent, member)) = head.rsplit_once("::") else {
+            return false;
+        };
+        let Some(written) = self.the_class_as_its_file_wrote_it(parent, &view.path) else {
+            return false;
+        };
+        let Some(at) = written.members.get(member).copied() else {
+            return false;
+        };
+        let Some(opener) = an_opening_brace_before(&written.text, at) else {
+            return false;
+        };
+        the_nearest_class_keyword(&written.text[..opener]) == Some("union")
     }
 
     /// The layout of one of a class's **bases**, read in the class's own instantiation.
@@ -709,6 +1112,19 @@ impl<F: FileProvider + Clone> Session<F> {
                 eprintln!("[layout]   still a parameter");
             }
             return None;
+        }
+        // **An array of anything, before the builtin words are read as scalars.** `int m[NMARKS]` ends in `]`; a
+        // builtin reader that stops at the first word would answer four bytes for the whole array, and neovim's
+        // `border_chars[8][MAX_SCHAR_SIZE]` would be one `char`. The dimension is often a macro or an enumerator —
+        // `DB_COUNT`, `SNAP_COUNT`, `JUMPLISTSIZE`, `NSUBEXP`, `kWinOptCount`, `NMARKS` all are — so it is evaluated
+        // rather than required to be a literal. A flexible array (`[]`) has zero extent; C's `sizeof` leaves it out.
+        if let Some((element, dimension)) = split_an_array_dimension(spelled) {
+            let count = self.the_value_of_an_array_dimension(view, dimension)?;
+            let (element_size, element_alignment) =
+                self.the_size_of_a_type_in(view, element, depth + 1, instantiation)?;
+            return element_size
+                .checked_mul(count)
+                .map(|size| (size, element_alignment));
         }
         if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelled) {
             return Some(builtin);
@@ -1190,4 +1606,26 @@ fn mentions_a_parameter(spelling: &str, parameters: &[String]) -> bool {
     spelling
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .any(|word| parameters.iter().any(|parameter| parameter == word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::a_constant_expression;
+
+    #[test]
+    fn a_constant_expression_reads_what_a_dimension_writes() {
+        for (text, expected) in [
+            ("8", 8usize),
+            ("(53)", 53),
+            ("10u", 10),
+            ("0x10", 16),
+            ("1 << 4", 16),
+            ("('z' - 'a' + 1)", 26),
+        ] {
+            assert_eq!(a_constant_expression(text), Some(expected), "{text}");
+        }
+        for text in ["sizeof(x)", "COUNT", "8 /* n */", "1 +"] {
+            assert_eq!(a_constant_expression(text), None, "{text}");
+        }
+    }
 }

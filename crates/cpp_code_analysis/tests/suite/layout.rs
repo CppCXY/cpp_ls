@@ -484,3 +484,150 @@ struct WithDataBase : HasData {
         layout.unknown
     );
 }
+
+/// **`int64_t` and the other fixed-width typedefs are sized by name.** They are defined in the compiler's
+/// `stdint.h`, which is not a project summary, so the typedef lookup has nothing to read — and every neovim struct
+/// with an `OptInt` or `int64_t` member was "not computed" for that reason alone.
+#[test]
+fn a_fixed_width_standard_typedef_is_sized_by_its_name() {
+    let layout = layout(
+        "\
+struct Fixed {
+    int64_t wide;
+    uint16_t half;
+    size_t count;
+};
+",
+        "Fixed",
+    );
+    assert_eq!(layout.size, 24);
+    assert_eq!(layout.alignment, 8);
+    let placed: Vec<(&str, usize, usize)> = layout
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.offset, field.size))
+        .collect();
+    assert_eq!(placed, [("wide", 0, 8), ("half", 8, 2), ("count", 16, 8)]);
+}
+
+/// **An array of a struct, sized by a macro.** `#define COUNT 4` is the ordinary C spelling, and the array's element
+/// is not a builtin — the two together used to make every member of this shape unsizable.
+#[test]
+fn an_array_of_a_struct_is_sized_from_its_macro() {
+    let layout = layout(
+        "\
+#define COUNT 4
+struct Point { int x; int y; };
+struct Path {
+    Point points[COUNT];
+    char tag;
+};
+",
+        "Path",
+    );
+    assert_eq!(layout.size, 36);
+    assert_eq!(layout.alignment, 4);
+    assert_eq!(layout.fields[0].offset, 0);
+    assert_eq!(layout.fields[0].size, 32);
+    assert_eq!(layout.fields[1].offset, 32);
+}
+
+/// **An array dimension that is an enumerator is a number too** — neovim sizes `lpos_T startpos[NSUBEXP]` this way.
+#[test]
+fn an_array_dimension_that_is_an_enumerator_is_sized() {
+    let layout = layout(
+        "\
+enum { COUNT = 3 };
+struct Point { int x; int y; };
+struct Path {
+    Point points[COUNT];
+};
+",
+        "Path",
+    );
+    assert_eq!(layout.size, 24);
+    assert_eq!(layout.alignment, 4);
+}
+
+/// **A macro dimension may be a constant expression**, not only a literal: neovim's `NMARKS` is
+/// `('z' - 'a' + 1)`.
+#[test]
+fn a_macro_dimension_that_is_a_character_expression_is_sized() {
+    let layout = layout(
+        "\
+#define NMARKS ('z' - 'a' + 1)
+struct Marks {
+    int m[NMARKS];
+};
+",
+        "Marks",
+    );
+    assert_eq!(layout.size, 104);
+    assert_eq!(layout.alignment, 4);
+}
+
+/// **A nested struct over the old 64-member budget is still priced.** `wininfo_S` has seven members, one of them a
+/// 68-member `winopt_T`; with the budget at 64 the inner class was refused and the outer card said nothing.
+#[test]
+fn a_sized_member_past_the_old_budget_is_priced() {
+    let mut source = String::from("struct Inner {\n");
+    for member in 0..68 {
+        source.push_str(&format!("    int a{member};\n"));
+    }
+    source.push_str("};\nstruct Outer {\n    Inner inner;\n    char tail;\n};\n");
+    let layout = layout(&source, "Outer");
+    assert_eq!(layout.size, 276);
+    assert_eq!(layout.alignment, 4);
+    assert_eq!(layout.fields[0].size, 272);
+    assert_eq!(layout.fields[1].offset, 272);
+}
+
+/// **A typedef of a struct is a struct even when a member is a union.** The name of a typedef of an anonymous class
+/// comes after its body, and an older reader took the nearest `union` before that name — the member's own — as the
+/// class's keyword. It laid `Tagged` out as a union of `data` and `type`, against the compiler. Measured on neovim's
+/// `Callback` (16 bytes, not 40) and `wininfo_S` (1816, not 1848).
+#[test]
+fn a_typedef_of_a_struct_with_an_inner_union_is_still_a_struct() {
+    let layout = layout(
+        "\
+typedef struct {
+    union {
+        int i;
+        double d;
+    } data;
+    int type;
+} Tagged;
+",
+        "Tagged",
+    );
+    assert_eq!(layout.size, 16);
+    assert_eq!(layout.alignment, 8);
+    assert!(!layout.union);
+    let placed: Vec<(&str, usize, usize)> = layout
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.offset, field.size))
+        .collect();
+    assert_eq!(placed, [("data", 0, 8), ("type", 8, 4)]);
+}
+
+/// **An anonymous union member is laid out as a union**, not as a struct: its members overlap.
+#[test]
+fn an_anonymous_union_member_is_laid_out_as_a_union() {
+    let layout = layout(
+        "\
+struct Holder {
+    union {
+        int i;
+        double d;
+    } value;
+    int tail;
+};
+",
+        "Holder",
+    );
+    assert_eq!(layout.size, 16);
+    assert_eq!(layout.alignment, 8);
+    assert_eq!(layout.fields[0].size, 8);
+    assert_eq!(layout.fields[1].offset, 8);
+}
