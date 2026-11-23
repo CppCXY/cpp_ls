@@ -1485,15 +1485,16 @@ impl<F: FileProvider + Clone> Session<F> {
         // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
         // client's buffer changes — and it is read here as well as rendered here, because both are the same read
         // lock and neither changes the session.
-        let mut rendered = Vec::new();
-        for path in environments {
+        //
+        // **In parallel, for the same reason the program read's records are.** Each environment walks its file's whole
+        // closure and copies every text in it — 103.7 ms on MSVC's headers — and a query that names several hundred
+        // files of a closure costs tens of seconds of one core. Measured on neovim's `ui.c`, where a cold start's
+        // drain was **25.0 s** of 57 s while `prepare_the_re_read` accounted for 0.9 s of it: the rest is this loop.
+        // The chunks keep the caller's order, and both halves run with the same read lock.
+        let prepare_environment = |path: PathBuf| {
             let step = std::time::Instant::now();
-            let Some(reading) = self.rendering_of(&path) else {
-                continue;
-            };
-            let Some(text) = self.text(&path) else {
-                continue;
-            };
+            let reading = self.rendering_of(&path)?;
+            let text = self.text(&path)?;
             // **And the macro environment for the file's own view** - the other half of what a query asked for here.
             // ``Session::view_of_the_file`` reads the text the reader is typing with the macros **in force** for it,
             // and the environment it reads is the one this builds: without this call the map was never written, so
@@ -1508,10 +1509,34 @@ impl<F: FileProvider + Clone> Session<F> {
                     step.elapsed().as_millis()
                 );
             }
-            rendered.push((
+            Some((
                 (path, crate::cache::content_hash(&text)),
                 std::sync::Arc::new(reading),
-            ));
+            ))
+        };
+        let cores = std::thread::available_parallelism()
+            .map(|cores| cores.get())
+            .unwrap_or(4)
+            .min(environments.len().max(1));
+        let mut rendered = Vec::new();
+        if cores <= 1 || environments.len() < 8 {
+            rendered.extend(environments.into_iter().filter_map(prepare_environment));
+        } else {
+            let chunk = environments.len().div_ceil(cores);
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(cores);
+                for piece in environments.chunks(chunk) {
+                    handles.push(scope.spawn(move || {
+                        piece
+                            .iter()
+                            .filter_map(|path| prepare_environment(path.clone()))
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                for handle in handles {
+                    rendered.extend(handle.join().unwrap_or_default());
+                }
+            });
         }
 
         PreparedDrain {

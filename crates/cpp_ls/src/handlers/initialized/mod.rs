@@ -687,16 +687,53 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     // **The disk before the render**, per claimed file: a record with its rendering is a cook this
                     // slice does not run at all — it is filed straight into the index, and the rendering answers
                     // `view` immediately.
+                    //
+                    // **In parallel, because decoding a stored record is most of a cold start's drain.** Measured on
+                    // neovim's `ui.c`: the drain's compute was **26.8 s** of a 57 s start, and it was neither the
+                    // re-read pass (0.9 s, traced) nor the environments (`prepare_the_drain`'s own loop, which the
+                    // engine now splits across cores) — it is this loop, which decodes four renderings per slice and
+                    // each one is a whole closure's text. Three or four of them are independent, and the slice is
+                    // the only caller, so the chunks are cut here and the answers are kept in the order asked for.
+                    let decide = |path: &std::path::PathBuf| match session.a_stored_cook(path) {
+                        Some(record) => (Some(record), None),
+                        None => (None, session.gather_a_cook(path)),
+                    };
+                    let cores = std::thread::available_parallelism()
+                        .map(|cores| cores.get())
+                        .unwrap_or(4)
+                        .min(claimed.len().max(1));
                     let mut stored = Vec::new();
                     let mut cooks = Vec::new();
-                    for path in &claimed {
-                        match session.a_stored_cook(path) {
-                            Some(record) => stored.push(record),
-                            None => {
-                                if let Some(cook) = session.gather_a_cook(path) {
-                                    cooks.push(cook);
-                                }
+                    if cores <= 1 || claimed.len() < 4 {
+                        for path in &claimed {
+                            let (record, cook) = decide(path);
+                            stored.extend(record);
+                            cooks.extend(cook);
+                        }
+                    } else {
+                        let chunk = claimed.len().div_ceil(cores);
+                        let mut pieces: Vec<(Vec<_>, Vec<_>)> = Vec::new();
+                        std::thread::scope(|scope| {
+                            let mut handles = Vec::with_capacity(cores);
+                            for piece in claimed.chunks(chunk) {
+                                handles.push(scope.spawn(move || {
+                                    let mut stored = Vec::new();
+                                    let mut cooks = Vec::new();
+                                    for path in piece {
+                                        let (record, cook) = decide(path);
+                                        stored.extend(record);
+                                        cooks.extend(cook);
+                                    }
+                                    (stored, cooks)
+                                }));
                             }
+                            for handle in handles {
+                                pieces.push(handle.join().unwrap_or_default());
+                            }
+                        });
+                        for (records, gathered) in pieces {
+                            stored.extend(records);
+                            cooks.extend(gathered);
                         }
                     }
                     Some((
