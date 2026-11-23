@@ -48,8 +48,30 @@ const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Maximum number of files prepared in one adaptive background wave.
 const INDEX_SLICE: usize = 24;
 
+/// **How many cooked readings one insert holds the writer for.** The claim is wider than this (see
+/// [`COOK_A_SLICE`]) because the decode and the render run without the lock and parallelise over it; the insert takes
+/// the writer, so it is cut to what a request can wait for.
+const COMMIT_A_SLICE: usize = 4;
+
 /// Maximum number of cooks gathered per slice; rendering runs without the session lock.
-const COOK_A_SLICE: usize = 4;
+/// **How many files one cooking slice claims.**
+///
+/// Four was the number before the claim's stored-record decode was learned to be the drain's cost. A slice decodes one
+/// rendering per claimed file (~100 ms each) and renders one closure per file it has no record for, so a claim of four
+/// left the chunked decode four files wide while the rest of the slice paid its own overhead thirteen times more often
+/// than it had to.
+///
+/// Measured on neovim's `ui.c`, cold cache, same machine:
+///
+/// ```text
+/// claim   index   drain tails   worst write-lock hold
+///     4    53 s           45          931 ms
+///    16    43 s           12          ~1 s
+///    32    39 s            6         3165 ms   ← refused: the insert holds the writer for three seconds
+/// ```
+///
+/// Sixteen is the middle: it spreads the decode over the cores without making one insert a stall a request can feel.
+const COOK_A_SLICE: usize = 16;
 
 /// Feedback target for adjusting wave size, not a hard end-to-end latency deadline.
 const INDEX_SLICE_MS: u64 = 30;
@@ -757,12 +779,29 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 slice.paths().map(|path| path.to_path_buf()).collect();
 
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
-            // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
-            // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
+            // cooked file, and nothing else.
+            //
+            // **In chunks, because that is what a claim size buys and what it must not cost.** The decode and the
+            // render are off the lock and want a *large* claim (they parallelise over it); the insert is under the
+            // lock and wants a *small* one (measured: claim 4 held the writer 931 ms, claim 32 held it **3165 ms**).
+            // Splitting the slice into insert-sized pieces gives both — the claims are 16 wide, the writer is held for
+            // four files at a time.
             log::trace!("pump: commit starts");
-            let (re_read, cooked) = context
+            let cook_logged = !asked.is_empty();
+            if !asked.is_empty() {
+                log::info!(
+                    "cook slice: asked {}, rendered {}, emptied the queue, refused {}",
+                    asked.len(),
+                    built.len(),
+                    asked.len().saturating_sub(built.len())
+                );
+            }
+            let draining = std::time::Instant::now();
+            let asked_for_the_write = asked.clone();
+            let built_for_the_write = built.clone();
+            let re_read = context
                 .analysis()
-                .update_session("index slice", |session| {
+                .update_session("index slice", move |session| {
                     // **The files this slice could not build are not asked for again by the closure walk**, which is
                     // what turned a cook that can never succeed into a loop: measured on a real session, the log
                     // repeated `4 to cook, 1 left` / `2 left` / `0 left` every second for as long as the window
@@ -770,45 +809,54 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     // (`Session::want_cooked_reading`), so nothing is lost but the retry.
                     if let Some(revision) = &cooking_revision {
                         if session.is_current(revision) {
-                            session.refuse_the_cooks_that_built_nothing(&asked, &built);
+                            session.refuse_the_cooks_that_built_nothing(
+                                &asked_for_the_write,
+                                &built_for_the_write,
+                            );
                         } else if session.owns_revision(revision) {
-                            for path in &asked {
+                            for path in &asked_for_the_write {
                                 session.want_cooked_reading(path);
                             }
                         }
                     }
-                    let cook_logged = !asked.is_empty();
-                    if !asked.is_empty() {
-                        log::info!(
-                            "cook slice: asked {}, rendered {}, emptied the queue, refused {}",
-                            asked.len(),
-                            built.len(),
-                            asked.len().saturating_sub(built.len())
-                        );
-                    }
-                    let started = std::time::Instant::now();
-                    let re_read = session.commit_the_drain(prepared_drain);
-                    let drained = started.elapsed().as_millis();
-                    let started = std::time::Instant::now();
-                    let cooked = session.commit_them(slice).len();
-                    let inserted = started.elapsed().as_millis();
-                    if cook_logged {
-                        log::info!(
-                            "cook slice committed: {cooked} of {} rendering(s) stored, {re_read} re-read",
-                            built.len()
-                        );
-                    }
-                    if re_read > 0 || cooked > 0 {
-                        log::debug!(
-                            "index slice tail: re-read {re_read}, cooked {cooked}, write lock held {held} ms \
-                             (re-read {drained} ms, cooked {inserted} ms)",
-                            held = drained + inserted
-                        );
-                    }
-                    (re_read, cooked)
+                    session.commit_the_drain(prepared_drain)
                 })
                 .await
-                .unwrap_or((0, 0));
+                .unwrap_or(0);
+            let drained = draining.elapsed().as_millis();
+            let inserting = std::time::Instant::now();
+            let mut cooked = 0usize;
+            let mut stored = slice.stored;
+            let mut fresh = slice.fresh;
+            while !stored.is_empty() || !fresh.is_empty() {
+                let stored_here = stored.len().min(COMMIT_A_SLICE);
+                let fresh_here = fresh.len().min(COMMIT_A_SLICE - stored_here);
+                let chunk = cpp_code_analysis::session::AClaimedSlice {
+                    stored: stored.drain(..stored_here).collect(),
+                    fresh: fresh.drain(..fresh_here).collect(),
+                };
+                cooked += context
+                    .analysis()
+                    .update_session("index slice", move |session| {
+                        session.commit_them(chunk).len()
+                    })
+                    .await
+                    .unwrap_or(0);
+            }
+            let inserted = inserting.elapsed().as_millis();
+            if cook_logged {
+                log::info!(
+                    "cook slice committed: {cooked} of {} rendering(s) stored, {re_read} re-read",
+                    built.len()
+                );
+            }
+            if re_read > 0 || cooked > 0 {
+                log::debug!(
+                    "index slice tail: re-read {re_read}, cooked {cooked}, write lock held {held} ms \
+                     (re-read {drained} ms, cooked {inserted} ms)",
+                    held = drained + inserted
+                );
+            }
 
             // **The inactive regions of the files this slice cooked**, sent as soon as the commit lands.
             //
