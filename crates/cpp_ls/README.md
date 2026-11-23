@@ -35,8 +35,9 @@ diagnostic  inactive_regions  text_document  configuration  initialized  switch_
 Two of those are not LSP:
 [`textDocument/switchSourceHeader`](src/handlers/switch_source_header) (clangd's extension method, and the reason the
 VS Code client ships a `cppls.switchheadersource` command) and the **inactive regions** notification — the ranges a
-configuration does not compile, which an editor greys out. Both are described in
-[`docs/configuration.md`](../../docs/configuration.md) and [`docs/inactive-regions.md`](../../docs/inactive-regions.md).
+configuration does not compile, which an editor greys out. The switch-source-header method and the configuration it
+reads are described in [`docs/configuration.md`](../../docs/configuration.md); the notification's own contract is in
+[`src/handlers/inactive_regions`](src/handlers/inactive_regions).
 
 ## Design
 
@@ -55,32 +56,31 @@ cargo test --release -p cpp_ls --tests     # the suite; `--release`, because the
 ```
 
 ```text
-protocol       handshake lsp_status diagnostics_status diagnostics_stable progress format_status
-               module_implementation implementation_declaration
-answers        hover_probe lsp_hover_probe real_project_hover_probe rendering_hover_probe
-               hover_positions_probe hover_attributes hover_layout reported_hover
-               module_definition_probe rendering_members_probe signature_real implementation_real definition
-latency        latency hover_latency idle idle_probe loop_probe memory_probe
-real projects  real_project c_project arrow_status neovim_usability usability_probe codestyle_round_probe
-               lua_diagnostics_probe macro_member_probe implementation_c_probe std_string_probe
-               editor_answers_probe code_lens_probe
+protocol       handshake lsp_status progress diagnostics_stable watch_rescan
+answers        hover_attributes hover_layout implementation_declaration module_implementation
+               reported_hover a_header_language formatter_choice
+latency        latency idle
+real projects  real_project
+allocator      global_allocator — the binary installs `MiMalloc` itself, and no shipped `src/` wraps `GlobalAlloc`
 ```
 
-The real-project ones are `#[ignore]`d and read the project from `CPPLS_PROJECT`, `CPPLS_C_PROJECT` or
-`CPPLS_LUA_PROJECT`. `cargo test --release -- --ignored --nocapture` runs the set, and each prints what it measured.
+The suite is **one test target** (`tests/suite.rs`) over the modules in `tests/suite/`. The real-project ones are
+`#[ignore]`d and read the project from `CPPLS_PROJECT`, `CPPLS_C_PROJECT` or `CPPLS_LUA_PROJECT`.
+`cargo test --release -- --ignored --nocapture` runs the set, and each prints what it measured.
 
-`tools/inspect` asks the same engine one question without an editor — the instrument every report in
+[`cpp_inspect`](../cpp_inspect) asks the same engine one question without an editor — the instrument every report in
 [`docs/open-questions.md`](../../docs/open-questions.md) was measured with:
 
 ```bash
-cargo run --release -p inspect -- --project . --file src/lib.rs hover --line 10 --col 5
-cargo run --release -p inspect -- --fixture "a.c=int f(void) { return 1; }" --file a.c --cook --index type --line 1 --col 21
+cargo run --release -p cpp_inspect -- --project <root> --file <file> hover --needle "node->twin" --text
+cargo run --release -p cpp_inspect -- --fixture "a.cpp=struct Widget { int size() const { return 1; } };" --needle size hover
 ```
+
+Its protocol and every command are in [`docs/inspect.md`](../../docs/inspect.md); `caps` prints the list.
 
 ## See also
 
 - [`docs/configuration.md`](../../docs/configuration.md) — `.cppls.toml`, the two database formats, and the limits
-- [`docs/usability.md`](../../docs/usability.md), [`docs/neovim.md`](../../docs/neovim.md) — what a client has to do
 - [`crates/cpp_formatter`](../cpp_formatter) — the built-in formatter `textDocument/formatting` can use
 
 ## License

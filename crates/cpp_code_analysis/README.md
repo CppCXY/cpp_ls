@@ -60,20 +60,15 @@ answer is `Unknown` may be asked again of the rendering — by span, and with th
 ## Testing
 
 ```bash
-cargo test -p cpp_code_analysis                    # the suites below
-CPPLS_TRACE_TYPES=1 cargo test -p cpp_code_analysis --test macro_member_types -- --nocapture
+cargo test -p cpp_code_analysis                          # the whole suite: one target, `tests/suite.rs`
+CPPLS_TRACE_TYPES=1 cargo test -p cpp_code_analysis --test suite macro_member_types -- --nocapture
 ```
 
-```text
-real projects   c_corpus cpp_corpus neovim_probe codestyle_probe real_project_probe lua_source_reports reported_defects
-language        types scopes members modules concepts contracts reflection generics layout lifetime checks
-reading         cook_fixture_probe cooked rendered_reading rendering_real rendering_scope unit_*_probe expand
-cost            allocation_probe memory_probe cold_start_memory_probe namespace_macros slice_probe scale_probe
-```
-
-Real-project tests read a project from the environment and are `#[ignore]`d (`CPPLS_C_PROJECT`, `CPPLS_PROJECT`,
-`CPPLS_LUA_PROJECT`, …); the hermetic ones run in CI. `docs/open-questions.md` is where each of them comes from, with
-the before/after numbers.
+The suite is **one test target** (`tests/suite.rs`) over the modules in `tests/suite/`. The standalone probes were
+deleted with the reorganisation that made it one binary per crate (`2dc17c8d`: 142 linked test binaries at ~2 s each,
+against 4.85 s of execution), and the real-project modules that remain are `#[ignore]`d — they read the project from
+`CPPLS_C_PROJECT`, `CPPLS_PROJECT` or `CPPLS_LUA_PROJECT`. The before/after numbers they produced are in
+[`docs/open-questions.md`](../../docs/open-questions.md).
 
 ## Probes
 
@@ -81,13 +76,13 @@ Every claim in this repository is measured, and the instruments are environment 
 print in [`crates/cpp_toolchain/src/probes.rs`](../cpp_toolchain/src/probes.rs) — `CPPLS_TRACE_TYPES`,
 `CPPLS_TRACE_MEMBERS`, `CPPLS_TRACE_INFERENCE`, `CPPLS_TRACE_ANSWERS`, `CPPLS_TRACE_VIEW`, `CPPLS_TRACE_DIAGNOSTICS`
 and the rest, plus `CPPLS_NO_INFERENCE` and `CPPLS_NO_INDEX_LOOKUP` for splitting a measurement into the engine and the
-index.
+index. `CPPLS_TRACE_MEMORY` prints the session's own table estimate (`MemoryReport`) and says nothing about the
+process: the allocator no longer carries a counter.
 
 ## See also
 
 - [`docs/cpp-support.md`](../../docs/cpp-support.md) — the language support, feature by feature, and the diagnostics
-- [`docs/memory-status.md`](../../docs/memory-status.md) — what the analysis holds, measured
-- [`docs/module-cache.md`](../../docs/module-cache.md) — the module index and its cache
+- [`docs/open-questions.md`](../../docs/open-questions.md) — what is open, and what each measurement found
 
 ## License
 
