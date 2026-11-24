@@ -394,22 +394,28 @@ fn an_assignment_containing_a_conditional_is_an_expression() {
     // the shape was perfectly well formed and nothing was reported. Every assignment whose left-hand side the
     // file had not seen a type for came out that way. See `an_assignment_is_not_a_declaration` in `direct_init`.
     //
-    // The *shape* of the conditional is C++'s and not the naive one: in `a ? b : c` the `?`'s left operand is a
-    // full expression, so an assignment written there is nested **inside** the `TernaryExpr` — `(x = a) ? b : c`
-    // — rather than the conditional sitting on the assignment's right-hand side. That is the grammar, unusual as
-    // it looks, and pinning it keeps someone from "fixing" it later.
+    // The *shape* is C++'s: the `?`'s left operand is a **logical-or-expression**, so an assignment written
+    // before it is not part of the condition — `x = a ? b : c` is `x = (a ? b : c)`. Pinning that is what keeps
+    // the front end from reading `(x = a) ? b : c`, which made `assign-type-check` compare `a`'s type against
+    // `x`'s.
     let tree = CppParser::parse("void f() { x = a ? b : c; }\n", ParserConfig::default());
     let root = tree.get_red_root();
-    let ternary = root
+    let assignment = root
+        .descendants()
+        .find(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BinaryExpr
+                && node.text().to_string().trim_start().starts_with("x =")
+        })
+        .expect("the assignment is a binary expression");
+    let ternary = assignment
         .descendants()
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TernaryExpr)
-        .expect("the conditional is a ternary expression");
-
+        .expect("the conditional is the assignment's right operand");
     assert!(
         ternary
             .descendants()
-            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BinaryExpr),
-        "the assignment is the conditional's condition"
+            .all(|node| CppSyntaxKind::from(node.kind()) != CppSyntaxKind::BinaryExpr),
+        "the assignment is not the conditional's condition"
     );
     assert_eq!(
         count("void f() { x = a ? b : c; }\n", CppSyntaxKind::TernaryExpr),

@@ -457,18 +457,18 @@ enum Level {
 /// Read an expression down to `level`, optionally reading a trailing `...` as a pack expansion.
 fn parse_expr_up_to(p: &mut CppParser, level: Level, pack_expansion: bool) -> ParseResult {
     let _phase = crate::parser::phases::during("expression");
-    let mut expr = parse_ternary_expr(p)?;
+    let mut expr = parse_assignment_expr_inner(p)?;
 
     if level == Level::Full {
         // The comma operator: the loosest of all, left-associative, and a `BinaryExpr` like every other
         // operator. Folded left in a loop rather than given a precedence number, for the reason in [`Level`].
         //
-        // The right operand is a **ternary** expression and not another comma one, which is what makes the
+        // The right operand is an **assignment expression** and not another comma one, which is what makes the
         // operator left-associative: `a, b, c` folds as `(a, b), c`.
         while p.current_token() == CppTokenKind::Comma {
             let m = expr.precede(p, CppSyntaxKind::BinaryExpr);
             p.bump(); // `,`
-            parse_ternary_expr(p)?;
+            parse_assignment_expr_inner(p)?;
             expr = m.complete(p);
         }
     }
@@ -496,9 +496,43 @@ fn parse_expr_up_to(p: &mut CppParser, level: Level, pack_expansion: bool) -> Pa
     Ok(expr)
 }
 
+/// **One assignment expression** — a conditional, or a target and its right-hand assignment.
+///
+/// The assignment family is looser than `?:` and right-associative: `m = cond ? a : b` is an assignment whose right
+/// operand is the conditional, and `a = b = c` folds on the right. Reading the conditional's condition with the full
+/// binary ladder made `m = cond` the condition and produced `(m = cond) ? a : b`; `assign-type-check` then compared
+/// `cond`'s pointer type against `m`'s int. The condition now stops above precedence 1 (see
+/// [`parse_ternary_expr`]), and this is where the assignment is put back together.
+///
+/// The right operand may also be a **braced initializer** (`x = {1, 2};`), which is an initializer-clause rather than
+/// an expression; the binary-operator loop's assignment arm had that case, and this replacement keeps it.
+fn parse_assignment_expr_inner(p: &mut CppParser) -> ParseResult {
+    let mut expr = parse_ternary_expr(p)?;
+    let (operator, spans) = p.joined_operator_at_the_cursor();
+    if !is_assignment_operator(operator) {
+        return Ok(expr);
+    }
+
+    let m = expr.precede(p, CppSyntaxKind::BinaryExpr);
+    for _ in 0..spans {
+        p.bump(); // the assignment operator, in however many tokens the lexer left it
+    }
+    if p.current_token() == CppTokenKind::LeftBrace {
+        decls::parse_braced_initializer(p)?;
+    } else {
+        parse_assignment_expr_inner(p)?;
+    }
+    expr = m.complete(p);
+    Ok(expr)
+}
+
 /// 解析三元表达式 (condition ? true_expr : false_expr)
 fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
-    let mut expr = parse_binary_expr_with_precedence(p, 0)?;
+    // **The condition is a *binary* expression, not an assignment** — C++ gives the assignment family a lower
+    // precedence than `?:`, so `a = b ? c : d` is `a = (b ? c : d)`. Starting at precedence 2 (the first level above
+    // the assignment family, which is 1 in [`get_operator_precedence`]) is what keeps the `?` from wrapping an
+    // assignment that was already read. See [`parse_expr_up_to`], which folds the assignment after this returns.
+    let mut expr = parse_binary_expr_with_precedence(p, 2)?;
 
     if p.current_token() == CppTokenKind::Question {
         // **`a ?: b` is GNU's elvis operator**, and where the configuration does not have it a `:` where the true

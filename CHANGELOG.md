@@ -41,6 +41,10 @@ fix many parser and toolchain bug
   files each declaration under the file that wrote it; `define typebuf` lands in `globals.h:575`, and `api/vim.c`,
   `window.c`, `ui.c` and `ex_docmd.c` diagnose cleanly. The parser-shape heuristic intended to paper over this was
   withdrawn — it accepted `EXTERN typebuf_T …` without include evidence, which C does not.
+- **An assignment is not the condition of a following conditional.** `m = ptr ? a : b` was parsed as
+  `(m = ptr) ? a : b`, so `assign-type-check` compared `ptr`'s pointer type against `m`'s `int` — neovim's
+  `ex_getln.c:3055` was reported for a valid expression. The conditional's condition now stops above the assignment
+  family and the assignment is folded after it, right-associatively, including `>>=` and a braced right-hand side.
 - **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
   and `main` into one declaration; the `#else` side was read as an old-style parameter list, and walking it for
   modifiers found a body-local `static`. `nvim_main` was drawn as `static int nvim_main` although the source and the

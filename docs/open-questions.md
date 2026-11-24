@@ -3662,9 +3662,9 @@ followed as an alias now; `channel.c` diagnoses with no findings and no overflow
 `sweep` over the 219 translation units the compile database holds, with the parser *shape heuristics removed*:
 
 ```text
-findings 356
-unresolved-call-or-receiver 128
-assign-type-check 1 (the two `tui.c` false positives are fixed by pointer→bool)
+findings 226
+unresolved-call-or-receiver 1
+assign-type-check 0
 include-not-found 1
 missing-include 3
 missing-return 1
@@ -3673,8 +3673,9 @@ simplify-boolean-expr 3
 syntax-error 0
 ```
 
-`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c` and `eval/funcs.c` diagnose
-cleanly; the 128 unresolved are the class below, **not** names the compiler cannot see.
+`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c`, `eval/funcs.c`,
+`api/vim.c`, `window.c`, `ui.c`, `ex_docmd.c`, `tui.c` and `ex_getln.c` diagnose cleanly through `--cook`. The one
+unresolved is `getsid` in the platform fixture; the three `missing-include` are the per-file sweep measurement below.
 
 ### Why `globals.h` works although the parser has not included it
 
@@ -3726,9 +3727,29 @@ exactly the "works without being included" claim the code must not make. The tem
 gone too (the remaining 62 → 63 is the `nvim_main` modifier fix below). The fix is in the reading the tool asks for,
 not in the grammar.
 
-`sweep` still runs the **per-file** cook for each file, so its 128 unresolved entries are a measurement of that path,
-not of the language server, which reads units through the pump. The sweep number is kept as a baseline for the tool;
-it is not a list of names the compiler cannot see.
+`sweep` reads one representative unit before its per-file loop, so the header facts above are in the index and the
+128 unresolved entries drop to one. It still cooks each file on its own for that file's declarations, so the three
+`missing-include` entries it reports (`Dict` in `msgpack_rpc/channel.c` and `tui/tui.c`) are the same per-file gap;
+`cpp_inspect --cook diagnostics` on either file answers `none`, because that path performs the file's own unit read.
+
+### An assignment is not the condition of a following conditional
+
+`ex_getln.c:3055` is
+
+```c
+m = cmdline_win ? cmdline_win->w_view_width * cmdline_win->w_view_height : Columns * Rows;
+```
+
+The parser read the `?`'s left operand as a **full expression**, so the tree was `(m = cmdline_win) ? … : …`; the
+assignment's right-hand side was therefore the pointer `cmdline_win`, and `assign-type-check` reported that a
+`win_T*` does not convert to `m`'s `int`. C++ gives the assignment family a **lower** precedence than `?:` — the
+left operand is a logical-or-expression — so the tree is `m = (cmdline_win ? … : …)`.
+
+The condition now starts at precedence 2 (above the assignment family), and `parse_assignment_expr_inner` folds the
+assignment after the conditional, right-associatively, including the `>>=` spelling the lexer leaves as three tokens
+and the braced initializer (`x = {1, 2};`). The parser fixture that had pinned the old nesting was corrected along with
+the grammar; `ex_getln.c` is clean, and `a_pointer_conditioned_ternary_is_not_an_assignment_of_the_condition` pins
+the check.
 
 `nvim_main`'s **false `static`** was a separate, real modifier defect: main.c's `#ifdef MAKE_LIB` branches merge
 `nvim_main` and `main` into one declaration, the `#else` side is an `OldStyleParameterList`, and walking it for

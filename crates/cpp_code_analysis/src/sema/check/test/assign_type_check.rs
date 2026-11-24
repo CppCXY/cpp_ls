@@ -69,3 +69,24 @@ fn a_pointer_to_bool_is_a_standard_conversion() {
         "and the same in C++: {in_cpp:?}"
     );
 }
+
+/// **An assignment whose right operand is a conditional is not an assignment of the condition.** `m = ptr ? a : b`
+/// is `m = (ptr ? a : b)`; the old parser read `(m = ptr) ? a : b`, so `assign-type-check` asked whether `ptr`'s
+/// pointer type converted to `m`'s `int` — neovim's `ex_getln.c:3055` (`m = cmdline_win ? … : Columns * Rows`) was
+/// reported for a perfectly valid C expression.
+#[test]
+fn a_pointer_conditioned_ternary_is_not_an_assignment_of_the_condition() {
+    let source = "\
+struct win { int width; };\n\
+extern struct win *cmdline_win;\n\
+int f(void) {\n\
+    int m;\n\
+    m = cmdline_win ? 1 * 2 : 3 * 4;\n\
+    return m;\n\
+}\n";
+    let codes = codes_of(source);
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "the conditional's branches are `int`, and `m` is `int`: {codes:?}"
+    );
+}

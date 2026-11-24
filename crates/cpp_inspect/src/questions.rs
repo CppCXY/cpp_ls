@@ -897,6 +897,17 @@ pub fn the_sweep(
     }
     paths.sort();
 
+    // **One whole-program reading before the per-file loop, so header declarations exist as facts.** A per-file cook
+    // renders one file and files only its declarations; a header's `EXTERN typebuf_T typebuf INIT(…)` (globals.h) is
+    // then invisible to every file that includes it, which is the raw-summary false positive this sweep used to
+    // report. The unit read is the same path the server's pump takes: it files each declaration under the file that
+    // wrote it. One root is enough for the headers a sweep asks about; a header a different root reads with a
+    // different environment still comes from the per-file cook below.
+    if opened.session.config().is_in_the_database(&opened.file) {
+        crate::project::warm_the_closure(&mut opened.session, &opened.file);
+        let _ = opened.session.read_the_unit(&opened.file);
+    }
+
     for path in &paths {
         // **A file the compilation database does not name is measured against no configuration at all.** libuv's
         // database has 80 commands and no `aix.c`, `ibmi.c`, `kqueue.c` or `linux.c` — those are other platforms'
