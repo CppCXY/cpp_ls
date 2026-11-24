@@ -59,7 +59,7 @@ pub async fn on_inlay_hint(
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
     if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
+        let _ = path;
 
         // **And this file's own reading, because the wait this replaced was doing that too.**
         //
@@ -72,7 +72,6 @@ pub async fn on_inlay_hint(
         // `catch_up` is that, as a question about **this file**: one parse of it when an edit is waiting, and
         // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
         // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
-        context.analysis().catch_up(&path).await;
         if cpp_code_analysis::probes::inlay() {
             eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
         }

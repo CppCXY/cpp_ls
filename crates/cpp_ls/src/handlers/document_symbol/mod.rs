@@ -48,9 +48,6 @@ pub async fn on_document_symbol(
 
     // Read in first, under the write lock: an outline of a file nobody has read would be an empty outline, which is
     // a wrong answer rather than a missing one.
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

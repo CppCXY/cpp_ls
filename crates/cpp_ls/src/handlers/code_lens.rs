@@ -63,11 +63,6 @@ pub async fn on_code_lens(
     let uri = params.text_document.uri;
     let client = context.lsp_features().client_id();
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference

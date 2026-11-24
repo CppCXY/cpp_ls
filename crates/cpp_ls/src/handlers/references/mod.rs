@@ -40,22 +40,6 @@ pub async fn on_references(
     let position = params.text_document_position.position;
     let include_declaration = params.context.include_declaration;
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The defect was real: `prepare` reads *this* file, while the name being asked about is usually in a header
-        // whose facts exist only once the pump has cooked the include closure — measured on a live server for
-        // `std::endl`, the first three queries after an open answered **nothing at all** and the fourth answered
-        // correctly. The wait added for it was `AnalysisState::settle`, which asked whether the *whole project's*
-        // indexing queue was empty — a question about the project standing in for a question about this file.
-        //
-        // A query about a name needs this file's summary and the files it includes, and that is
-        // what `AnalysisState::catch_up` reads.
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
 

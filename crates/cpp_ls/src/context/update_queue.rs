@@ -359,6 +359,50 @@ impl UpdateInbox {
 
         applied
     }
+
+    /// **Take every event up to `upto` as one batch**, and hand them to one applier.
+    ///
+    /// The single-writer rule is the same as [`UpdateInbox::apply_upto`], but the unit of work is the **client's run**
+    /// rather than one notification. The writer applies all document text under one session write, then updates the
+    /// affected files' index impact; readers never apply a content event themselves.
+    pub async fn apply_batch_upto<F, Fut>(&self, upto: u64, apply: F) -> usize
+    where
+        F: FnOnce(Vec<UpdateEvent>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _applying = self.applying.lock().await;
+        let mut events = Vec::new();
+        let mut last_seq = 0;
+        loop {
+            let next = {
+                let mut pending = self.pending.lock().await;
+                match pending.front() {
+                    Some(queued) if queued.seq <= upto => pending.pop_front(),
+                    _ => None,
+                }
+            };
+            let Some(queued) = next else {
+                break;
+            };
+            last_seq = queued.last_seq;
+            if queued.event.changes_analysis() {
+                self.started_change.send_replace(queued.last_seq);
+            }
+            events.push(queued.event);
+        }
+        if events.is_empty() {
+            return 0;
+        }
+        let count = events.len();
+        let started = std::time::Instant::now();
+        apply(events).await;
+        self.applied.send_replace(last_seq);
+        let took = started.elapsed().as_millis();
+        if took > 50 {
+            log::debug!("apply_batch_upto: {count} event(s) took {took} ms");
+        }
+        count
+    }
 }
 
 /// **Apply the client's pending notifications up to `upto`** — the whole of what a request waits for.
@@ -372,6 +416,97 @@ pub async fn catch_up_upto(snapshot: &ServerContextSnapshot, upto: u64) {
     let took = started.elapsed().as_millis();
     if took > 50 {
         log::debug!("catch_up_upto: waited {took} ms for events through {upto}");
+    }
+}
+
+/// **Apply a client run as one writer step.** Document text is applied under **one** session write, in the queue's
+/// order; the affected files' index impact is started after that write, off the request barrier. Everything else goes
+/// through [`process`], which is the non-content path.
+async fn process_batch(snapshot: &ServerContextSnapshot, events: Vec<UpdateEvent>) {
+    let mut texts: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut closed: Vec<std::path::PathBuf> = Vec::new();
+    let mut others: Vec<UpdateEvent> = Vec::new();
+
+    for event in events {
+        match event {
+            UpdateEvent::Changed(params) => {
+                let uri = params.text_document.uri.clone();
+                let Some(path) = crate::util::uri_to_file_path(&uri) else {
+                    continue;
+                };
+                let changed = {
+                    let mut manager = snapshot.workspace_manager().lock().await;
+                    manager.change_file(&uri, params.text_document.version, &params.content_changes)
+                };
+                match changed {
+                    Ok(text) => texts.push((path, text)),
+                    Err(error) => {
+                        log::warn!("cannot apply document change for {}: {error}", uri.as_str())
+                    }
+
+                }
+            }
+            UpdateEvent::Saved(params) => {
+                let Some(text) = params.text else {
+                    continue;
+                };
+                let uri = params.text_document.uri.clone();
+                let Some(path) = crate::util::uri_to_file_path(&uri) else {
+                    continue;
+                };
+                let replaced = {
+                    let mut manager = snapshot.workspace_manager().lock().await;
+                    manager.replace_open_text(&uri, text.clone())
+                };
+                if let Err(error) = replaced {
+                    log::warn!("cannot apply saved text for {}: {error}", uri.as_str());
+                    continue;
+                }
+                texts.push((path, text));
+            }
+            UpdateEvent::Closed(params) => {
+                let uri = params.text_document.uri.clone();
+                let Some(path) = crate::util::uri_to_file_path(&uri) else {
+                    continue;
+                };
+                snapshot.workspace_manager().lock().await.close_open_file(&uri);
+                closed.push(path);
+            }
+            // An open has workspace bookkeeping and a first-read; it is rare enough to keep the existing path.
+            other => others.push(other),
+        }
+    }
+
+    if !texts.is_empty() || !closed.is_empty() {
+        let affected: Vec<std::path::PathBuf> =
+            texts.iter().map(|(path, _)| path.clone()).collect();
+        let changed = texts.clone();
+        snapshot
+            .analysis()
+            .update_session("apply client content", move |session| {
+                for (path, text) in changed {
+                    session.did_open_as(&path, &text, None);
+                }
+                for path in closed {
+                    session.did_close(&path);
+                }
+                // **Everything a read can ask for is made ready here, before the write lock is released.** A request
+                // acquiring the read lock is the barrier: it must never see a buffer whose summary, includes or
+                // rendering are from the previous text.
+                for path in &affected {
+                    session.catch_up(path);
+                }
+            })
+            .await;
+        snapshot.analysis().wake();
+        snapshot
+            .diagnostics()
+            .schedule_open_files(snapshot.clone())
+            .await;
+    }
+
+    for event in others {
+        process(snapshot, event).await;
     }
 }
 
@@ -414,8 +549,8 @@ pub fn spawn_update_queue(inner: Arc<ServerContextInner>) {
             let worker_snapshot = &snapshot;
             let applied = snapshot
                 .inbox()
-                .apply_upto(u64::MAX, |event| async move {
-                    process(worker_snapshot, event).await
+                .apply_batch_upto(u64::MAX, |events| async move {
+                    process_batch(worker_snapshot, events).await
                 })
                 .await;
             if applied == 0 {

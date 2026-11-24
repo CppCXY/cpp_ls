@@ -58,10 +58,6 @@ pub async fn on_prepare_call_hierarchy(
     let position = params.text_document_position_params.position;
 
     log::debug!("call hierarchy: prepare asked at {position:?}");
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
     log::debug!("call hierarchy: prepare returned, asking the session");
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -84,8 +80,6 @@ pub async fn on_incoming_calls(
     let Some(path) = uri_to_file_path(&item.uri) else {
         return RequestOutcome::Missing;
     };
-    context.analysis().prepare(&path).await;
-    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;
@@ -109,8 +103,6 @@ pub async fn on_outgoing_calls(
     let Some(path) = uri_to_file_path(&item.uri) else {
         return RequestOutcome::Missing;
     };
-    context.analysis().prepare(&path).await;
-    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;

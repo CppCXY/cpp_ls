@@ -48,21 +48,6 @@ pub async fn on_signature_help(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // `std::format(` in a file that says `import std;` needs the same read the hover and the definition do — and
-        // this handler has its own reason to care: it declines to answer while files are queued, and a module whose
-        // interface unit nobody read is exactly that state. `false`: no edit to catch up on.
-        crate::handlers::read_the_modules(&context, &path, false).await;
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue
-        // was empty — because the callee's declaration is usually in a header whose facts arrive
-        // later. What the answer needs is this file's own closure, and `read_the_modules` above is
-        // what reads it (it catches the summary up first).
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // This handler answered `null` for every call site on a real project before the two steps

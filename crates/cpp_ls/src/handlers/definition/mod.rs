@@ -66,26 +66,6 @@ pub async fn on_goto_definition_handler(
 
     // The file is read in first, under the write lock, so that the query below can be a read: a file the client has
     // open is already held by `didOpen`, and this covers the request that arrives about one that is not.
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **The module interface units this file imports.** A name that arrives through `import std;` is declared in
-        // a file the project never scanned — `<VC>/Tools/MSVC/<version>/modules/std.ixx` is outside it — so a
-        // go-to-definition on `std::string` in a file that says `import std;` has nothing to point at until that file
-        // is read. `false`: this handler has no edit to catch up on, so the read does it itself.
-        crate::handlers::read_the_modules(&context, &path, false).await;
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The defect is real and worth keeping on the record: `prepare` reads *this* file, while the declaration
-        // being jumped to is usually in a header whose facts exist only once the pump has cooked the include closure
-        // — and measured on a live server for `std::endl`, the first three queries after an open answered **nothing
-        // at all** while the fourth answered correctly. The wait added for it was `AnalysisState::settle`, which
-        // asked whether the *whole project's* indexing queue was empty.
-        //
-        // The question that matters is about this file's own closure, and `read_the_modules` above
-        // is what answers it: it catches this file's summary up and reads the files it reaches that
-        // nobody has read.
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

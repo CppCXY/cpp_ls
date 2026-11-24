@@ -38,11 +38,6 @@ pub async fn on_document_highlight(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The file's own text, for the cursor and for both answers.** A highlight is a set of ranges in the file the

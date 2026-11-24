@@ -73,7 +73,10 @@ pub async fn process_did_open_text_document(
         crate::handlers::register_files_watch(context.clone()).await;
     }
 
-    apply_buffer_as(&context, path, text, family).await;
+    apply_buffer_as(&context, path.clone(), text, family).await;
+    // **An open is applied and caught up before the event is marked applied.** The first requests after `didOpen` are
+    // entitled to the file's includes; the queue worker, not a request, pays for reading them.
+    context.analysis().catch_up(&path).await;
     context
         .diagnostics()
         .schedule_open_files(context.clone())
@@ -251,6 +254,10 @@ async fn apply_buffer_as(
         return;
     }
 
-    // The queued file is the pump's; parsing it is not part of this write-locked update.
+    // **The pump is woken before anything waits on it.** `did_open_as` dropped the summary and queued the file;
+    // reading its includes is the background's work, and a request that needs the new reading waits (a read-only wait)
+    // for this file to be ready rather than doing the work under the request's lock.
     analysis.wake();
+
+    // The queued file is the pump's; parsing it is not part of this write-locked update.
 }

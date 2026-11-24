@@ -57,18 +57,6 @@ pub async fn on_prepare_rename(
     let uri = params.text_document.uri;
     let position = params.position;
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue
-        // was empty — because `prepare` reads *this* file while the name being renamed is usually
-        // declared in a header whose facts arrive later. The question that matters is this file's
-        // own closure, and `AnalysisState::catch_up` is what reads it.
-        context.analysis().catch_up(&path).await;
-    }
-
     // **A refused rename says why.** The gate below is right — a partial search would write half a rename into the
     // user's files — but the protocol's `null` is what an editor shows as "this cannot be renamed here", and during a
     // project's first minute that is the wrong sentence. The message is sent before the decision is taken, because the
@@ -119,11 +107,6 @@ pub async fn on_rename(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
     let new_name = params.new_name;
-
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

@@ -100,8 +100,10 @@ pub async fn read_the_modules(
     caught_up: bool,
 ) {
     if !caught_up {
-        context.analysis().catch_up(path).await;
+        // A request no longer catches the file up; the update queue's writer owns the index impact. The parameter
+        // stays in the signature for the callers that still name it while the queue refactor lands.
     }
+
     // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
     // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
     // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for

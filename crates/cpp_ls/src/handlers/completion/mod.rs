@@ -87,33 +87,10 @@ pub async fn on_completion(
     // It is one parse of **one file**, and nothing at all when there is no edit waiting — see [`Session::catch_up`],
     // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
     // include closure, which for a file that includes `<string>` is thousands of headers).
-    if let Some(path) = requested_path.as_ref() {
-        let started = std::time::Instant::now();
-        context.analysis().prepare_for_completion(path).await;
-        let prepared = started.elapsed().as_millis();
-
-        let read = path.clone();
-        let started = std::time::Instant::now();
-        context.analysis().catch_up(&read).await;
-        let caught_up = started.elapsed().as_millis();
-
-        // …and the module interface units this file imports, which the index cannot name a file for until something
-        // reads them: `import std;` is `<VC>/Tools/MSVC/<version>/modules/std.ixx`, a file **outside the project**,
-        // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
-        // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
-        let started = std::time::Instant::now();
-        crate::handlers::read_the_modules(&context, path, true).await;
-        let modules = started.elapsed().as_millis();
-
-        // **Where the time went, which is the only way to tell the two failures apart.** A completion is slow for
-        // one of two reasons and they have different fixes: it waited for the **write lock** the pump holds (the
-        // three calls above), or it waited for the index to fill (`settle`), or its own query was slow. The request's
-        // total says none of that, and the report this handler exists for — *"I type `s` and it takes forever"* —
-        // was diagnosed by exactly this breakdown.
-        log::debug!(
-            "completion: prepare {prepared} ms, catch up {caught_up} ms, modules {modules} ms, {} ms before the query",
-            prepared + caught_up + modules
-        );
+    if let Some(_path) = requested_path.as_ref() {
+        // **Read-only by contract.** The event queue has already applied this document's text; a completion asks
+        // the analysis what it knows and never loads, catches up, cooks or queues anything.
+        let _ = &context;
     }
 
     // **And then the query, which no longer waits for the index to drain.**
@@ -142,6 +119,9 @@ pub async fn on_completion(
     // rendering owns bindings, types and members. Asking for the current buffer's rendering here is what makes a
     // macro-declared local (`kvec_t(int64_t) ids`) visible on the **first** completion after an edit, instead of
     // only when some other request happened to have left a rendering warm.
+    // **No readiness check and no timeout.** The update queue applies an edit and its index impact under the
+    // session's write lock; a read lock acquired here is therefore a lock acquired after that work, which is the
+    // barrier. If a query needs a fact, the writer owed it before releasing.
     let from_the_rendering = match requested_path.as_ref() {
         Some(path) => {
             context
@@ -517,8 +497,6 @@ pub async fn on_completion_resolve(
     let (Some(file), Some(offset)) = (file, offset) else {
         return RequestOutcome::Ready(item);
     };
-
-    context.analysis().prepare(&file).await;
 
     let looked_up = file.clone();
     let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {

@@ -235,7 +235,7 @@ impl AnalysisState {
         position: lsp_types::Position,
     ) -> Option<cpp_code_analysis::CompletionSet> {
         let path = path.to_path_buf();
-        self.update_session("render a completion", move |session| {
+        self.run_blocking("a completion's reading", move |session| {
             let editable = session.view_of_the_file(&path)?;
             let offset = crate::util::file_offset_at_position(&editable, position)?;
             let raw = session.completions(&editable, offset);
@@ -243,19 +243,12 @@ impl AnalysisState {
             let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
                 !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
             };
-            // **A prefix the file's own list can answer needs no rendering.** `KV_IN` has `KV_INITIAL_VALUE` among
-            // its rows, and `kvec` has both kvec macros; asking the cook for those is the cost this rule exists to
-            // avoid. The rendering is for the prefix nothing in the file's tree can start — `ids` written by
-            // `kvec_t`, and the empty prefix after `ids.`.
             if (typed.is_empty() && !raw.items.is_empty())
                 || (!typed.is_empty() && has_the_prefix(&raw))
             {
                 return Some(raw);
             }
             let Some(rendered) = session.view(&path) else {
-                // **No rendering yet is not a reason to cook inside a request.** The pump builds it from the edit's
-                // own queue; until then the ordinary list is returned and marked incomplete, so the client asks
-                // again instead of this request holding the analysis while it renders a translation unit.
                 let mut incomplete = raw;
                 incomplete.incomplete = true;
                 return Some(incomplete);
@@ -281,7 +274,6 @@ impl AnalysisState {
             Some(found)
         })
         .await
-        .flatten()
     }
 
     async fn prepare_inner(&self, path: &std::path::Path) -> bool {

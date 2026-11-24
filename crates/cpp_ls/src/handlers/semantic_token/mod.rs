@@ -662,18 +662,6 @@ pub async fn on_semantic_tokens(
     );
     let multi_line = multi_line_support(&context);
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue
-        // was empty — because a name a header declares is classified through the index, and before
-        // that header has been read the name has no classification. The question that matters is
-        // this file's own closure, and `AnalysisState::catch_up` is what reads it.
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;

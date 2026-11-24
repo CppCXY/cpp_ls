@@ -75,7 +75,6 @@ pub async fn on_hover(
     // measurement: the first hover of an open file went from 1 103 ms to 12–34 ms.
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare_for_a_read(&path).await;
-        crate::handlers::read_the_modules(&context, &path, false).await;
 
         // **And this file's own closure, which is what a name in a header needs.** `prepare` puts the file's *text*
         // in reach and `read_the_modules` reads what it imports; neither reads the headers it `#include`s, and a name
@@ -85,7 +84,6 @@ pub async fn on_hover(
         // one. `catch_up` is the same step the semantic-token and inlay-hint handlers take, for the same reason, and it
         // is bounded to the files this one names (9), so it cannot become the settle that used to make every hover
         // wait for the whole project.
-        context.analysis().catch_up(&path).await;
         // **`catch_up` is nine files and this name is fourteen headers down**, so the readiness that decides the
         // answer is [`AnalysisState::wait_for_the_closure`] — the same condition the semantic-token handler checks,
         // waited for instead of answered with `null`. The budget is a ceiling: on a warm index the first check
