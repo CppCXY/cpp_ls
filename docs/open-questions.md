@@ -3774,9 +3774,36 @@ Two more defects were reported while using the fixed server on `channel.c`:
   a declaration yet. Ordinary name completion now adds the file's own and direct includes' macros, so `kvec`,
   `KV_I` and `KV_INI` keep their candidates.
 
-**Not yet fixed: completion latency.** The CLI's query answers these prefixes; the server's per-request
-`prepare`/`catch_up` path and the client's renewal of an incomplete list still need a real neovim timing run before
-the "slow" report can be called closed.
+**Completion latency is measured, not closed.** The server's per-request `prepare`/`catch_up` path and the client's
+renewal of an incomplete list now have a real neovim timing run; the edit stall it found is fixed, and the query's
+own ~90 ms remains below.
+
+### Completion timing on a real neovim file
+
+`latency::measure_neovim_completion_before_and_after_an_edit` is an `#[ignore]`d over-the-wire test against
+`src/nvim/channel.c`; run it with `CPPLS_NEovim_PROJECT=… cargo test --release -p cpp_ls --test suite
+measure_neovim_completion -- --ignored --nocapture`.
+
+The report before the open-file shortcut:
+
+```text
+before edit   322–897 ms (the index was still filling)
+after edit    476 / 708 / 1857 / 762 / 95 / 93 ms
+              the 1857 ms request spent 1609 ms in `prepare` and 157 ms in `modules`
+```
+
+`prepare` took the analysis **read lock** to discover that `channel.c` was open — which `OpenDocuments` already
+answers without a lock. `AnalysisState::prepare_for_completion` now returns `true` for an open buffer, and the
+handler uses it. After the change:
+
+```text
+after edit    91 / 229 / 90 / 110 / 90 / 88 ms   (steady 90–110 ms)
+prepare       0 ms on every request
+```
+
+The remaining first-request cost is the view parse/lock after the edit (up to ~500 ms in one run, 0 once the view
+cache warms), and the completion query itself is still ~85–110 ms on this file. Those are the next two numbers to
+attack; the simple edit no longer restarts a program read, and no request is waiting on `prepare`.
 
 `include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
 `test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not

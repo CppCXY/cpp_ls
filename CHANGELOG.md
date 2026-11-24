@@ -41,6 +41,13 @@ fix many parser and toolchain bug
   files each declaration under the file that wrote it; `define typebuf` lands in `globals.h:575`, and `api/vim.c`,
   `window.c`, `ui.c` and `ex_docmd.c` diagnose cleanly. The parser-shape heuristic intended to paper over this was
   withdrawn — it accepted `EXTERN typebuf_T …` without include evidence, which C does not.
+- **A completion on an open file no longer asks the pump for the file it already has.** The completion handler called
+  `AnalysisState::prepare` on every request; that path takes the analysis read lock to find out the file is open, so
+  while the pump held it for a program read a one-line edit cost **1609 ms**, and the first completion after the edit
+  took **1857 ms**. An open buffer is already in the provider chain, and the completion's own `catch_up` rebuilds the
+  summary the edit dropped; `prepare_for_completion` answers from `OpenDocuments` without the lock. Measured over the
+  wire on neovim's `channel.c`: before the fix the post-edit requests were 476 / 708 / 1857 / 762 / 95 / 93 ms; after
+  it, 91–702 ms with the steady ones **90–110 ms**, and `prepare` is 0 ms on every request.
 - **A member of a macro-declared local is resolved through the rendering.** `kvec_t(int64_t) ids = …` is an
   anonymous struct after the preprocessor and an expression statement before it, so the plain reading had no binding
   for `ids` and the hover said `` `ids` has no member `size` ``. A card that is a failed member lookup (or a

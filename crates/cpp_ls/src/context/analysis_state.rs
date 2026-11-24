@@ -194,6 +194,21 @@ impl AnalysisState {
         answer
     }
 
+    /// **The completion path's form of [`AnalysisState::prepare`]** — an open buffer is already in the provider
+    /// chain, so asking the session to load it is a read lock taken for a fact this state can answer itself.
+    ///
+    /// That read lock is not free while the pump holds the analysis for a program read: measured on neovim's
+    /// `channel.c` (release server), a one-line `didChange` followed by six completions spent **1609 ms in one
+    /// `prepare`** and the request it belonged to took **1857 ms**; the other five, which found the session free,
+    /// were 93–708 ms. The file is open (`OpenDocuments` holds its text), so `load`/`want_cooked_reading` have
+    /// nothing to do; the completion's own `catch_up` still rebuilds the summary the edit dropped.
+    pub async fn prepare_for_completion(&self, path: &std::path::Path) -> bool {
+        if self.files.overlay.is_open(path) {
+            return true;
+        }
+        self.prepare(path).await
+    }
+
     async fn prepare_inner(&self, path: &std::path::Path) -> bool {
         // **The shortcut that matters, and it is the ordinary case.** The file a request is about is normally one the
         // editor has open, so the VFS already holds its text and its cooked reading is either built or already asked

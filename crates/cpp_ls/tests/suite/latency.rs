@@ -522,6 +522,152 @@ fn an_unrelated_completion_stays_responsive_after_a_large_incremental_edit() {
 // forty lines of process plumbing, not behaviour.
 // ---------------------------------------------------------------------------------------------------------------
 
+/// **A real neovim file, a real edit, and the completion the keystroke asks for.**
+///
+/// Ignored by default because it needs the checkout and its compile database. Run it with
+/// `CPPLS_NEovim_PROJECT=C:\…\neovim cargo test --release -p cpp_ls --test suite measure_neovim_completion -- --ignored --nocapture`.
+/// The report is the pair that matters: the completions *before* a small edit and the completions *after* it. A
+/// simple `KV_INITIAL_VALUE` → `KV_INI` replacement must not turn a millisecond-scale query into a re-index.
+#[test]
+#[ignore = "measures a real neovim checkout; set CPPLS_NEovim_PROJECT"]
+fn measure_neovim_completion_before_and_after_an_edit() {
+    if not_the_product() {
+        return;
+    }
+    let Some(root) = std::env::var_os("CPPLS_NEovim_PROJECT").map(PathBuf::from) else {
+        eprintln!("skipped: set CPPLS_NEovim_PROJECT to the neovim checkout");
+        return;
+    };
+    let file = root.join("src/nvim/channel.c");
+    let text = std::fs::read_to_string(&file).expect("the neovim file");
+    let uri = uri_of(&file);
+    let log = std::env::temp_dir().join(format!("cppls-neovim-completion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&log);
+    let mut server = Server::start_with_log(&root, log.clone());
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": { "window": { "workDoneProgress": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": text }
+        }),
+    );
+
+    // **Let the first index settle before measuring the steady state.** The requests below are about a keystroke on
+    // an ordinary edit, not about the startup window (the separate `latency` tests cover that), and neovim's 632
+    // source files are still being read for several seconds after `didOpen`.
+    std::thread::sleep(Duration::from_secs(10));
+
+    let (line, character) = position_of(&text, "KV_INITIAL_VALUE");
+    let mut before: Vec<Duration> = Vec::new();
+    let mut after: Vec<Duration> = Vec::new();
+
+    for attempt in 0..6 {
+        let started = Instant::now();
+        let answer = server.request(
+            100 + attempt,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character + "KV_IN".len() as u32 },
+            }),
+        );
+        let took = started.elapsed();
+        before.push(took);
+        let items = answer["result"]["items"].as_array().map_or(0, Vec::len);
+        eprintln!(
+            "[neovim] before edit #{attempt}: {} ms, {items} item(s)",
+            took.as_millis()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            answer["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "KV_INITIAL_VALUE")),
+            "the macro must be offered before the edit: {answer}"
+        );
+    }
+
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character + "KV_INITIAL_VALUE".len() as u32 },
+                },
+                "text": "KV_INI",
+            }],
+        }),
+    );
+
+    for attempt in 0..6 {
+        let started = Instant::now();
+        let answer = server.request(
+            200 + attempt,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character + "KV_INI".len() as u32 },
+            }),
+        );
+        let took = started.elapsed();
+        after.push(took);
+        let items = answer["result"]["items"].as_array().map_or(0, Vec::len);
+        eprintln!(
+            "[neovim] after edit  #{attempt}: {} ms, {items} item(s)",
+            took.as_millis()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            answer["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "KV_INITIAL_VALUE")),
+            "the macro must still be offered after the edit: {answer}"
+        );
+    }
+
+    let summary = |name: &str, times: &[Duration]| {
+        let max = times.iter().copied().max().unwrap_or_default();
+        let min = times.iter().copied().min().unwrap_or_default();
+        let mean = times.iter().sum::<Duration>() / times.len().max(1) as u32;
+        format!(
+            "{name}: min {} ms, mean {} ms, max {} ms",
+            min.as_millis(),
+            mean.as_millis(),
+            max.as_millis()
+        )
+    };
+    eprintln!("[neovim] {}", summary("before", &before));
+    eprintln!("[neovim] {}", summary("after", &after));
+    // **The server's own split of the request**, which is what says whether the remaining 100–300 ms is the lock,
+    // the file's catch-up, or the completion's query. The log is read before the temporary directory goes away.
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for line in text.lines().filter(|line| line.contains("completion:")) {
+                    eprintln!("[neovim log] {line}");
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&log);
+}
+
 fn uri_of(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     format!("file:///{}", text.trim_start_matches('/'))
@@ -578,10 +724,13 @@ struct Server {
 
 impl Server {
     fn start(root: &Path) -> Server {
+        Server::start_with_log(root, root.join("log"))
+    }
+
+    fn start_with_log(root: &Path, log_dir: PathBuf) -> Server {
         // **The log goes to a file, because the test reads a number out of it.** `AnalysisState::update` reports the
         // longest it held the analysis, and that number is the one the bound is really about — the requests can only
         // see the sum. `--log-path none` would be quieter; it would also throw away the measurement.
-        let log_dir = root.join("log");
         let _ = std::fs::create_dir_all(&log_dir);
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_cpp_ls"))

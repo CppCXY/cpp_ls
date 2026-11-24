@@ -88,7 +88,7 @@ pub async fn on_completion(
     // include closure, which for a file that includes `<string>` is thousands of headers).
     if let Some(path) = uri_to_file_path(&uri) {
         let started = std::time::Instant::now();
-        context.analysis().prepare(&path).await;
+        context.analysis().prepare_for_completion(&path).await;
         let prepared = started.elapsed().as_millis();
 
         let read = path.clone();
