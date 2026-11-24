@@ -34,15 +34,28 @@ fix many parser and toolchain bug
   its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
   argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
   statement write.
-- **A generated declaration was shadowed by a stale empty header.** `api_free_luaref` *is* declared — in neovim's
-  generated `build/include/lua/executor.h.generated.h:26`, not in a source header. This checkout also had a 2-byte
-  `build/src/nvim/auto/lua/executor.h.generated.h` (a CRLF placeholder) earlier in the compile command's include path,
-  so the index saw only the call and reported an implicit declaration. A clean generation removes the placeholder and
-  the hover resolves from the generated declaration. The cross-translation-unit fallback tried in the previous commit
-  was a workaround that hid this and has been removed. This is not a case of C accepting the call: MinGW GCC 15.1 under
-  `-std=gnu99` rejects an implicit function declaration outright, and this checkout has no `buffer_updates.c.obj` — a
-  fresh compile of that translation unit fails on `api_free_luaref` (and earlier implicit names) until the stale
-  generated-header directory is cleaned.
+- **A C enumerator is visible across files, and its card reads its own enum's value.** In C an enumerator is an
+  ordinary name in the enclosing scope; the index filed `EVENT_BUFADD` with `scope: auto_event` and the in-scope
+  lookup dropped it as if the enum were a class. A `.c` file now keeps unscoped enumerators (`enum class` keeps the
+  C++ scoped exclusion), so `EVENT_BUFADD` jumps to `auevents_enum.generated.h`. The card also walked the *caller's*
+  tree at the header's offset and printed `= 3`; it now counts in the declaring file and prints `EVENT_BUFADD = 0`,
+  "an enumerator of `auto_event`".
+- **An alias cycle no longer overflows the stack.** `operator_returns_of` followed the first declaration of a name,
+  whatever its kind: `typedef struct proc { … } Proc;` plus a variable `Proc proc;` made it follow `Proc` → the
+  variable's `type_of` → `Proc` forever. Opening neovim's `channel.c` (`proc->status`) killed the server's worker with
+  a stack overflow in both `undefined-field` and `param-type-check`. Only a `DeclKind::Type` declaration may be the
+  alias arm now; `channel.c` diagnoses cleanly.
+- **Stale generated placeholders shadowed 92 declarations.** neovim's real declaration of `api_free_luaref` is
+  `build/include/lua/executor.h.generated.h:26`, and `cstr_as_string`'s is
+  `build/include/api/private/helpers.h.generated.h:26`; this checkout also had 92 two-byte
+  `build/src/nvim/auto/**/*.generated.h` placeholders (CRLF, from 2026-10-28) earlier in the compile command's include
+  path, so both the compiler and the analysis saw only calls and reported implicit declarations. The placeholders were
+  moved to `build/stale-auto-20261124`; the real generated headers now resolve, `cstr_as_string` hovers as
+  `String cstr_as_string(const char* str)`, and the diagnostic is gone. This is not a case of C accepting the call:
+  MinGW GCC 15.1 under `-std=gnu99` rejects an implicit function declaration outright, and this checkout has no
+  `buffer_updates.c.obj` — a fresh compile of that translation unit fails until the stale generated-header directory
+  is cleaned or regenerated. The cross-translation-unit fallback tried in the previous commit was a workaround for the
+  same artifact and has been removed.
 - **`__FILE__` answers the compile command's spelling, and `#line N "name"` is applied.** `__FILE__` used to be the
   empty literal in every rendering and `#line` was parsed and then dropped: a file whose command writes `src/a.cpp`
   now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. A GNU line

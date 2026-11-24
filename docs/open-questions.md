@@ -3616,7 +3616,7 @@ struct fact to lay out. That is the next layer if the card should cover all nine
 another type spelling in this layer. `file_buffer` at 253 members costs about **1.2 s** of layout on top of its cold
 cook; the 256 budget is where that was measured.
 
-## A generated header declaration shadowed by a stale placeholder
+## Stale generated placeholders shadowed 92 declarations
 
 `api_free_luaref` is **declared**, not implicit: neovim generates
 `build/include/lua/executor.h.generated.h:26` with
@@ -3625,15 +3625,35 @@ cook; the 256 budget is where that was measured.
 DLLEXPORT void api_free_luaref(LuaRef ref);
 ```
 
-and `src/nvim/lua/executor.h:55` includes `"lua/executor.h.generated.h"`. The card was empty because this checkout also
-contains a **2-byte `build/src/nvim/auto/lua/executor.h.generated.h`** (hex `0D 0A`) from an older generation, and the
-compile command puts `-I build/src/nvim/auto` **before** `-I build/include`. Both the compiler and the analysis therefore
-resolve the include to the empty placeholder; the real generated declaration is never seen.
+and `src/nvim/lua/executor.h:55` includes `"lua/executor.h.generated.h"`. `cstr_as_string` is the same shape at
+`build/include/api/private/helpers.h.generated.h:26`. This checkout also contains **92 two-byte
+`build/src/nvim/auto/**/*.generated.h` placeholders** (hex `0D 0A`, from 2026-10-28) and the compile command puts
+`-I build/src/nvim/auto` **before** `-I build/include`. Both the compiler and the analysis therefore resolve the
+includes to the empty placeholders; the real generated declarations are never seen. They were moved to
+`build/stale-auto-20261124`, after which `api_free_luaref` and `cstr_as_string` resolve from `build/include`, and
+`buffer.c`'s former `cstr_as_string` diagnostic is gone.
 
-This tree does **not** compile that translation unit: MinGW GCC 15.1 under `-std=gnu99` reports `implicit declaration of function 'api_free_luaref' [-Wimplicit-function-declaration]` as an **error**, and there is no `buffer_updates.c.obj` in the build. The earlier assumption that the build passed through an implicit warning was wrong; the stale placeholder means a fresh compile fails, and the analyzer's `NotDeclaredHere` was the same truth. A clean/regenerated build removes the placeholder, so the compiler and the language server both see the generated declaration.
+This tree does **not** compile those translation units: MinGW GCC 15.1 under `-std=gnu99` reports `implicit
+declaration of function` as an **error**, and there is no `buffer_updates.c.obj` in the build. The earlier assumption
+that the build passed through an implicit warning was wrong; the stale placeholders mean a fresh compile fails. A
+clean/regenerated build removes them, so the compiler and the language server both see the generated declarations.
+The cross-translation-unit fallback tried in the previous commit was removed: it hid the stale build artifact and would
+have invented a definition for any undeclared call. A user with this tree should clean `build/src/nvim/auto` and
+regenerate, or ensure the directory does not contain old empty files.
 
-Removing/regenerating the stale placeholder makes the include resolve to `build/include/lua/executor.h.generated.h`, and
-the hover card becomes `DLLEXPORT void api_free_luaref(LuaRef ref)` declared there. The cross-translation-unit fallback
-tried in the previous commit was removed: it hid a stale build artifact and would have invented a definition for any
-undeclared call. The real fix for a user who has this tree is to clean `build/src/nvim/auto` and regenerate, or to make
-sure the generated header directory does not contain old empty files.
+## A C enumerator is visible across files — and reads its own enum's value
+
+`typedef enum auto_event { EVENT_BUFADD = 0, … } event_T;` in `auevents_enum.generated.h` declares ordinary C names:
+`EVENT_BUFADD` is visible in the enclosing scope, not only as `auto_event::EVENT_BUFADD`. The in-scope lookup treated
+`auto_event` as a class and dropped the enumerator, so `buffer.c`'s `EVENT_BUFADD` had no jump. A `.c` caller now keeps
+unscoped enumerators (a C++ `enum class` still hides them). The hover card also counted the value in the **caller's**
+tree at the header's offset, which is how `EVENT_BUFADD = 0` became `= 3`; it now reads the file that declares the
+enumerator, and the card says `EVENT_BUFADD = 0` / "an enumerator of `auto_event`".
+
+## An alias and a variable sharing a name caused a stack overflow
+
+`operator_returns_of` followed the first declaration of a name without asking its kind. For
+`typedef struct proc { … } Proc;` plus a `Proc proc;` variable, it followed `Proc`'s typedef target to `proc`, then
+`proc`'s variable `type_of` (`Proc`) back to `Proc`, forever. Opening neovim's `channel.c` (`proc->status`) killed the
+server's `tokio-rt-worker` in both `undefined-field` and `param-type-check`. Only a `DeclKind::Type` declaration may be
+followed as an alias now; `channel.c` diagnoses with no findings and no overflow.

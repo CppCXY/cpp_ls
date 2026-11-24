@@ -3142,6 +3142,13 @@ impl ProjectIndex {
         // visibility walk per candidate would be paid once per overload rather than once per class.
         let mut decided: Vec<(String, bool)> = Vec::new();
         let mut kept = Vec::with_capacity(found.found.len());
+        // **A C enumeration has no scoped form.** In C the enumerators are ordinary names in the enclosing scope;
+        // the fact's `scope` names the enum only because that is where the declaration is written. Dropping it
+        // because its scope "names a class" is a C++ rule — measured on neovim's `EVENT_BUFADD`, whose `auto_event`
+        // enumerator has no jump from a `.c` file. A C++ `enum class` keeps the scoped exclusion.
+        let c_file = visible_from
+            .extension()
+            .is_some_and(|extension| extension == "c");
 
         for declaration in found.found {
             let Some(scope) = declaration.fact.scope.clone() else {
@@ -3159,7 +3166,7 @@ impl ProjectIndex {
                 }
             };
 
-            if !a_class {
+            if !a_class || (c_file && declaration.fact.enumerator) {
                 kept.push(declaration);
             }
         }

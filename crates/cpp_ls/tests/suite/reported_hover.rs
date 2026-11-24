@@ -814,3 +814,55 @@ LUA_API int lua_getstack (void *L, int level, void *ar) {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A C enumerator's card says which enum and which number** — and reads the number in the header that declares it,
+/// not at the same offset in the file the cursor is in. `EVENT_BUFADD` is `auto_event`'s first member (`= 0`); the
+/// card used to print `= 3` because it walked the *caller's* tree at the header's offset.
+#[test]
+fn a_c_enumerator_card_has_its_own_enums_value() {
+    let root: PathBuf = std::env::temp_dir().join("cppls-hover-c-enumerator");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+    let header = root.join("events.h");
+    let file = root.join("use.c");
+    let header_text =
+        "typedef enum auto_event { EVENT_BUFADD = 0, EVENT_BUFCREATE = 1 } event_T;\n";
+    let source = "#include \"events.h\"\nint f(void) { return EVENT_BUFADD; }\n";
+    std::fs::write(&header, header_text).expect("the header writes");
+    std::fs::write(&file, source).expect("the source writes");
+
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    session.add_project_files([header.clone(), file.clone()]);
+    session.did_open(&file, source);
+    session.catch_up(&file);
+    let _ = session.cook(&file);
+    let _ = session.index_everything();
+
+    let view = session.view_of_the_file(&file).expect("the written text");
+    let at = source.find("EVENT_BUFADD").expect("the use");
+    let hover = cpp_ls::handlers::hover::hover(
+        &session,
+        &view,
+        ReadingOffset::new(at),
+        FileOffset::new(at),
+    )
+    .expect("an enumerator has a card");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        other => format!("{other:?}"),
+    };
+    assert!(
+        text.contains("EVENT_BUFADD = 0"),
+        "the value is the header's, not the caller's: {text}"
+    );
+    assert!(
+        text.contains("an enumerator of `auto_event`"),
+        "the card says what the name is: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
