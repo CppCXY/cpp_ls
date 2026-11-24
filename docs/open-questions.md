@@ -3657,3 +3657,52 @@ enumerator, and the card says `EVENT_BUFADD = 0` / "an enumerator of `auto_event
 `proc`'s variable `type_of` (`Proc`) back to `Proc`, forever. Opening neovim's `channel.c` (`proc->status`) killed the
 server's `tokio-rt-worker` in both `undefined-field` and `param-type-check`. Only a `DeclKind::Type` declaration may be
 followed as an alias now; `channel.c` diagnoses with no findings and no overflow.
+## Neovim validation after the stale-header cleanup (2026-11-24)
+
+`sweep` over the 219 translation units the compile database holds:
+
+```text
+findings 356 (was 433)
+unresolved-call-or-receiver 128 (was 180)
+assign-type-check 3 (2 of them fixed by the pointer→bool rule, below)
+include-not-found 1
+missing-include 3
+missing-return 1
+braces-around-statements 80, else-after-return 110, macro-parentheses 27,
+simplify-boolean-expr 3
+syntax-error 0
+```
+
+`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c` and `eval/funcs.c` now
+diagnose cleanly; `window.c` and `api/vim.c` have one finding each, and `ui.c` two.
+
+### The remaining `unresolved-call-or-receiver` are macro-decorated globals
+
+The samples are all the same declaration shape:
+
+```c
+EXTERN VisualState Visual INIT( = { .mode = 'v' });
+EXTERN typebuf_T typebuf INIT( = { NULL, NULL, 0, … });
+EXTERN Grid default_grid INIT( = …);
+EXTERN int msg_grid_adj INIT( = 0);
+```
+
+in `src/nvim/globals.h` (and `grid.h`/`message.h`), used from `window.c`, `api/vim.c`, `ui.c` and `ex_docmd.c`. The
+raw summary does not hold these declarations: the parser's known-type table is built from **this file's own**
+declarations, so `EXTERN typebuf_T typebuf …` is not recognised as a declaration when `typebuf_T` comes from an
+included header. `EXTERN bool …` in the same file parses because `bool` is builtin. A fixture with `a.h` defining the
+typedef and `a.c` writing `EXTERN typebuf_T typebuf INIT( = { 0 });` reproduces it exactly; adding the typedef to the
+same file makes it parse. The compiler sees the declarations because `macros_defs.h` defines `EXTERN`/`INIT`; the raw
+summary reader lacks both the expansion and the included type name. This is a **parser/summary gap**, not a missing
+declaration, and it accounts for that class of the 128. The fix direction is to seed the parser's type names from the
+include closure (or to read the unexpanded `MACRO type name` shape as a declaration), not another lookup fallback.
+
+`nvim_main` also still shows a **false `static`** on its definition (`main.c:253`): the source is `int nvim_main`,
+the previous declaration at 252 has no `static`, and the fact at 253 reports `modifiers = 64` (STATIC). It is a
+conditional-branch definition (`#ifdef MAKE_LIB`), and the modifier reader is taking a `static` from somewhere other
+than that definition's specifier sequence. The hover card is therefore `static int nvim_main…` while the source says
+`int`. Recorded rather than guessed.
+
+`tui.c`'s two `assign-type-check` findings were the other real false positives: `bool setrgbf = tui->ti.defs[…];`
+assigns a `const char *` to `bool`, a standard scalar conversion. The conversion relation now accepts a pointer (or
+decaying array) into `bool`/`_Bool`, and `tui.c` diagnoses cleanly.

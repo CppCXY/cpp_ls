@@ -33,6 +33,17 @@ impl Conversion {
     }
 }
 
+/// **Is this a pointer, through any qualifiers?** — `const char*`, `T* const`, `T*`.
+fn a_pointer(type_of: &crate::sema::types::Type) -> bool {
+    match type_of {
+        crate::sema::types::Type::Pointer { .. } => true,
+        crate::sema::types::Type::Qualified { of, .. } => a_pointer(of),
+        // An array decays to a pointer in an assignment to a scalar; `bool b = array;` is the same conversion.
+        crate::sema::types::Type::Array { .. } => true,
+        _ => false,
+    }
+}
+
 /// **A written parameter without its reference and top-level `const`** — `const std::string&` → `std::string`.
 ///
 /// `Type::class_name()` answers `None` for `Reference { to: Named(..) }`, which is how the class question was never asked at
@@ -59,6 +70,19 @@ pub fn conversion(
     answer_the_class_question: impl FnOnce(&str) -> Option<bool>,
 ) -> Conversion {
     let target = crate::sema::types::parse_type_spelling(written);
+
+    // **A pointer converts to `bool`/`_Bool`.** The relation is about the classes and arithmetic the type algebra
+    // knows; a scalar-to-bool conversion is a standard conversion in both languages, and `const char *defs[…];
+    // bool has = defs[i];` is ordinary C (neovim's `tui.c`). Reporting it refused was a false positive on every
+    // capability lookup of that shape.
+    if matches!(
+        &target,
+        crate::sema::types::Type::Builtin { spelling }
+            if spelling == "bool" || spelling == "_Bool"
+    ) && a_pointer(from)
+    {
+        return Conversion::Implicit;
+    }
 
     // **The relation first.** It is exact for arithmetic, pointers and plain names, and it is the only half that knows about
     // `const` and references at all.

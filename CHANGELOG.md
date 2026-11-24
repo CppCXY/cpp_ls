@@ -34,6 +34,10 @@ fix many parser and toolchain bug
   its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
   argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
   statement write.
+- **A pointer converts to `bool`.** `assign-type-check` treated the scalar-to-`_Bool` conversion as no conversion at
+  all, so neovim's `bool setrgbf = tui->ti.defs[kTerm_set_rgb_foreground];` (a `const char *`) was reported twice.
+  A pointer (through qualifiers, or an array that decays) into `bool`/`_Bool` is now an implicit conversion in both
+  C and C++.
 - **A C enumerator is visible across files, and its card reads its own enum's value.** In C an enumerator is an
   ordinary name in the enclosing scope; the index filed `EVENT_BUFADD` with `scope: auto_event` and the in-scope
   lookup dropped it as if the enum were a class. A `.c` file now keeps unscoped enumerators (`enum class` keeps the
