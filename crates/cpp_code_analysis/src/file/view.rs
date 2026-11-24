@@ -256,6 +256,71 @@ impl FileView {
         ))
     }
 
+    /// **The rendering's offset for a position in the file, checked against the spelling there.**
+    ///
+    /// The ordinary mapping is [`Session::the_rendering_offset`](crate::Session::the_rendering_offset), which walks
+    /// the spans' **written** starts. A token that was substituted into a macro body can arrive without a written
+    /// span, so that walk answers with the previous token — measured on neovim's `channel.c`: `ids.items` inside
+    /// `DICT_OBJ(...)` mapped to the `ids` of a `for` loop ten lines above. This method asks the spans directly:
+    ///
+    /// * a span whose `written` range contains the offset is preferred, and the position inside it is preserved;
+    /// * failing that, a span whose `reported` range contains it **and whose cooked spelling is `spelling`** — the
+    ///   macro argument keeps its call site in `reported` even when `written` is gone, and the spelling is what keeps
+    ///   the whole invocation's first token from winning.
+    ///
+    /// `None` when neither exists; the caller can still fall back to the ordinary map.
+    pub fn reading_offset_of_the_written(
+        &self,
+        written: usize,
+        spelling: &str,
+    ) -> Option<ReadingOffset> {
+        if self.written.is_none() {
+            return Some(ReadingOffset::new(written));
+        }
+        // **The token's neighbours are the fact the spans lost.** A macro argument substituted into a body may keep
+        // only the *invocation's* reported range, so every token in the expansion reports the same call site — and
+        // `items` in `ret.items` cannot be told from `items` in `ids.items` by that range. The written text still has
+        // the token's own neighbours (`ids.` before, `[` after); compare them against the rendering's, and the
+        // spelling plus its context picks the occurrence the reader is on.
+        let written_text = self.written.as_deref().unwrap_or_default();
+        let token_start = written_text[..written.min(written_text.len())]
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| character.is_alphanumeric() || *character == '_')
+            .last()
+            .map_or(written, |(at, _)| at);
+        let token_end = token_start + spelling.len();
+        let before = written_context_before(written_text, token_start);
+        let after = written_context_after(written_text, token_end);
+        let mut contextual: Option<&crate::preprocess::cooked::RenderedSpan> = None;
+        for span in self.reading.iter() {
+            if let Some(written_range) = span.written
+                && written_range.contain(written)
+            {
+                return Some(ReadingOffset::new(
+                    span.cooked.start_offset + (written - written_range.start_offset),
+                ));
+            }
+            if self
+                .source
+                .get(span.cooked.start_offset..span.cooked.end_offset())
+                != Some(spelling)
+            {
+                continue;
+            }
+            if span.reported.contain(written) {
+                let rendered_before =
+                    written_context_before(&self.source, span.cooked.start_offset);
+                let rendered_after = written_context_after(&self.source, span.cooked.end_offset());
+                if rendered_before == before && rendered_after == after && contextual.is_none() {
+                    contextual = Some(span);
+                }
+            }
+        }
+        contextual
+            .map(|span| ReadingOffset::new(span.cooked.start_offset + (written - token_start)))
+    }
+
     /// **Where in the file a *range's end* is** — the outbound mapping for the far end of a range.
     ///
     /// [`FileView::file_offset_of`] answers with the span **containing** an offset, so an end that falls in
@@ -1149,6 +1214,27 @@ impl FileView {
     pub fn get_token_text(&self, range: cpp_parser::SourceRange) -> Option<&str> {
         self.source.get(range.start_offset..range.end_offset())
     }
+}
+
+/// The non-space characters just before a token, for matching an occurrence whose spans lost their written range.
+fn written_context_before(text: &str, at: usize) -> String {
+    let mut context: Vec<char> = text[..at.min(text.len())]
+        .chars()
+        .rev()
+        .filter(|character| !character.is_whitespace())
+        .take(8)
+        .collect();
+    context.reverse();
+    context.into_iter().collect()
+}
+
+/// The non-space characters just after a token, for the same comparison as [`written_context_before`].
+fn written_context_after(text: &str, at: usize) -> String {
+    text[at.min(text.len())..]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .take(8)
+        .collect()
 }
 
 #[cfg(test)]

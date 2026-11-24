@@ -48,12 +48,18 @@ fix many parser and toolchain bug
   summary the edit dropped; `prepare_for_completion` answers from `OpenDocuments` without the lock. Measured over the
   wire on neovim's `channel.c`: before the fix the post-edit requests were 476 / 708 / 1857 / 762 / 95 / 93 ms; after
   it, 91–702 ms with the steady ones **90–110 ms**, and `prepare` is 0 ms on every request.
-- **A completion asks the rendering when the file's own tree has no binding.** `kvec_t(int64_t) ids` is an
-  expression statement to the raw parser and an anonymous struct to the preprocessor, so `ids.` listed nothing. The
-  handler still reads the file's own view (the text the client edits), and when that answer is empty it asks the
-  rendered view and maps the `replace` range back to file coordinates. Measured over the wire on neovim's
-  `channel.c`: `ids.` lists `capacity`, `items`, `size`, and `KV_` at the end of an incomplete
-  `kvec_t(int64_t) ifd3 = KV_` lists `KV_INITIAL_VALUE` among the macros.
+- **A completion asks the current buffer's rendering for a name its own tree cannot bind.** `kvec_t(int64_t) ids`
+  is an expression statement to the raw parser and an anonymous struct to the preprocessor, so `ids.` listed nothing
+  and `ids` itself was missing after a fresh insertion. The editable view still supplies the position and the
+  ordinary answer; when that answer has no item with the typed word's exact label, the handler builds the current
+  rendering and asks again, mapping the `replace` range back to the file. Measured over the wire on neovim's
+  `channel.c`: `ids.` lists `capacity`, `items`, `size`; `ids` completes itself after the insertion; `KV_` at an
+  incomplete `kvec_t(int64_t) ifd3 = KV_` lists `KV_INITIAL_VALUE`.
+- **A macro argument's token maps to its own rendering occurrence, not the previous one.** neovim's `ids.items`
+  inside `DICT_OBJ(...)` has no preserved written span (the argument was substituted into a macro body), so the
+  reverse start-offset walk answered with the `ids` of a `for` loop ten lines above and the hover said the type was
+  unknown. The mapping now prefers a span whose `written` range contains the offset, and otherwise matches the
+  spelling plus its surrounding context (`ids.` before, `[` after); `ids.items` hovers as `int64_t*`.
 - **A member of a macro-declared local is resolved through the rendering.** `kvec_t(int64_t) ids = …` is an
   anonymous struct after the preprocessor and an expression statement before it, so the plain reading had no binding
   for `ids` and the hover said `` `ids` has no member `size` ``. A card that is a failed member lookup (or a

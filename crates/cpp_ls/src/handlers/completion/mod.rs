@@ -68,6 +68,7 @@ pub async fn on_completion(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
     let snippets = snippets_of(context.lsp_features().supports_snippets());
+    let requested_path = uri_to_file_path(&uri);
 
     // **Every request, whether or not anything goes wrong with it.** The report is "补全时有时无" — sometimes there,
     // sometimes not — and a log that records only the empty answers cannot tell "the client asked and got nothing"
@@ -86,9 +87,9 @@ pub async fn on_completion(
     // It is one parse of **one file**, and nothing at all when there is no edit waiting — see [`Session::catch_up`],
     // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
     // include closure, which for a file that includes `<string>` is thousands of headers).
-    if let Some(path) = uri_to_file_path(&uri) {
+    if let Some(path) = requested_path.as_ref() {
         let started = std::time::Instant::now();
-        context.analysis().prepare_for_completion(&path).await;
+        context.analysis().prepare_for_completion(path).await;
         let prepared = started.elapsed().as_millis();
 
         let read = path.clone();
@@ -101,7 +102,7 @@ pub async fn on_completion(
         // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
         // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
         let started = std::time::Instant::now();
-        crate::handlers::read_the_modules(&context, &path, true).await;
+        crate::handlers::read_the_modules(&context, path, true).await;
         let modules = started.elapsed().as_millis();
 
         // **Where the time went, which is the only way to tell the two failures apart.** A completion is slow for
@@ -137,6 +138,19 @@ pub async fn on_completion(
     // `didOpen`: the wait was **988 / 536 / 1443 / 877 / 542 / 734 / 584 / 1479 / 532 / 728 / 353 / 4 ms** and is now
     // **11 / 8 / 4 / 9 / 0 … 7 ms**, with the list the same length or longer at every attempt.
     let asked_at = std::time::Instant::now();
+    // **The reading a semantic answer comes from.** The file's own view keeps the positions and the prefix; the
+    // rendering owns bindings, types and members. Asking for the current buffer's rendering here is what makes a
+    // macro-declared local (`kvec_t(int64_t) ids`) visible on the **first** completion after an edit, instead of
+    // only when some other request happened to have left a rendering warm.
+    let from_the_rendering = match requested_path.as_ref() {
+        Some(path) => {
+            context
+                .analysis()
+                .completion_from_a_rendering(path, position)
+                .await
+        }
+        None => None,
+    };
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The file's own tokens, and not the compiler's rendering.**
@@ -187,35 +201,9 @@ pub async fn on_completion(
         }
 
         let finding = std::time::Instant::now();
-        let mut found = session.completions(&view, offset);
-        // **A name a macro declared is not in the file's own tree.** `kvec_t(int64_t) ids` is an expression statement
-        // before the preprocessor and an anonymous struct after it; a completion on `ids.` found no binding in the raw
-        // view and answered nothing. The rendering has the struct and its members. Ask it only when the raw answer is
-        // empty, and map its `replace` range back to the file: the raw view is what the client edits.
-        if found.items.is_empty()
-            && let Some(rendered) = session.view(&path)
-        {
-            let mut from_the_rendering = session.completions(&rendered, offset);
-            if !from_the_rendering.items.is_empty() {
-                let start = rendered.file_offset_of(
-                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                        from_the_rendering.replace.start_offset,
-                    ),
-                );
-                let end = rendered.file_offset_of(
-                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                        from_the_rendering.replace.end_offset(),
-                    ),
-                );
-                if let (Some(start), Some(end)) = (start, end) {
-                    from_the_rendering.replace = cpp_parser::SourceRange::new(
-                        start.get(),
-                        end.get().saturating_sub(start.get()),
-                    );
-                }
-                found = from_the_rendering;
-            }
-        }
+        let found = from_the_rendering
+            .filter(|found| !found.items.is_empty())
+            .unwrap_or_else(|| session.completions(&view, offset));
         // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
         // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
         // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether

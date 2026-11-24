@@ -532,16 +532,26 @@ fn hover_of_the_rendering(
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
     let traced = crate::probes::hover();
-    let mapped = session.the_rendering_offset(&view.path, in_the_file.get());
+    let rendered = session.view(&view.path)?;
+    // **The spelling is what keeps a macro argument's call site from mapping to the invocation's first token.** The
+    // ordinary map walks written starts and, for an argument token whose written span the cook dropped, answers with
+    // the previous token: `ids.items` inside `DICT_OBJ(...)` landed on `ids` ten lines above. The rendered view can
+    // check the span's own spelling, which is the fact the map does not carry.
+    let spelling = cpp_parser::token_at(&view.root, in_the_file.get())
+        .map(|token| token.text().to_string())
+        .unwrap_or_default();
+    let mapped = rendered
+        .reading_offset_of_the_written(in_the_file.get(), &spelling)
+        .map(|at| at.get())
+        .or_else(|| session.the_rendering_offset(&view.path, in_the_file.get()));
     if traced {
         eprintln!(
-            "[rendering] {} at {} maps to {mapped:?}",
+            "[rendering] {} at {} ({spelling:?}) maps to {mapped:?}",
             view.path.display(),
             in_the_file.get()
         );
     }
     let offset = mapped?;
-    let rendered = session.view(&view.path)?;
     if traced {
         eprintln!(
             "[rendering] the rendering view is {} byte(s)",

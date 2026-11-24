@@ -571,6 +571,10 @@ fn measure_neovim_completion_before_and_after_an_edit() {
         .find("Array channel_all_info")
         .expect("the measured function");
     let ids_size = text[function..].find("ids.size").expect("the ids.size use") + function;
+    let ids_items = text[function..]
+        .find("ids.items")
+        .expect("the ids.items use")
+        + function;
     let kv_value = text[function..]
         .find("KV_INITIAL_VALUE")
         .expect("the kvec initializer")
@@ -581,6 +585,7 @@ fn measure_neovim_completion_before_and_after_an_edit() {
         + function;
     let (line, character) = position_at(&text, kv_value);
     let (ids_line, ids_character) = position_at(&text, ids_size);
+    let (items_line, items_character) = position_at(&text, ids_items);
 
     // **A member of a macro-declared local**, before the timing runs: `ids.` is the anonymous struct `kvec_t`
     // wrote, and must list `size`/`items` rather than an empty set.
@@ -605,6 +610,26 @@ fn measure_neovim_completion_before_and_after_an_edit() {
     assert!(
         opened_items.contains(&"size") && opened_items.contains(&"items"),
         "the rendering's anonymous struct must list its members: {opened_items:?}"
+    );
+
+    // **The member a macro argument swallowed.** `ids.items` occurs inside `DICT_OBJ(...)`; the written/reported span
+    // map used to land on the `ids` of a `for` loop ten lines above, and the card said the type was unknown. The
+    // spelling-plus-context mapping must find the occurrence the reader is on.
+    let hovered = server.request(
+        53,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": items_line, "character": items_character + 5 },
+        }),
+    );
+    let hover_text = hovered["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_default();
+    eprintln!("[neovim] ids.items hover: {hover_text}");
+    assert!(
+        hover_text.contains("int64_t") && hover_text.contains("items"),
+        "the member inside the macro argument must resolve: {hovered}"
     );
 
     // **The two reports from the screenshot**: a macro name at the end of an incomplete declaration, and the local
@@ -671,10 +696,10 @@ fn measure_neovim_completion_before_and_after_an_edit() {
         ids_names.len(),
         ids_names.contains(&"ids")
     );
-    // **Known gap, measured rather than asserted.** The first completion after an insertion has no rendering of the
-    // edited buffer, so the raw name query does not see the macro-declared local. The local is found when a rendering
-    // is warm (the analysis test `a_macro_declared_local_is_completed_by_name_from_the_rendering` pins that); making
-    // that happen on the request path is the design work recorded in `docs/open-questions.md`.
+    assert!(
+        ids_names.contains(&"ids"),
+        "the macro-declared local must complete by name after an edit: {ids_names:?}"
+    );
 
     let mut before: Vec<Duration> = Vec::new();
     let mut after: Vec<Duration> = Vec::new();

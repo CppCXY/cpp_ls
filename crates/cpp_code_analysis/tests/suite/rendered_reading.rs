@@ -166,3 +166,36 @@ fn a_member_the_raw_reading_lost_is_answered_after_the_pump_renders_the_file() {
         "the rendered reading of the class's own header holds the member"
     );
 }
+
+#[test]
+fn a_local_inside_a_macro_argument_keeps_its_rendering_position_and_type() {
+    const SOURCE: &str = "\
+#define WRAP(x) ((x))
+void g(long long);
+void f(void) {
+    struct { long long *items; } ids;
+    g(WRAP((long long)ids.items[0]));
+}
+";
+    let mut session = session_of(&[("/p/a.c", SOURCE)]);
+    session.want_cooked_reading(Path::new("/p/a.c"));
+    session.index_everything();
+    let view = session.view("/p/a.c").expect("a rendering");
+    let raw = SOURCE.find("ids.items").unwrap();
+    let mapped = view
+        .reading_offset_of_the_written(raw, "ids")
+        .expect("the macro argument maps")
+        .get();
+    assert!(
+        view.source[mapped..].starts_with("ids.items"),
+        "the macro argument's token must map to its own rendering occurrence, got {:?}",
+        &view.source[mapped..(mapped + 20).min(view.source.len())]
+    );
+    let at = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(raw))
+        .expect("reading");
+    match session.type_at(&view, at) {
+        Known::Yes(found) => assert_eq!(found.type_of, "ids"),
+        other => panic!("the macro-declared local types: {other:?}"),
+    }
+}

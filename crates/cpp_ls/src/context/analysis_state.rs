@@ -155,6 +155,20 @@ pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 /// to bound it.
 pub const QUERY_BUDGET: Duration = Duration::from_millis(50);
 
+/// The identifier ending at `offset`, or the empty string when the cursor is not after one.
+fn identifier_before(text: &str, offset: usize) -> String {
+    let before = &text[..offset.min(text.len())];
+    let mut start = before.len();
+    for (at, character) in before.char_indices().rev() {
+        if character.is_alphanumeric() || character == '_' {
+            start = at;
+        } else {
+            break;
+        }
+    }
+    before[start..].to_string()
+}
+
 impl AnalysisState {
     pub fn new() -> Self {
         let documents = OpenDocuments::new();
@@ -207,6 +221,60 @@ impl AnalysisState {
             return true;
         }
         self.prepare(path).await
+    }
+
+    /// **A completion whose semantics were read from the current buffer's rendering**, in the file's coordinates.
+    ///
+    /// The editable view is taken for the position and the replace range; the rendering is built for the same text
+    /// and answers the names, types and members. Returned as an owned [`cpp_code_analysis::CompletionSet`] because a
+    /// [`cpp_code_analysis::FileView`] is not `Send` and must not cross into a blocking query. `None` when either
+    /// view is unavailable; the caller still has the file's own reading.
+    pub async fn completion_from_a_rendering(
+        &self,
+        path: &std::path::Path,
+        position: lsp_types::Position,
+    ) -> Option<cpp_code_analysis::CompletionSet> {
+        let path = path.to_path_buf();
+        self.update_session("render a completion", move |session| {
+            let editable = session.view_of_the_file(&path)?;
+            let offset = crate::util::file_offset_at_position(&editable, position)?;
+            let raw = session.completions(&editable, offset);
+            let typed = identifier_before(&editable.source, offset.get());
+            let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
+                !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
+            };
+            // **A prefix the file's own list can answer needs no rendering.** `KV_IN` has `KV_INITIAL_VALUE` among
+            // its rows, and `kvec` has both kvec macros; asking the cook for those is the cost this rule exists to
+            // avoid. The rendering is for the prefix nothing in the file's tree can start — `ids` written by
+            // `kvec_t`, and the empty prefix after `ids.`.
+            if (typed.is_empty() && !raw.items.is_empty())
+                || (!typed.is_empty() && has_the_prefix(&raw))
+            {
+                return Some(raw);
+            }
+            let rendered = session.view_of_the_rendering(&path)?;
+            let mut found = session.completions(&rendered, offset);
+            if found.items.is_empty() || (!typed.is_empty() && !has_the_prefix(&found)) {
+                return Some(raw);
+            }
+            let start =
+                rendered.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                    found.replace.start_offset,
+                ));
+            let end =
+                rendered.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                    found.replace.end_offset(),
+                ));
+            if let (Some(start), Some(end)) = (start, end) {
+                found.replace = cpp_parser::SourceRange::new(
+                    start.get(),
+                    end.get().saturating_sub(start.get()),
+                );
+            }
+            Some(found)
+        })
+        .await
+        .flatten()
     }
 
     async fn prepare_inner(&self, path: &std::path::Path) -> bool {

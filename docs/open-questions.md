@@ -3805,36 +3805,44 @@ The remaining first-request cost is the view parse/lock after the edit (up to ~5
 cache warms), and the completion query itself is still ~85–110 ms on this file. Those are the next two numbers to
 attack; the simple edit no longer restarts a program read, and no request is waiting on `prepare`.
 
-### Macro-declared locals: the design gap, measured
+### Macro-declared locals: the two-coordinate rule, enforced
 
-`kvec_t(int64_t) ids = KV_INITIAL_VALUE;` is the sharpest case for the two-coordinate design, and the current
-implementation still has a hole in it:
+`kvec_t(int64_t) ids = KV_INITIAL_VALUE;` is the sharpest case for the two-coordinate design. The rule is now enforced:
+
+* **Positions, prefixes and replace ranges are the file's.** The handler always takes `view_of_the_file` for the
+  client's line and column.
+* **Bindings, types and members are the current buffer's rendering.** When the file's own completion has no item
+  with the typed word's exact label, the handler calls `Session::view_of_the_rendering` for the just-edited text,
+  asks the completion again, and maps the replace range back through `FileView::file_offset_of`.
+
+The measured behaviour on `channel.c`:
 
 ```text
-ids.                members: capacity, items, size        (rendering is warm)
-KV_                 lists KV_INITIAL_VALUE                 (macros; no rendering needed)
-ids (after insert)  does not list ids                      (no rendering of the edited buffer yet)
-ids.items hover     "The type of `ids` is not known here"  (ids is inside DICT_OBJ(...)'s argument/cast)
+ids.                members: capacity, items, size
+ids (after insert)  lists ids
+KV_                 lists KV_INITIAL_VALUE
+ids.items hover     int64_t* items, in ids
 ```
 
-`ids.` and the macro list work because the handler now asks the rendered view. The name completion after an insertion
-does **not**: `session.view(&path)` has no rendering for the just-edited text, so the handler falls back to the raw
-view, where `kvec_t(int64_t) ids` is an expression statement and `ids` is not a binding. `ids.items` is the same
-absence in a different shape — the occurrence is a macro argument, and the symbol walk never binds it, so the hover's
-rendering fallback asks the type engine about a name it cannot see.
+`ids.items` needed a second half: the occurrence is inside `DICT_OBJ(...)`, and its **written span was dropped** when
+the macro argument was substituted into the body. The reverse start-offset map therefore answered with the `ids` of
+the `for` loop ten lines above. `FileView::reading_offset_of_the_written` now prefers the span whose `written` range
+contains the offset, and for a span that kept only `reported` it matches the spelling **and its surrounding context**
+(`ids.` before, `[` after). That is what maps the occurrence the reader is on rather than the first token of the
+invocation.
 
-**This is not fixed by another trigger.** The design is right in principle and incomplete in fact: positions and
-replacement ranges belong to the file, while bindings, types and members belong to the current rendering. The
-missing piece is that the rendering must exist for the buffer **after every edit**, before a semantic query. The
-options, in order of preference:
+**Remaining cost, measured:** an ordinary completion still pays the editable view's prefix query once (~90 ms on this
+file, and a prefix the file's own list can answer does not build a rendering). The rendering is built only when that
+list has **no row beginning with the typed word**, which is the `ids` / `ids.` case; later requests are cached. The
+current over-the-wire run is:
 
-1. **Re-cook the open file on edit**, incrementally if possible, and let completion/hover wait for that reading (or
-   return `isIncomplete` while it lands). The cook is already the reading that knows macro expansion; the current
-   gap exists only because completion deliberately does not ask for it.
-2. **Cache the macro-generated bindings** for the edited text by content hash and reuse them until the next edit;
-   this is the same cook with a smaller granularity, not a second parser.
-3. **File-local expansion only** for the visible function, which is cheaper but duplicates the cook's rules and is
-   the kind of second implementation that goes stale; not preferred.
+```text
+before edit   min 87 ms, mean 149 ms, max 450 ms
+after edit    min 89 ms, mean  90 ms, max  92 ms
+```
+
+The first request after an insertion can still pay the current render (up to ~450 ms in that run); that is the next
+target, not a correctness hole.
 
 `include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
 `test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not

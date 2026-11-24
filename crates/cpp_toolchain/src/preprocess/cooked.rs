@@ -421,6 +421,18 @@ impl RenderedCooked {
     /// token the invocation produced, which is the best answer available: the expansion is not in the file, so a
     /// caller that wanted the invocation itself asks [`RenderedCooked::written_at`] in the other direction.
     pub fn the_rendering_offset_of(&self, written: usize) -> Option<usize> {
+        // **A span that actually contains the written offset wins.** The reverse map below is built from spans' start
+        // offsets, so a token whose written span was not preserved (a macro argument substituted into a body) leaves
+        // the position between two starts and the map answers with the **previous** token. That is how neovim's
+        // `ids.items` inside `DICT_OBJ(...)` mapped to the `ids` of the `for` loop ten lines above it. Ask the spans
+        // directly first; the containing span's own length is what says where in it the position is.
+        if let Some(span) = self.spans.iter().find(|span| {
+            span.written
+                .is_some_and(|written_range| written_range.contain(written))
+        }) && let Some(written_range) = span.written
+        {
+            return Some(span.cooked.start_offset + (written - written_range.start_offset));
+        }
         let order = self.written_order.get_or_init(|| {
             let mut order: Vec<(u32, u32)> = self
                 .spans
