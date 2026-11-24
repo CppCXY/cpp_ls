@@ -252,7 +252,14 @@ impl AnalysisState {
             {
                 return Some(raw);
             }
-            let rendered = session.view_of_the_rendering(&path)?;
+            let Some(rendered) = session.view(&path) else {
+                // **No rendering yet is not a reason to cook inside a request.** The pump builds it from the edit's
+                // own queue; until then the ordinary list is returned and marked incomplete, so the client asks
+                // again instead of this request holding the analysis while it renders a translation unit.
+                let mut incomplete = raw;
+                incomplete.incomplete = true;
+                return Some(incomplete);
+            };
             let mut found = session.completions(&rendered, offset);
             if found.items.is_empty() || (!typed.is_empty() && !has_the_prefix(&found)) {
                 return Some(raw);

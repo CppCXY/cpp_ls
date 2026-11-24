@@ -3812,8 +3812,9 @@ attack; the simple edit no longer restarts a program read, and no request is wai
 * **Positions, prefixes and replace ranges are the file's.** The handler always takes `view_of_the_file` for the
   client's line and column.
 * **Bindings, types and members are the current buffer's rendering.** When the file's own completion has no item
-  with the typed word's exact label, the handler calls `Session::view_of_the_rendering` for the just-edited text,
-  asks the completion again, and maps the replace range back through `FileView::file_offset_of`.
+  beginning with the typed word, the handler asks the **cached** rendering of the just-edited text, and maps the
+  replace range back through `FileView::file_offset_of`. It never builds a rendering inside a request: if the edit's
+  rendering has not landed, the ordinary list is returned with `isIncomplete`, and the pump serves the next request.
 
 The measured behaviour on `channel.c`:
 
@@ -3831,17 +3832,17 @@ contains the offset, and for a span that kept only `reported` it matches the spe
 (`ids.` before, `[` after). That is what maps the occurrence the reader is on rather than the first token of the
 invocation.
 
-**Remaining cost, measured:** an ordinary completion still pays the editable view's prefix query once (~90 ms on this
-file, and a prefix the file's own list can answer does not build a rendering). The rendering is built only when that
-list has **no row beginning with the typed word**, which is the `ids` / `ids.` case; later requests are cached. The
-current over-the-wire run is:
+**Remaining cost, measured:** an ordinary completion still pays the editable view's prefix query once (~90–100 ms on
+this file, and a prefix the file's own list can answer does not ask for a rendering). When the rendering is not
+cached yet, the cross-request answer is `isIncomplete` plus the ordinary list — never a cook under the request lock.
+The current over-the-wire run is:
 
 ```text
-before edit   min 87 ms, mean 149 ms, max 450 ms
-after edit    min 89 ms, mean  90 ms, max  92 ms
+before edit   min 101 ms, mean 496 ms, max 1086 ms   (index still filling)
+after edit    min  98 ms, mean 102 ms, max  108 ms
 ```
 
-The first request after an insertion can still pay the current render (up to ~450 ms in that run); that is the next
+The first request after an insertion may still be the ordinary list until the pump's cook lands; that is the next
 target, not a correctness hole.
 
 `include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in

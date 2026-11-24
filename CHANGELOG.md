@@ -48,12 +48,14 @@ fix many parser and toolchain bug
   summary the edit dropped; `prepare_for_completion` answers from `OpenDocuments` without the lock. Measured over the
   wire on neovim's `channel.c`: before the fix the post-edit requests were 476 / 708 / 1857 / 762 / 95 / 93 ms; after
   it, 91–702 ms with the steady ones **90–110 ms**, and `prepare` is 0 ms on every request.
-- **A completion asks the current buffer's rendering for a name its own tree cannot bind.** `kvec_t(int64_t) ids`
-  is an expression statement to the raw parser and an anonymous struct to the preprocessor, so `ids.` listed nothing
-  and `ids` itself was missing after a fresh insertion. The editable view still supplies the position and the
-  ordinary answer; when that answer has no item with the typed word's exact label, the handler builds the current
-  rendering and asks again, mapping the `replace` range back to the file. Measured over the wire on neovim's
-  `channel.c`: `ids.` lists `capacity`, `items`, `size`; `ids` completes itself after the insertion; `KV_` at an
+- **A completion asks the current buffer's rendering for a name its own tree cannot bind, without cooking in the
+  request.** `kvec_t(int64_t) ids` is an expression statement to the raw parser and an anonymous struct to the
+  preprocessor, so `ids.` listed nothing and `ids` itself was missing after a fresh insertion. The editable view still
+  supplies the position and the ordinary answer; when that answer has no item beginning with the typed word, the
+  handler asks the **cached** current rendering. If the edit's rendering has not landed yet, the ordinary list is
+  returned with `isIncomplete` set — the pump builds it, the next request answers — instead of holding the analysis
+  while it renders a translation unit (the shape that made a workspace reload show 235 files forever). Measured over
+  the wire on neovim's `channel.c`: `ids.` lists `capacity`, `items`, `size`; `ids` completes itself; `KV_` at an
   incomplete `kvec_t(int64_t) ifd3 = KV_` lists `KV_INITIAL_VALUE`.
 - **A macro argument's token maps to its own rendering occurrence, not the previous one.** neovim's `ids.items`
   inside `DICT_OBJ(...)` has no preserved written span (the argument was substituted into a macro body), so the

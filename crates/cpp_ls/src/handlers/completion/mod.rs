@@ -201,9 +201,7 @@ pub async fn on_completion(
         }
 
         let finding = std::time::Instant::now();
-        let found = from_the_rendering
-            .filter(|found| !found.items.is_empty())
-            .unwrap_or_else(|| session.completions(&view, offset));
+        let found = from_the_rendering.unwrap_or_else(|| session.completions(&view, offset));
         // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
         // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
         // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether
@@ -233,6 +231,7 @@ pub async fn on_completion(
             // dropped by an edit, a declaration it needs has not been read yet, the cursor is mid-word in a way this
             // layer cannot see. None of them is a fact about the prefix.
             is_incomplete: found.items.is_empty()
+                || found.incomplete
                 || !session.is_locally_ready(&path)
                 || found.truncated
                 // **…and while the session still has work queued.** `is_locally_ready` is a fact about *this* file —
