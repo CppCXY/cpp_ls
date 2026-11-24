@@ -3701,17 +3701,34 @@ cook diagnostics main.c      no findings
 ```
 
 So the 128 `unresolved-call-or-receiver` are the **raw-summary lookup** talking: it reads `globals.h` on its own, where
-`EXTERN` is not a specifier and `typebuf_T` is not a type. The **cooked reading** — the rendering with includes inlined
-and macros expanded — has the declaration and files it under `globals.h`; a lookup from a unit that reads that header
-should use **that** reading, not the raw summary. The project index already has the machinery for it
-(`CookedFile`, `insert_cooked_in_a_program`, `the_reading_for`, `cooked_declarations`), and the fixture above proves it
-works. The defect is that the declaration query reached the summary first / did not have the asking program's reading.
+`EXTERN` is not a specifier and `typebuf_T` is not a type. The project index already has the machinery for the right
+reading (`CookedFile`, `insert_cooked_in_a_program`, `the_reading_for`, `cooked_declarations`); what was missing is
+that the **cook this tool ran was the per-file one**. `Session::cook` renders the requested file alone and
+`index_rendering` files declarations at that file's path — a declaration written in an included header is dropped.
+The unit read does the opposite: `Session::read_the_unit` stitched the closure once and `index_unit_rendering` files
+each declaration under the file that wrote it.
 
-**The parser-shape fix tried here was wrong and has been removed.** It made `EXTERN typebuf_T typebuf …` a declaration
-even when no include or macro expansion was in hand — a heuristic that accepts text C would reject, and exactly the
-"works without being included" claim the code must not make. The temporary `FORMAT_VERSION` bump for it is gone too
-(the remaining 62 → 63 is the `nvim_main` modifier fix below). The next change belongs in the cooked-fact lookup path,
-with the fixture as its test; not in the grammar.
+`cpp_inspect`'s `--cook` now performs that unit read (`Session::read_the_unit`, with the per-file cook as the fallback
+for a fixture with no compile command). Measured on the real project after the change:
+
+```text
+define typebuf from api/vim.c   globals.h:575:18  typebuf  variable type `typebuf_T`
+hover typebuf from api/vim.c    `typebuf` — a variable of type `typebuf_T`, declared in globals.h:575:18
+diagnostics api/vim.c           none
+diagnostics window.c            none
+diagnostics ui.c                none
+diagnostics ex_docmd.c          none
+```
+
+**The parser-shape fix tried here was wrong and has been removed.** It made `EXTERN typebuf_T typebuf …` a
+declaration even when no include or macro expansion was in hand — a heuristic that accepts text C would reject, and
+exactly the "works without being included" claim the code must not make. The temporary `FORMAT_VERSION` bump for it is
+gone too (the remaining 62 → 63 is the `nvim_main` modifier fix below). The fix is in the reading the tool asks for,
+not in the grammar.
+
+`sweep` still runs the **per-file** cook for each file, so its 128 unresolved entries are a measurement of that path,
+not of the language server, which reads units through the pump. The sweep number is kept as a baseline for the tool;
+it is not a list of names the compiler cannot see.
 
 `nvim_main`'s **false `static`** was a separate, real modifier defect: main.c's `#ifdef MAKE_LIB` branches merge
 `nvim_main` and `main` into one declaration, the `#else` side is an `OldStyleParameterList`, and walking it for

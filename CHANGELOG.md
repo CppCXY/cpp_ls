@@ -34,6 +34,13 @@ fix many parser and toolchain bug
   its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
   argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
   statement write.
+- **A header declaration reaches the file that includes it when the tool cooks.** `cpp_inspect --cook` asked for
+  `Session::cook`, which renders the requested file alone: neovim's `api/vim.c` therefore had no `typebuf` (declared
+  in `globals.h` by `EXTERN typebuf_T typebuf INIT(…)` after `macros_defs.h`/`input_defs.h`), and `define` answered
+  `NotDeclaredHere`. The tool now performs the same unit read the server pump does (`Session::read_the_unit`), which
+  files each declaration under the file that wrote it; `define typebuf` lands in `globals.h:575`, and `api/vim.c`,
+  `window.c`, `ui.c` and `ex_docmd.c` diagnose cleanly. The parser-shape heuristic intended to paper over this was
+  withdrawn — it accepted `EXTERN typebuf_T …` without include evidence, which C does not.
 - **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
   and `main` into one declaration; the `#else` side was read as an old-style parameter list, and walking it for
   modifiers found a body-local `static`. `nvim_main` was drawn as `static int nvim_main` although the source and the
