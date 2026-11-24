@@ -41,6 +41,19 @@ fix many parser and toolchain bug
   files each declaration under the file that wrote it; `define typebuf` lands in `globals.h:575`, and `api/vim.c`,
   `window.c`, `ui.c` and `ex_docmd.c` diagnose cleanly. The parser-shape heuristic intended to paper over this was
   withdrawn — it accepted `EXTERN typebuf_T …` without include evidence, which C does not.
+- **A member of a macro-declared local is resolved through the rendering.** `kvec_t(int64_t) ids = …` is an
+  anonymous struct after the preprocessor and an expression statement before it, so the plain reading had no binding
+  for `ids` and the hover said `` `ids` has no member `size` ``. A card that is a failed member lookup (or a
+  conditional-macro card) is now re-asked against the rendering, where the struct's members are; the card reads
+  `size_t size`, declared at the declaration's line.
+- **A self-identical conditional macro does not hide the type it names.** neovim's `map_defs.h` writes
+  `#ifdef __NetBSD__ / #define uint64_t uint64_t / #endif`; `uint64_t` hovered as "a macro whose `#define` is inside
+  a conditional block" on Windows. A pass-through macro is skipped, and the standard fixed-width typedefs have their
+  own card (`uint64_t` — the 64-bit unsigned integer type from `<stdint.h>`).
+- **Macros complete while their declaration is still being typed.** `kvec` before `kvec_t(int64_t) ids` is an
+  expression statement to the parser until the `(`, so the declaration-shaped name query offered none of `kvec.h`'s
+  macros. Ordinary code completion now includes the file's own and its direct includes' macros, filtered by the
+  prefix like every other name; `kvec`, `KV_I` and `KV_INI` all keep the candidate.
 - **An assignment is not the condition of a following conditional.** `m = ptr ? a : b` was parsed as
   `(m = ptr) ? a : b`, so `assign-type-check` compared `ptr`'s pointer type against `m`'s `int` — neovim's
   `ex_getln.c:3055` was reported for a valid expression. The conditional's condition now stops above the assignment

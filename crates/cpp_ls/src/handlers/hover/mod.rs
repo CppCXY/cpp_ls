@@ -359,6 +359,20 @@ pub fn hover(
         "program",
         hover_of_the_program(session, view, offset, in_the_file)
     ) {
+        // **A card that names a failure may be the plain reading's failure, not the program's answer.** The file's
+        // text has `kvec_t(int64_t) ids = …`, which the plain reading files as an expression with no binding; a member
+        // card then says "`ids` has no member `size` — members could not be read". The rendering has
+        // `struct { size_t size; … } ids`, and the same member question is answerable there. The same applies to a
+        // name a conditional block happens to `#define` in the plain reading — `uint64_t` in a C header — where the
+        // rendering's typedef is the declaration a compiler sees.
+        //
+        // Only these two card shapes are re-asked. A card that answers a declaration is the program's answer and is
+        // returned as it is; re-asking every hover would pay a rendering parse for every ordinary name.
+        if a_failed_card_may_need_the_rendering(&found)
+            && let Some(rendered) = hover_of_the_rendering(session, view, in_the_file)
+        {
+            return Some(rendered);
+        }
         return Some(found);
     }
 
@@ -538,6 +552,55 @@ fn hover_of_the_rendering(
     hover_of_the_program(session, &rendered, offset, in_the_file)
 }
 
+/// **Does this card describe a failure the rendering may be able to answer?**
+///
+/// Two shapes, both measured on neovim's `channel.c`: a member card for an anonymous struct a macro wrote
+/// (`kvec_t(int64_t) ids` → "`ids` has no member `size` … members could not be read") and a macro card for a name
+/// whose plain reading found a conditional `#define` while the rendering has the compiler's typedef (`uint64_t`).
+/// A declaration card is left alone; the rendering fallback is for the cards that say the plain reading did not find
+/// the declaration.
+fn a_failed_card_may_need_the_rendering(hover: &Hover) -> bool {
+    let lsp_types::HoverContents::Markup(markup) = &hover.contents else {
+        return false;
+    };
+    let text = &markup.value;
+    text.contains("has no member")
+        || text.contains("members could not be read")
+        || text.contains("whose `#define` is inside a conditional block")
+}
+
+/// **A macro that expands to its own name** — the self-identical definition a platform compatibility header writes.
+///
+/// `#define uint64_t uint64_t` under `#ifdef __NetBSD__` in neovim's `map_defs.h` is the measurement: it changes no
+/// text, so it cannot be the whole answer to "what is `uint64_t`". The declaration or the standard typedef behind it
+/// is.
+fn a_pass_through_macro(found: &ProjectMacro) -> bool {
+    found.fact.alias.as_deref() == Some(found.fact.name.as_str())
+}
+
+/// **What a standard fixed-width integer typedef is**, for a name whose only competing definition is a conditional
+/// pass-through macro.
+fn a_standard_integer_typedef(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "int8_t" => "the 8-bit signed integer type from `<stdint.h>`",
+        "uint8_t" => "the 8-bit unsigned integer type from `<stdint.h>`",
+        "int16_t" => "the 16-bit signed integer type from `<stdint.h>`",
+        "uint16_t" => "the 16-bit unsigned integer type from `<stdint.h>`",
+        "int32_t" => "the 32-bit signed integer type from `<stdint.h>`",
+        "uint32_t" => "the 32-bit unsigned integer type from `<stdint.h>`",
+        "int64_t" => "the 64-bit signed integer type from `<stdint.h>`",
+        "uint64_t" => "the 64-bit unsigned integer type from `<stdint.h>`",
+        "intptr_t" => "the signed integer type wide enough to hold a pointer",
+        "uintptr_t" => "the unsigned integer type wide enough to hold a pointer",
+        "intmax_t" => "the widest signed integer type",
+        "uintmax_t" => "the widest unsigned integer type",
+        "size_t" => "the unsigned type of a `sizeof` result",
+        "ssize_t" => "the signed counterpart of `size_t`",
+        "ptrdiff_t" => "the signed type of a pointer difference",
+        _ => return None,
+    })
+}
+
 /// **The card for an attribute name at the cursor**, when that is what the cursor is on — see [`hover`].
 ///
 /// The walk is the one every other question here uses: up from the token, stopping at the first node that is a
@@ -619,10 +682,18 @@ fn hover_of_the_program(
     // **The macro question, asked in the file's coordinates.** A macro use has no footprint in the rendering — the cook
     // expanded it — so the query takes the file offset the client gave us. Measured: a hover on a file's own
     // `#define MAX(a, b)` answered nothing, because the reading offset named a position the file does not have.
+    //
+    // **A macro whose body is its own name is a pass-through, not an answer.** neovim's `map_defs.h` writes
+    // `#ifdef __NetBSD__ / #define uint64_t uint64_t / #endif`: on this Windows compilation the macro is not in
+    // force, and even where it is, it expands to the same token, so the typedef from `<stdint.h>` is what a reader
+    // needs. A conditional pass-through used to stop the hover at "a macro whose #define is inside a conditional
+    // block" for every `uint64_t` in `channel.c`.
+    let word = word_in_the_file(view, in_the_file);
     if let Known::Yes(found) = timed!(
         "macro_at_a_file_offset",
         session.macro_at_a_file_offset(view, in_the_file)
-    ) {
+    ) && !a_pass_through_macro(&found)
+    {
         return Some(markdown(macro_markdown(
             session,
             view,
@@ -637,7 +708,7 @@ fn hover_of_the_program(
     // `TEST(Format, LocalStatement)` plainly has it. The popup says what the name is and that its existence depends on
     // the compilation, rather than saying nothing at all (which is what an editor reported: no hover on `TEST`).
     match timed!("macro_definition", session.macro_definition(view, offset)) {
-        Known::Yes(found) => {
+        Known::Yes(found) if !a_pass_through_macro(&found) => {
             return Some(markdown(macro_markdown(
                 session,
                 view,
@@ -646,11 +717,13 @@ fn hover_of_the_program(
             )));
         }
         Known::Unknown(UnknownReason::ConditionalCompilation) => {
-            let name = session
-                .definitions(view, offset)
-                .value()
-                .and_then(|found| found.found.first().map(|one| one.fact.name.clone()));
-            let _ = name;
+            // **A conditional macro does not hide a standard type.** `uint64_t` has a `#define uint64_t uint64_t`
+            // under `__NetBSD__` in `map_defs.h`, but the type a compiler sees comes from `<stdint.h>`; the macro is
+            // conditional and self-identical. The type's name is the honest card, and it is what the reader asked
+            // for. The fixed-width family is the same reading `layout.rs` already sizes by name.
+            if let Some(what) = a_standard_integer_typedef(&word) {
+                return Some(markdown(format!("`{word}` — {what}.")));
+            }
             let written = cpp_parser::token_at(&view.root, offset.get())
                 .map(|token| token.text().to_string())
                 .unwrap_or_default();
@@ -662,7 +735,7 @@ fn hover_of_the_program(
                 )));
             }
         }
-        Known::Unknown(_) | Known::No => {}
+        Known::Yes(_) | Known::Unknown(_) | Known::No => {}
     }
     // **A macro the compiler itself defines** — `__STDC_VERSION__`, `__GNUC__`, `_WIN32`. It is in no file, so every
     // query above answers nothing for it, and a reader hovering `#ifdef __STDC_VERSION__` was told nothing at all —

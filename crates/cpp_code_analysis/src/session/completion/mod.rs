@@ -1536,6 +1536,32 @@ fn names(
         }
     }
 
+    // **A macro is a name that can be written in ordinary code too.** A declaration-shaped parse offers the macros
+    // in scope, but while the reader is still typing the declaration's *type* there is no declaration yet:
+    // `kvec` in front of `kvec_t(int64_t) ids` was an expression statement to the parser, so the list held none of
+    // kvec.h's macros — reported from an editor as "typing `kvec` completes nothing, but a full declaration does".
+    // The list is the file's own macros and its **direct** includes' (the same `macro_names` the preprocessor
+    // positions use), filtered by the typed prefix like every other arm. A macro from an indirect include is reachable
+    // only through the macro environment and stays out of this tier.
+    if !inside_a_scope {
+        for name in macro_names(index, path) {
+            let matched = matching::quality(name, &listed_prefix);
+            if matched == matching::NONE {
+                continue;
+            }
+            let mut item = CompletionItem::word(name, ItemKind::Macro, "a macro");
+            item.replace = replace;
+            scored.push(Scored {
+                score: Score::new(
+                    Score::DIRECT_INCLUDE,
+                    Score::kind_penalty(DeclKind::MacroLike),
+                ),
+                matched,
+                item,
+            });
+        }
+    }
+
     // **Nothing from the vocabulary table inside a written scope.** A `::` can only be followed by a name that scope
     // declares, so a keyword, a snippet and a built-in type are all wrong there — and the earlier code offered them,
     // which is why the `std::` list started with `case`, `catch`, `class`.

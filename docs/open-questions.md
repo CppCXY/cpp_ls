@@ -3760,6 +3760,24 @@ modifiers found a body-local `static`. The modifier walk now stops at that node;
 assigns a `const char *` to `bool`, a standard scalar conversion. The conversion relation now accepts a pointer (or
 decaying array) into `bool`/`_Bool`, and `tui.c` diagnoses cleanly.
 
+### Hover and completion on the shapes an editor actually meets
+
+Two more defects were reported while using the fixed server on `channel.c`:
+
+* **`ids.size`** — `kvec_t(int64_t) ids = …` is an anonymous struct after the preprocessor, and an expression
+  statement before it. The plain member card said `` `ids` has no member `size` — members could not be read``. That
+  card now re-asks the rendering when the plain reading failed, and it reads `size_t size` from the declaration.
+* **`uint64_t`** — `map_defs.h` has `#ifdef __NetBSD__` / `#define uint64_t uint64_t`; the conditional pass-through
+  was shown as a macro on Windows. A self-identical macro no longer answers for the name, and the standard fixed-width
+  typedefs have their own card (`the 64-bit unsigned integer type from <stdint.h>`).
+* **Completion of a macro** — `kvec` at the start of a declaration completed nothing, because the parser had not seen
+  a declaration yet. Ordinary name completion now adds the file's own and direct includes' macros, so `kvec`,
+  `KV_I` and `KV_INI` keep their candidates.
+
+**Not yet fixed: completion latency.** The CLI's query answers these prefixes; the server's per-request
+`prepare`/`catch_up` path and the client's renewal of an incomplete list still need a real neovim timing run before
+the "slow" report can be called closed.
+
 `include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
 `test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not
 in the compile database, so no `MSWIN` is known. Those are platform/fixture answers, not parser defects. The three

@@ -3759,3 +3759,73 @@ struct Thing {
         labels(&found)
     );
 }
+
+/// **A macro from a directly included header completes while the declaration is still being typed.**
+///
+/// `kvec` at the start of a declaration is an expression statement to the parser until the `(` arrives, so the
+/// declaration-shaped name query had none of `kvec.h`'s macros: an editor reported "typing `kvec` completes nothing,
+/// but a full `kvec_t(int64_t) ids` does". Macros are names in ordinary code, so the file's own and its direct
+/// includes' macros are offered by the same prefix query, at the same tier as an included name.
+#[test]
+fn a_macro_from_an_included_header_completes_while_a_declaration_is_incomplete() {
+    let header = "\
+#define kvec_t(type) struct { size_t size; type *items; }\n\
+#define KV_INITIAL_VALUE { 0, NULL }\n";
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec\n}\n";
+    let offset = source.rfind("kvec").expect("the fixture") + "kvec".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"kvec_t".to_string()),
+        "the macro's name is what the reader is typing: {labels:?}"
+    );
+
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec_t(int64_t) ids = KV_INI;\n}\n";
+    let offset = source.find("KV_INI").expect("the fixture") + "KV_INI".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"KV_INITIAL_VALUE".to_string()),
+        "a longer prefix keeps the macro: {labels:?}"
+    );
+}
+
+/// The completion labels at `offset`, from a session that has read and cooked the fixture.
+fn completions_in(files: &[(&str, &str)], path: &str, offset: usize) -> Vec<String> {
+    let mut memory = MemoryFiles::new();
+    for (name, text) in files {
+        memory = memory.with_file(*name, *text);
+    }
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(name, _)| std::path::PathBuf::from(*name)),
+    );
+    session.want_cooked_reading(std::path::Path::new(path));
+    session.index_everything();
+    let view = session
+        .view(path)
+        .unwrap_or_else(|| panic!("{path} asked for a reading"));
+    session
+        .completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        )
+        .items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect()
+}
