@@ -71,6 +71,17 @@ fn spelled_without_its_qualifiers(spelled: &str) -> &str {
     }
 }
 
+/// The layout a **type alias to a scalar** reports: a size and an alignment, with no fields of its own.
+fn a_scalar_layout(size: usize, alignment: usize) -> crate::sema::layout::ClassLayout {
+    crate::sema::layout::ClassLayout {
+        size,
+        alignment,
+        union: false,
+        fields: Vec::new(),
+        unknown: Vec::new(),
+    }
+}
+
 /// **Split a trailing `[dimension]` from a type spelling**, or `None` when the spelling does not end in one.
 ///
 /// The declarator's name is already gone — `DeclFact::type_of` holds a type, not a declaration — so the last bracket
@@ -692,8 +703,23 @@ impl<F: FileProvider + Clone> Session<F> {
             format!("{head}<{}>", arguments.join(", "))
         };
         let Known::Yes(list) = self.members_of(view, &full) else {
-            return Known::No;
+            // **An alias has no member list, but it has a size.** `typedef int64_t Integer;` answered "no
+            // members" and the empty-class rule then printed `size 1 byte(s)` — the same number an empty struct
+            // has, and a wrong one. The target is the type a reader asked about.
+            return match self.the_size_of_an_alias(view, &head) {
+                Some(Some((size, alignment))) => Known::Yes(a_scalar_layout(size, alignment)),
+                _ => Known::No,
+            };
         };
+        if list.members.is_empty() {
+            match self.the_size_of_an_alias(view, &head) {
+                Some(Some((size, alignment))) => {
+                    return Known::Yes(a_scalar_layout(size, alignment));
+                }
+                Some(None) => return Known::No,
+                None => {}
+            }
+        }
         // **The class and its members as their file wrote them** — the text a union's keyword and a bitfield's `:` are
         // read out of, at file offsets. `None` when the index cannot place the class: the layout is still computed for
         // a class the asking file declares, and reported without the two spelling facts it cannot read.
@@ -951,6 +977,26 @@ impl<F: FileProvider + Clone> Session<F> {
             return false;
         };
         the_nearest_class_keyword(&written.text[..opener]) == Some("union")
+    }
+
+    /// **The size of a type alias's target**, when `head` is an alias — `Some(None)` when it is one whose target
+    /// this layer cannot size, and `None` when it is not an alias at all.
+    ///
+    /// The typedef of a class and the class may share a name (`typedef struct { … } T;`): the alias's recorded
+    /// `type_of` is then its own name, which says nothing about a target and must fall through to the class's
+    /// member list. Only a target that is a different spelling is followed.
+    fn the_size_of_an_alias(&self, view: &FileView, head: &str) -> Option<Option<(usize, usize)>> {
+        let Known::Yes(alias) = self.store.index().definition(head, &view.path) else {
+            return None;
+        };
+        if alias.fact.kind != crate::DeclKind::Type {
+            return None;
+        }
+        let target = alias.fact.type_of.as_deref()?.trim();
+        if target.is_empty() || target == head.trim() {
+            return None;
+        }
+        Some(self.the_size_of_a_type_in(view, target, 0, None))
     }
 
     /// The layout of one of a class's **bases**, read in the class's own instantiation.

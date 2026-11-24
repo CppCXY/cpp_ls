@@ -110,8 +110,22 @@ pub fn logical_lines_with(
             if start < index {
                 lines.push(start..index);
             }
-            lines.push(index..index + 1);
-            start = index + 1;
+            // **A `;` written directly after a closing brace belongs to the brace's line.** It is what a class
+            // definition (`};`), a lambda and a compound statement followed by an empty statement write, and
+            // splitting it put `;` alone on the next line: measured on neovim's `TEXTLOCK_WRAP({ … });`, whose
+            // expansion showed `}` / `;` because the macro's own body writes `code;` and the argument is a block.
+            let through = if kind == CppTokenKind::RightBrace
+                && stream
+                    .tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == CppTokenKind::Semicolon)
+            {
+                index + 2
+            } else {
+                index + 1
+            };
+            lines.push(index..through);
+            start = through;
             continue;
         }
         let ends = match kind {

@@ -132,11 +132,12 @@ pub fn an_item(
     lines
 }
 
-/// **A declaration's text without comments**, whitespace collapsed — the one place a card copies source text.
+/// **A declaration's text without comments**, with its own line breaks kept — the one place a card copies source text.
 ///
 /// The generated renderer has no type spelling for an anonymous class body, so a typedef of one falls back to the
-/// declaration's own bytes; its `///<` member notes must not travel into the code block. Strings and character
-/// literals are copied as written, so a `//` inside one is not a comment.
+/// declaration's own bytes; its `///<` member notes must not travel into the code block, and a twenty-member struct
+/// must not become one line. Strings and character literals are copied as written, so a `//` inside one is not a
+/// comment.
 fn without_comments(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
@@ -164,22 +165,31 @@ fn without_comments(text: &str) -> String {
                     chars.next();
                     for next in chars.by_ref() {
                         if next == '\n' {
+                            // A line comment ends **at** the newline; the line break is structure, not comment.
+                            out.push('\n');
                             break;
                         }
                     }
-                    out.push(' ');
                     continue;
                 }
                 Some('*') => {
                     chars.next();
+                    let mut newlines = 0usize;
                     let mut previous = '\0';
                     for next in chars.by_ref() {
                         if previous == '*' && next == '/' {
                             break;
                         }
+                        if next == '\n' {
+                            newlines += 1;
+                        }
                         previous = next;
                     }
-                    out.push(' ');
+                    if newlines > 0 {
+                        out.push_str(&"\n".repeat(newlines));
+                    } else {
+                        out.push(' ');
+                    }
                     continue;
                 }
                 _ => {}
@@ -187,7 +197,14 @@ fn without_comments(text: &str) -> String {
         }
         out.push(character);
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut lines: Vec<&str> = out.lines().map(str::trim_end).collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 /// **The declaration's own line**, without a template head — what an overload list prints per declaration.
@@ -1092,6 +1109,13 @@ mod tests {
         assert_eq!(
             rendered("typedef struct { int x; } T;\n", "T"),
             ["typedef struct { int x; } T;"]
+        );
+        assert_eq!(
+            rendered(
+                "typedef struct {\n    int x; ///< a note\n    int y;\n} T;\n",
+                "T"
+            ),
+            ["typedef struct {\n    int x;\n    int y;\n} T;"]
         );
     }
 

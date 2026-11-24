@@ -2650,10 +2650,13 @@ fn kind_words(fact: &DeclFact) -> String {
     // come out the way every other type in the card does. `const char * const` → `const char*` is the same normalization
     // the card has had since the renderer landed.
     match (&fact.type_of, &fact.returns) {
-        (Some(written), _) => words.push_str(&format!(
+        // **A typedef of a class records its own name as its type**, so "a type of type `T`" said nothing that the
+        // code block does not say better. The alias's target is only prose when it is a different spelling.
+        (Some(written), _) if written.trim() != fact.name => words.push_str(&format!(
             " of type `{}`",
             cpp_code_analysis::sema::render::a_type(written)
         )),
+        (Some(_), _) => {}
         (None, Some(written)) => words.push_str(&format!(
             " returning `{}`",
             cpp_code_analysis::sema::render::a_type(written)

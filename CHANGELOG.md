@@ -22,6 +22,27 @@ fix many parser and toolchain bug
 
 ### Fixed
 
+- **A typedef of a class shows its declaration, across lines.** The card's generated alias line had no type spelling to
+  use for an anonymous class body, fell back to the source, and collapsed it to one line — neovim's `lcs_chars_T` was a
+  single 200-character row. The fallback now keeps the declaration's own line breaks and strips `///<` comments, so the
+  card reads as the file does. `typedef struct { … } T;` also no longer renders as `using T = T;`: its recorded target
+  is its own name, and the source `typedef` line is the only spelling that carries the body.
+- **An alias is priced as the type it names.** `typedef int64_t Integer;` answered `size 1 byte(s)` — the empty-class
+  rule — because an alias has no members and the layout never looked through it. A type alias with no member list is now
+  sized by its target (`Integer` 8 bytes, alignment 8), and a member spelled with an alias uses that target's size.
+- **A statement's semicolon stays on its block's line.** The formatter put the `;` after a closing brace on a line of
+  its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
+  argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
+  statement write.
+- **A generated declaration was shadowed by a stale empty header.** `api_free_luaref` *is* declared — in neovim's
+  generated `build/include/lua/executor.h.generated.h:26`, not in a source header. This checkout also had a 2-byte
+  `build/src/nvim/auto/lua/executor.h.generated.h` (a CRLF placeholder) earlier in the compile command's include path,
+  so the index saw only the call and reported an implicit declaration. A clean generation removes the placeholder and
+  the hover resolves from the generated declaration. The cross-translation-unit fallback tried in the previous commit
+  was a workaround that hid this and has been removed. This is not a case of C accepting the call: MinGW GCC 15.1 under
+  `-std=gnu99` rejects an implicit function declaration outright, and this checkout has no `buffer_updates.c.obj` — a
+  fresh compile of that translation unit fails on `api_free_luaref` (and earlier implicit names) until the stale
+  generated-header directory is cleaned.
 - **`__FILE__` answers the compile command's spelling, and `#line N "name"` is applied.** `__FILE__` used to be the
   empty literal in every rendering and `#line` was parsed and then dropped: a file whose command writes `src/a.cpp`
   now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. A GNU line

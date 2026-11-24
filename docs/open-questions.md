@@ -3615,3 +3615,25 @@ Those macros expand to declarations — `PMap(T)` is `Map_##T##_##ptr_t`, a name
 struct fact to lay out. That is the next layer if the card should cover all nine; it needs the preprocessed type, not
 another type spelling in this layer. `file_buffer` at 253 members costs about **1.2 s** of layout on top of its cold
 cook; the 256 budget is where that was measured.
+
+## A generated header declaration shadowed by a stale placeholder
+
+`api_free_luaref` is **declared**, not implicit: neovim generates
+`build/include/lua/executor.h.generated.h:26` with
+
+```c
+DLLEXPORT void api_free_luaref(LuaRef ref);
+```
+
+and `src/nvim/lua/executor.h:55` includes `"lua/executor.h.generated.h"`. The card was empty because this checkout also
+contains a **2-byte `build/src/nvim/auto/lua/executor.h.generated.h`** (hex `0D 0A`) from an older generation, and the
+compile command puts `-I build/src/nvim/auto` **before** `-I build/include`. Both the compiler and the analysis therefore
+resolve the include to the empty placeholder; the real generated declaration is never seen.
+
+This tree does **not** compile that translation unit: MinGW GCC 15.1 under `-std=gnu99` reports `implicit declaration of function 'api_free_luaref' [-Wimplicit-function-declaration]` as an **error**, and there is no `buffer_updates.c.obj` in the build. The earlier assumption that the build passed through an implicit warning was wrong; the stale placeholder means a fresh compile fails, and the analyzer's `NotDeclaredHere` was the same truth. A clean/regenerated build removes the placeholder, so the compiler and the language server both see the generated declaration.
+
+Removing/regenerating the stale placeholder makes the include resolve to `build/include/lua/executor.h.generated.h`, and
+the hover card becomes `DLLEXPORT void api_free_luaref(LuaRef ref)` declared there. The cross-translation-unit fallback
+tried in the previous commit was removed: it hid a stale build artifact and would have invented a definition for any
+undeclared call. The real fix for a user who has this tree is to clean `build/src/nvim/auto` and regenerate, or to make
+sure the generated header directory does not contain old empty files.
