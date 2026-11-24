@@ -757,6 +757,10 @@ fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
             // pack expansion in an expression.
             if cpp_parser::CppClassBody::can_cast(child.kind().into())
                 || cpp_parser::CppCompoundStat::can_cast(child.kind().into())
+                || matches!(
+                    cpp_parser::CppSyntaxKind::from(child.kind()),
+                    cpp_parser::CppSyntaxKind::OldStyleParameterList
+                )
             {
                 continue;
             }

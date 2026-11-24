@@ -34,6 +34,11 @@ fix many parser and toolchain bug
   its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
   argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
   statement write.
+- **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
+  and `main` into one declaration; the `#else` side was read as an old-style parameter list, and walking it for
+  modifiers found a body-local `static`. `nvim_main` was drawn as `static int nvim_main` although the source and the
+  preceding declaration both say `int`. The modifier walk now stops at `OldStyleParameterList`, and the fact is
+  `modifiers = 0`. `FORMAT_VERSION` 62 → 63.
 - **A pointer converts to `bool`.** `assign-type-check` treated the scalar-to-`_Bool` conversion as no conversion at
   all, so neovim's `bool setrgbf = tui->ti.defs[kTerm_set_rgb_foreground];` (a `const char *`) was reported twice.
   A pointer (through qualifiers, or an array that decays) into `bool`/`_Bool` is now an implicit conversion in both

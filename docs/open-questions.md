@@ -3659,12 +3659,12 @@ server's `tokio-rt-worker` in both `undefined-field` and `param-type-check`. Onl
 followed as an alias now; `channel.c` diagnoses with no findings and no overflow.
 ## Neovim validation after the stale-header cleanup (2026-11-24)
 
-`sweep` over the 219 translation units the compile database holds:
+`sweep` over the 219 translation units the compile database holds, with the parser *shape heuristics removed*:
 
 ```text
-findings 356 (was 433)
-unresolved-call-or-receiver 128 (was 180)
-assign-type-check 3 (2 of them fixed by the pointer→bool rule, below)
+findings 356
+unresolved-call-or-receiver 128
+assign-type-check 1 (the two `tui.c` false positives are fixed by pointer→bool)
 include-not-found 1
 missing-include 3
 missing-return 1
@@ -3673,36 +3673,57 @@ simplify-boolean-expr 3
 syntax-error 0
 ```
 
-`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c` and `eval/funcs.c` now
-diagnose cleanly; `window.c` and `api/vim.c` have one finding each, and `ui.c` two.
+`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c` and `eval/funcs.c` diagnose
+cleanly; the 128 unresolved are the class below, **not** names the compiler cannot see.
 
-### The remaining `unresolved-call-or-receiver` are macro-decorated globals
+### Why `globals.h` works although the parser has not included it
 
-The samples are all the same declaration shape:
+It does not, in C. `globals.h` is included, and the compiler sees a different declaration than the parser's raw
+summary does:
 
 ```c
-EXTERN VisualState Visual INIT( = { .mode = 'v' });
-EXTERN typebuf_T typebuf INIT( = { NULL, NULL, 0, … });
-EXTERN Grid default_grid INIT( = …);
-EXTERN int msg_grid_adj INIT( = 0);
+// src/nvim/api/vim.c:41
+#include "nvim/globals.h"
+
+// src/nvim/globals.h
+#include "nvim/macros_defs.h"      // EXTERN → extern, INIT(...) → nothing
+#include "nvim/input_defs.h"       // typedef … typebuf_T
+EXTERN typebuf_T typebuf INIT( = { NULL, NULL, 0, … });   // extern typebuf_T typebuf = { … };
 ```
 
-in `src/nvim/globals.h` (and `grid.h`/`message.h`), used from `window.c`, `api/vim.c`, `ui.c` and `ex_docmd.c`. The
-raw summary does not hold these declarations: the parser's known-type table is built from **this file's own**
-declarations, so `EXTERN typebuf_T typebuf …` is not recognised as a declaration when `typebuf_T` comes from an
-included header. `EXTERN bool …` in the same file parses because `bool` is builtin. A fixture with `a.h` defining the
-typedef and `a.c` writing `EXTERN typebuf_T typebuf INIT( = { 0 });` reproduces it exactly; adding the typedef to the
-same file makes it parse. The compiler sees the declarations because `macros_defs.h` defines `EXTERN`/`INIT`; the raw
-summary reader lacks both the expansion and the included type name. This is a **parser/summary gap**, not a missing
-declaration, and it accounts for that class of the 128. The fix direction is to seed the parser's type names from the
-include closure (or to read the unexpanded `MACRO type name` shape as a declaration), not another lookup fallback.
+`EXTERN typebuf_T typebuf INIT(…)` is a declaration **only after the include and the two macro expansions**. The facts
+show the split plainly on a four-file fixture (`macros.h`, `defs.h`, `globals.h`, `main.c`):
 
-`nvim_main` also still shows a **false `static`** on its definition (`main.c:253`): the source is `int nvim_main`,
-the previous declaration at 252 has no `static`, and the fact at 253 reports `modifiers = 64` (STATIC). It is a
-conditional-branch definition (`#ifdef MAKE_LIB`), and the modifier reader is taking a `static` from somewhere other
-than that definition's specifier sequence. The hover card is therefore `static int nvim_main…` while the source says
-`int`. Recorded rather than guessed.
+```text
+facts typebuf in main.c       []                         the raw summary has not included anything
+define typebuf from main.c    globals.h:3:18  typebuf     the cooked reading has
+cook diagnostics main.c      no findings
+```
+
+So the 128 `unresolved-call-or-receiver` are the **raw-summary lookup** talking: it reads `globals.h` on its own, where
+`EXTERN` is not a specifier and `typebuf_T` is not a type. The **cooked reading** — the rendering with includes inlined
+and macros expanded — has the declaration and files it under `globals.h`; a lookup from a unit that reads that header
+should use **that** reading, not the raw summary. The project index already has the machinery for it
+(`CookedFile`, `insert_cooked_in_a_program`, `the_reading_for`, `cooked_declarations`), and the fixture above proves it
+works. The defect is that the declaration query reached the summary first / did not have the asking program's reading.
+
+**The parser-shape fix tried here was wrong and has been removed.** It made `EXTERN typebuf_T typebuf …` a declaration
+even when no include or macro expansion was in hand — a heuristic that accepts text C would reject, and exactly the
+"works without being included" claim the code must not make. The temporary `FORMAT_VERSION` bump for it is gone too
+(the remaining 62 → 63 is the `nvim_main` modifier fix below). The next change belongs in the cooked-fact lookup path,
+with the fixture as its test; not in the grammar.
+
+`nvim_main`'s **false `static`** was a separate, real modifier defect: main.c's `#ifdef MAKE_LIB` branches merge
+`nvim_main` and `main` into one declaration, the `#else` side is an `OldStyleParameterList`, and walking it for
+modifiers found a body-local `static`. The modifier walk now stops at that node; the fact and the hover say `int`, and
+`FORMAT_VERSION` moved 62 → 63 because an old summary holds the wrong bit.
 
 `tui.c`'s two `assign-type-check` findings were the other real false positives: `bool setrgbf = tui->ti.defs[…];`
 assigns a `const char *` to `bool`, a standard scalar conversion. The conversion relation now accepts a pointer (or
 decaying array) into `bool`/`_Bool`, and `tui.c` diagnoses cleanly.
+
+`include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
+`test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not
+in the compile database, so no `MSWIN` is known. Those are platform/fixture answers, not parser defects. The three
+`missing-include` findings are the raw-summary class above (`Dict` is declared as `typedef kvec_t(KeyValuePair) Dict;`
+in `api/private/defs.h`, which is included); they need the same cooked-fact path.

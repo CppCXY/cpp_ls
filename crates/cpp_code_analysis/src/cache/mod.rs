@@ -467,7 +467,13 @@ use std::path::{Path, PathBuf};
 /// branch of `#if __has_builtin(__builtin_expect)` where the compiler takes the then branch — a difference in which
 /// declarations exist, not merely in how they are described. The key is content plus `context_hash`, neither of which
 /// moves for either change, so only the version reaches the old rows.
-pub const FORMAT_VERSION: u32 = 62;
+/// # Why this moved to 63
+///
+/// **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
+/// and `main` into one declaration; the `#else` side is an `OldStyleParameterList`, and walking it for modifiers found
+/// a body-local `static`. Summaries written before this record `nvim_main` as `static`; the content hash cannot see a
+/// reader change, so only the version reaches them.
+pub const FORMAT_VERSION: u32 = 63;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
