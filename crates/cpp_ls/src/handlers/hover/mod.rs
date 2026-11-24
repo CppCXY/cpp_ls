@@ -566,6 +566,7 @@ fn a_failed_card_may_need_the_rendering(hover: &Hover) -> bool {
     let text = &markup.value;
     text.contains("has no member")
         || text.contains("members could not be read")
+        || text.contains("The type of")
         || text.contains("whose `#define` is inside a conditional block")
 }
 

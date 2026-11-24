@@ -3829,3 +3829,19 @@ fn completions_in(files: &[(&str, &str)], path: &str, offset: usize) -> Vec<Stri
         .map(|item| item.label.clone())
         .collect()
 }
+
+#[test]
+fn a_macro_declared_local_is_completed_by_name_from_the_rendering() {
+    let header = "#define kvec_t(type) struct { size_t size; type *items; }\n#define KV_INITIAL_VALUE { 0, 0 }\n";
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec_t(int64_t) ids = KV_INITIAL_VALUE;\n  ids\n}\n";
+    let offset = source.rfind("ids").expect("the use") + "ids".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"ids".to_string()),
+        "the local the macro wrote: {labels:?}"
+    );
+}

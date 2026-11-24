@@ -3805,6 +3805,37 @@ The remaining first-request cost is the view parse/lock after the edit (up to ~5
 cache warms), and the completion query itself is still ~85–110 ms on this file. Those are the next two numbers to
 attack; the simple edit no longer restarts a program read, and no request is waiting on `prepare`.
 
+### Macro-declared locals: the design gap, measured
+
+`kvec_t(int64_t) ids = KV_INITIAL_VALUE;` is the sharpest case for the two-coordinate design, and the current
+implementation still has a hole in it:
+
+```text
+ids.                members: capacity, items, size        (rendering is warm)
+KV_                 lists KV_INITIAL_VALUE                 (macros; no rendering needed)
+ids (after insert)  does not list ids                      (no rendering of the edited buffer yet)
+ids.items hover     "The type of `ids` is not known here"  (ids is inside DICT_OBJ(...)'s argument/cast)
+```
+
+`ids.` and the macro list work because the handler now asks the rendered view. The name completion after an insertion
+does **not**: `session.view(&path)` has no rendering for the just-edited text, so the handler falls back to the raw
+view, where `kvec_t(int64_t) ids` is an expression statement and `ids` is not a binding. `ids.items` is the same
+absence in a different shape — the occurrence is a macro argument, and the symbol walk never binds it, so the hover's
+rendering fallback asks the type engine about a name it cannot see.
+
+**This is not fixed by another trigger.** The design is right in principle and incomplete in fact: positions and
+replacement ranges belong to the file, while bindings, types and members belong to the current rendering. The
+missing piece is that the rendering must exist for the buffer **after every edit**, before a semantic query. The
+options, in order of preference:
+
+1. **Re-cook the open file on edit**, incrementally if possible, and let completion/hover wait for that reading (or
+   return `isIncomplete` while it lands). The cook is already the reading that knows macro expansion; the current
+   gap exists only because completion deliberately does not ask for it.
+2. **Cache the macro-generated bindings** for the edited text by content hash and reuse them until the next edit;
+   this is the same cook with a smaller granularity, not a second parser.
+3. **File-local expansion only** for the visible function, which is cheaper but duplicates the cook's rules and is
+   the kind of second implementation that goes stale; not preferred.
+
 `include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
 `test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not
 in the compile database, so no `MSWIN` is known. Those are platform/fixture answers, not parser defects. The three

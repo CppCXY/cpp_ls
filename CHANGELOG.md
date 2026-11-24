@@ -48,6 +48,12 @@ fix many parser and toolchain bug
   summary the edit dropped; `prepare_for_completion` answers from `OpenDocuments` without the lock. Measured over the
   wire on neovim's `channel.c`: before the fix the post-edit requests were 476 / 708 / 1857 / 762 / 95 / 93 ms; after
   it, 91–702 ms with the steady ones **90–110 ms**, and `prepare` is 0 ms on every request.
+- **A completion asks the rendering when the file's own tree has no binding.** `kvec_t(int64_t) ids` is an
+  expression statement to the raw parser and an anonymous struct to the preprocessor, so `ids.` listed nothing. The
+  handler still reads the file's own view (the text the client edits), and when that answer is empty it asks the
+  rendered view and maps the `replace` range back to file coordinates. Measured over the wire on neovim's
+  `channel.c`: `ids.` lists `capacity`, `items`, `size`, and `KV_` at the end of an incomplete
+  `kvec_t(int64_t) ifd3 = KV_` lists `KV_INITIAL_VALUE` among the macros.
 - **A member of a macro-declared local is resolved through the rendering.** `kvec_t(int64_t) ids = …` is an
   anonymous struct after the preprocessor and an expression statement before it, so the plain reading had no binding
   for `ids` and the hover said `` `ids` has no member `size` ``. A card that is a failed member lookup (or a

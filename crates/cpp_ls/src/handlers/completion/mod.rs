@@ -187,7 +187,35 @@ pub async fn on_completion(
         }
 
         let finding = std::time::Instant::now();
-        let found = session.completions(&view, offset);
+        let mut found = session.completions(&view, offset);
+        // **A name a macro declared is not in the file's own tree.** `kvec_t(int64_t) ids` is an expression statement
+        // before the preprocessor and an anonymous struct after it; a completion on `ids.` found no binding in the raw
+        // view and answered nothing. The rendering has the struct and its members. Ask it only when the raw answer is
+        // empty, and map its `replace` range back to the file: the raw view is what the client edits.
+        if found.items.is_empty()
+            && let Some(rendered) = session.view(&path)
+        {
+            let mut from_the_rendering = session.completions(&rendered, offset);
+            if !from_the_rendering.items.is_empty() {
+                let start = rendered.file_offset_of(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        from_the_rendering.replace.start_offset,
+                    ),
+                );
+                let end = rendered.file_offset_of(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        from_the_rendering.replace.end_offset(),
+                    ),
+                );
+                if let (Some(start), Some(end)) = (start, end) {
+                    from_the_rendering.replace = cpp_parser::SourceRange::new(
+                        start.get(),
+                        end.get().saturating_sub(start.get()),
+                    );
+                }
+                found = from_the_rendering;
+            }
+        }
         // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
         // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
         // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether

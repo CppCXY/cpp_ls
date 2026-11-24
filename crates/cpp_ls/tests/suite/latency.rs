@@ -567,7 +567,115 @@ fn measure_neovim_completion_before_and_after_an_edit() {
     // source files are still being read for several seconds after `didOpen`.
     std::thread::sleep(Duration::from_secs(10));
 
-    let (line, character) = position_of(&text, "KV_INITIAL_VALUE");
+    let function = text
+        .find("Array channel_all_info")
+        .expect("the measured function");
+    let ids_size = text[function..].find("ids.size").expect("the ids.size use") + function;
+    let kv_value = text[function..]
+        .find("KV_INITIAL_VALUE")
+        .expect("the kvec initializer")
+        + function;
+    let return_at = text[function..]
+        .find("return ret;")
+        .expect("the function's return")
+        + function;
+    let (line, character) = position_at(&text, kv_value);
+    let (ids_line, ids_character) = position_at(&text, ids_size);
+
+    // **A member of a macro-declared local**, before the timing runs: `ids.` is the anonymous struct `kvec_t`
+    // wrote, and must list `size`/`items` rather than an empty set.
+    let opened = server.request(
+        50,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": ids_line, "character": ids_character + 4 },
+        }),
+    );
+    let opened_items: Vec<&str> = opened["result"]["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!("[neovim] ids. members: {opened_items:?}");
+    assert!(
+        opened_items.contains(&"size") && opened_items.contains(&"items"),
+        "the rendering's anonymous struct must list its members: {opened_items:?}"
+    );
+
+    // **The two reports from the screenshot**: a macro name at the end of an incomplete declaration, and the local
+    // `ids` itself. Both are typed text that the raw tree does not bind; the completion handler's rendering fallback
+    // has to answer them.
+    let (return_line, return_character) = position_at(&text, return_at);
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": return_line, "character": return_character },
+                    "end": { "line": return_line, "character": return_character },
+                },
+                "text": "  kvec_t(int64_t) ifd3 = KV_\n  ids\n",
+            }],
+        }),
+    );
+    let incomplete_line = return_line;
+    let incomplete_at = 2 + "kvec_t(int64_t) ifd3 = KV_".len() as u32;
+    let macro_answer = server.request(
+        51,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": incomplete_line, "character": incomplete_at },
+        }),
+    );
+    let macros: Vec<&str> = macro_answer["result"]["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!("[neovim] incomplete KV_ completions: {macros:?}");
+    assert!(
+        macros.contains(&"KV_INITIAL_VALUE"),
+        "the macro must complete while the declaration is incomplete: {macros:?}"
+    );
+
+    let ids_answer = server.request(
+        52,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": return_line + 1, "character": 5 },
+        }),
+    );
+    let ids_names: Vec<&str> = ids_answer["result"]["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "[neovim] ids name completions: {} item(s); contains ids: {}",
+        ids_names.len(),
+        ids_names.contains(&"ids")
+    );
+    // **Known gap, measured rather than asserted.** The first completion after an insertion has no rendering of the
+    // edited buffer, so the raw name query does not see the macro-declared local. The local is found when a rendering
+    // is warm (the analysis test `a_macro_declared_local_is_completed_by_name_from_the_rendering` pins that); making
+    // that happen on the request path is the design work recorded in `docs/open-questions.md`.
+
     let mut before: Vec<Duration> = Vec::new();
     let mut after: Vec<Duration> = Vec::new();
 
@@ -675,6 +783,11 @@ fn uri_of(path: &Path) -> String {
 
 fn position_of(source: &str, needle: &str) -> (u32, u32) {
     let at = source.find(needle).expect("the needle is in the fixture");
+    position_at(source, at)
+}
+
+/// The line and character of a **byte offset** in `source`.
+fn position_at(source: &str, at: usize) -> (u32, u32) {
     let before = &source[..at];
     let line = before.matches('\n').count() as u32;
     let character = before
