@@ -920,7 +920,7 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
         );
         let _ = index;
     }
-    std::thread::sleep(Duration::from_secs(12));
+    std::thread::sleep(Duration::from_secs(45));
 
     let mut sequential = Vec::new();
     for (path, _, line, character, _, _) in &targets {

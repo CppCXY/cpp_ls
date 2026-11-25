@@ -727,3 +727,33 @@ apply client content held the analysis for 431–539 ms
 2. 让 writer 在 didOpen 时 cook 当前文件，diagnostics 对已打开文件只读；
 3. 未打开文件的诊断走 writer 请求，不在 reader 路径里写；
 4. 重跑本节的四文件并发基准，验收 writer hold 和 completion p95。
+### 2026-11-25：等待 45 s 后仍是 index 活跃期
+
+把 settle 从 12 s 提到 45 s 再跑同一并发基准，索引仍有大量文件在 cook；日志继续出现
+`index slice tail ... write lock held 1129–7342 ms`。本次 `channel.c` 的 edit：
+
+```text
+catch_up 206 ms, cook 236 ms, apply client content 447 ms
+one content batch 8771 ms
+```
+
+也就是说 **8.3 s 不是在 writer 内做文本/语义，而是在等 index slice 的写入口**。
+
+45 s settle 后的数据：
+
+```text
+baseline completion: channel 90 ms / 1 item, buffer 682 / 1000,
+                     message 24 / 0, eval 1880 / 1000
+channel 五 provider 顺序: completion 87, codeLens 134, inlayHint 1145,
+                        semanticTokens 359, diagnostic 12 ms（合计 1737 ms）
+20 个并发请求: p50 2636 ms, p95 5632 ms, max 6939 ms
+provider 中位: completion 4815, diagnostic 2482, codeLens 2636,
+               inlayHint 2913, semanticTokens 2167 ms
+```
+
+所以这不是“steady state 下 provider 并发差”，而是 **索引还没结束**：冷启动的
+`index slice` 与编辑、五个 provider 抢同一个 publication 边界。并发测量必须再加一档
+“索引完全空闲后”的数据，当前数字只能描述启动期。
+
+这也解释了为何顺序五 provider 合计 1.7 s，而并发 20 请求 p95 5.6 s：并发请求在
+index slice 的秒级写锁上排队，不是并行计算。
