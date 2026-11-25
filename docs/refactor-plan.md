@@ -553,3 +553,45 @@ CodeLens 不阻塞 completion       0 次锁等待
 4. 尚未关闭的风险。
 
 **不要**在一个提交里同时改锁、cook、Preamble 和 provider policy。
+
+---
+
+## 实施记录
+
+### 2026-11-25：Phase 0 + Phase 1 的第一段
+
+已完成：
+
+- `process_batch` 按客户端顺序应用文本：`Opened` / `Closed` / 非内容事件是批处理边界，不会再把
+  `Changed(A)` 排到 `Opened(B)` 前面。
+- `didChange` 的 `update_session` 只做文本替换；`session.catch_up` 已移出写锁。
+- 每个受影响文件（以及当前所有 open 文档，作为 header 依赖的保守集合）由 focus worker 异步
+  `catch_up`，完成后发布 per-file semantic ready 事件。
+- completion / inlay 等待的是**该文件的 semantic ready 事件**，不是全局锁、不是超时；其他文件的请求不等待。
+- writer 只把“文本已应用”作为 request barrier；语义工作由 focus worker 发布。
+- `Closed` 仍走有序的 side-effect 路径（清诊断、清 inactive regions、回退到磁盘）。
+
+验证：
+
+```text
+cargo test --release -p cpp_ls --test suite
+  118 passed, 0 failed, 11 ignored
+
+large edit -> unrelated completion:
+  p50 3 ms, p95 5 ms, max 13 ms
+
+large edit -> same-file completion:
+  p50 417 ms, p95 446 ms, max 580 ms
+
+neovim channel.c, after edit:
+  ids. members, ids.items hover, ids name, KV_ 全部通过
+  completion min 90 ms, mean 94 ms, max 100 ms
+```
+
+结论：
+
+- **无关文件请求的锁等待已经消失**（p95 5 ms）。
+- 同一文件的请求仍要等该文件的 focus catch-up（p95 446 ms）；这是 Phase 2 Preamble/body-only
+  复用要解决的目标，不是等待策略能解决的。
+- 下一阶段不要把 `catch_up` 放回写锁，也不要用超时替换这个事件等待。
+

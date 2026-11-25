@@ -73,10 +73,15 @@ pub async fn process_did_open_text_document(
         crate::handlers::register_files_watch(context.clone()).await;
     }
 
+    context
+        .analysis()
+        .mark_semantic_pending(std::slice::from_ref(&path))
+        .await;
     apply_buffer_as(&context, path.clone(), text, family).await;
     // **An open is applied and caught up before the event is marked applied.** The first requests after `didOpen` are
     // entitled to the file's includes; the queue worker, not a request, pays for reading them.
     context.analysis().catch_up(&path).await;
+    context.analysis().mark_semantic_ready(&path).await;
     context
         .diagnostics()
         .schedule_open_files(context.clone())

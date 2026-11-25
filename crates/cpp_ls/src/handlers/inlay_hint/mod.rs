@@ -59,22 +59,10 @@ pub async fn on_inlay_hint(
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
     if let Some(path) = uri_to_file_path(&uri) {
-        let _ = path;
-
-        // **And this file's own reading, because the wait this replaced was doing that too.**
-        //
-        // The wait was `AnalysisState::settle`, and what it bought was not only "the project's queue is empty": an
-        // edit **drops this file's summary** (`Session::buffer_changed`), the pump rebuilds it later, and a request
-        // that arrives in between reads a file whose declarations are not in the index — so a call in it resolves to
-        // nothing and the hint is missing. Inlay hints carry no "incomplete" flag, so an empty answer here stands
-        // until something else moves the editor.
-        //
-        // `catch_up` is that, as a question about **this file**: one parse of it when an edit is waiting, and
-        // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
-        // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
-        if cpp_code_analysis::probes::inlay() {
-            eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
-        }
+        context
+            .analysis()
+            .wait_for_semantic(&path, &cancel_token)
+            .await;
     }
 
     // **A hint no longer waits for the project's index to drain.**
