@@ -421,10 +421,6 @@ pub struct DirectiveSignature {
     pub environment: u64,
     pub layout: u64,
     pub preamble_end: usize,
-    /// **The end of the leading directive block**, before the first code token. This is the boundary a body-only
-    /// cook may reuse: directives later in the body are part of the suffix, so they are still rendered on every
-    /// edit. `preamble_end` remains the conservative last-directive bound the translation-unit cache keys on.
-    pub leading_end: usize,
 }
 
 /// Read the [`DirectiveSignature`] of `source`.
@@ -455,66 +451,6 @@ pub fn directive_signature(source: &str) -> DirectiveSignature {
         environment,
         layout,
         preamble_end,
-        leading_end: leading_boundary(source),
-    }
-}
-
-/// The byte after the leading block of blank lines, comments and directives — the clangd-shaped preamble bound.
-/// `0` when the file starts with code.
-fn leading_boundary(source: &str) -> usize {
-    let bytes = source.as_bytes();
-    let mut offset = 0;
-    let mut last_directive_end = 0;
-    let mut in_block_comment = false;
-    while offset < bytes.len() {
-        let line_end = bytes[offset..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(bytes.len(), |at| offset + at);
-        let line = &source[offset..line_end];
-        let trimmed = line.trim_start();
-        if in_block_comment {
-            if let Some(end) = line.find("*/") {
-                in_block_comment = false;
-                if !line[end + 2..].trim().is_empty() {
-                    return line_end;
-                }
-            }
-            offset = (line_end + 1).min(bytes.len());
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            offset = (line_end + 1).min(bytes.len());
-            continue;
-        }
-        if trimmed.starts_with("/*") {
-            in_block_comment = !trimmed.contains("*/");
-            offset = (line_end + 1).min(bytes.len());
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            last_directive_end = line_end;
-            // A line continuation belongs to the same directive.
-            let mut continued = line.trim_end().ends_with('\\');
-            offset = (line_end + 1).min(bytes.len());
-            while continued && offset < bytes.len() {
-                let next_end = bytes[offset..]
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .map_or(bytes.len(), |at| offset + at);
-                continued = source[offset..next_end].trim_end().ends_with('\\');
-                last_directive_end = next_end;
-                offset = (next_end + 1).min(bytes.len());
-            }
-            continue;
-        }
-        // First code line. The preamble includes the comments and blank lines before it.
-        return if last_directive_end == 0 { 0 } else { offset };
-    }
-    if last_directive_end == 0 {
-        0
-    } else {
-        bytes.len()
     }
 }
 
