@@ -8,17 +8,21 @@ crate_paths = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(crate_paths)
 
 SOURCE = """//! [`crate::DocThing`] stays a rustdoc link.
-use crate::{Known};
+use crate::{Known, config::{AlignConfig, CommentConfig}};
 pub(crate) use crate::Existing;
 pub(crate) use crate::other::Exported;
 fn root() {
     let _ = crate::Known::Yes(());
     let _ = crate::module::Thing;
+    let _ = crate::config::Thing;
 }
 #[cfg(test)] mod tests {
     fn test() {
         let _ = crate::module::Thing;
     }
+}
+mod elsewhere {
+    mod config {}
 }
 macro_rules! definition {
     () => {
@@ -36,6 +40,8 @@ class CratePathsTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("[`crate::DocThing`]", text)
             self.assertIn("use crate::module;", text)
+            self.assertIn("use crate::config;", text)
+            self.assertNotIn("use crate::config::{", text)
             self.assertIn("mod tests {\n    use crate::module;", text)
             self.assertIn("macro_rules! definition {\n    () => {\n        let _ = crate::module::Thing;", text)
             self.assertEqual(2, text.count("use crate::module;"))

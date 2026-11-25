@@ -112,26 +112,47 @@ def file_info(path: pathlib.Path):
             occurrences.append((no,mm.start(),mm.group(1),owner(no)))
     return text,lines,occurrences
 
+def _split_top(text: str):
+    parts=[]; depth=0; start=0
+    for i,c in enumerate(text):
+        if c=='{': depth+=1
+        elif c=='}': depth-=1
+        elif c==',' and depth==0:
+            parts.append(text[start:i]); start=i+1
+    parts.append(text[start:])
+    return parts
+
+def _use_names(tree: str, out: set):
+    tree=tree.strip()
+    if not tree: return
+    if tree.startswith('{') and tree.endswith('}'):
+        for part in _split_top(tree[1:-1]): _use_names(part,out)
+        return
+    if '{' in tree:
+        prefix,rest=tree.split('{',1)
+        contents=rest.rsplit('}',1)[0]
+        prefix=prefix.rstrip(':')
+        for part in _split_top(contents):
+            part=part.strip()
+            if part=='self':
+                name=prefix.split('::')[-1].strip()
+                if name: out.add(name)
+            else:
+                _use_names(prefix+'::'+part,out)
+        return
+    tree=tree.strip().strip(':').strip()
+    if not tree or tree in ('*','crate','super','self','std','core','alloc'): return
+    if ' as ' in tree: tree=tree.split(' as ')[-1].strip()
+    name=tree.split('::')[-1].strip()
+    if name and re.match(r'^[A-Za-z_][A-Za-z0-9_]*$',name): out.add(name)
+
 def existing_names(text):
     names=set()
-    for line in masked(text).splitlines():
-        mm=MOD.search(line)
-        if mm: names.add(mm.group(1))
+    # Module declarations are not imports: a `mod config` in a sibling or
+    # nested scope does not make `config::...` visible here.
     joined=' '.join(masked(text).splitlines())
     for m in re.finditer(r"\buse\s+([^;]+);",joined):
-        body=m.group(1)
-        prefix=body.split('{',1)[0] if '{' in body else ''
-        flat=body.replace('{',' , ').replace('}', ' , ')
-        for item in re.split(r",",flat):
-            item=item.strip().strip(':').strip()
-            if not item or item in ('crate','super','self','std','core','alloc'): continue
-            if ' as ' in item: item=item.split(' as ')[-1].strip()
-            if item=='self':
-                parts=prefix.rstrip(':').split('::')
-                if parts and parts[-1]: names.add(parts[-1])
-                continue
-            name=item.split('::')[-1].strip()
-            if name and re.match(r'^[A-Za-z_][A-Za-z0-9_]*$',name): names.add(name)
+        _use_names(m.group(1),names)
     return names
 
 def check(paths):
