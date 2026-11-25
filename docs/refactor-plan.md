@@ -686,3 +686,44 @@ batch 明显大于 catch_up+cook，说明编辑之外的 index/pump 工作也在
 
 可用性：20 个请求全部有响应，没有崩溃/超时；但 `message.c` 选的基线位置 completion 为 0 项，
 该位置不是可靠可用性样本。
+### 2026-11-25：并发慢的根因不是 provider，而是写锁内的秒级提交
+
+neovim 四文件并发测量中，server 日志给出了真正阻塞请求的 write hold：
+
+```text
+index slice: prepared 0 in 0 ms, committed 0, write lock held 1 ms,
+             16 to cook, 189 left
+index slice tail: re-read 0, cooked 16, write lock held 3520 ms
+                 (re-read 812 ms, cooked 2708 ms)
+
+index slice tail: re-read 0, cooked 11, write lock held 3991 ms
+                 (re-read 400 ms, cooked 3591 ms)
+
+index slice tail: re-read 0, cooked 8, write lock held 6207 ms
+                 (re-read 1072 ms, cooked 5135 ms)
+```
+
+同一窗口还有：
+
+```text
+commit a diagnostic rendering held the analysis for 237–256 ms  (×4)
+prepare a file a pull request named held the analysis for 231–265 ms  (×4 per edit)
+apply client content held the analysis for 431–539 ms
+```
+
+所以并发 p95 5.6–6.8 s 的直接原因不是“provider 并行度不够”，而是所有 reader 都在等这些写锁：
+
+1. `index slice` 的 tail 在同一写锁内提交 8–16 个 cooked rendering，单次 3.5–6.2 s；
+2. `prepare a file a pull request named` 是 diagnostics 请求内的写路径，每个 230–265 ms；
+3. `commit a diagnostic rendering` 是诊断请求内 cook/commit，每个 237–256 ms；
+4. `apply client content` 的 writer catch_up+cook 本身 431–539 ms。
+
+诊断请求内写路径不能直接删：删掉后 handshake 有 8 个测试失败，因为 didOpen 只 catch_up、不 cook，
+未打开文件的诊断也没有 writer 先准备。要先把“打开/诊断所需的 rendering”交给 writer，再删请求内 prepare。
+
+下一步按优先级：
+
+1. 把 cooked rendering 的磁盘持久化移出 `index slice` 写锁，写锁只做内存/index insert；
+2. 让 writer 在 didOpen 时 cook 当前文件，diagnostics 对已打开文件只读；
+3. 未打开文件的诊断走 writer 请求，不在 reader 路径里写；
+4. 重跑本节的四文件并发基准，验收 writer hold 和 completion p95。

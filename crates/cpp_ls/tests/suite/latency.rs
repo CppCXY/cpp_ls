@@ -547,10 +547,13 @@ fn measure_neovim_completion_before_and_after_an_edit() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
                 continue;
             };
-            for line in text
-                .lines()
-                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
-            {
+            for line in text.lines().filter(|line| {
+                line.contains("writer phase")
+                    || line.contains("cook:")
+                    || line.contains("held the analysis")
+                    || line.contains("index slice")
+                    || line.contains("a query took")
+            }) {
                 eprintln!("[server] {line}");
             }
         }
@@ -816,10 +819,13 @@ fn measure_neovim_completion_before_and_after_an_edit() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
                 continue;
             };
-            for line in text
-                .lines()
-                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
-            {
+            for line in text.lines().filter(|line| {
+                line.contains("writer phase")
+                    || line.contains("cook:")
+                    || line.contains("held the analysis")
+                    || line.contains("index slice")
+                    || line.contains("a query took")
+            }) {
                 eprintln!("[server] {line}");
             }
         }
@@ -877,10 +883,13 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
                 continue;
             };
-            for line in text
-                .lines()
-                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
-            {
+            for line in text.lines().filter(|line| {
+                line.contains("writer phase")
+                    || line.contains("cook:")
+                    || line.contains("held the analysis")
+                    || line.contains("index slice")
+                    || line.contains("a query took")
+            }) {
                 eprintln!("[server] {line}");
             }
         }
@@ -1097,10 +1106,13 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
                 continue;
             };
-            for line in text
-                .lines()
-                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
-            {
+            for line in text.lines().filter(|line| {
+                line.contains("writer phase")
+                    || line.contains("cook:")
+                    || line.contains("held the analysis")
+                    || line.contains("index slice")
+                    || line.contains("a query took")
+            }) {
                 eprintln!("[server] {line}");
             }
         }
