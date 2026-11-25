@@ -516,6 +516,60 @@ impl RenderedCooked {
     ///
     /// Shared by the two questions above because they differ only in which place they read out of a span — the
     /// *shape* of the answer (the extent of the node, `None` when no token has one) is the same question.
+    /// **The part of this rendering that a file's preamble produced**, cut at a position in the file.
+    ///
+    /// A body-only edit can reuse this prefix: its text, spans, and inactive regions are still exactly what the
+    /// unchanged directives produced. `None` when the position is not in the rendering at all.
+    pub fn prefix_through(&self, written_end: usize) -> Option<RenderedCooked> {
+        let cooked_end = self.the_rendering_offset_of(written_end)?;
+        let keep = self
+            .spans
+            .partition_point(|span| span.cooked.end_offset() <= cooked_end);
+        let spans = self.spans[..keep].to_vec();
+        let cut = spans
+            .last()
+            .map(|span| span.cooked.end_offset())
+            .unwrap_or(0);
+        Some(RenderedCooked {
+            text: self.text[..cut.min(self.text.len())].to_string(),
+            spans,
+            inactive: self
+                .inactive
+                .iter()
+                .copied()
+                .filter(|range| range.end_offset() <= written_end)
+                .collect(),
+            // A branch decided in the prefix is still decided by the same directives; the suffix's count is added by
+            // [`RenderedCooked::join`] when its own render is available.
+            assumed_undefined: self.assumed_undefined,
+            written_order: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// **A full rendering from a reusable prefix and a freshly rendered suffix.**
+    ///
+    /// The suffix's `cooked` offsets start at zero in its own render; the join shifts them behind the prefix. The
+    /// `written` and `reported` offsets are **not** shifted — they are the file's, and the suffix was rendered from
+    /// tokens whose ranges still name the file's own text.
+    pub fn join(prefix: &RenderedCooked, suffix: RenderedCooked) -> RenderedCooked {
+        let shift = prefix.text.len();
+        let mut text = prefix.text.clone();
+        text.push_str(&suffix.text);
+        let mut spans = prefix.spans.clone();
+        spans.extend(suffix.spans.into_iter().map(|mut span| {
+            span.cooked = SourceRange::new(span.cooked.start_offset + shift, span.cooked.length);
+            span
+        }));
+        let mut inactive = prefix.inactive.clone();
+        inactive.extend(suffix.inactive);
+        RenderedCooked {
+            text,
+            spans,
+            inactive,
+            assumed_undefined: prefix.assumed_undefined + suffix.assumed_undefined,
+            written_order: std::sync::OnceLock::new(),
+        }
+    }
     fn span_covering(
         &self,
         cooked: SourceRange,
