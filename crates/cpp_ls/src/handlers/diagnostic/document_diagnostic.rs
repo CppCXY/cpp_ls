@@ -6,7 +6,7 @@ use lsp_types::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{CancelSource, RequestOutcome, ServerContextSnapshot, snapshot_query};
+use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::uri_to_file_path;
 
 pub async fn on_pull_document_diagnostic(
@@ -21,17 +21,6 @@ pub async fn on_pull_document_diagnostic(
             message: format!("diagnostics require a file URI: {}", uri.as_str()),
         };
     };
-    let prepared = tokio::select! {
-        _ = cancel_token.cancelled() => return RequestOutcome::Cancelled(CancelSource::Client),
-        prepared = context.analysis().prepare_for_a_diagnostic(&path) => prepared,
-    };
-    if !prepared {
-        return RequestOutcome::Failed {
-            code: lsp_server::ErrorCode::RequestFailed,
-            message: format!("diagnostics are not ready for {}", path.display()),
-        };
-    }
-
     let for_the_query = path.clone();
     let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
         let answer = super::diagnose_file(session, &for_the_query).map(|(_, items)| items);

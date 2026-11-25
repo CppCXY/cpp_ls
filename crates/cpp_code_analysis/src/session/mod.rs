@@ -923,6 +923,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **A rendered prefix for a body-only edit.** Keyed by the path's normalized queue key; the entry carries the
     /// source prefix it was built from, so a text that changed before `preamble_end` can be rejected.
     preamble_renderings: std::sync::Mutex<std::collections::HashMap<String, PreambleRendering>>,
+    /// **Cooked readings waiting for a debounced disk write.** The commit itself only updates memory and the index;
+    /// persistence is a background, delayed action so an edit never pays for redb under the analysis write lock.
+    cook_persistence:
+        std::sync::Mutex<std::collections::HashMap<String, (PathBuf, std::time::Instant)>>,
     /// **Files already read and parsed, waiting for the queue to reach them** — see [`Session::advance`].
     ///
     /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a

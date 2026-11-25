@@ -128,6 +128,16 @@ pub async fn initialized_handler(
     register_files_watch(context.clone()).await;
     start_analysis(context.clone()).await;
 
+    // **Debounced persistence, one background writer at a time.** Editing only marks a file; this task wakes after
+    // two seconds and writes at most what has been quiet, under the read side of the analysis.
+    let persistence = context.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            persistence.analysis().persist_cooked().await;
+        }
+    });
+
     Some(())
 }
 

@@ -987,6 +987,10 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
         );
     }
     let sequential_providers_total: Duration = sequential_providers.iter().sum();
+    eprintln!(
+        "[concurrent] sequential five-provider total: {} ms",
+        sequential_providers_total.as_millis()
+    );
 
     // **One file at a time, five providers at once.** Editing four large files before asking makes every answer wait
     // for one writer batch; that measures the batch, not provider concurrency. Here the edit and the batch are scoped

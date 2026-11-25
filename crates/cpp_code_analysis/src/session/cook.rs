@@ -669,7 +669,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // because the write borrows the store and the insert needs it mutably; both are cheap.
             // **The rendering, kept beside the facts** --- a record with only the facts is one a hit cannot answer
             // from, because every query that reads the tree needs the text and the spans.
-            let rendered = std::sync::Arc::clone(&indexed.rendered);
             let cooked: crate::index::CookedFile = indexed.into();
             if crate::probes::cooking() {
                 // **How many declarations the cook found**, which the cache line above does not say: a cook that
@@ -683,10 +682,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
             }
             let declared = cooked.declarations.len();
-            let writing = std::time::Instant::now();
-            self.store
-                .put_the_cooked_reading_with_rendering(&path, &cooked, &rendered);
-            let written = writing.elapsed().as_millis();
+            // **No disk write here.** Serialising and writing a whole rendering is what made an index-slice commit
+            // hold the writer for seconds. Mark the path; the delayed persistence pass writes at most a few records
+            // when the editing has been quiet.
+            if let Ok(mut dirty) = self.cook_persistence.lock() {
+                dirty.insert(queue_key(&path), (path.clone(), std::time::Instant::now()));
+            }
+            let written = 0u128;
             let inserting = std::time::Instant::now();
             self.store.index_mut().insert_cooked(&path, cooked);
             let inserted = inserting.elapsed().as_millis();
@@ -710,6 +712,42 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
         Some(reading)
+    }
+
+    /// **Write the cooked readings whose edit has been quiet long enough**, outside the analysis write lock.
+    ///
+    /// The entries are path + touch time only. The facts come from the live index and the rendering from the live
+    /// cache, so a file edited again while it waits is either absent or has a newer rendering; the record key is
+    /// recomputed from the current text by [`crate::SummaryStore::put_the_cooked_reading_with_rendering`].
+    pub fn persist_cooked(&self, min_age: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
+        let due: Vec<std::path::PathBuf> = match self.cook_persistence.lock() {
+            Ok(mut dirty) => {
+                let due: Vec<_> = dirty
+                    .iter()
+                    .filter(|(_, (_, touched))| now.duration_since(*touched) >= min_age)
+                    .map(|(key, (path, _))| (key.clone(), path.clone()))
+                    .collect();
+                for (key, _) in &due {
+                    dirty.remove(key);
+                }
+                due.into_iter().map(|(_, path)| path).collect()
+            }
+            Err(_) => return 0,
+        };
+        let mut written = 0;
+        for path in due {
+            let Some(rendered) = self.rendering_of(&path) else {
+                continue;
+            };
+            let Some(cooked) = self.store.index().cooked_reading(&path).cloned() else {
+                continue;
+            };
+            self.store
+                .put_the_cooked_reading_with_rendering(&path, &cooked, &rendered);
+            written += 1;
+        }
+        written
     }
 
     /// **Which files the next cooking slice is for** — the queue pop, and the only part of taking a slice that needs

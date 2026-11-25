@@ -216,13 +216,6 @@ async fn compute(
             message: "diagnostics require a file URI".to_string(),
         };
     };
-    let prepared = tokio::select! {
-        _ = cancel.cancelled() => return RequestOutcome::Cancelled(CancelSource::Client),
-        prepared = context.analysis().prepare_for_a_diagnostic(&path) => prepared,
-    };
-    if !prepared {
-        return RequestOutcome::Missing;
-    }
     snapshot_query(context.analysis(), cancel, move |session| {
         diagnose_file(session, &path).map(|(_, items)| items)
     })

@@ -184,6 +184,16 @@ impl AnalysisState {
         }
     }
 
+    /// **Persist a few quiet cooked readings**, without taking the analysis write lock. Called by a delayed
+    /// background task; the method itself runs under the read side only.
+    pub async fn persist_cooked(&self) {
+        let _ = self
+            .run_blocking("persist cooked readings", |session| {
+                Some(session.persist_cooked(Duration::from_secs(2)))
+            })
+            .await;
+    }
+
     /// Read a file in and hold it, so that the read-only queries can see it.
     ///
     /// # Why a request needs this, and why it is not part of the query
