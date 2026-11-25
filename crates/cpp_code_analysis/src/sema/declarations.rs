@@ -1503,7 +1503,7 @@ pub(crate) fn declared_alias_target_with(
     // list with `unlisted ["{inta;intb;}"]` while its two members sat under the scope `Object`, and as the
     // **21 539 of 40 000** refusals in neovim's member questions. C declares almost every struct this way, so the
     // shape is the common one rather than a corner.
-    if let Some(named) = the_class_a_typedef_body_names(specifiers, &binding.name.text()) {
+    if let Some(named) = the_class_a_typedef_body_names(specifiers, binding.name.spelled().as_ref()) {
         return Some(named);
     }
 
@@ -3151,7 +3151,7 @@ pub(crate) fn declared_returns_of_with(
     // The rule is the **spelling**, not the kind: the walker classifies `operator bool` as an operator, and a
     // conversion operator is the one operator whose name carries a space and a type (`operator[]` and `operator+` do
     // not match this pattern, and their return type is a real specifier).
-    let spelled = binding.name.text();
+    let spelled = binding.name.spelled();
     if let Some(target) = spelled.trim().strip_prefix("operator ").map(str::trim)
         && !target.is_empty()
     {
@@ -3344,13 +3344,13 @@ pub(crate) fn declared_returns_of_with(
     // `std::size_t LuaSource::GetLine(std::size_t offset)` recorded `returns: Some("LuaSource::GetLine")`, and a hover
     // showed that as the function's answer where the file wrote `std::size_t`. See
     // [`crate::sema::types::type_of_declaration_named`].
-    let declared = binding.name.text();
+    let declared = binding.name.spelled();
     let spelling = if specifiers.text().is_empty() {
         String::new()
     } else {
         crate::sema::types::read_specifiers_named(
             &specifiers,
-            Some(declared.as_str()),
+            Some(declared.as_ref()),
             cpp_parser::source_range(specifiers.text_range()),
         )
         .to_string()
@@ -3994,7 +3994,7 @@ fn fact_for(
     // its own class. `definition("std::vector")` then found the class **and** its destructor and reported
     // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (
     // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
-    let name = binding.name.text();
+    let spelled = binding.name.spelled();
     // **A qualified declarator name declares into the scope it names.**
     //
     // `void Name::printf(int i) { }` is a declaration **of `Name`'s `printf`**, not a file-scope name spelled
@@ -4005,13 +4005,13 @@ fn fact_for(
     // enclosing scope would be a name that cannot be used unqualified there), so the split belongs here, where the
     // fact is built. Until the grammar learned the shape, an out-of-class definition reached this point with its name
     // swallowed by the specifier sequence; now the declarator's name *is* the qualified spelling.
-    let (name, scope) = match name.rsplit_once("::") {
+    let (name, scope): (std::borrow::Cow<'_, str>, Option<String>) = match spelled.rsplit_once("::") {
         // A local never carries a qualifier: `S::f` at block scope is a call, not a declaration.
         Some((qualifier, last)) if !local && !qualifier.is_empty() && !last.is_empty() => (
-            last.to_string(),
+            std::borrow::Cow::Owned(last.to_string()),
             Some(qualifier.trim_start_matches("::").to_string()),
         ),
-        _ => (name, scope),
+        _ => (spelled, scope),
     };
 
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
@@ -4055,7 +4055,7 @@ fn fact_for(
             // `EmmyLuaCodeStyle`, `e.U.Start.Kind` answered "the type of `e.U` is not known here". The name used is
             // the one the parser already gives the anonymous type's **own members** as their scope —
             // `MarkEvent::U` — which is what makes the member lookup below it work.
-            .or_else(|| an_unnamed_class_body_named(scope.as_deref(), &name, shapes, binding))
+            .or_else(|| an_unnamed_class_body_named(scope.as_deref(), name.as_ref(), shapes, binding))
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
@@ -4187,7 +4187,7 @@ fn fact_for(
         // **What the function frees** is filled by the pass after the facts are built — see
         // [`fill_the_frees`], which needs the whole file to do it in one walk.
         frees: 0,
-        name: name.into(),
+        name: SmolStr::from(name.as_ref()),
         scope: scope.map(SmolStr::from),
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
