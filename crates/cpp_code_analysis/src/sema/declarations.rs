@@ -4866,7 +4866,6 @@ impl<'a> DeclarationFacts<'a> {
         } else {
             Vec::new()
         };
-        let _qualified_count = qualified.len();
         for (binding, scope, parameters) in qualified {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
             // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a

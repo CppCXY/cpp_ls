@@ -1641,7 +1641,6 @@ fn file_what_was_found(
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
     // read here is a lock of the process environment plus an `OsString` built for an answer that cannot change
     // during a run.
-    let _interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
 
     for mut fact in declarations {
         let Some((file, range)) = stream.written_span(fact.range) else {

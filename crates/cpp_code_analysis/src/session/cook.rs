@@ -519,14 +519,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // from, because every query that reads the tree needs the text and the spans.
             let cooked: crate::index::CookedFile = indexed.into();
 
-            let _declared = cooked.declarations.len();
             // **No disk write here.** Serialising and writing a whole rendering is what made an index-slice commit
             // hold the writer for seconds. Mark the path; the delayed persistence pass writes at most a few records
             // when the editing has been quiet.
             if let Ok(mut dirty) = self.cook_persistence.lock() {
                 dirty.insert(queue_key(&path), (path.clone(), std::time::Instant::now()));
             }
-            let _written = 0u128;
             self.store.index_mut().insert_cooked(&path, cooked);
 
             // **Cooked here counts as asked**, so the closure loop does not queue it again the moment its reading is
@@ -680,7 +678,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     slice.stored.push((path, cooked, rendered));
                 }
                 AClaimedCook::Fresh(materials) => {
-                    let _path = materials.path.clone();
                     let built = self.render_a_cooked(&materials);
                     // **The last silent drop.** A claimed file whose render declines is gone from the queue and was
                     // never cooked, which the pump reads as "no work left".

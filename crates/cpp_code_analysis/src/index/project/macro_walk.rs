@@ -1734,8 +1734,6 @@ impl ProjectIndex {
         // translation unit this question is asked from** — the reading every file's answer is
         // chosen by.
         let asking = self.the_program_that_read(visible_from);
-        let _asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
-        let _nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (walk, walk_files) = self.the_visible_walk(visible_from);
         let files = walk_files.as_ref();
         let through_an_import = &walk.through_an_import;

@@ -253,7 +253,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
         // tenth translation unit includes is not.
-        let _include_count = includes.len();
         for include in includes {
             self.queue.add(include, priority, depth + 1);
         }
@@ -630,9 +629,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 let claimed = self.claim_cooking(COOK_SLICE);
 
                 let materials = self.materials_for(claimed);
-                let _wanted = materials.len();
                 let rendered = self.render_them(materials);
-                let _built = rendered.len();
 
                 self.commit_them(rendered).len()
             };

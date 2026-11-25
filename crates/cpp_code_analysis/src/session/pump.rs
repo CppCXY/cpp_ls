@@ -567,13 +567,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 // `docs/open-questions.md` names "claimed and dropped": `materials_for` when a file's unit is
                 // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
                 // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
-                let _asked = claimed.len();
 
                 let materials = self.materials_for(claimed);
-                let _gathered = materials.len();
                 let rendered = self.render_them(materials);
-                let _built = rendered.len();
-                let _committed = self.commit_them(rendered).len();
+                self.commit_them(rendered);
             }
         }
 

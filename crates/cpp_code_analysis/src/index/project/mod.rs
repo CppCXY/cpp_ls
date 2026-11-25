@@ -490,13 +490,6 @@ pub struct ProjectIndex {
     walk_inputs: std::collections::HashMap<String, u64>,
 }
 
-/// **What evaluating guarded `#include` conditions has cost**, in asks and nanoseconds — see the `FactGuard::Region`
-/// arm and the `[visibility]` probe. Only written when `CPPLS_TRACE_TIME` is on, so a normal run does not touch it.
-pub(crate) static CONDITION_ASKS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub(crate) static CONDITION_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 /// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
 ///
 /// The contributors are the files whose facts the list holds — every member's own file. An entry is dropped when one
