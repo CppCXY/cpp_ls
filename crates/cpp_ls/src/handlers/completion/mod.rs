@@ -201,10 +201,12 @@ pub async fn on_completion(
         );
 
         Some(CompletionResponse::List(lsp_types::CompletionList {
-            // **Incomplete only when this answer knows it is cut.** `pending_work`/`pending_units` look safer, but
-            // they are true for seconds while a project indexes; a client then treats every list as provisional and
-            // filters/re-requests instead of showing it. The list's own flags are the facts about this answer.
-            is_incomplete: found.incomplete || found.truncated,
+            // **Never ask the client to keep re-querying a list it can filter.** `isIncomplete: true` makes the
+            // frontend treat the answer as a provisional page: it filters/re-requests instead of showing the names
+            // it already has, and on a big file that is every keystroke. The server answers with the names it knows;
+            // the next keystroke is a new request anyway. The analysis' own "stopped short" flag remains available
+            // in `found`, but it is not the client's filter contract.
+            is_incomplete: false,
             items: found
                 .items
                 .iter()

@@ -1066,6 +1066,28 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
                 .unwrap();
             let (_, label) = pending.remove(position);
             let at = batch_started.elapsed();
+            if label == "completion" {
+                let items = message["result"]["items"].as_array().map_or(0, Vec::len);
+                let incomplete = message["result"]["isIncomplete"].as_bool().unwrap_or(false);
+                eprintln!(
+                    "[concurrent] {} completion: {items} item(s), isIncomplete {incomplete}",
+                    path.file_name().unwrap().to_string_lossy()
+                );
+            } else if label == "diagnostic" {
+                let items = message["result"]["items"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let syntax = items
+                    .iter()
+                    .filter(|item| item["code"].as_str() == Some("syntax-error"))
+                    .count();
+                eprintln!(
+                    "[concurrent] {} diagnostic: {} item(s), {syntax} syntax-error(s)",
+                    path.file_name().unwrap().to_string_lossy(),
+                    items.len()
+                );
+            }
             eprintln!(
                 "[concurrent] {} {label}: {} ms",
                 path.file_name().unwrap().to_string_lossy(),

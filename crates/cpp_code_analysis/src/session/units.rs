@@ -1723,7 +1723,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // introduced: the caller that asks for a program is allowed to do the work the program needs.
         if self.store.index().summary(&root).is_none() {
             let ready = self.prefetched.remove(&queue_key(&root));
-            self.index_one(root.clone(), Priority::Open, 0, ready);
+            self.index_one(root.clone(), Priority::Open, 0, ready, true);
         }
 
         let reading = self.read_the_unit(&root);

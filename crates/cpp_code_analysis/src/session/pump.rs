@@ -524,7 +524,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // file still takes the wave's answer.
             let ready = self.prefetched.remove(&key);
             let step_started = std::time::Instant::now();
-            done.push(self.index_one(path, priority, depth, ready));
+            done.push(self.index_one(path, priority, depth, ready, true));
             if crate::probes::units() {
                 eprintln!(
                     "[advance] one step took {} ms ({} of {} step(s))",
@@ -940,7 +940,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 break;
             };
             let ready = self.prefetched.remove(&queue_key(&path));
-            done.push(self.index_one(path, priority, depth, ready));
+            done.push(self.index_one(path, priority, depth, ready, true));
         }
 
         if self.queue.pending() == 0 {
@@ -1042,7 +1042,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let path = file.path;
         self.prefetched.remove(&queue_key(&path));
         let rendering = file.prepared.rendering();
-        let step = self.index_one(path.clone(), Priority::Open, 0, Some(file.prepared));
+        let step = self.index_one(path.clone(), Priority::Open, 0, Some(file.prepared), true);
         if step.with_the_environment {
             self.parsed_since_the_last_pass
                 .retain(|queued| queued != &path);

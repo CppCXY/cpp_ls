@@ -167,6 +167,9 @@ impl<F: FileProvider + Clone> Session<F> {
         priority: Priority,
         depth: usize,
         ready: Option<crate::index::store::Prepared>,
+        // May this read build a translation timeline? An edited open buffer only needs its own summary; a full
+        // closure walk is the difference between a keystroke and a project read.
+        timeline: bool,
     ) -> Step {
         {
             let loading = std::time::Instant::now();
@@ -209,7 +212,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let prepared_with_environment = ready
             .as_ref()
             .is_some_and(crate::index::store::Prepared::with_environment);
-        let unit = if ready.is_none() {
+        let unit = if ready.is_none() && timeline {
             self.the_timeline_to_read_through(&spelled)
         } else {
             None
@@ -370,7 +373,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The file a request is about is one the second pass may refine** — see `want_refinement`.
         self.want_refinement(path);
         if self.queue.forget(path) {
-            self.index_one(path.to_path_buf(), Priority::Open, 0, None);
+            self.index_one(path.to_path_buf(), Priority::Open, 0, None, false);
         }
 
         // **A slice of its includes, not all of them, and the difference is a hover's latency.** Reading an include
@@ -397,7 +400,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         for include in includes {
             self.queue.forget(&include);
-            self.index_one(include, Priority::Open, 1, None);
+            self.index_one(include, Priority::Open, 1, None, true);
         }
     }
 
