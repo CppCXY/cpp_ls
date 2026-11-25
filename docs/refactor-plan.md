@@ -595,3 +595,26 @@ neovim channel.c, after edit:
   复用要解决的目标，不是等待策略能解决的。
 - 下一阶段不要把 `catch_up` 放回写锁，也不要用超时替换这个事件等待。
 
+
+### 2026-11-25：1000 行 writer 实测，Preamble 的目标修正
+
+严格单写多读 RwLock 下，1000 行 fixture 的一次编辑：
+
+```text
+catch_up                约 22 ms
+cook gathered           0 ms
+cook rendered           21 ms
+cook committed          5 ms
+cook total              27 ms
+one content batch       50–57 ms
+```
+
+所以此前“1000 行 p95 < 30 ms”的目标不成立：即使 Preamble 把本文件 render 降到 0，仍有
+`catch_up 22 + commit 5 = 27 ms` 的固定成本，再加查询与 LSP。
+
+修正后的验收：
+
+- 1000 行、无头文件闭包：same-file completion p95 < 50 ms（当前 76 ms）；
+- 头文件闭包大的文件：Preamble 后 `cook rendered` 显著下降，而不是强行压到 30 ms；
+- `preamble_end` 之后没有指令的文件才走 body-only 路径；指令区不变但 body 变化时复用
+  preamble 的 source prefix、rendered text/spans 与 MacroEnvironment。
