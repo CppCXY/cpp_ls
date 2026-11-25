@@ -300,13 +300,6 @@ impl<F: FileProvider + Clone> Session<F> {
         names
     }
 
-    /// **Warm the shared provider readings after a cook**, under the writer that just published the text. The view
-    /// lands in `views` and the semantic classification in `classified`, so the first read-only request about this
-    /// version reuses them instead of parsing and classifying again.
-    pub fn warm_provider_readings(&self, path: &Path) {
-        let _ = self.view_of_the_file(path);
-    }
-
     /// **Every format string in this file, with what each part of it is** — see [`crate::format`].
     ///
     /// ```cpp

@@ -494,7 +494,6 @@ async fn apply_text_batch(
                 let caught = phase.elapsed();
                 let phase = std::time::Instant::now();
                 session.cook(path);
-                session.warm_provider_readings(path);
                 log::info!(
                     "writer phase: {} catch_up {:?}, cook {:?}",
                     path.display(),
