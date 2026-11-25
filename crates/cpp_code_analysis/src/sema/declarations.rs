@@ -4998,7 +4998,13 @@ impl<'a> DeclarationFacts<'a> {
         for (at, fact) in facts.iter().enumerate() {
             by_offset.entry(fact.name_range.start_offset).or_insert(at);
         }
-        let qualified = qualified_declarations(root);
+        // **A cheap gate before a full-tree walk.** A file with no `::` has no qualified declaration; the walk
+        // used to run on every file, and on a plain C file it is 13 ms of the fact build for nothing.
+        let qualified = if rendered.contains("::") {
+            qualified_declarations(root)
+        } else {
+            Vec::new()
+        };
         let qualified_count = qualified.len();
         for (binding, scope, parameters) in qualified {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
@@ -5052,13 +5058,21 @@ impl<'a> DeclarationFacts<'a> {
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
         let freeing = std::time::Instant::now();
-        fill_the_frees(root, &mut facts);
+        // Neither sweep can find anything in a file that never spells its marker, and both were paid per file.
+        if rendered.contains("free") {
+            fill_the_frees(root, &mut facts);
+        }
         let freed = freeing.elapsed();
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
         let reflecting = std::time::Instant::now();
-        fill_the_reflection(root, &rendered, &mut facts);
+        if rendered.contains("UCLASS")
+            || rendered.contains("UPROPERTY")
+            || rendered.contains("UFUNCTION")
+        {
+            fill_the_reflection(root, &rendered, &mut facts);
+        }
         let reflected = reflecting.elapsed();
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts

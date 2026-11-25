@@ -894,11 +894,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let scoping = std::time::Instant::now();
         let scopes = build_scopes_with(&root, evidence, keep_locals);
         let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "index phase {}: scopes {:.1} ms",
-            path.display(),
-            scopes_ms
-        );
+        eprintln!("index phase {}: scopes {:.1} ms", path.display(), scopes_ms);
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
