@@ -14,7 +14,7 @@ import argparse, pathlib, re, subprocess, sys
 
 SKIP_PARTS = {"target", ".git", ".cppls"}
 USE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\b")
-MOD = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
+MOD = re.compile(r"\b(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 PATH = re.compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*)")
 MACRO = re.compile(r"^\s*(?:macro_rules!|macro)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -63,7 +63,7 @@ def scopes(m: str):
     stack=[(0,len(m.splitlines()),0)]; depth=0; cur=[]
     lines=m.split('\n')
     for no,line in enumerate(lines,1):
-        mm=MOD.match(line)
+        mm=MOD.search(line)
         if mm:
             indent=len(line)-len(line.lstrip())
             stack.append((no,len(lines),indent)); continue
@@ -115,7 +115,7 @@ def file_info(path: pathlib.Path):
 def existing_names(text):
     names=set()
     for line in masked(text).splitlines():
-        mm=re.match(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)",line)
+        mm=MOD.search(line)
         if mm: names.add(mm.group(1))
     joined=' '.join(masked(text).splitlines())
     for m in re.finditer(r"\buse\s+([^;]+);",joined):

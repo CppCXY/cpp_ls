@@ -15,8 +15,7 @@ fn root() {
     let _ = crate::Known::Yes(());
     let _ = crate::module::Thing;
 }
-#[cfg(test)]
-mod tests {
+#[cfg(test)] mod tests {
     fn test() {
         let _ = crate::module::Thing;
     }
