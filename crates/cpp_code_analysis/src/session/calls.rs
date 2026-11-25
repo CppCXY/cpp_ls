@@ -897,10 +897,10 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
         let at = view.source.len();
-        if let Some(body) = self.macro_body_at(&view.path, at, dimension) {
-            if let Some(value) = a_constant_expression(&body) {
-                return Some(value);
-            }
+        if let Some(body) = self.macro_body_at(&view.path, at, dimension)
+            && let Some(value) = a_constant_expression(&body)
+        {
+            return Some(value);
         }
         if let Known::Yes(found) = self.store.index().definition(dimension, &view.path) {
             if let Some(value) = self.the_constant_a_declaration_writes(&found) {

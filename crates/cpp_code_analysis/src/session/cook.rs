@@ -86,7 +86,6 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` when the file has no summary or no text — nothing has read it yet, which is a state and not an error.
     pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
-        let started = std::time::Instant::now();
         // **The disk before the render.** A record with its rendering — the file's content, its configuration and its
         // closure, all validated by the reader — is the reading this call would produce, and the rendering is what
         // makes filing it different from filing facts: `view` answers from it immediately.
@@ -100,18 +99,13 @@ impl<F: FileProvider + Clone> Session<F> {
             return committed;
         }
         let materials = self.cooking_materials(path.as_ref())?;
-        let gathered = started.elapsed().as_millis();
-        let render_started = std::time::Instant::now();
         let rendered = self.render_a_cooked(&materials)?;
         // **The text this reading is built from**, written out when `CPPLS_DUMP_RENDERING_DIR` names a directory —
         // the same escape hatch `index_rendering` has, for the other half of the pipeline. A parse that goes wrong only
         // in the *cooked* reading cannot be seen in `inspect tree` (which reads the file's own text), and without the
         // text every diagnosis is a guess about what the macros produced.
 
-        let rendered_for = render_started.elapsed().as_millis();
-        let committed = self.commit_a_cooked(rendered);
-
-        committed
+        self.commit_a_cooked(rendered)
     }
 
     /// **Everything a cook needs that is cheap to gather** — and it takes `&self`, which is the whole point of it.
@@ -488,14 +482,12 @@ impl<F: FileProvider + Clone> Session<F> {
             revision,
         } = rendered;
         let path = indexed.summary.path.clone();
-        let started = std::time::Instant::now();
 
         // **The check.** `self.text` is the file's text *now*, and the hash it is compared against is the one the
         // rendering was made from. A file that has become unreadable is the same answer — nothing to file.
         let current = self
             .text(&path)
             .map(|text| crate::cache::content_hash(&text));
-        let text_hash_ms = started.elapsed().as_millis();
         if !self.is_current(&revision) || current != Some(text_hash) {
             if Arc::ptr_eq(&self.identity, &revision.session) && self.files.exists(&path) {
                 self.want_cooked_reading(&path);
@@ -514,11 +506,10 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Ok(mut known) = self.renderings.lock() {
             let key = a_rendering_key(&path, text_hash);
 
-            let before = known.len();
+            let _before = known.len();
             let weight = indexed.rendered.weight();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
         }
-        let before_the_disk = started.elapsed().as_millis();
         {
             // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
             // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
@@ -528,17 +519,15 @@ impl<F: FileProvider + Clone> Session<F> {
             // from, because every query that reads the tree needs the text and the spans.
             let cooked: crate::index::CookedFile = indexed.into();
 
-            let declared = cooked.declarations.len();
+            let _declared = cooked.declarations.len();
             // **No disk write here.** Serialising and writing a whole rendering is what made an index-slice commit
             // hold the writer for seconds. Mark the path; the delayed persistence pass writes at most a few records
             // when the editing has been quiet.
             if let Ok(mut dirty) = self.cook_persistence.lock() {
                 dirty.insert(queue_key(&path), (path.clone(), std::time::Instant::now()));
             }
-            let written = 0u128;
-            let inserting = std::time::Instant::now();
+            let _written = 0u128;
             self.store.index_mut().insert_cooked(&path, cooked);
-            let inserted = inserting.elapsed().as_millis();
 
             // **Cooked here counts as asked**, so the closure loop does not queue it again the moment its reading is
             // evicted from the index's bounded map — a file cooked by a program read or by a query is exactly the
@@ -638,7 +627,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let resolved = self.store.index().summary(path)?.path.clone();
         match self.store.the_stored_cook_reason(&resolved) {
             Ok((cooked, rendered)) => Some((resolved, cooked, rendered)),
-            Err(reason) => {
+            Err(_reason) => {
                 // **Named, because "0 hits" is not a diagnosis.** `not stored` is a cold cache; `no closure` is the
                 // index not holding every file the key is built from yet, which is a race the pump can lose.
 
@@ -691,13 +680,12 @@ impl<F: FileProvider + Clone> Session<F> {
                     slice.stored.push((path, cooked, rendered));
                 }
                 AClaimedCook::Fresh(materials) => {
-                    let path = materials.path.clone();
+                    let _path = materials.path.clone();
                     let built = self.render_a_cooked(&materials);
                     // **The last silent drop.** A claimed file whose render declines is gone from the queue and was
                     // never cooked, which the pump reads as "no work left".
-                    match built {
-                        Some(rendered) => slice.fresh.push(rendered),
-                        None => {}
+                    if let Some(rendered) = built {
+                        slice.fresh.push(rendered)
                     }
                 }
             }

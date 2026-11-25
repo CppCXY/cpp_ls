@@ -832,9 +832,7 @@ impl Server {
             .iter()
             .any(|argument| *argument == std::ffi::OsStr::new("--log-path"))
         {
-            command
-                .arg("--log-path")
-                .arg("none".to_string());
+            command.arg("--log-path").arg("none");
         }
         if let Ok(level) = Ok::<String, std::env::VarError>("info".to_string()) {
             command.arg("--log-level").arg(level);

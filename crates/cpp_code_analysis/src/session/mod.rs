@@ -1860,7 +1860,6 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
                 // headers are full of. See [`Session::render_the_unit`].
                 let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
-                let cooking = std::time::Instant::now();
                 let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,

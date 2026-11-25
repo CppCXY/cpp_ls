@@ -206,54 +206,6 @@ impl ReRead {
 /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
 const PARALLEL_WORKERS: usize = 8;
 
-/// **The four stages of one prepared file**, accumulated only while `CPPLS_TRACE_COOKING` is on.
-///
-/// A warm start's cost is spread over eight workers and three different things — reading the text, decoding a stored
-/// summary, and re-running the include search to see that the stored answer still holds — so a wall clock says
-/// nothing about which one to work on. These are read as a delta around one [`SummaryStore::prepare_closure`], which
-/// is one wave, and printed as one line.
-///
-/// `build` is the whole call for a file that was parsed (read, index, encode, write), because on that path there is
-/// nothing to separate: the parse is what is being paid for.
-static PREPARED: [std::sync::atomic::AtomicU64; 5] = [
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
-
-/// Count one prepared file's stages — `(files, read, decode, verify, build)`, in nanoseconds.
-fn note_a_prepared_file(
-    read: std::time::Duration,
-    decode: std::time::Duration,
-    verify: std::time::Duration,
-    build: std::time::Duration,
-) {
-    use std::sync::atomic::Ordering::Relaxed;
-
-    let nanos =
-        |duration: std::time::Duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64;
-    PREPARED[0].fetch_add(1, Relaxed);
-    PREPARED[1].fetch_add(nanos(read), Relaxed);
-    PREPARED[2].fetch_add(nanos(decode), Relaxed);
-    PREPARED[3].fetch_add(nanos(verify), Relaxed);
-    PREPARED[4].fetch_add(nanos(build), Relaxed);
-}
-
-/// [`note_a_prepared_file`]'s counters, as they stand — the delta between two reads is one wave's work.
-fn prepared_stages() -> [u64; 5] {
-    use std::sync::atomic::Ordering::Relaxed;
-
-    [
-        PREPARED[0].load(Relaxed),
-        PREPARED[1].load(Relaxed),
-        PREPARED[2].load(Relaxed),
-        PREPARED[3].load(Relaxed),
-        PREPARED[4].load(Relaxed),
-    ]
-}
-
 /// The stack of an indexing worker. Larger than the default because the parser recurses on nesting depth and a
 /// worker must not be the place a deeply nested header first overflows.
 const WORKER_STACK: usize = 16 * 1024 * 1024;
@@ -1130,7 +1082,6 @@ impl<F: FileProvider> SummaryStore<F> {
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
         timeline: Option<&crate::TranslationUnit>,
     ) -> Prepared {
-        let entered = std::time::Instant::now();
         let Some(source) = ({ self.files.read(path) }) else {
             return Prepared {
                 outcome: PreparedOutcome::Unreadable,
@@ -1139,7 +1090,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 content_hash: None,
             };
         };
-        let read = entered.elapsed();
         // **Where this file sits in the timeline**, by the spelling the walk used — a unit's frames are keyed by the
         // include graph's spelling, and asking with the session's finds nothing. See [`Session::held_units`].
         let view = timeline.and_then(|unit| {
@@ -1159,7 +1109,6 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         {
-            let reading = std::time::Instant::now();
             // (the decode is the database's, so the two timers it fed are zero — see `note_a_prepared_file`)
             // **The database, and only the database.**
             let stored = self
@@ -1172,7 +1121,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 // **The second half, timed apart from the decode**: re-running the include search for every
                 // `#include` of a stored summary is what makes a hit trustworthy, and it is a filesystem search per
                 // include — the one part of a warm start that looks like nothing in the code and can cost seconds.
-                let verifying = std::time::Instant::now();
                 let still_holds = self.resolution_still_holds(path, &stored);
 
                 if still_holds {
@@ -1394,8 +1342,6 @@ impl<F: FileProvider> SummaryStore<F> {
         budget: usize,
     ) -> Vec<(PathBuf, Prepared)> {
         use std::sync::{Condvar, Mutex};
-        let before = prepared_stages();
-        let started = std::time::Instant::now();
 
         struct Frontier {
             waiting: std::collections::VecDeque<PathBuf>,
@@ -1857,10 +1803,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// verified the same way a normal cache hit is ([`SummaryStore::resolution_still_holds`]), because a header that
     /// moved changes the program without changing any text the key names.
     pub fn the_stored_refinement(&self, path: &Path) -> Option<crate::FileSummary> {
-        match self.the_stored_refinement_reason(path) {
-            Ok(summary) => Some(summary),
-            Err(reason) => None,
-        }
+        self.the_stored_refinement_reason(path).ok()
     }
 
     /// Why a stored refinement is not usable, named — the instrument the hit-rate measurements needed.
@@ -2149,7 +2092,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // file's text and asks a question about every `#define` in the project — and from outside they are the same
         // call. Measured on a real project: four files took 315 ms with a timeline and 18 000 ms without, so the
         // first question about a slow start-up here is *which form ran*, and these counts answer it.
-        let started = std::time::Instant::now();
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
         //
@@ -2268,7 +2210,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // body is not shaped and the reading keeps the plain reading it had; it is the same answer the eager arm
         // would have given for a name nobody in the closure defines.)
         // One function, so the restriction has a name and a test — see [`SummaryStore::the_closure_of`].
-        let closure_started = std::time::Instant::now();
         let in_the_closure = self.the_closure_of(indexed);
 
         let mut candidates: Vec<&FileSummary> = if eager {
@@ -2332,7 +2273,7 @@ impl<F: FileProvider> SummaryStore<F> {
             }
         }
 
-        let uncovered = uncovered || uncovered_candidates > 0;
+        let _uncovered = uncovered || uncovered_candidates > 0;
 
         // The names whose body a **reading** uses, from the **macro facts** of the indexed closure — not from its
         // text, and not from the environment: this is the question "could any file's reading have changed", and
@@ -2502,7 +2443,6 @@ impl<F: FileProvider> SummaryStore<F> {
         if bodied.is_empty() && guarded.is_empty() {
             // **The decision is written down**, so the next start serves it instead of rebuilding the timelines that led
             // to it. See `mark_the_reading_as_refined`.
-            let marking = std::time::Instant::now();
             for path in indexed {
                 self.mark_the_reading_as_refined(path);
             }
@@ -3155,45 +3095,6 @@ impl<F: FileProvider> SummaryStore<F> {
         });
 
         Some(cpp_parser::MacroEnvironment::from_included_macros(entries))
-    }
-
-    /// **A trace of one composed environment** — the files it walked, the decisions it made, and the names a probe
-    /// asked about, so a rendering that still holds a macro call can be told from one that never saw the `#define`.
-    fn trace_the_composed_environment(
-        path: &Path,
-        order: &[(usize, PathBuf, usize)],
-        entries: &[cpp_parser::IncludedMacro],
-        table: &crate::preprocess::macros::MacroTable,
-        watched: &[&str],
-    ) {
-        eprintln!(
-            "[environment] {}: {} file(s) in the closure, {} decision(s), {} in the table",
-            path.display(),
-            order.len(),
-            entries.len(),
-            table.len()
-        );
-        for name in watched {
-            let own: Vec<String> = entries
-                .iter()
-                .filter(|entry| entry.name.as_ref() == *name)
-                .map(|entry| {
-                    format!(
-                        "{} at {}",
-                        if entry.definition.is_some() {
-                            "defined"
-                        } else {
-                            "undefined"
-                        },
-                        entry.from_offset
-                    )
-                })
-                .collect();
-            eprintln!(
-                "[environment] {name}: in the table {}, in the timeline {own:?}",
-                table.get(name).is_some()
-            );
-        }
     }
 
     /// **The file's own timeline, walked from what this store holds** — the second pass's fallback arm needs one.

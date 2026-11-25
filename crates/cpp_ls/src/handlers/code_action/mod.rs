@@ -46,17 +46,12 @@ pub async fn on_code_action(
         .filter_map(named_by_a_diagnostic)
         .collect();
     // **Where the milliseconds go**, when asked.
-    let started = std::time::Instant::now();
 
-    let prepared = started.elapsed();
-
-    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
+    snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let written = session.view_of_the_file(&path)?;
-        let after_the_file = std::time::Instant::now();
         let in_the_file = crate::util::file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;
-        let after_the_rendering = std::time::Instant::now();
         let offset = view.reading_offset_of(
             cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),
         )?;
@@ -70,9 +65,7 @@ pub async fn on_code_action(
                 .collect(),
         )
     })
-    .await;
-
-    answer
+    .await
 }
 
 /// What a fix provider is given: the cursor, and the few questions every provider asks about it.

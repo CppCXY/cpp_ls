@@ -54,7 +54,6 @@ pub async fn on_inlay_hint(
 ) -> RequestOutcome<Vec<InlayHint>> {
     let uri = params.text_document.uri;
     let requested = params.range;
-    let started = std::time::Instant::now();
 
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
@@ -99,7 +98,6 @@ pub async fn on_inlay_hint(
         // view is the file's own tokens. Asking for a rendering here would silently move every hint by however many
         // lines the directives had taken out, which is the mistake the hover handler had.
         let view = session.view_of_the_file(&path)?;
-        let parsed = started.elapsed();
         let held = session.files().held(&view.path)?;
 
         // **Answered from what is known, rather than withheld until everything is.**
@@ -117,10 +115,7 @@ pub async fn on_inlay_hint(
         let visible = visible_range(&view, requested)?;
         // **The two heaviest calls in a request, timed apart.** A report of "inlay hints are slow" cannot say which
         // of them went to the index; this line does, and the view's own parse above is the third number.
-        let hints_started = std::time::Instant::now();
         let hints = session.inlay_hints(&view, visible);
-        let hints_done = hints_started.elapsed();
-        let types_started = std::time::Instant::now();
         let types = session.type_hints(&view, visible);
 
         Some(

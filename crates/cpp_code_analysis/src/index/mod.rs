@@ -641,7 +641,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // to see which file's text a wrong scope came from — the rendering has no file markers in it, and the
         // boundaries are what say where one file stops.
 
-        let parsing = std::time::Instant::now();
         let tree = {
             // **And where one file's text ends and the next begins**, which is the parser's half of "a scope may not
             // cross a file boundary". `stream` has known it all along — [`crate::RenderedUnit::file_boundaries`] is
@@ -658,8 +657,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **The errors this parse reported, and which file each one is in** — written only when a dump directory is
         // named. A rendering has no file markers in it, so a bare offset says nothing about which header is wrong.
 
-        let parsed = parsing.elapsed();
-        let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
@@ -815,7 +812,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
 
-        let making = std::time::Instant::now();
         let (mut declarations, mut guards) =
             { build_facts(&scopes, &preprocessing, &root, &errors, keep_locals) };
 
@@ -1645,7 +1641,7 @@ fn file_what_was_found(
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
     // read here is a lock of the process environment plus an `OsString` built for an answer that cannot change
     // during a run.
-    let interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
+    let _interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
 
     for mut fact in declarations {
         let Some((file, range)) = stream.written_span(fact.range) else {

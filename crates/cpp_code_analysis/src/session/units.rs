@@ -59,7 +59,6 @@ impl<F: FileProvider + Clone> Session<F> {
             if let Some(known) = seen.borrow().get(path) {
                 return known.clone();
             }
-            let started = std::time::Instant::now();
             let made = session.view_of_the_file(path);
 
             seen.borrow_mut().insert(path.to_path_buf(), made.clone());
@@ -226,13 +225,8 @@ impl<F: FileProvider + Clone> Session<F> {
                     None => return None,
                 };
 
-                let read_started = std::time::Instant::now();
-
                 let (closure, closure_by_key) = { self.closure_with_text_from(path, Some(root)) };
-                let read_took = read_started.elapsed();
-                let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
-
-                let walk_started = std::time::Instant::now();
+                let _closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
 
                 // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a
                 // file sees, and the same definition reaches hundreds of files — `<vector>` and `<string>` both see
@@ -309,19 +303,14 @@ impl<F: FileProvider + Clone> Session<F> {
                                 .map(std::path::Path::to_path_buf),
                         )
                     });
-                    let walk_took = walk_started.elapsed();
 
                     // **Is this timeline of the whole program, or of as much of it as has been read?** A file the
                     // closure could not offer is either outside the analysis — the permanent reading, and the one
                     // the walk's own early return documents — or *not yet read*, which is a fact about the queue and
                     // not about the file. See [`HeldUnit`] for what storing the second kind cost.
 
-                    let mut put_took = std::time::Duration::ZERO;
                     if !provisional {
-                        // Written for the **next run**.
-                        let put_started = std::time::Instant::now();
                         // (the disk cache is gone — see the note at `cached` above)
-                        put_took = put_started.elapsed();
 
                         // …and offered to the **rest of this one**, under the same condition: a provisional
                         // timeline is one the queue will make obsolete, and handing it to a second root would
@@ -926,7 +915,6 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
     /// and not an error.
     pub fn gather_a_unit_read(&self, root: &Path) -> Option<UnitReadMaterials<SessionFiles<F>>> {
-        let started = std::time::Instant::now();
         let revision = self.revision();
         // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
         // keyed by the normalized path.
@@ -979,9 +967,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         let unit = self.translation_unit_of(&root)?;
-        let walked = started.elapsed();
         let (sources, units_key) = self.the_units_inputs(&unit);
-        let hashed = started.elapsed() - walked;
         let key = SummaryKey::new(0, context);
 
         // **The rendering, if this session or the database already has it.** Without it the program's hash is unknown
@@ -1295,13 +1281,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// fact lost. The cause was the one `index_unit_rendering`'s crossing fence now quarantines — a file whose
     /// unclosed scope used to swallow the rest of the program.
     pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
-        let gathering = std::time::Instant::now();
         let prepared = self.prepare_a_unit_reading(root)?;
         // The per-file records are prepared here, while the same read-side state is in hand — see
         // `prepare_the_unit_records` for the 17.9 s this keeps out of the writer.
         let records = self.prepare_the_unit_records(&prepared);
-        let gathered = gathering.elapsed();
-        let committing = std::time::Instant::now();
         let reading = self.commit_a_unit_reading(prepared, records)?;
 
         Some(reading)
@@ -1773,7 +1756,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // same call measured 25 s, 44 s, 112 s and 506 s on unchanged inputs, against a 24 MB cache, so the answer is
         // not the cache and not the closure.
         let started = std::time::Instant::now();
-        let mut last = started;
+        let mut _last = started;
 
         for _ in 0..MAX_MODULES_READ_AT_ONCE {
             // The module names the index cannot point at a file for, from the file itself and from every file the
@@ -1859,8 +1842,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 due
             };
             for unit in due {
-                let reading = std::time::Instant::now();
-                let read = self.read_the_unit(&unit);
+                let _read = self.read_the_unit(&unit);
             }
         }
 

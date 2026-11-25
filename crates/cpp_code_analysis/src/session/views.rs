@@ -262,7 +262,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// (`advance` moves it into the cook queue and cooks it).
     pub fn ask_for_the_cooked_reading(&self, path: &Path) {
         if let Ok(mut work) = self.macro_work.lock() {
-            let queued = work.want(path);
+            let _queued = work.want(path);
         }
     }
 

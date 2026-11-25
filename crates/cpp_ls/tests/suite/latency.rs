@@ -237,15 +237,13 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
     // is only asserted when `CPPLS_LATENCY_STRICT` is set, which is how it is meant to be run —
     // `CPPLS_LATENCY_STRICT=1 cargo test --test suite latency -- --test-threads=1` on an idle machine. The two assertions
     // that are about the code (a render inside its budget, and the median) run always.
-    const A_RENDER_MAY_TAKE: Duration = Duration::from_millis(300);
-    const RENDERS_IN_THE_WINDOW: usize = 2;
     let over: Vec<(usize, Duration)> = steady
         .iter()
         .enumerate()
         .filter(|(_, took)| **took > STEADY_BUDGET)
         .map(|(at, took)| (STEADY_FROM + at, *took))
         .collect();
-    let slow_steady: Vec<String> = over
+    let _slow_steady: Vec<String> = over
         .iter()
         .map(|(at, took)| format!("  #{}: {} ms", at, took.as_millis()))
         .collect();

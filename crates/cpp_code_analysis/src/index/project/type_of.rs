@@ -251,7 +251,6 @@ pub(crate) fn type_of_expression_memoed(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     }
 
-    let started = std::time::Instant::now();
     // **The recursion, when it is asked to show itself.** `depth` is bounded (`MAX_TYPE_DEPTH`) *per question*, and
     // several call sites deliberately start a **new** question at 0 — so a cycle that goes through one of them is not
     // bounded by anything. Measured on a real C++23 project: `module_graph.cpp` overflowed the stack with 32 MB on

@@ -810,7 +810,7 @@ impl AnalysisState {
     /// completion's own query is slow": with the writes in good order the first five completions after `didOpen`
     /// still took 60–1677 ms, and every millisecond of it was in this function's `ran` — the query's own work over an
     /// index that was still filling.
-    pub async fn run_blocking<R, F>(&self, label: &'static str, f: F) -> Option<R>
+    pub async fn run_blocking<R, F>(&self, _label: &'static str, f: F) -> Option<R>
     where
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,

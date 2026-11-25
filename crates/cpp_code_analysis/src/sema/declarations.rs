@@ -4755,7 +4755,6 @@ impl<'a> DeclarationFacts<'a> {
         // the parser keeps as a sibling. One copy per file, not one per declaration.
         let rendered = root.text().to_string();
 
-        let walking = std::time::Instant::now();
         for (index, scope) in scopes.scopes().iter().enumerate() {
             let id = ScopeId(index);
             // **A template parameter list files no declarations, and filing them was expensive in a way that had
@@ -4844,8 +4843,6 @@ impl<'a> DeclarationFacts<'a> {
         // The scope a qualified declaration belongs to is **written in the text**, so the fact is built from the
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
-        let walked = walking.elapsed();
-        let qualifying = std::time::Instant::now();
         // **By offset, because the scan this replaces was quadratic in the program.** The loop below used to ask
         // `facts.iter_mut().find(..)` for every qualified declaration — a linear scan of a list a standard-library
         // closure makes tens of thousands of entries long, so the cost was the *product* of the two lists.
@@ -4869,7 +4866,7 @@ impl<'a> DeclarationFacts<'a> {
         } else {
             Vec::new()
         };
-        let qualified_count = qualified.len();
+        let _qualified_count = qualified.len();
         for (binding, scope, parameters) in qualified {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
             // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a
@@ -4921,31 +4918,25 @@ impl<'a> DeclarationFacts<'a> {
         // declaration — measured on a folding fixture that includes `<string>` and `<vector>`: the server took longer
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
-        let freeing = std::time::Instant::now();
         // Neither sweep can find anything in a file that never spells its marker, and both were paid per file.
         if rendered.contains("free") {
             fill_the_frees(root, &mut facts);
         }
-        let freed = freeing.elapsed();
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
-        let reflecting = std::time::Instant::now();
         if rendered.contains("UCLASS")
             || rendered.contains("UPROPERTY")
             || rendered.contains("UFUNCTION")
         {
             fill_the_reflection(root, &rendered, &mut facts);
         }
-        let reflected = reflecting.elapsed();
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
-        let guarding = std::time::Instant::now();
         assign_guards(&mut targets, preprocessing, &mut guards);
-        let guarded = guarding.elapsed();
 
         // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
         // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.

@@ -379,7 +379,6 @@ where
         // below — measured: `inlayHint` on `containers.cpp` sat in one call for sixteen seconds and a gigabyte, and the
         // last line the trace had printed was the call *before* it. This line is what names it.
 
-        let started = std::time::Instant::now();
         // **The parameters of the call's declaration** — a function's own, or, when the callee names a **class**, the
         // constructor's. `Widget(3, 4)` is a temporary of `Widget`: the class's scope holds fields, but the class also
         // *declares constructors*, and a constructor declares parameters. Reported from `EmmyLuaCodeStyle`:
@@ -411,7 +410,6 @@ where
                     // wrong parameter is a wrong answer printed into the code.
                     return a_variables_call();
                 };
-                let resolved = started.elapsed();
 
                 let names = parameter_names_for(view, &callee, &mut declaring, &mut view_of)
                     .or_else(|| {

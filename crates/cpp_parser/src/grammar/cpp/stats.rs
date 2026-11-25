@@ -1090,7 +1090,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             }
             Ok(marker)
         }
-        Err(err) => {
+        Err(_err) => {
             // Not a declaration. Rewind **first**: the question below is asked about the token the statement began
             // at, and the failed attempt left the cursor somewhere past it.
             p.rollback(checkpoint);

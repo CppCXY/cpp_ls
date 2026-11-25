@@ -114,7 +114,8 @@ fn a_method_after_the_macro_shaped_try_catch_is_still_a_member() {
 #[test]
 #[ignore = "a probe: parses one file of a real project"]
 fn where_json_hpp_stops_being_a_class_body() {
-    let Ok(root) = Result::<String, std::env::VarError>::Ok(r"E:\EmmyLuaCodeStyle".to_string()) else {
+    let Ok(root) = Result::<String, std::env::VarError>::Ok(r"E:\EmmyLuaCodeStyle".to_string())
+    else {
         eprintln!("set CPPLS_REAL_PROJECT to run this probe");
         return;
     };

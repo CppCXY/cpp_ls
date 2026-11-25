@@ -437,7 +437,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // **What one batch costs**, under the unit trace. The modules fixture's module read is nine of these and
         // 48–59 s, and no number outside could say which of the nine — or which half of a batch, the wave's closure
         // preparation or the per-file steps — was the seconds.
-        let started = std::time::Instant::now();
 
         for taken in 0..steps {
             let Some((path, priority, depth)) = self.queue.pop() else {
@@ -487,7 +486,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
 
                 let room = (steps * 4).saturating_sub(self.prefetched.len());
-                let prepared_from = std::time::Instant::now();
                 let made = {
                     let queue = &self.queue;
                     let prefetched = &self.prefetched;
@@ -509,7 +507,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // prepared entry, `index_one` builds the summary itself and can hand it the environment. Every other
             // file still takes the wave's answer.
             let ready = self.prefetched.remove(&key);
-            let step_started = std::time::Instant::now();
             done.push(self.index_one(path, priority, depth, ready, true));
         }
 
@@ -529,12 +526,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
         let units = Vec::new();
 
-        let drain = {
-            let finishing = std::time::Instant::now();
-            let drain = self.finish_a_slice(&done, units);
-
-            drain
-        };
+        let drain = { self.finish_a_slice(&done, units) };
 
         // **A file this slice read is NOT queued for cooking, and three tests are why.**
         //
@@ -556,10 +548,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
         // call each way. The answer is the same: what `finish_a_slice` planned is worked out and applied.
-        let drain_started = std::time::Instant::now();
         let prepared = self.prepare_the_drain(drain);
-        let prepared_in = drain_started.elapsed();
-        let committed = self.commit_the_drain(prepared);
+        let _committed = self.commit_the_drain(prepared);
 
         // **And a slice of the cooking queue, which this path used to leave to two other callers.** `index_everything`
         // and `diagnose_everything` both claim cooks; `advance` — the server's timer callback — did not, so a file a
@@ -577,13 +567,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 // `docs/open-questions.md` names "claimed and dropped": `materials_for` when a file's unit is
                 // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
                 // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
-                let asked = claimed.len();
+                let _asked = claimed.len();
 
                 let materials = self.materials_for(claimed);
-                let gathered = materials.len();
+                let _gathered = materials.len();
                 let rendered = self.render_them(materials);
-                let built = rendered.len();
-                let committed = self.commit_them(rendered).len();
+                let _built = rendered.len();
+                let _committed = self.commit_them(rendered).len();
             }
         }
 
@@ -597,7 +587,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // closure walk, a render of every file in it, a parse of the result and a sweep of every declaration —
         // 8.9 s for `std.ixx` measured on its own (`tests/unit_probe.rs`), and this is where a *batch* pays it.
         if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
-            let reading = std::time::Instant::now();
             self.read_a_program_now();
         }
 
@@ -1409,7 +1398,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // this. `prepare_the_re_read` and one environment look the same from outside and have nothing to do with each
         // other — one re-parses four files with their closure's macros in hand, the other renders a file's whole
         // closure — so a single number for the drain names neither.
-        let started = std::time::Instant::now();
         let re_read =
             // **`true`: this caller can walk a timeline**, so the pass renders a file no slice unit covers instead of
             // keeping the raw reading of it. See `SummaryStore::prepare_the_re_read`'s `walk_its_own`.
@@ -1426,7 +1414,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // drain was **25.0 s** of 57 s while `prepare_the_re_read` accounted for 0.9 s of it: the rest is this loop.
         // The chunks keep the caller's order, and both halves run with the same read lock.
         let prepare_environment = |path: PathBuf| {
-            let step = std::time::Instant::now();
             let reading = self.rendering_of(&path)?;
             let text = self.text(&path)?;
             // **And the macro environment for the file's own view** - the other half of what a query asked for here.

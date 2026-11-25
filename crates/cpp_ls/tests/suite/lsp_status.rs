@@ -29,9 +29,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 fn project() -> PathBuf {
-    PathBuf::from(
-        r"E:\EmmyLuaCodeStyle".to_string(),
-    )
+    PathBuf::from(r"E:\EmmyLuaCodeStyle".to_string())
 }
 
 fn uri_of(path: &Path) -> String {

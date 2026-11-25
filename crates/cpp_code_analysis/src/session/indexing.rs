@@ -172,7 +172,6 @@ impl<F: FileProvider + Clone> Session<F> {
         timeline: bool,
     ) -> Step {
         {
-            let loading = std::time::Instant::now();
             self.vfs.load(&path);
         }
         let before = self.store.stats();
@@ -210,8 +209,6 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             None
         };
-        let timed = std::time::Instant::now();
-        let timeline_ask = std::time::Instant::now();
 
         let has_a_timeline = unit
             .as_ref()
@@ -241,7 +238,6 @@ impl<F: FileProvider + Clone> Session<F> {
             },
         };
 
-        let tail = std::time::Instant::now();
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
                 summary
@@ -257,8 +253,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
         // tenth translation unit includes is not.
-        let queueing = std::time::Instant::now();
-        let include_count = includes.len();
+        let _include_count = includes.len();
         for include in includes {
             self.queue.add(include, priority, depth + 1);
         }
@@ -543,9 +538,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
         loop {
-            let round_started = std::time::Instant::now();
             let steps = self.advance(64);
-            let advanced = round_started.elapsed();
             // **Every file a batch read names is a file to refine.** This is the review's lever: a request asks
             // (`catch_up`), and a batch caller that just read the whole project asks for the whole project. It was held
             // back while the refined reading was weaker than the raw one; the refinement now files its rendering as the
@@ -614,7 +607,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // round after `index_everything` — measured: `refined true wanted 0 backlog 0 pending 0`. So every
             // dependant of the eager ask is a dependant of *being asked*, and the loop goes.
             let _ = &steps;
-            let refined = round_started.elapsed() - advanced;
             let read = steps.len();
             // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
             // reads would be a file to refine, which is what "index everything" sounds like it means — and it makes four
@@ -634,19 +626,16 @@ impl<F: FileProvider + Clone> Session<F> {
             // drop is a file that is **no longer queued and never cooked**, and the loop below reads that state as
             // "nothing left to do": `read == 0 && cooked == 0` ends the work with a cooking backlog still standing.
             // Measured on the completion fixture: `pending 0, cooking 22` on every round, for six rounds.
-            let cook_started = std::time::Instant::now();
             let cooked = {
                 let claimed = self.claim_cooking(COOK_SLICE);
 
                 let materials = self.materials_for(claimed);
-                let wanted = materials.len();
+                let _wanted = materials.len();
                 let rendered = self.render_them(materials);
-                let built = rendered.len();
-                let committed = self.commit_them(rendered).len();
+                let _built = rendered.len();
 
-                committed
+                self.commit_them(rendered).len()
             };
-            let cook = cook_started.elapsed();
 
             // **The second pass is work, and this loop used to return while it was owed.**
             // `advance` drains up to [`RE_READ_SLICE`] of the backlog per call, and the backlog is

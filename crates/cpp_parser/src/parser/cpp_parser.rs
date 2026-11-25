@@ -200,10 +200,6 @@ struct ParserCounts {
     type_questions: std::cell::Cell<u64>,
     type_answers: std::cell::Cell<u64>,
     greater_than_questions: std::cell::Cell<u64>,
-    marks: std::cell::Cell<u64>,
-    closes: std::cell::Cell<u64>,
-    #[allow(dead_code)]
-    trivia_sweeps: std::cell::Cell<u64>,
     comment_groups: std::cell::Cell<u64>,
     comment_nanos: std::cell::Cell<u64>,
 }

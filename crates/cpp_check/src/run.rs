@@ -24,7 +24,7 @@ use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 use crate::cli::Level;
-use crate::report::{Report, position_of, relative};
+use crate::report::{Report, position_of};
 
 #[allow(clippy::too_many_arguments)]
 pub fn check_files(
@@ -33,7 +33,7 @@ pub fn check_files(
     min: Level,
     only: Option<&BTreeSet<&'static str>>,
     skipped: Option<&BTreeSet<&'static str>>,
-    tracing: bool,
+    _tracing: bool,
     quiet: bool,
 ) -> Run {
     let mut session = Session::open(

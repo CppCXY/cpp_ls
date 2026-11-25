@@ -407,14 +407,8 @@ fn a_macro_from_an_earlier_include_is_visible_to_a_later_one() {
 #[test]
 #[ignore = "a probe: walks a real project and compares instead of asserting"]
 fn the_fold_and_the_walk_agree_on_a_real_project() {
-    let root = PathBuf::from(
-        r"E:\EmmyLuaCodeStyle".to_string(),
-    );
-    let directories: Vec<String> = Result::<String, std::env::VarError>::Ok(String::new())
-        .unwrap_or_else(|_| {
-            "CodeFormat,CodeFormatCLib,CodeFormatCore,CodeFormatLib,CodeFormatServer,LuaParser,Util"
-                .to_string()
-        })
+    let root = PathBuf::from(r"E:\EmmyLuaCodeStyle".to_string());
+    let directories: Vec<String> = String::new()
         .split(',')
         .map(|directory| directory.trim().to_string())
         .collect();

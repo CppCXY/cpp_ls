@@ -99,7 +99,6 @@ impl Check for Unused {
         // declaration would walk the token stream once per name, which is quadratic in a file the size of a real
         // header. Measured on MSVC's `<vector>`: 20 247 nodes, and the per-declaration form was the whole cost of
         // the layer.
-        let started = std::time::Instant::now();
         let mut written: HashMap<&str, usize> = HashMap::new();
         // **This file's own tokens**, not the rendering's: a token inside an inlined header is another file's
         // spelling, and counting it would make this rule answer about a name in `<string>`. See `CheckContext::own`.
@@ -121,7 +120,6 @@ impl Check for Unused {
         // `kind=Variable type=Some("_CSTD")`, and `xstring`'s `addressof` came out with `type=Some("_STD(_STD,
         // _Right)")`, the parameters inside the type. Four such facts were reported as "declared here and never used"
         // on a corpus that is known good, which is the one measurement this layer has to pass.
-        let counted = started.elapsed().as_millis();
         // **The bodies as ranges, sorted by where they start** — the question "is this offset inside one" is asked
         // once per local, and a file has many of both: measured on a 2 701-line fixture, 1 500 locals against ~300
         // bodies, and the linear scan over the bodies was **22 of this rule's 43 ms loop**. A binary search on the
@@ -154,15 +152,12 @@ impl Check for Unused {
             .collect();
         bodies.sort_by_key(|body| body.start);
 
-        let walked = started.elapsed().as_millis();
-        let mut locals = 0usize;
         for fact in &context.summary.declarations {
             // **A local variable inside a function body**, which is the only shape this rule claims — see the module
             // documentation for the reasoning behind each condition.
             if !fact.local || fact.kind != crate::DeclKind::Variable {
                 continue;
             }
-            locals += 1;
             // **The comparison happens in the rendering's coordinates**, because the two sides come from different
             // places: `fact.range` is the file's — see `CheckContext::written` — while a body's range is the tree's,
             // which is the rendering. Asking without the crossing is how this guard first went wrong: a fixture whose

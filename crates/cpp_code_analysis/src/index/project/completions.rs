@@ -369,7 +369,6 @@ pub fn name_completions_at(
     let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
-    let phase = std::time::Instant::now();
 
     // **What is typed decides how much is read**, and the difference is not small. The index half of this query
     // collects every declaration of every file the cursor can see — measured on a real file that includes
@@ -559,7 +558,6 @@ pub(crate) fn visible_names(
 
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
-    let phase = std::time::Instant::now();
 
     // **The class a separated definition belongs to.** `int Source::GetLine(int) { … }` in a `.cpp` declares no scope for
     // `Source` here — the class is in a header — so the scope chain below has no class to offer members from, and a
@@ -576,8 +574,6 @@ pub(crate) fn visible_names(
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
-
-    let chain_phase = std::time::Instant::now();
 
     for (depth, scope) in chain.iter().copied().enumerate() {
         let Some(data) = scopes.scope(scope) else {
@@ -644,7 +640,6 @@ pub(crate) fn visible_names(
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
 
-    let global_phase = std::time::Instant::now();
     names.extend(global_offers(
         index,
         scopes,
@@ -654,7 +649,6 @@ pub(crate) fn visible_names(
         written,
     ));
 
-    let sort_phase = std::time::Instant::now();
     sort_and_hide(&mut names);
 
     Known::Yes(names)

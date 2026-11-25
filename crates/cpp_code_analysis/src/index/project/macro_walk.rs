@@ -714,7 +714,7 @@ impl ProjectIndex {
             .clear();
 
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
-        let tracing = false
+        let _tracing = false
             && (path.ends_with("stl_map.h")
                 || path.ends_with("iostream")
                 || path.ends_with("json.hpp"));
@@ -1734,9 +1734,8 @@ impl ProjectIndex {
         // translation unit this question is asked from** — the reading every file's answer is
         // chosen by.
         let asking = self.the_program_that_read(visible_from);
-        let walk_started = std::time::Instant::now();
-        let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
-        let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
+        let _asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
+        let _nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (walk, walk_files) = self.the_visible_walk(visible_from);
         let files = walk_files.as_ref();
         let through_an_import = &walk.through_an_import;
@@ -2164,9 +2163,7 @@ impl ProjectIndex {
         // function asks is not a second implementation of the walk — it is the same walk, told to report the files
         // it enters. That is the rule the module keeps being bitten by: one question, one implementation.
         let mut seen = Seen::new(&from);
-        let macros_started = std::time::Instant::now();
         let mut state = self.macros.clone();
-        let macros_cloned = macros_started.elapsed();
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
 
         self.macro_candidates(
@@ -2638,7 +2635,6 @@ impl ProjectIndex {
                             None => {
                                 // **What a condition costs, counted** — the probe that says whether a warm walk is
                                 // warm because the memo works or because there was nothing to ask.
-                                let started = std::time::Instant::now();
                                 let answer = crate::index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
@@ -2906,7 +2902,6 @@ impl ProjectIndex {
         {
             return known;
         }
-        let started = std::time::Instant::now();
         let answer = self.definitions_inner(name, visible_from);
 
         if let Ok(mut memo) = self.definition_answers.lock() {

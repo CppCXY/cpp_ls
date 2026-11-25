@@ -955,7 +955,6 @@ pub fn members_of_with(
     // Measured on `LuaSource.cpp`: 17 lists, 82 ms of a 157 ms pull, every keystroke. The cache is invalidated by
     // *which files the list was made of*, so an edit to a file that contributes members drops exactly those lists
     // (see [`CachedMemberList`]).
-    let started = std::time::Instant::now();
     let key = (class.to_string(), path.to_path_buf());
     if let Some(known) = index.cached_member_list(&key) {
         return known;
@@ -1735,9 +1734,8 @@ pub(crate) fn substitute_a_base_clause(
     if names.is_empty() {
         return clause.to_string();
     }
-    let substituted = crate::sema::types::substituted_spelling(clause, &names, &arguments);
 
-    substituted
+    crate::sema::types::substituted_spelling(clause, &names, &arguments)
 }
 
 /// Every declaration written **directly in** the class or namespace `class` names.
