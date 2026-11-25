@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse, pathlib, re, subprocess, sys
 
 SKIP_PARTS = {"target", ".git", ".cppls"}
-USE = re.compile(r"^\s*(?:pub\s+)?use\b")
+USE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\b")
 MOD = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 PATH = re.compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*)")
 MACRO = re.compile(r"^\s*(?:macro_rules!|macro)\s+([A-Za-z_][A-Za-z0-9_]*)")
