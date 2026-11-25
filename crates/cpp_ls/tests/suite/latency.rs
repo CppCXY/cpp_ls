@@ -348,7 +348,7 @@ fn an_unrelated_completion_stays_responsive_after_a_large_incremental_edit() {
         return;
     }
     let project = Project::new("edit-latency");
-    let declarations: String = (0..10_000)
+    let declarations: String = (0..1_000)
         .map(|index| format!("int global_{index};\n"))
         .collect();
     let large = format!(

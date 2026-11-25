@@ -105,14 +105,12 @@ const PREPARE_INDEX_SLICE: usize = 24;
 /// milliseconds on a local project — and this is the bound on that wait.
 const PREPARE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
-use tokio::sync::{Mutex, Notify, Semaphore, watch};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::context::RequestOutcome;
 
@@ -132,10 +130,6 @@ pub struct AnalysisState {
     worst_write_hold: Arc<std::sync::atomic::AtomicU64>,
     /// "The queue has work in it" — how an edit reaches the task that reads.
     work: Arc<Notify>,
-    /// **Per-file semantic readiness.** A content edit publishes its text immediately; the focus worker rebuilds
-    /// that file's summary/rendering afterwards. Requests about the file wait on this event (not on a timeout), while
-    /// requests about any other file read the last stable snapshot and never see the edit's preparation.
-    semantic: Mutex<HashMap<PathBuf, watch::Sender<u64>>>,
 }
 
 /// **How long an update may hold the analysis before it is a defect.**
@@ -187,55 +181,6 @@ impl AnalysisState {
             file_read_gate: Arc::new(Mutex::new(())),
             worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
-            semantic: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// **Mark files whose edit has been applied but whose semantic reading is still being prepared.**
-    pub async fn mark_semantic_pending(&self, paths: &[PathBuf]) {
-        let mut semantic = self.semantic.lock().await;
-        for path in paths {
-            let (sender, _) = watch::channel(0);
-            semantic.insert(path.clone(), sender);
-        }
-    }
-
-    /// **Mark a file's semantic reading ready**, releasing every request waiting for it.
-    pub async fn mark_semantic_ready(&self, path: &std::path::Path) {
-        if let Some(sender) = self.semantic.lock().await.remove(path) {
-            let _ = sender.send(1);
-        }
-    }
-
-    /// **Wait for one file's current semantic reading**, on the read side.
-    ///
-    /// This is an event, not a timeout: the focus worker always publishes (ready or failed), and the request's own
-    /// cancellation token ends the wait when the client no longer wants the answer. Requests about other files do not
-    /// observe this file's gate at all.
-    pub async fn wait_for_semantic(
-        &self,
-        path: &std::path::Path,
-        cancel: &CancellationToken,
-    ) -> bool {
-        loop {
-            let mut receiver = {
-                let semantic = self.semantic.lock().await;
-                match semantic.get(path) {
-                    Some(sender) => sender.subscribe(),
-                    None => return true,
-                }
-            };
-            if *receiver.borrow_and_update() > 0 {
-                return true;
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return false,
-                changed = receiver.changed() => {
-                    if changed.is_err() || *receiver.borrow() > 0 {
-                        return true;
-                    }
-                }
-            }
         }
     }
 

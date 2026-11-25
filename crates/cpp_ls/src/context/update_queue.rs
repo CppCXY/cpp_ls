@@ -461,31 +461,17 @@ async fn process_batch(snapshot: &ServerContextSnapshot, events: Vec<UpdateEvent
                 }
                 texts.push((path, text));
             }
-            UpdateEvent::Closed(params) => {
-                // **A close is more than text**: it clears diagnostics and inactive regions, and returns the path to
-                // the filesystem. It is rare, so it keeps the ordered side-effecting path rather than riding the text
-                // batch, which only replaces a buffer.
-                apply_text_batch(snapshot, std::mem::take(&mut texts)).await;
-                process(snapshot, UpdateEvent::Closed(params)).await;
-            }
-            // **An open must be applied in order.** A client may send `Opened(B)` after `Changed(A)`; applying A
-            // while B is still unopened would make B's first change fail with "the document is not open". Flush the
-            // pending text at the open boundary.
-            UpdateEvent::Opened(params) => {
-                apply_text_batch(snapshot, std::mem::take(&mut texts)).await;
-                process(snapshot, UpdateEvent::Opened(params)).await;
-            }
+            // Ordering boundaries: an open/close/other event is applied in sequence, not after a later change.
             other => {
                 apply_text_batch(snapshot, std::mem::take(&mut texts)).await;
                 process(snapshot, other).await;
             }
         }
     }
-
     apply_text_batch(snapshot, texts).await;
 }
 
-/// Apply one client run's document text under a single session write, then update its index impact.
+/// Apply one client run's document text under a single session write, then prepare its reading.
 async fn apply_text_batch(
     snapshot: &ServerContextSnapshot,
     texts: Vec<(std::path::PathBuf, String)>,
@@ -493,50 +479,34 @@ async fn apply_text_batch(
     if texts.is_empty() {
         return;
     }
-    let affected: Vec<std::path::PathBuf> = texts.iter().map(|(path, _)| path.clone()).collect();
-    let changed = texts;
+    let changed: Vec<std::path::PathBuf> = texts.iter().map(|(path, _)| path.clone()).collect();
+    let changed_for_the_write = texts;
+    let started = std::time::Instant::now();
     snapshot
         .analysis()
         .update_session("apply client content", move |session| {
-            for (path, text) in changed {
+            for (path, text) in changed_for_the_write {
                 session.did_open_as(&path, &text, None);
+            }
+            for path in &changed {
+                let phase = std::time::Instant::now();
+                session.catch_up(path);
+                let caught = phase.elapsed();
+                let phase = std::time::Instant::now();
+                session.cook(path);
+                log::info!(
+                    "writer phase: {} catch_up {:?}, cook {:?}",
+                    path.display(),
+                    caught,
+                    phase.elapsed()
+                );
             }
         })
         .await;
-    // **A header edit changes what its includers can name**, and a request about an includer must wait for the
-    // includer's own catch-up, not just for the changed header's. The open documents are the set of readers this
-    // server is holding; marking them all is the conservative boundary until the include-dependency version map is in
-    // place. A file with no edit to it catches up in one parse.
-    let mut semantic_paths = affected;
-    {
-        let open = snapshot
-            .workspace_manager()
-            .lock()
-            .await
-            .open_document_versions();
-        for (uri, _) in open {
-            if let Some(path) = crate::util::uri_to_file_path(&uri)
-                && !semantic_paths.contains(&path)
-            {
-                semantic_paths.push(path);
-            }
-        }
-    }
-    snapshot
-        .analysis()
-        .mark_semantic_pending(&semantic_paths)
-        .await;
-    // **The index impact is a focus-worker job, not part of the write lock.** The edit's applied sequence is the
-    // request barrier for its text; the semantic work is started here and published when it is ready. This is the
-    // step that stops one large file's summary rebuild from blocking every unrelated completion.
-    for path in semantic_paths {
-        let catch_up = snapshot.clone();
-        tokio::spawn(async move {
-            catch_up.analysis().catch_up(&path).await;
-            catch_up.analysis().mark_semantic_ready(&path).await;
-            crate::handlers::inactive_regions::publish_all(&catch_up).await;
-        });
-    }
+    log::info!(
+        "writer phase: one content batch took {:?}",
+        started.elapsed()
+    );
     snapshot.analysis().wake();
     snapshot
         .diagnostics()

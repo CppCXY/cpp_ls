@@ -119,14 +119,9 @@ pub async fn on_completion(
     // rendering owns bindings, types and members. Asking for the current buffer's rendering here is what makes a
     // macro-declared local (`kvec_t(int64_t) ids`) visible on the **first** completion after an edit, instead of
     // only when some other request happened to have left a rendering warm.
-    // **The writer has applied the text; the focus worker publishes the matching semantic reading.** A request about
-    // this file waits for that event (cancellable, no timeout); a request about another file never reaches this wait.
-    if let Some(path) = requested_path.as_ref() {
-        context
-            .analysis()
-            .wait_for_semantic(path, &cancel_token)
-            .await;
-    }
+    // **No readiness check and no timeout.** The update queue applies an edit and its index impact under the
+    // session's write lock; a read lock acquired here is therefore a lock acquired after that work, which is the
+    // barrier. If a query needs a fact, the writer owed it before releasing.
     let from_the_rendering = match requested_path.as_ref() {
         Some(path) => {
             context
