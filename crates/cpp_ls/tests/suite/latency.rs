@@ -542,6 +542,19 @@ fn measure_neovim_completion_before_and_after_an_edit() {
     let text = std::fs::read_to_string(&file).expect("the neovim file");
     let uri = uri_of(&file);
     let log = std::env::temp_dir().join(format!("cppls-neovim-completion-{}", std::process::id()));
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in text
+                .lines()
+                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
+            {
+                eprintln!("[server] {line}");
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&log);
     let mut server = Server::start_with_log(&root, log.clone());
 
@@ -798,9 +811,302 @@ fn measure_neovim_completion_before_and_after_an_edit() {
             }
         }
     }
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in text
+                .lines()
+                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
+            {
+                eprintln!("[server] {line}");
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&log);
 }
 
+/// **Several real neovim files, one edit each, every provider at once.**
+///
+/// Ignored by default: it needs `CPPLS_NEovim_PROJECT`. It opens four files that are not the earlier `channel.c`
+/// benchmark, appends a comment to each, and immediately pipelines completion, codeLens, inlayHint,
+/// semanticTokens/full and diagnostic requests. The report is per-file first response and aggregate p95; the
+/// assertions are "the server answered every request" and "completion still has items", not a synthetic budget.
+#[test]
+#[ignore = "measures real neovim files; set CPPLS_NEovim_PROJECT"]
+fn measure_neovim_concurrent_providers_on_an_edit() {
+    if not_the_product() {
+        return;
+    }
+    let Some(root) = std::env::var_os("CPPLS_NEovim_PROJECT").map(PathBuf::from) else {
+        eprintln!("skipped: set CPPLS_NEovim_PROJECT to the neovim checkout");
+        return;
+    };
+    let files = [
+        "src/nvim/channel.c",
+        "src/nvim/buffer.c",
+        "src/nvim/message.c",
+        "src/nvim/eval.c",
+    ];
+    let mut targets = Vec::new();
+    for name in files {
+        let path = root.join(name);
+        let text = std::fs::read_to_string(&path).expect("the neovim file");
+        let marker = if name.ends_with("channel.c") {
+            "KV_INITIAL_VALUE"
+        } else {
+            "return "
+        };
+        let (line, character) = position_of(&text, marker);
+        let line_count = text.lines().count() as u32;
+        let end_character = text.lines().last().map_or(0, |line| line.len()) as u32;
+        targets.push((
+            path,
+            text,
+            line,
+            character + marker.len() as u32,
+            line_count,
+            end_character,
+        ));
+    }
+
+    let log = std::env::temp_dir().join(format!("cppls-neovim-concurrent-{}", std::process::id()));
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in text
+                .lines()
+                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
+            {
+                eprintln!("[server] {line}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&log);
+    let mut server = Server::start_with_log(&root, log.clone());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(&root),
+            "capabilities": { "window": { "workDoneProgress": true } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    for (index, (path, text, _, _, _, _)) in targets.iter().enumerate() {
+        server.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri_of(path),
+                    "languageId": "c",
+                    "version": 1,
+                    "text": text,
+                }
+            }),
+        );
+        let _ = index;
+    }
+    std::thread::sleep(Duration::from_secs(12));
+
+    let mut sequential = Vec::new();
+    for (path, _, line, character, _, _) in &targets {
+        let started = Instant::now();
+        let answer = server.request(
+            10,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri_of(path) },
+                "position": { "line": line, "character": character },
+            }),
+        );
+        let took = started.elapsed();
+        let items = answer["result"]["items"].as_array().map_or(0, Vec::len);
+        eprintln!(
+            "[concurrent] baseline completion {}: {} ms, {items} item(s)",
+            path.display(),
+            took.as_millis()
+        );
+        sequential.push(took);
+    }
+
+    // **The same five providers, one after another, on one file** — the comparison that says whether a concurrent
+    // p95 is lock contention or simply five full-file queries sharing the CPU.
+    let (path, _, line, character, line_count, end_character) = &targets[0];
+    let mut sequential_providers = Vec::new();
+    for (offset, method) in [
+        "completion",
+        "codeLens",
+        "inlayHint",
+        "semanticTokens/full",
+        "diagnostic",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let started = Instant::now();
+        let params = match method {
+            "completion" => json!({
+                "textDocument": { "uri": uri_of(path) },
+                "position": { "line": line, "character": character },
+            }),
+            "diagnostic" => json!({ "textDocument": { "uri": uri_of(path) } }),
+            "codeLens" => json!({ "textDocument": { "uri": uri_of(path) } }),
+            _ => json!({
+                "textDocument": { "uri": uri_of(path) },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": line_count, "character": end_character },
+                },
+            }),
+        };
+        let method = if method == "semanticTokens/full" {
+            "textDocument/semanticTokens/full".to_string()
+        } else {
+            format!("textDocument/{method}")
+        };
+        let _ = server.request(200 + offset as i64, &method, params);
+        sequential_providers.push(started.elapsed());
+        eprintln!(
+            "[concurrent] sequential {}: {} ms",
+            method,
+            started.elapsed().as_millis()
+        );
+    }
+    let sequential_providers_total: Duration = sequential_providers.iter().sum();
+
+    // **One file at a time, five providers at once.** Editing four large files before asking makes every answer wait
+    // for one writer batch; that measures the batch, not provider concurrency. Here the edit and the batch are scoped
+    // to the same file, and the next file starts only after this one's five answers are in.
+    let mut all: Vec<(String, Duration)> = Vec::new();
+    for (index, (path, _, line, character, line_count, end_character)) in targets.iter().enumerate()
+    {
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri_of(path), "version": 2 },
+                "contentChanges": [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 },
+                    },
+                    "text": "// concurrent probe\n",
+                }],
+            }),
+        );
+        let completion_line = line + 1;
+        let mut pending: Vec<(i64, &'static str)> = Vec::new();
+        let batch_started = Instant::now();
+        for method in [
+            "completion",
+            "codeLens",
+            "inlayHint",
+            "semanticTokens/full",
+            "diagnostic",
+        ] {
+            let id = 1000 + index as i64 * 10 + pending.len() as i64;
+            let params = match method {
+                "completion" => json!({
+                    "textDocument": { "uri": uri_of(path) },
+                    "position": { "line": completion_line, "character": character },
+                }),
+                "diagnostic" => json!({ "textDocument": { "uri": uri_of(path) } }),
+                "codeLens" => json!({ "textDocument": { "uri": uri_of(path) } }),
+                _ => json!({
+                    "textDocument": { "uri": uri_of(path) },
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": line_count, "character": end_character },
+                    },
+                }),
+            };
+            let method = if method == "semanticTokens/full" {
+                "textDocument/semanticTokens/full".to_string()
+            } else {
+                format!("textDocument/{method}")
+            };
+            let label = match method.as_str() {
+                "textDocument/completion" => "completion",
+                "textDocument/codeLens" => "codeLens",
+                "textDocument/inlayHint" => "inlayHint",
+                "textDocument/semanticTokens/full" => "semanticTokens",
+                _ => "diagnostic",
+            };
+            server.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+            pending.push((id, label));
+        }
+        while !pending.is_empty() {
+            let message = server.wait_for(|message| {
+                message
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| pending.iter().any(|(candidate, _)| *candidate == id))
+            });
+            let id = message["id"].as_i64().unwrap();
+            let position = pending
+                .iter()
+                .position(|(candidate, _)| *candidate == id)
+                .unwrap();
+            let (_, label) = pending.remove(position);
+            let at = batch_started.elapsed();
+            eprintln!(
+                "[concurrent] {} {label}: {} ms",
+                path.file_name().unwrap().to_string_lossy(),
+                at.as_millis()
+            );
+            all.push((label.to_string(), at));
+        }
+    }
+
+    let mut times: Vec<Duration> = all.iter().map(|(_, at)| *at).collect();
+    times.sort();
+    let p95 = times[(times.len() * 95).div_ceil(100) - 1];
+    let mut by_provider: std::collections::BTreeMap<&str, Vec<u128>> =
+        std::collections::BTreeMap::new();
+    for (label, at) in &all {
+        by_provider
+            .entry(label.as_str())
+            .or_default()
+            .push(at.as_millis());
+    }
+    for (label, mut values) in by_provider {
+        values.sort();
+        eprintln!(
+            "[concurrent] {label}: p50 {} ms, max {} ms",
+            values[values.len() / 2],
+            values.last().unwrap()
+        );
+    }
+    eprintln!(
+        "[concurrent] {} request(s): p50 {} ms, p95 {} ms, max {} ms; sequential baseline p50 {} ms",
+        times.len(),
+        times[times.len() / 2].as_millis(),
+        p95.as_millis(),
+        times.last().unwrap().as_millis(),
+        {
+            sequential.sort();
+            sequential[sequential.len() / 2].as_millis()
+        }
+    );
+    if let Ok(entries) = std::fs::read_dir(&log) {
+        for entry in entries.flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in text
+                .lines()
+                .filter(|line| line.contains("writer phase") || line.contains("cook:"))
+            {
+                eprintln!("[server] {line}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&log);
+}
 fn uri_of(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     format!("file:///{}", text.trim_start_matches('/'))

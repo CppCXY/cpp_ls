@@ -639,3 +639,50 @@ unrelated completion  p95 59 ms
 same-file completion  p95 73 ms
 diagnostic            p95 65 ms
 ```
+### 2026-11-25：neovim 多文件并发测量
+
+被测文件：`channel.c`、`buffer.c`、`message.c`、`eval.c`。每个文件单独编辑一次，然后在编辑后同时发
+completion、codeLens、inlayHint、semanticTokens/full、diagnostic 五个请求。
+
+顺序基线（只测 completion）：
+
+```text
+channel.c   338 ms, 1 item
+buffer.c    930 ms, 1000 items
+message.c   277 ms, 0 items
+eval.c     2151 ms, 1000 items
+```
+
+`channel.c` 五个 provider 顺序执行：
+
+```text
+completion        391 ms
+codeLens          127 ms
+inlayHint        1200 ms
+semanticTokens   2753 ms
+diagnostic        551 ms
+五者合计        5022 ms
+```
+
+同样五个 provider 对同文件并发：
+
+```text
+p50 3812 ms, p95 6839 ms, max 7426 ms（20 个请求，四个文件）
+provider 中位：codeLens 3889, inlayHint 4113, completion 5140,
+               semanticTokens 3330, diagnostic 6477 ms
+```
+
+结论：**并发没有带来并行加速**；五个请求的总延迟接近顺序执行之和。它们分享同一套 analysis 工作，
+而且在编辑后的 writer batch 上排队。writer 阶段本身：
+
+```text
+channel.c  catch_up 199 ms, cook 224 ms, batch 454 ms
+buffer.c   catch_up 269 ms, cook 237 ms, batch 1471 ms
+message.c  catch_up 251 ms, cook 240 ms, batch 1837 ms
+eval.c     catch_up 303 ms, cook 238 ms, batch 1298 ms
+```
+
+batch 明显大于 catch_up+cook，说明编辑之外的 index/pump 工作也在同一 publication 边界内排队。
+
+可用性：20 个请求全部有响应，没有崩溃/超时；但 `message.c` 选的基线位置 completion 为 0 项，
+该位置不是可靠可用性样本。
