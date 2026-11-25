@@ -77,8 +77,20 @@ pub fn build_facts(
     // half of the standard library's facts are those locals (measured on `import std;`: 29 067 of 61 337).
     keep_locals: bool,
 ) -> (Vec<DeclFact>, SummaryGuards) {
+    let preparing = std::time::Instant::now();
     let file = DeclarationFacts::new(scopes, preprocessing, root, errors, keep_locals);
-    file.build()
+    eprintln!(
+        "[facts] prepare {:.1} ms ({} declaration(s))",
+        preparing.elapsed().as_secs_f64() * 1000.0,
+        usize::from(root.text().len())
+    );
+    let walking = std::time::Instant::now();
+    let built = file.build();
+    eprintln!(
+        "[facts] build {:.1} ms",
+        walking.elapsed().as_secs_f64() * 1000.0
+    );
+    built
 }
 
 /// The type a variable-like declaration was written with, as it is spelled before the name.
