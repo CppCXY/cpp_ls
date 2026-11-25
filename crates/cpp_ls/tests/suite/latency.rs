@@ -998,20 +998,27 @@ fn measure_neovim_concurrent_providers_on_an_edit() {
     let mut all: Vec<(String, Duration)> = Vec::new();
     for (index, (path, _, line, character, line_count, end_character)) in targets.iter().enumerate()
     {
-        server.notify(
-            "textDocument/didChange",
-            json!({
-                "textDocument": { "uri": uri_of(path), "version": 2 },
-                "contentChanges": [{
-                    "range": {
-                        "start": { "line": 0, "character": 0 },
-                        "end": { "line": 0, "character": 0 },
-                    },
-                    "text": "// concurrent probe\n",
-                }],
-            }),
-        );
-        let completion_line = line + 1;
+        // **Warm the Preamble cache once, then edit the body for the measured batch.** The first cook builds the
+        // prefix; the second edit is the body-only path. Inserting below the completion line keeps its position.
+        for version in [2, 3] {
+            server.notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri_of(path), "version": version },
+                    "contentChanges": [{
+                        "range": {
+                            "start": { "line": line + 2, "character": 0 },
+                            "end": { "line": line + 2, "character": 0 },
+                        },
+                        "text": "// concurrent probe\n",
+                    }],
+                }),
+            );
+            if version == 2 {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        let completion_line = *line;
         let mut pending: Vec<(i64, &'static str)> = Vec::new();
         let batch_started = Instant::now();
         for method in [

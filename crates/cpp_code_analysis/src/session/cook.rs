@@ -398,7 +398,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .and_then(|cache| cache.get(&queue_key(&path)).cloned())
             .filter(|preamble| {
                 text.starts_with(&preamble.source_prefix)
-                    && crate::preprocess::directive::directive_signature(&text).preamble_end
+                    && crate::preprocess::directive::directive_signature(&text).leading_end
                         == preamble.preamble_end
             })
             .map(std::sync::Arc::new);
@@ -529,14 +529,37 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         let rendered_suffix = stream.render();
-        let rendered = match preamble {
-            Some(preamble) => cpp_toolchain::preprocess::cooked::RenderedCooked::join(
-                &preamble.rendered,
-                rendered_suffix,
-            ),
-            None => rendered_suffix,
-        };
         let indexer = FileIndexer::new(files, config);
+        let indexed = if let Some(preamble) = preamble
+            && Self::prefix_is_top_level(&preamble.rendered.text)
+        {
+            // **The prefix is already parsed.** Parse only the body and merge the two summaries; fall back to the
+            // whole rendering when the body alone does not parse (it can start inside a construct the prefix opened).
+            let body_indexed = indexer.index_rendering(path, &rendered_suffix, *key);
+            if body_indexed.diagnostics.is_empty() && body_indexed.unplaced == 0 {
+                log::info!(
+                    "preamble body-only parse: {} (prefix {} byte(s))",
+                    path.display(),
+                    preamble.preamble_end
+                );
+                let rendered = cpp_toolchain::preprocess::cooked::RenderedCooked::join(
+                    &preamble.rendered,
+                    rendered_suffix,
+                );
+                Self::merge_prefix_and_body(&preamble.indexed, body_indexed, &rendered)
+            } else {
+                let rendered = cpp_toolchain::preprocess::cooked::RenderedCooked::join(
+                    &preamble.rendered,
+                    rendered_suffix,
+                );
+                indexer.index_rendering(path, &rendered, *key)
+            }
+        } else {
+            indexer.index_rendering(path, &rendered_suffix, *key)
+        };
+        // **The rendering `view` and `map_into_the_file` need**, built after the index decision so the fast path
+        // still has one contiguous coordinate space. The parser never reads it on that path.
+        let rendered = std::sync::Arc::clone(&indexed.rendered);
         if crate::probes::cooking() {
             eprintln!(
                 "render_cook: {} text {} tokens {} rendered {} ({})",
@@ -547,7 +570,26 @@ impl<F: FileProvider + Clone> Session<F> {
                 if unit.is_some() { "unit" } else { "composed" }
             );
         }
-        let indexed = indexer.index_rendering(path, &rendered, *key);
+        let preamble_cache = if preamble.is_none() {
+            let signature = crate::preprocess::directive::directive_signature(text);
+            if signature.leading_end > 0
+                && let Some(prefix) = rendered.prefix_through(signature.leading_end)
+                && !prefix.text.trim().is_empty()
+                && Self::prefix_is_top_level(&prefix.text)
+            {
+                let prefix_indexed = indexer.index_rendering(path, &prefix, *key);
+                Some(std::sync::Arc::new(PreambleRendering {
+                    source_prefix: text[..signature.leading_end].to_string(),
+                    preamble_end: signature.leading_end,
+                    rendered: std::sync::Arc::new(prefix),
+                    indexed: std::sync::Arc::new(prefix_indexed),
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let reading = CookedReading {
             declarations: indexed.summary.declarations.len(),
             only_after_expansion: indexed
@@ -564,7 +606,8 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash: *text_hash,
             indexed,
             reading,
-            rendered: std::sync::Arc::new(rendered),
+            rendered,
+            preamble: preamble_cache,
             revision: revision.clone(),
         })
     }
@@ -585,7 +628,8 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             indexed,
             reading,
-            rendered,
+            rendered: _,
+            preamble,
             revision,
         } = rendered;
         let path = indexed.summary.path.clone();
@@ -610,22 +654,12 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
 
-        // **Publish the verified prefix with the commit**, not after it: `rendered` was previously dropped here, and
-        // the Preamble cache must be built from the rendering whose hash was just validated.
-        if let Some(text) = self.text(&path) {
-            let signature = crate::preprocess::directive::directive_signature(&text);
-            if signature.preamble_end > 0
-                && let Some(prefix) = rendered.prefix_through(signature.preamble_end)
-            {
-                let entry = PreambleRendering {
-                    source_prefix: text[..signature.preamble_end].to_string(),
-                    preamble_end: signature.preamble_end,
-                    rendered: std::sync::Arc::new(prefix),
-                };
-                if let Ok(mut cache) = self.preamble_renderings.lock() {
-                    cache.insert(queue_key(&path), entry);
-                }
-            }
+        // **Publish the verified prefix with the commit**, built by `render_cook` from the rendering whose hash was
+        // just validated. It carries both the prefix rendering and the prefix's one-time parse.
+        if let Some(entry) = preamble
+            && let Ok(mut cache) = self.preamble_renderings.lock()
+        {
+            cache.insert(queue_key(&path), (*entry).clone());
         }
         // **The rendering is remembered, not dropped.** This is the half that was missing, and its absence is why
         // `Session::view` could answer `None` for a file whose rendering had *just* been built and parsed: the facts
@@ -712,6 +746,68 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
         Some(reading)
+    }
+
+    /// **Does a rendered prefix end at the top level?** A body parsed alone is only meaningful when the prefix has not
+    /// opened a namespace, class or function. Strings and characters are skipped so braces in literals do not count.
+    fn prefix_is_top_level(rendered: &str) -> bool {
+        let mut depth = 0i32;
+        let mut quote = None;
+        let mut escaped = false;
+        for character in rendered.chars() {
+            if let Some(open) = quote {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == open {
+                    quote = None;
+                }
+                continue;
+            }
+            match character {
+                '"' | '\'' => quote = Some(character),
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth == 0
+    }
+
+    /// **A full reading from a cached prefix summary and a freshly parsed body.**
+    ///
+    /// The body's parse errors are empty on this path (the caller falls back otherwise), so its diagnostics are the
+    /// body's own; the prefix's diagnostics come from the cached parse. Ranges are already file coordinates on both
+    /// sides. `use_filter` is the union of the two names, not a replacement.
+    fn merge_prefix_and_body(
+        prefix: &crate::IndexedRendering,
+        body: crate::IndexedRendering,
+        rendered: &cpp_toolchain::preprocess::cooked::RenderedCooked,
+    ) -> crate::IndexedRendering {
+        let mut summary = prefix.summary.clone();
+        summary.declarations.extend(body.summary.declarations);
+        summary.macros.extend(body.summary.macros);
+        summary.includes.extend(body.summary.includes);
+        summary.macro_readings.extend(body.summary.macro_readings);
+        if summary.use_filter.len() < body.summary.use_filter.len() {
+            summary.use_filter.resize(body.summary.use_filter.len(), 0);
+        }
+        for (index, byte) in body.summary.use_filter.iter().enumerate() {
+            summary.use_filter[index] |= byte;
+        }
+        let mut diagnostics = prefix.diagnostics.clone();
+        diagnostics.extend(body.diagnostics);
+        crate::IndexedRendering {
+            summary,
+            rendered: std::sync::Arc::new(rendered.clone()),
+            mapped: crate::MapReport {
+                placed: prefix.mapped.placed + body.mapped.placed,
+                dropped: prefix.mapped.dropped + body.mapped.dropped,
+            },
+            diagnostics,
+            unplaced: prefix.unplaced + body.unplaced,
+        }
     }
 
     /// **Write the cooked readings whose edit has been quiet long enough**, outside the analysis write lock.

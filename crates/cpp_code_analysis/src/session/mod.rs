@@ -1555,6 +1555,8 @@ pub struct PreambleRendering {
     pub source_prefix: String,
     pub preamble_end: usize,
     pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    /// The prefix parsed **once**: body-only cooks reuse its summary instead of re-parsing the prefix text.
+    pub indexed: std::sync::Arc<crate::IndexedRendering>,
 }
 
 pub struct RenderedCook {
@@ -1565,6 +1567,8 @@ pub struct RenderedCook {
     /// The raw rendering, kept for a Preamble cache. The indexer consumes a reference; the rendering itself was
     /// previously dropped here, which is why a prefix could not be published with the commit.
     pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    /// The prefix this rendering was built over, when a body-only cook can reuse it.
+    pub preamble: Option<std::sync::Arc<PreambleRendering>>,
     revision: SessionRevision,
 }
 
