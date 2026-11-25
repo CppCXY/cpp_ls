@@ -16,36 +16,46 @@ SKIP_PARTS = {"target", ".git", ".cppls"}
 USE = re.compile(r"^\s*(?:pub\s+)?use\b")
 MOD = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 PATH = re.compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*)")
+MACRO = re.compile(r"^\s*(?:macro_rules!|macro)\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+def blank(seg: str) -> str:
+    return ''.join('\n' if c=='\n' else ' ' for c in seg)
 
 def masked(text: str) -> str:
-    out=[]; i=0; block=0; line=False; quote=None; raw_hashes=0
-    while i < len(text):
-        c=text[i]
-        if line:
-            if c=='\n': line=False; out.append(c)
-            else: out.append(' ')
-            i+=1; continue
-        if block:
-            if text.startswith('/*',i): block+=1; out.extend('  '); i+=2; continue
-            if text.startswith('*/',i): block-=1; out.extend('  '); i+=2; continue
-            out.append('\n' if c=='\n' else ' '); i+=1; continue
-        if quote:
-            if c=='\\': out.extend('  '); i+=2; continue
-            if c==quote: quote=None
-            out.append('\n' if c=='\n' else ' '); i+=1; continue
-        if text.startswith('//',i): line=True; out.extend('  '); i+=2; continue
-        if text.startswith('/*',i): block=1; out.extend('  '); i+=2; continue
-        if c=='r' and text.startswith('r#"',i) or c=='r' and text.startswith('r"',i):
-            # raw strings, including hashes
-            j=i+1; hashes=0
-            while j < len(text) and text[j]=='#': hashes+=1; j+=1
-            if j < len(text) and text[j]=='"':
-                end=text.find('"'+'#'*hashes, j+1)
-                if end < 0: break
-                seg=text[i:end+1+hashes]
-                out.extend('\n' if ch=='\n' else ' ' for ch in seg); i=end+1+hashes; continue
-        if c in ('"',"'"): quote=c; out.append(' '); i+=1; continue
-        out.append(c); i+=1
+    out=[]; i=0; n=len(text)
+    while i < n:
+        if text.startswith('//',i):
+            j=text.find('\n',i)
+            if j<0: j=n
+            out.append(blank(text[i:j])); i=j; continue
+        if text.startswith('/*',i):
+            depth=1; j=i+2
+            while j<n and depth:
+                if text.startswith('/*',j): depth+=1; j+=2
+                elif text.startswith('*/',j): depth-=1; j+=2
+                else: j+=1
+            out.append(blank(text[i:j])); i=j; continue
+        # raw string: r"..." / r#"..."# / br#"..."#
+        m=re.match(r'b?r(#*)"',text[i:])
+        if m:
+            hashes=m.group(1); start=i; i+=m.end()
+            close='"'+hashes
+            j=text.find(close,i)
+            if j<0: j=n
+            else: j+=len(close)
+            out.append(blank(text[start:j])); i=j; continue
+        if text[i] in ('"',"'"):
+            quote=text[i]
+            # A lone apostrophe is a lifetime, not a char literal.
+            if quote=="'" and not (i+2<n and text[i+2]=="'"):
+                out.append("'"); i+=1; continue
+            j=i+1
+            while j<n:
+                if text[j]=='\\': j+=2; continue
+                if text[j]==quote: j+=1; break
+                j+=1
+            out.append(blank(text[i:j])); i=j; continue
+        out.append(text[i]); i+=1
     return ''.join(out)
 
 def scopes(m: str):
@@ -68,6 +78,18 @@ def scopes(m: str):
         result.append((start,end,indent))
     return result
 
+def macro_spans(m: str):
+    lines=m.split('\n'); spans=[]
+    for no,line in enumerate(lines,1):
+        if not MACRO.match(line): continue
+        d=0; end=no
+        for at in range(no,len(lines)+1):
+            d += lines[at-1].count('{')-lines[at-1].count('}')
+            if '{' in '\n'.join(lines[no-1:at]) and d<=0:
+                end=at; break
+        spans.append((no,end))
+    return spans
+
 def file_info(path: pathlib.Path):
     text=path.read_text(encoding='utf-8'); m=masked(text); lines=text.split('\n'); ml=m.split('\n')
     scopes_list=scopes(m)
@@ -77,8 +99,10 @@ def file_info(path: pathlib.Path):
             if s[0] <= no <= s[1] and s[0] >= best[0]: best=s
         return best
     occurrences=[]
+    macros=macro_spans(m)
     in_use=False
     for no,line in enumerate(ml,1):
+        if any(a<=no<=b for a,b in macros): continue
         s=line.strip()
         if in_use or USE.match(line):
             if ';' in line: in_use=False
@@ -132,40 +156,48 @@ def fix(paths, verify=True):
     for p in paths:
         text,lines,occ=file_info(p)
         if not occ: continue
-        existing=existing_names(text)
         by_scope={}
         for no,col,seg,sc in occ:
-            key=(sc[0],sc[2])
-            by_scope.setdefault(key,{}).setdefault(seg,set()).add(no)
+            by_scope.setdefault((sc[0],sc[1],sc[2]),set()).add(seg)
         imports=[]; replace=set()
-        for (start,indent),segs in by_scope.items():
+        for (start,end,indent),segs in by_scope.items():
+            existing=existing_names('\n'.join(lines[start-1:end]))
             for seg in segs:
                 replace.add(seg)
                 if seg not in existing:
-                    imports.append((start,indent,seg))
+                    imports.append((start,end,indent,seg))
         if not imports:
             skipped+=len(occ); continue
-        # replace only code lines, not use/comment/string occurrences (masked line says code)
-        ml=masked(text).split('\n')
+        # Replace only executable code, never use declarations, comments, strings,
+        # or macro bodies. `masked` preserves offsets, so the edits stay aligned.
+        ml=masked(text).split('\n'); macros=macro_spans(masked(text))
         for no,line in enumerate(lines):
             if no < len(ml) and USE.match(ml[no]): continue
-            new=line
-            for seg in sorted(replace,key=len,reverse=True):
-                new=new.replace('crate::'+seg,seg)
-            lines[no]=new
-        # insert imports, bottom scope first (line shifts)
+            if any(a<=no+1<=b for a,b in macros): continue
+            masked_line=ml[no] if no < len(ml) else ''
+            hits=[m for m in PATH.finditer(masked_line) if m.group(1) in replace]
+            for hit in reversed(hits):
+                start=hit.start(); end=start+len('crate::')+len(hit.group(1))
+                line=line[:start]+hit.group(1)+line[end:]
+            lines[no]=line
+        # Insert each import in its own lexical module scope, bottom-up.
         imports.sort(key=lambda x:(x[0],x[1]), reverse=True)
-        inserted = set()
-        for _start, _indent, seg in imports:
-            if seg in inserted:
-                continue
-            inserted.add(seg)
-            idx=0
-            while idx<len(lines) and (lines[idx].startswith('//!') or lines[idx].startswith('#![') or lines[idx].strip()==''):
-                idx+=1
-            while idx<len(lines) and (lines[idx].lstrip().startswith('extern crate') or lines[idx].lstrip().startswith('#[macro_use]')):
-                idx+=1
-            lines.insert(idx,f'use crate::{seg};')
+        inserted=set()
+        for start,_end,indent,seg in imports:
+            key=(start,seg)
+            if key in inserted: continue
+            inserted.add(key)
+            if start==0:
+                idx=0
+                while idx<len(lines) and (lines[idx].startswith('//!') or lines[idx].startswith('#![') or lines[idx].strip()==''):
+                    idx+=1
+                while idx<len(lines) and (lines[idx].lstrip().startswith('extern crate') or lines[idx].lstrip().startswith('#[macro_use]')):
+                    idx+=1
+                line=f'use crate::{seg};'
+            else:
+                idx=start
+                line=' '*(indent+4)+f'use crate::{seg};'
+            lines.insert(idx,line)
         p.write_text('\n'.join(lines),encoding='utf-8'); changed+=1
     print(f"fixed {changed} file(s), skipped {skipped} conflicting/ambiguous occurrence(s)")
     if verify and changed:
@@ -191,6 +223,6 @@ def main():
             names=[]
         paths=[root/n for n in names if n.endswith('.rs') and (root/n).is_file()]
     else:
-        paths=[p for p in root.rglob('*.rs') if not (set(p.parts)&SKIP_PARTS)]
+        paths=[root] if root.is_file() else [p for p in root.rglob('*.rs') if not (set(p.parts)&SKIP_PARTS)]
     return check(paths) if args.mode=='check' else fix(paths, verify=not args.no_verify)
 if __name__=='__main__': sys.exit(main())
