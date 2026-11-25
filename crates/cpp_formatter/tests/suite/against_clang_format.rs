@@ -47,15 +47,12 @@ fn clang_format() -> Option<PathBuf> {
 }
 
 fn style() -> String {
-    std::env::var("CPPLS_FMT_STYLE").unwrap_or_else(|_| "LLVM".to_string())
+    "LLVM".to_string()
 }
 
 /// The corpus's source files, in a stable order, bounded by `CPPLS_FMT_LIMIT` (default 200).
 fn sources(root: &Path) -> Vec<PathBuf> {
-    let limit: usize = std::env::var("CPPLS_FMT_LIMIT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(200);
+    let limit: usize = 200;
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {

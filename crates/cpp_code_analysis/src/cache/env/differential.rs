@@ -408,9 +408,9 @@ fn a_macro_from_an_earlier_include_is_visible_to_a_later_one() {
 #[ignore = "a probe: walks a real project and compares instead of asserting"]
 fn the_fold_and_the_walk_agree_on_a_real_project() {
     let root = PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
+        r"E:\EmmyLuaCodeStyle".to_string(),
     );
-    let directories: Vec<String> = std::env::var("CPPLS_PROBE_DIRS")
+    let directories: Vec<String> = Result::<String, std::env::VarError>::Ok(String::new())
         .unwrap_or_else(|_| {
             "CodeFormat,CodeFormatCLib,CodeFormatCore,CodeFormatLib,CodeFormatServer,LuaParser,Util"
                 .to_string()
@@ -447,7 +447,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
     session.index_everything();
 
     let seed_names = seed_names_of(&session);
-    let roots: usize = std::env::var("CPPLS_PROBE_ROOTS")
+    let roots: usize = Result::<String, std::env::VarError>::Ok("100".to_string())
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(3);

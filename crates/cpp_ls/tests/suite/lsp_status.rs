@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 fn project() -> PathBuf {
     PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
+        r"E:\EmmyLuaCodeStyle".to_string(),
     )
 }
 

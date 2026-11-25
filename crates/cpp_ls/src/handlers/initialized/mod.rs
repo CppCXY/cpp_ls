@@ -245,10 +245,6 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         Some(format!("Indexing {}", root.display())),
     );
 
-    // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
-    // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
-    // counters stand still is neither of them.
-
     index_in_background(context.clone(), version).await;
     context
         .diagnostics()
@@ -937,11 +933,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     context.analysis().wait_for_work(IDLE_WAIT).await;
                 }
             }
-
-            // **Which table grew**, when the question is a leak rather than a stage: a total that climbs with
-            // `pending 0` and nothing cooked is the report this exists for. The numbers are the session's own
-            // estimates ([`cpp_code_analysis::MemoryReport`]), not the allocator's: the byte counter that used to
-            // print them beside a process-wide total is gone, because an allocator is not the place for a measurement.
 
             if pending > 0 {
                 // **The bar counts the project's files, not the repair of their readings.** `pending` is

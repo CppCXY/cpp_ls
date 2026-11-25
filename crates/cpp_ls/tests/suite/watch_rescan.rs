@@ -211,10 +211,7 @@ impl Server {
 fn a_watcher_storm_reconciles_instead_of_reloading() {
     // **The size is the measurement's** — the default keeps the test quick, and `CPPLS_WATCH_STORM_FILES=3000` is
     // what a kernel-sized tree looks like (the machine's own project was 3 200 files from a 2 978-entry database).
-    let count: usize = std::env::var("CPPLS_WATCH_STORM_FILES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(120);
+    let count: usize = 120;
     let project = Project::new("storm");
     let files: Vec<String> = (0..count)
         .map(|index| format!("src/f{index:03}.c"))

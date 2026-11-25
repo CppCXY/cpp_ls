@@ -429,34 +429,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .with_dialect(self.config.dialect())
             .with_cuda(self.config.cuda())
             .with_language(self.config.language_for(path));
-        let tree = {
-            let parse_started = std::time::Instant::now();
-            let tree = CppParser::parse(&rendered.text, config);
-            eprintln!(
-                "index phase {}: parse {} ms, {} byte(s)",
-                path.display(),
-                parse_started.elapsed().as_millis(),
-                rendered.text.len()
-            );
-            tree
-        };
-        let mut summary = {
-            let index_started = std::time::Instant::now();
-            let summary = self.index_tree(path, &rendered.text, &tree, key, true);
-            eprintln!(
-                "index phase {}: facts {} ms",
-                path.display(),
-                index_started.elapsed().as_millis()
-            );
-            summary
-        };
-        let report_started = std::time::Instant::now();
-        let report = { summary.map_into_the_file(rendered) };
-        eprintln!(
-            "index phase {}: map {} ms",
-            path.display(),
-            report_started.elapsed().as_millis()
-        );
+        let tree = CppParser::parse(&rendered.text, config);
+        let mut summary = self.index_tree(path, &rendered.text, &tree, key, true);
+        let report = summary.map_into_the_file(rendered);
 
         // The tree's errors, each asked of the map. `reported_span` answers for a node's whole range — from the first
         // token it covers to the last — and `reported_at` for the span an offset falls in, which is the fallback for
@@ -830,10 +805,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             Some(bodies) => bodies,
             None => &crate::sema::scopes::NoMacroBodies,
         };
-        let scoping = std::time::Instant::now();
         let scopes = build_scopes_with(&root, evidence, keep_locals);
-        let scopes_ms = scoping.elapsed().as_secs_f64() * 1000.0;
-        eprintln!("index phase {}: scopes {:.1} ms", path.display(), scopes_ms);
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.

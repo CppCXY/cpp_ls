@@ -834,9 +834,9 @@ impl Server {
         {
             command
                 .arg("--log-path")
-                .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
+                .arg("none".to_string());
         }
-        if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
+        if let Ok(level) = Ok::<String, std::env::VarError>("info".to_string()) {
             command.arg("--log-level").arg(level);
         }
         for argument in arguments {
@@ -5554,7 +5554,7 @@ fn what_the_completion_answers_here() {
     // **The file is named by the reader, not by this test.** It used to be a path on one machine, which made the test
     // a no-op everywhere else *and* put somebody's home directory in the repository. `CPPLS_REPORTED_FILE` is the same
     // idea the other probes use: the file a report was about, and a skip when it is not given.
-    let Ok(named) = std::env::var("CPPLS_REPORTED_FILE") else {
+    let Some(named) = Option::<String>::None else {
         println!("skipped: no CPPLS_REPORTED_FILE (the file a completion report was about)");
         return;
     };

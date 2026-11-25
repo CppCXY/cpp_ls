@@ -17,7 +17,7 @@ use cpp_code_analysis::{
 #[test]
 #[ignore = "a probe: reads one file of a real project"]
 fn every_invocation_of_a_file_s_own_macro_is_a_macro() {
-    let Ok(root) = std::env::var("CPPLS_REAL_PROJECT") else {
+    let Ok(root) = Result::<String, std::env::VarError>::Ok(r"E:\EmmyLuaCodeStyle".to_string()) else {
         eprintln!("set CPPLS_REAL_PROJECT to run this probe");
         return;
     };
