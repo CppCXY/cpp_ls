@@ -391,8 +391,20 @@ impl<F: FileProvider + Clone> Session<F> {
         let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
 
         let features = self.feature_probe(&path);
+        let preamble = self
+            .preamble_renderings
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&queue_key(&path)).cloned())
+            .filter(|preamble| {
+                text.starts_with(&preamble.source_prefix)
+                    && crate::preprocess::directive::directive_signature(&text).preamble_end
+                        == preamble.preamble_end
+            })
+            .map(std::sync::Arc::new);
 
         Some(CookingMaterials {
+            preamble,
             path,
             key,
             unit,
@@ -445,9 +457,19 @@ impl<F: FileProvider + Clone> Session<F> {
             already_declared,
             features,
             revision,
+            ..
         } = materials;
 
         let (tokens, _) = { cpp_parser::lex(text, &cpp_parser::LexerConfig::default()) };
+        let preamble = materials.preamble.as_ref();
+        let suffix_tokens = match preamble {
+            Some(preamble) => {
+                let first = tokens
+                    .partition_point(|token| token.range.start_offset < preamble.preamble_end);
+                &tokens[first..]
+            }
+            None => &tokens[..],
+        };
         // **Two ways to start a rendering, and the walk's is the accurate one.**
         //
         // A `MacroView` is a *position* in a walk, so it answers a `#define` that arrives mid-file and a directive that
@@ -474,7 +496,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
                 crate::preprocess::cooked::cook_with_file_and_features(
                     text,
-                    &tokens,
+                    suffix_tokens,
                     &macros,
                     Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
                     features.as_deref(),
@@ -484,7 +506,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
                 crate::preprocess::cooked::cook_with_file_and_features(
                     text,
-                    &tokens,
+                    suffix_tokens,
                     &start,
                     Some(config.presumed_name_for(path).unwrap_or(path.as_path())),
                     features.as_deref(),
@@ -506,7 +528,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 stream.exhausted
             );
         }
-        let rendered = stream.render();
+        let rendered_suffix = stream.render();
+        let rendered = match preamble {
+            Some(preamble) => cpp_toolchain::preprocess::cooked::RenderedCooked::join(
+                &preamble.rendered,
+                rendered_suffix,
+            ),
+            None => rendered_suffix,
+        };
         let indexer = FileIndexer::new(files, config);
         if crate::probes::cooking() {
             eprintln!(
@@ -535,6 +564,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash: *text_hash,
             indexed,
             reading,
+            rendered: std::sync::Arc::new(rendered),
             revision: revision.clone(),
         })
     }
@@ -555,6 +585,7 @@ impl<F: FileProvider + Clone> Session<F> {
             text_hash,
             indexed,
             reading,
+            rendered,
             revision,
         } = rendered;
         let path = indexed.summary.path.clone();
@@ -579,6 +610,23 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
 
+        // **Publish the verified prefix with the commit**, not after it: `rendered` was previously dropped here, and
+        // the Preamble cache must be built from the rendering whose hash was just validated.
+        if let Some(text) = self.text(&path) {
+            let signature = crate::preprocess::directive::directive_signature(&text);
+            if signature.preamble_end > 0
+                && let Some(prefix) = rendered.prefix_through(signature.preamble_end)
+            {
+                let entry = PreambleRendering {
+                    source_prefix: text[..signature.preamble_end].to_string(),
+                    preamble_end: signature.preamble_end,
+                    rendered: std::sync::Arc::new(prefix),
+                };
+                if let Ok(mut cache) = self.preamble_renderings.lock() {
+                    cache.insert(queue_key(&path), entry);
+                }
+            }
+        }
         // **The rendering is remembered, not dropped.** This is the half that was missing, and its absence is why
         // `Session::view` could answer `None` for a file whose rendering had *just* been built and parsed: the facts
         // went into the index and the tree went in the bin, so nothing could reconstruct the reading until some

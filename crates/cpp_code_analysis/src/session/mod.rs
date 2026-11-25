@@ -920,6 +920,9 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// neither. See [`crate::preprocess::directive::DirectiveSignature`].
     directive_signatures:
         std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
+    /// **A rendered prefix for a body-only edit.** Keyed by the path's normalized queue key; the entry carries the
+    /// source prefix it was built from, so a text that changed before `preamble_end` can be rejected.
+    preamble_renderings: std::sync::Mutex<std::collections::HashMap<String, PreambleRendering>>,
     /// **Files already read and parsed, waiting for the queue to reach them** — see [`Session::advance`].
     ///
     /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a
@@ -1542,21 +1545,31 @@ impl Session<DiskFiles> {
 /// the new text*, and nothing re-cooks a file that has a cooked reading: measured, a pull right after an edit
 /// answered `reading Cooked, 0 error(s)` for a file whose `;` had just been deleted. `text_hash` is what lets the
 /// commit say "this is not the text any more" and drop it.
+/// **A verified rendered prefix of one file**, keyed by the file's preamble signature and source prefix.
+#[derive(Clone)]
+pub struct PreambleRendering {
+    pub source_prefix: String,
+    pub preamble_end: usize,
+    pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+}
+
 pub struct RenderedCook {
     /// `cache::content_hash` of the text the rendering was made from.
     pub text_hash: u64,
     pub indexed: crate::IndexedRendering,
     pub reading: CookedReading,
+    /// The raw rendering, kept for a Preamble cache. The indexer consumes a reference; the rendering itself was
+    /// previously dropped here, which is why a prefix could not be published with the commit.
+    pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     revision: SessionRevision,
 }
 
 pub struct CookingMaterials {
-    /// The index's own spelling of the path, which is what every other layer keys on.
     pub path: PathBuf,
-    /// The summary key the rendered reading is filed under.
     pub key: SummaryKey,
-    /// **The timeline whose view answers positionally**, when one covers the file — `FileMacros` over its
-    /// definitions, which is what the reading has always used where a unit exists.
+    /// A verified prefix of the previous rendering, when the new text still has the same preamble and the bytes
+    /// before `preamble_end` are unchanged. `None` means a full render is required.
+    pub preamble: Option<std::sync::Arc<PreambleRendering>>,
     pub unit: Option<std::sync::Arc<crate::TranslationUnit>>,
     /// **The composed starting state**, for a file no timeline covers: `Over(configuration, seed)`.
     ///

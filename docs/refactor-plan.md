@@ -618,3 +618,24 @@ one content batch       50–57 ms
 - 头文件闭包大的文件：Preamble 后 `cook rendered` 显著下降，而不是强行压到 30 ms；
 - `preamble_end` 之后没有指令的文件才走 body-only 路径；指令区不变但 body 变化时复用
   preamble 的 source prefix、rendered text/spans 与 MacroEnvironment。
+### 2026-11-25：Preamble 接线
+
+`RenderedCook` 现在携带 `Arc<RenderedCooked>`；`commit_a_cooked` 验证 text hash 后用
+`DirectiveSignature.preamble_end` 截取并缓存 prefix；`cooking_materials` 只在该 prefix 的源码和
+`preamble_end` 都未变时提供它；`render_cook` 只把 `preamble_end` 之后的 tokens 交给
+`cook_with_file_and_features`，再用 `RenderedCooked::join` 拼回完整 rendering，最后照常 index。
+
+实测 `channel.c`（release，编辑包含大量 include 的文件）：
+
+```text
+before edit   min 93 ms, mean 155 ms, max 375 ms
+after edit    min 86 ms, mean  88 ms, max  91 ms
+```
+
+1000 行、无 directive 的 fixture（Preamble 无前缀可复用，body 就是全文件）：
+
+```text
+unrelated completion  p95 59 ms
+same-file completion  p95 73 ms
+diagnostic            p95 65 ms
+```
