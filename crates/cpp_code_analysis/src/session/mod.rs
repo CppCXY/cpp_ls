@@ -924,6 +924,11 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// persistence is a background, delayed action so an edit never pays for redb under the analysis write lock.
     cook_persistence:
         std::sync::Mutex<std::collections::HashMap<String, (PathBuf, std::time::Instant)>>,
+    /// **Semantic token classifications, per file content.** The writer warms this after a cook so every read-only
+    /// request about that version reuses one classification instead of walking the file and the index again.
+    classified: std::sync::Mutex<
+        std::collections::HashMap<String, (u64, std::sync::Arc<Vec<crate::semantic::Name>>)>,
+    >,
     /// **Files already read and parsed, waiting for the queue to reach them** — see [`Session::advance`].
     ///
     /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a

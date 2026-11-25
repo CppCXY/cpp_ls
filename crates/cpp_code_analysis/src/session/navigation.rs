@@ -17,6 +17,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// with different ones. A caller that publishes these should therefore publish them again once
     /// [`Session::pending`] reaches zero.
     pub fn classified_names(&self, view: &FileView) -> Vec<crate::semantic::Name> {
+        let key = super::queue_key(&view.path);
+        let hash = crate::cache::content_hash(&view.source);
+        if let Ok(cache) = self.classified.lock()
+            && let Some((known, names)) = cache.get(&key)
+            && *known == hash
+        {
+            return (**names).clone();
+        }
         use cpp_parser::CppTokenKind;
         let mut names = crate::semantic::classified_names(self.store.index(), view);
 
@@ -297,7 +305,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // rendering's.
         names.sort_by_key(|name| (name.range.start_offset, name.range.end_offset()));
 
+        if let Ok(mut cache) = self.classified.lock() {
+            cache.insert(key, (hash, std::sync::Arc::new(names.clone())));
+        }
         names
+    }
+
+    /// **Warm the shared provider readings after a cook**, under the writer that just published the text. The view
+    /// lands in `views` and the semantic classification in `classified`, so the first read-only request about this
+    /// version reuses them instead of parsing and classifying again.
+    pub fn warm_provider_readings(&self, path: &Path) {
+        if let Some(view) = self.view_of_the_file(path) {
+            let _ = self.classified_names(&view);
+        }
     }
 
     /// **Every format string in this file, with what each part of it is** — see [`crate::format`].
