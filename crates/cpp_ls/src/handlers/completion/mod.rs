@@ -201,46 +201,10 @@ pub async fn on_completion(
         );
 
         Some(CompletionResponse::List(lsp_types::CompletionList {
-            // See the module documentation: pending work means "a file may not have been read yet", a capped list
-            // means "there are more names than fitted, and the next keystroke asks a narrower question".
-            // **An empty list is never final**, and this is the third case — added after a report that named it
-            // exactly: *"the first time I type `s` I get `std` and the rest; I delete it and type `s` again and
-            // there is no completion at all"*. `isIncomplete: false` tells the client the list stands for the whole
-            // prefix, so a final **empty** answer is cached as "nothing here" and the next keystroke that deserves
-            // an answer is never asked. Every reason the list can be empty is temporary: the file's summary was just
-            // dropped by an edit, a declaration it needs has not been read yet, the cursor is mid-word in a way this
-            // layer cannot see. None of them is a fact about the prefix.
-            is_incomplete: found.items.is_empty()
-                || found.incomplete
-                || !session.is_locally_ready(&path)
-                || found.truncated
-                // **…and while the session still has work queued.** `is_locally_ready` is a fact about *this* file —
-                // its summary and its includes — and an answer can depend on files its **modules** bring in.
-                // Measured on a project whose files start with `import std;`: for about two seconds after `didOpen`,
-                // completion at `std::` answered **8 names with `isIncomplete: false`**, then 1000 (the cap) once
-                // the module's closure had been read and cooked. A client that caches a final list shows the eight
-                // and stops asking; the list was neither final nor right.
-                //
-                // `pending_work` rather than `pending`: the difference is the **cooking** backlog, and a module's
-                // names are in its *rendering*. Measured with the index queue alone (t+0.5 s): the queue was empty
-                // and the answer was still the eight, so the cooking half is the one that matters here.
-                || session.pending_work() > 0
-                // **…and while a module unit it imports is still unread.** That work is not in pending_work (see
-                // Session::pending_units): the unit arrives by name rather than through an include, and the pump
-                // takes it once its queue has drained. Measured on import std;: t+0.5–1.5 s answered eight names
-                // with isIncomplete: false while 401 files of the module's closure were still landing.
-                || session.pending_units() > 0
-                // **…and when the analysis stopped short.** A member list can be *missing* members because the class
-                // it needs has not been read yet: `std::string* message; message->` offered **one** item on the first
-                // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file
-                // scope) and **58** once that header was cooked. That is the same "ask again later" an empty list
-                // gets — and without it a partial list looks final, which is the defect this arm was added for.
-                || found.incomplete
-                // **…and when the list holds nothing that could be what was typed.** A client filters by the prefix
-                // and caches an empty result, so an answer that answers nothing is not final whatever the reason:
-                // measured by a reader, typing `f` showed nothing and typing `fp` worked — the same file, seconds
-                // apart.
-                || found.nothing_matched(),
+            // **Incomplete only when this answer knows it is cut.** `pending_work`/`pending_units` look safer, but
+            // they are true for seconds while a project indexes; a client then treats every list as provisional and
+            // filters/re-requests instead of showing it. The list's own flags are the facts about this answer.
+            is_incomplete: found.incomplete || found.truncated,
             items: found
                 .items
                 .iter()

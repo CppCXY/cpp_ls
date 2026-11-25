@@ -552,8 +552,13 @@ impl RenderedCooked {
     /// `written` and `reported` offsets are **not** shifted — they are the file's, and the suffix was rendered from
     /// tokens whose ranges still name the file's own text.
     pub fn join(prefix: &RenderedCooked, suffix: RenderedCooked) -> RenderedCooked {
-        let shift = prefix.text.len();
+        // **A separator, always.** The prefix was cut at a token boundary in the old rendering and the suffix starts
+        // at the next token in the new one; gluing `)` to `{` or `int` to `x` changes the token stream. A newline is
+        // the one separator that cannot merge two C++ tokens, and a rendering has no string literal continuation.
+        let separator = 1;
+        let shift = prefix.text.len() + separator;
         let mut text = prefix.text.clone();
+        text.push('\n');
         text.push_str(&suffix.text);
         let mut spans = prefix.spans.clone();
         spans.extend(suffix.spans.into_iter().map(|mut span| {
