@@ -592,13 +592,6 @@ impl<F: FileProvider + Clone> Session<F> {
                         last,
                     )
                 })?;
-        if false {
-            eprintln!(
-                "[across] {:?} -> {first}..={stop}: {:?}",
-                expression.text().to_string(),
-                found.text().to_string()
-            );
-        }
 
         match self.type_of_the_expression(&rendered, &found) {
             Known::Yes(found) => Some(found),

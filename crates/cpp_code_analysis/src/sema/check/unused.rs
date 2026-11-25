@@ -247,15 +247,5 @@ impl Check for Unused {
                 ),
             );
         }
-        if false {
-            eprintln!(
-                "[unused] {} declaration(s), {} local(s): counted tokens {} ms | bodies {} ms | loop {} ms",
-                context.summary.declarations.len(),
-                locals,
-                counted,
-                walked,
-                started.elapsed().as_millis().saturating_sub(walked)
-            );
-        }
     }
 }

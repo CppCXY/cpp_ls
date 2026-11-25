@@ -257,36 +257,11 @@ pub(crate) fn type_of_expression_memoed(
     // bounded by anything. Measured on a real C++23 project: `module_graph.cpp` overflowed the stack with 32 MB on
     // `text_of(site.file).content.substr(…).starts_with(name)`, and no log said which questions repeated. One line per
     // question answers that, and it is the only instrument that can.
-    if false {
-        eprintln!(
-            "[type_of] depth {depth:>2}  {:?}",
-            expression
-                .text()
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(60)
-                .collect::<String>()
-        );
-    }
+
     let answer = type_of_expression_inner(
         memo, shapes, index, declaring, scopes, root, path, expression, depth,
     );
 
-    if false && started.elapsed().as_millis() > 5 {
-        eprintln!(
-            "[type_of] {:>5} ms  depth {depth}  {:?}",
-            started.elapsed().as_millis(),
-            expression
-                .text()
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or_default()
-        );
-    }
     // **The claim is released before the answer is filed**, and both happen whatever the arm answered: a question
     // left in flight would make every later ask about the same node answer `Unknown`.
     memo.leave(&key);
@@ -1280,14 +1255,7 @@ pub(crate) fn type_of_expression_inner(
                             let written = a_members_answer_as_a_type(
                                 index, scopes, root, path, &type_of, &returns,
                             );
-                            if false {
-                                eprintln!(
-                                    "[inference] subscript on {:?}: the member wrote {:?}, the type is {:?}",
-                                    type_of.to_string(),
-                                    returns,
-                                    written
-                                );
-                            }
+
                             Known::Yes((crate::sema::types::parse_type_spelling(&written), file))
                         }
                         // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
@@ -2103,11 +2071,7 @@ pub(crate) fn operator_returns_of_with_arguments(
     // [`ProjectIndex::template_parameters_for`].
     let parameters = index.template_parameters_for(&class, path, &written_arguments);
     let parameter_names = &parameters;
-    if false {
-        eprintln!(
-            "[inference] operator_returns_of({class}, {operator}): parameters {parameters:?}, arguments {written_arguments:?}"
-        );
-    }
+
     // **The class as a spelling a member query can be asked with** — a reference or a qualifier is the *binding's*
     // business, not the class's, and asking `members_of` about `std::vector<MarkEvent>&` finds no class of that name.
     // Measured on `EmmyLuaCodeStyle`'s `Mark.cpp`: `auto &events = p.GetEvents(); events[Pos]` answered
@@ -2165,16 +2129,7 @@ pub(crate) fn operator_returns_of_with_arguments(
                     !object_is_const || fact.modifiers.contains(crate::DeclModifiers::CONST)
                 })
                 .collect();
-            if false {
-                eprintln!(
-                    "[rank] {class}::{wanted}: {} candidate(s): {:?}",
-                    callable.len(),
-                    callable
-                        .iter()
-                        .map(|(fact, _)| fact.parameter_list().unwrap_or("").to_string())
-                        .collect::<Vec<_>>()
-                );
-            }
+
             if callable.len() < 2 {
                 return None;
             }

@@ -1868,14 +1868,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                     true,
                     Some(&search),
                 );
-                if false {
-                    eprintln!(
-                        "[unit] cook  {:>6.1} ms  ({} file(s), {} bytes)",
-                        cooking.elapsed().as_secs_f64() * 1000.0,
-                        stream.files.len(),
-                        stream.text.len()
-                    );
-                }
+
                 // **And the walk's own file list, which is what its key folds.** `files` names only the files that
                 // contributed tokens; a header of nothing but `#define`s writes none, and a rendering that did not
                 // record it could never reproduce the key it is filed under — see `RenderedUnit::walked`.

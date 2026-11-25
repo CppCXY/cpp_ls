@@ -818,8 +818,6 @@ impl AnalysisState {
         let started = std::time::Instant::now();
         let permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
         let waited_for_a_permit = started.elapsed().as_millis() as u64;
-        let traced = false;
-
         let inner = self.inner.clone();
         let gate = self.gate.clone().read_owned().await;
         let waited_for_the_gate = started.elapsed().as_millis() as u64;
@@ -831,11 +829,7 @@ impl AnalysisState {
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let waited_for_the_session = locked.elapsed().as_millis() as u64;
-            if traced {
-                eprintln!(
-                    "[query] {label}: permit {waited_for_a_permit} ms, gate {waited_for_the_gate} ms, session {waited_for_the_session} ms",
-                );
-            }
+
             // The gate is released before the query runs: it orders an update against the queries already in
             // flight, and holding it for the whole query would make every notification queue behind every read.
             drop(gate);
@@ -843,13 +837,8 @@ impl AnalysisState {
             // `?` cannot be used here — the closure answers with the timings as well — so `None` is threaded by hand:
             // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
             // whether the session was missing or the query declined.
-            if traced {
-                eprintln!("[query] {label}: compute starts");
-            }
+
             let answer = session.as_ref().and_then(f);
-            if traced {
-                eprintln!("[query] {label}: compute done in {} ms", ran.elapsed().as_millis());
-            }
 
             (
                 waited_for_the_session,

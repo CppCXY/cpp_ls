@@ -1130,7 +1130,6 @@ impl<F: FileProvider> SummaryStore<F> {
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
         timeline: Option<&crate::TranslationUnit>,
     ) -> Prepared {
-        let tracing = false;
         let entered = std::time::Instant::now();
         let Some(source) = ({ self.files.read(path) }) else {
             return Prepared {
@@ -1175,14 +1174,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 // include — the one part of a warm start that looks like nothing in the code and can cost seconds.
                 let verifying = std::time::Instant::now();
                 let still_holds = self.resolution_still_holds(path, &stored);
-                if tracing {
-                    note_a_prepared_file(
-                        read,
-                        reading.elapsed(),
-                        verifying.elapsed(),
-                        std::time::Duration::ZERO,
-                    );
-                }
+
                 if still_holds {
                     if let Some(tell) = includes.as_mut() {
                         let targets: Vec<PathBuf> = stored
@@ -1199,13 +1191,6 @@ impl<F: FileProvider> SummaryStore<F> {
                         content_hash: Some(key.content_hash),
                     };
                 }
-            } else if tracing {
-                note_a_prepared_file(
-                    read,
-                    reading.elapsed(),
-                    std::time::Duration::ZERO,
-                    std::time::Duration::ZERO,
-                );
             }
         }
 
@@ -1273,15 +1258,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 // deletes, so the pair is written together (`SummaryCache` batches both into one transaction).
                 database.note_file(path, key.content_hash, key.context_hash, 0, self.generation);
             }
-        }
-
-        if tracing {
-            note_a_prepared_file(
-                read,
-                std::time::Duration::ZERO,
-                std::time::Duration::ZERO,
-                entered.elapsed(),
-            );
         }
 
         Prepared {
@@ -1418,8 +1394,6 @@ impl<F: FileProvider> SummaryStore<F> {
         budget: usize,
     ) -> Vec<(PathBuf, Prepared)> {
         use std::sync::{Condvar, Mutex};
-
-        let tracing = false;
         let before = prepared_stages();
         let started = std::time::Instant::now();
 
@@ -1539,26 +1513,6 @@ impl<F: FileProvider> SummaryStore<F> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(payload) = frontier.panic.take() {
             std::panic::resume_unwind(payload);
-        }
-
-        if tracing {
-            let after = prepared_stages();
-            let millis = |slot: usize| (after[slot] - before[slot]) as f64 / 1e6;
-            let took = started.elapsed();
-            // **Only the calls that are worth reading.** A wave of eight files is a few milliseconds; printing all
-            // 232 of them buries the handful that take a hundred, which is where a warm start still goes.
-            if took.as_millis() >= 40 {
-                eprintln!(
-                    "prepare: {} file(s) in {} ms | text {:.0} ms, decode {:.0} ms, verify {:.0} ms, build+encode \
-                     {:.0} ms (summed over workers)",
-                    after[0] - before[0],
-                    took.as_millis(),
-                    millis(1),
-                    millis(2),
-                    millis(3),
-                    millis(4)
-                );
-            }
         }
 
         frontier.done
@@ -1905,12 +1859,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn the_stored_refinement(&self, path: &Path) -> Option<crate::FileSummary> {
         match self.the_stored_refinement_reason(path) {
             Ok(summary) => Some(summary),
-            Err(reason) => {
-                if false {
-                    eprintln!("refinement: {} skipped: {reason}", path.display());
-                }
-                None
-            }
+            Err(reason) => None,
         }
     }
 
@@ -2168,12 +2117,7 @@ impl<F: FileProvider> SummaryStore<F> {
             served += 1;
         }
         self.stats.stored_refinements_served += served;
-        if false && !still_to_do.is_empty() {
-            eprintln!(
-                "re-read: {served} stored refinement(s) served, {} rebuilt (nothing stored for them)",
-                still_to_do.len()
-            );
-        }
+
         ServedRefinements {
             still_to_do,
             served: served_paths,
@@ -2205,7 +2149,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // file's text and asks a question about every `#define` in the project — and from outside they are the same
         // call. Measured on a real project: four files took 315 ms with a timeline and 18 000 ms without, so the
         // first question about a slow start-up here is *which form ran*, and these counts answer it.
-        let tracing = false;
         let started = std::time::Instant::now();
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
@@ -2327,14 +2270,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // One function, so the restriction has a name and a test — see [`SummaryStore::the_closure_of`].
         let closure_started = std::time::Instant::now();
         let in_the_closure = self.the_closure_of(indexed);
-        if tracing {
-            eprintln!(
-                "re-read: closure of {} file(s) is {} file(s) in {:?}",
-                indexed.len(),
-                in_the_closure.len(),
-                closure_started.elapsed()
-            );
-        }
+
         let mut candidates: Vec<&FileSummary> = if eager {
             self.index.summaries().collect()
         } else {
@@ -2564,29 +2500,13 @@ impl<F: FileProvider> SummaryStore<F> {
             .collect();
 
         if bodied.is_empty() && guarded.is_empty() {
-            if tracing {
-                eprintln!(
-                    "re-read: eager {eager}, {} source(s), {} word(s) mentioned, {} candidate file(s), \
-                     uncovered {uncovered}, nothing bodied — {} ms",
-                    sources.len(),
-                    mentioned.len(),
-                    candidates.len(),
-                    started.elapsed().as_millis()
-                );
-            }
             // **The decision is written down**, so the next start serves it instead of rebuilding the timelines that led
             // to it. See `mark_the_reading_as_refined`.
             let marking = std::time::Instant::now();
             for path in indexed {
                 self.mark_the_reading_as_refined(path);
             }
-            if tracing {
-                eprintln!(
-                    "re-read: marked {} file(s) in {:?}",
-                    indexed.len(),
-                    marking.elapsed()
-                );
-            }
+
             return ReRead {
                 rebuilt: Vec::new(),
                 cooked: Vec::new(),
@@ -2640,10 +2560,6 @@ impl<F: FileProvider> SummaryStore<F> {
             if !mentioned && !decided_about && !guarded.contains(path.as_path()) {
                 self.mark_the_reading_as_refined(path);
                 continue;
-            }
-
-            if tracing {
-                eprintln!("re-read candidate: {}", path.display());
             }
 
             // **A file a slice unit covers is rendered through it**, which is the whole reason the units exist — walking
@@ -2729,9 +2645,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 } else {
                     self.mark_the_reading_as_refined(path);
                 }
-                if tracing {
-                    eprintln!("re-read: {} through a walk of its own", path.display());
-                }
+
                 continue;
             }
 
@@ -2739,9 +2653,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // `the_indexed_environment` — so this is one parse of one file instead of a whole-program walk. It is
             // weaker than a rendering (no declarations a body writes), so it is only what a file with no walkable
             // closure gets, and it too is filed as the file's cooked facts rather than over its summary.
-            if tracing {
-                eprintln!("re-read: {} has no walk — composed", path.display());
-            }
+
             let Some(environment) = self.the_indexed_environment(path) else {
                 continue;
             };
@@ -2811,25 +2723,11 @@ impl<F: FileProvider> SummaryStore<F> {
             // The disk entry the first pass wrote stays, and it is the honest one: a reading of the
             // text with no environment claimed. This pass refines it in memory.
             let stored = false;
-            if tracing {
-                eprintln!("re-read: {} through its timeline", path.display());
-            }
+
             Some((rebuilt, stored))
         });
 
         rebuilt.extend(rebuilt_through_a_timeline.into_iter().flatten());
-
-        if tracing {
-            eprintln!(
-                "re-read: eager {eager}, {} source(s), {} word(s) mentioned, {} candidate file(s), \
-                 uncovered {uncovered}, {} bodied name(s) — {} ms",
-                sources.len(),
-                mentioned.len(),
-                candidates.len(),
-                bodied.len(),
-                started.elapsed().as_millis()
-            );
-        }
 
         // **The refined readings reach the disk now, not eventually.** `SummaryCache::put` appends to a batch that is
         // flushed when it fills or when the cache is dropped — and the cache is an `Arc` in a process-wide table, so a
@@ -3255,15 +3153,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 .cmp(&right.from_offset)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        if false {
-            Self::trace_the_composed_environment(
-                path,
-                &order,
-                &entries,
-                &table,
-                &["JSON_TRY", "JSON_CATCH", "JSON_NOEXCEPTION", "_CPPUNWIND"],
-            );
-        }
+
         Some(cpp_parser::MacroEnvironment::from_included_macros(entries))
     }
 

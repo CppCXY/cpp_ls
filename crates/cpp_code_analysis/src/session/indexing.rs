@@ -174,13 +174,6 @@ impl<F: FileProvider + Clone> Session<F> {
         {
             let loading = std::time::Instant::now();
             self.vfs.load(&path);
-            if false {
-                eprintln!(
-                    "[step] load {} took {} us",
-                    path.display(),
-                    loading.elapsed().as_micros()
-                );
-            }
         }
         let before = self.store.stats();
 
@@ -219,14 +212,7 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         let timed = std::time::Instant::now();
         let timeline_ask = std::time::Instant::now();
-        if false {
-            eprintln!(
-                "[step] timeline question for {} took {} ms (timeline {})",
-                path.display(),
-                timeline_ask.elapsed().as_millis(),
-                unit.is_some()
-            );
-        }
+
         let has_a_timeline = unit
             .as_ref()
             .is_some_and(|unit| unit.environment_of(&spelled).is_some());
@@ -254,15 +240,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 None => self.store.get(&path),
             },
         };
-        if false {
-            eprintln!(
-                "[step] {} read in {} ms after a {} ms timeline question (timeline {})",
-                path.display(),
-                timed.elapsed().as_millis(),
-                timeline_ask.elapsed().as_millis(),
-                unit.is_some()
-            );
-        }
+
         let tail = std::time::Instant::now();
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
@@ -275,14 +253,6 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_default();
         let after = self.store.stats();
         let outcome = outcome_of(before, after);
-        if false {
-            eprintln!(
-                "[step] {} includes+stats took {} us ({} include(s))",
-                path.display(),
-                tail.elapsed().as_micros(),
-                includes.len()
-            );
-        }
 
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
@@ -291,13 +261,6 @@ impl<F: FileProvider + Clone> Session<F> {
         let include_count = includes.len();
         for include in includes {
             self.queue.add(include, priority, depth + 1);
-        }
-        if false {
-            eprintln!(
-                "[step] {} queued {include_count} include(s) in {} us",
-                path.display(),
-                queueing.elapsed().as_micros()
-            );
         }
 
         // **And what the disk said while this reading was taken.** One `stat` per file read — the whole cost of the
@@ -579,8 +542,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
-        let tracing = false;
-
         loop {
             let round_started = std::time::Instant::now();
             let steps = self.advance(64);
@@ -676,33 +637,16 @@ impl<F: FileProvider + Clone> Session<F> {
             let cook_started = std::time::Instant::now();
             let cooked = {
                 let claimed = self.claim_cooking(COOK_SLICE);
-                if tracing && !claimed.is_empty() {
-                    eprintln!("cooking: claimed {} file(s) {:?}", claimed.len(), claimed);
-                }
+
                 let materials = self.materials_for(claimed);
                 let wanted = materials.len();
                 let rendered = self.render_them(materials);
                 let built = rendered.len();
                 let committed = self.commit_them(rendered).len();
-                if tracing && (built != wanted || committed != built) {
-                    eprintln!(
-                        "cooking: rendered {built} of {wanted} claimed, committed {committed} \
-                         (cooking backlog {})",
-                        self.pending_cooking()
-                    );
-                }
+
                 committed
             };
             let cook = cook_started.elapsed();
-            if false {
-                // **Three timers, each taken where it happened** rather than one derived by subtraction: the round
-                // that appeared to take 56 s had an `advance` of 7 ms and a cook of 1 µs, so the 56 s was in neither
-                // and the derived figure could not say where. The three now print their own walls.
-                eprintln!(
-                    "DRAIN round: advance {advanced:?} ({read} file(s)), refine {refined:?}, cook {cook:?} ({cooked} committed), round total {:?}",
-                    round_started.elapsed(),
-                );
-            }
 
             // **The second pass is work, and this loop used to return while it was owed.**
             // `advance` drains up to [`RE_READ_SLICE`] of the backlog per call, and the backlog is
@@ -718,25 +662,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // slice, and `pending_work` counts it, so the work still happens; what the loop bought
             // was paying for it *before* the session answered anything.
             if read == 0 && cooked == 0 {
-                if tracing {
-                    // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
-                    // the writer used and the key the reader computes are two different keys — which is the one
-                    // failure a count cannot show and the two hashes beside it can.
-                    let cached: Vec<String> = self
-                        .renderings
-                        .lock()
-                        .map(|known| {
-                            known
-                                .keys()
-                                .map(|(path, hash)| format!("{}#{hash}", path.display()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    eprintln!(
-                        "cooking: stopping with read 0, cooked 0, backlog {} | cache {cached:?}",
-                        self.pending_cooking()
-                    );
-                }
                 // **The idle step, and this is the idle.** A session that has just finished indexing is the one
                 // moment when collecting the cache is free of a reader: rows nothing references (a file that changed
                 // while the last run was writing it, a deleted file, a summary from a previous generation) are
@@ -944,15 +869,10 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             wanted.remove(&path);
             if self.store.index().summary(&path).is_none() {
-                if false {
-                    eprintln!("refinement ask not yet: {} (no summary)", path.display());
-                }
                 not_yet.push(path);
                 continue;
             }
-            if false {
-                eprintln!("refinement ask taken: {}", path.display());
-            }
+
             if let Some(at) = self
                 .parsed_since_the_last_pass
                 .iter()

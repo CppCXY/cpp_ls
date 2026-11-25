@@ -1143,51 +1143,6 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
         // **The trace is asked for through `crate::probes`, which reads its variable once.** `definition_at` is the
         // expander's own name resolution and runs for every macro name it meets — tens of millions of times in an
         // two other sites of the same shape. See that module for why every probe moved there.
-        if false {
-            match &found {
-                None => {
-                    // Which layer missed, and why — the three answers are the whole diagnosis.
-                    let in_force = self.in_force(name).map(|_| "yes").unwrap_or("no");
-                    let positional = match self.view.visible_binding(name) {
-                        None => "no-binding".to_string(),
-                        Some((at, index)) => format!(
-                            "binding@{} definition={}",
-                            at,
-                            if self.definitions.definition_of(index).is_some() {
-                                "yes"
-                            } else {
-                                "NO"
-                            }
-                        ),
-                    };
-                    let seed = self
-                        .seed
-                        .and_then(|seed| seed.definition(name))
-                        .map(|_| "yes")
-                        .unwrap_or("no");
-                    eprintln!(
-                        "cppls-macro: {name} at {offset} -> not defined (in_force={in_force} positional={positional} seed={seed})"
-                    );
-                }
-                Some(definition) => {
-                    let body: Vec<&str> = definition
-                        .body
-                        .significant()
-                        .map(|token| token.text())
-                        .collect();
-                    let params: Vec<&str> = definition
-                        .params
-                        .as_ref()
-                        .map(|list| list.iter().map(|held| held.name.as_ref()).collect())
-                        .unwrap_or_default();
-                    eprintln!(
-                        "cppls-macro: {name} at {offset} -> function_like={} params={params:?} body={:?}",
-                        definition.params.is_some(),
-                        body.join(" ")
-                    );
-                }
-            }
-        }
 
         found
     }

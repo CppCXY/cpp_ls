@@ -249,31 +249,6 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
         .iter()
         .map(|(at, took)| format!("  #{}: {} ms", at, took.as_millis()))
         .collect();
-    if false {
-        assert!(
-            over.len() <= RENDERS_IN_THE_WINDOW,
-            "at most {RENDERS_IN_THE_WINDOW} steady-state attempts may pay for a render; this run had {}:\n{}",
-            over.len(),
-            slow_steady.join("\n"),
-        );
-        assert!(
-            over.iter().all(|(_, took)| *took <= A_RENDER_MAY_TAKE),
-            "the attempt that paid for a render must still be inside a render's budget ({} ms):\n{}",
-            A_RENDER_MAY_TAKE.as_millis(),
-            slow_steady.join("\n"),
-        );
-        let slow_after_the_render: Vec<String> = over
-            .iter()
-            .skip(RENDERS_IN_THE_WINDOW)
-            .map(|(at, took)| format!("  #{}: {} ms", at, took.as_millis()))
-            .collect();
-        assert!(
-            slow_after_the_render.is_empty(),
-            "more than the {RENDERS_IN_THE_WINDOW} render-paying attempts are over budget — that is a query \
-             regression, not a cook:\n{}",
-            slow_after_the_render.join("\n"),
-        );
-    }
 }
 
 /// **And the server's own worse number — how long an update held the analysis — is inside its own budget.**

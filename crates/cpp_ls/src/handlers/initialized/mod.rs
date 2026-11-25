@@ -205,8 +205,6 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                     "the native watcher is off: the project's own configuration says \
                      `[workspace] native_watch = false`"
                 );
-            } else if false {
-                log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
                 .start(
@@ -250,24 +248,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
     // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
     // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
     // counters stand still is neither of them.
-    if false {
-        let watched = context.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let inbox = (watched.inbox().queued(), watched.inbox().applied());
-                let session = watched
-                    .analysis()
-                    .with_snapshot(|session| (session.pending_work(), session.pending_cooking()));
-                eprintln!(
-                    "[inbox] queued {} applied {} | session {session:?} | {} diagnostic computation(s)",
-                    inbox.0,
-                    inbox.1,
-                    watched.diagnostics().computations()
-                );
-            }
-        });
-    }
+
     index_in_background(context.clone(), version).await;
     context
         .diagnostics()
@@ -961,13 +942,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // `pending 0` and nothing cooked is the report this exists for. The numbers are the session's own
             // estimates ([`cpp_code_analysis::MemoryReport`]), not the allocator's: the byte counter that used to
             // print them beside a process-wide total is gone, because an allocator is not the place for a measurement.
-            if false
-                && let Some(report) = context
-                    .analysis()
-                    .with_snapshot(|session| session.memory_report())
-            {
-                eprintln!("[tables] {report}");
-            }
 
             if pending > 0 {
                 // **The bar counts the project's files, not the repair of their readings.** `pending` is
@@ -1207,12 +1181,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     )
                     .flatten()
             {
-                if false {
-                    eprintln!(
-                        "[program] a program read is owed (wait zero: {})",
-                        wait.is_zero()
-                    );
-                }
                 if wait.is_zero() {
                     // **Then breathe.** A project has one program per translation unit, and a pump that read them
                     // back to back would peg a core for minutes after every pause; one idle tick between them is

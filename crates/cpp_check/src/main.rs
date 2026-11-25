@@ -176,8 +176,6 @@ fn main() {
             stages.view.as_secs_f64(),
             stages = stages.pump_rounds,
         );
-        let (asks, reads) = (0, 0);
-        eprintln!("cpp_check: summary asks {asks}, summary reads {reads}");
     }
     let told = Fate {
         unreadable,

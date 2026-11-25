@@ -370,12 +370,6 @@ pub fn name_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
     let phase = std::time::Instant::now();
-    if false {
-        eprintln!(
-            "[completion] the position: scope {:?}, written {:?}",
-            position.scope, position.written
-        );
-    }
 
     // **What is typed decides how much is read**, and the difference is not small. The index half of this query
     // collects every declaration of every file the cursor can see — measured on a real file that includes
@@ -406,13 +400,6 @@ pub fn name_completions_at(
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     };
-    if false {
-        eprintln!(
-            "[completion] the listing took {:?} for {} name(s)",
-            phase.elapsed(),
-            names.len()
-        );
-    }
 
     // **The file's own macros**, which the index half cannot see. A `#define` is a preprocessing fact of *this* file, not a
     // declaration in any scope — measured at four cursors in one file: `MA` offered only `main`, `MAX` offered nothing, and
@@ -589,9 +576,7 @@ pub(crate) fn visible_names(
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
-    if false {
-        eprintln!("[completion]   the class tier: {:?}", phase.elapsed());
-    }
+
     let chain_phase = std::time::Instant::now();
 
     for (depth, scope) in chain.iter().copied().enumerate() {
@@ -658,9 +643,7 @@ pub(crate) fn visible_names(
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
-    if false {
-        eprintln!("[completion]   the chain: {:?}", chain_phase.elapsed());
-    }
+
     let global_phase = std::time::Instant::now();
     names.extend(global_offers(
         index,
@@ -670,18 +653,10 @@ pub(crate) fn visible_names(
         chain.len(),
         written,
     ));
-    if false {
-        eprintln!(
-            "[completion]   the global tier: {:?}",
-            global_phase.elapsed()
-        );
-    }
 
     let sort_phase = std::time::Instant::now();
     sort_and_hide(&mut names);
-    if false {
-        eprintln!("[completion]   the sort: {:?}", sort_phase.elapsed());
-    }
+
     Known::Yes(names)
 }
 
@@ -854,84 +829,6 @@ pub(crate) fn names_in_a_scope_at(
             //                                        arm `std::string::` offered **0** items.
             // ```
             let names_a_type = a_spelling_names_a_type(index, spelling, path);
-            if false {
-                let bare = spelling.rsplit("::").next().unwrap_or(spelling);
-                let facts: Vec<String> = index
-                    .every_fact_named(bare)
-                    .into_iter()
-                    .map(|(file, fact)| {
-                        format!(
-                            "{:?} scope {:?} kind {:?} @ {}",
-                            fact.name,
-                            fact.scope,
-                            fact.kind,
-                            file.file_name().unwrap_or_default().to_string_lossy()
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "    names_in_a_scope({spelling}): in the tree {}, names_a_type {names_a_type}, \
-                     definition {:?} | facts named {bare:?}: {facts:?}",
-                    in_the_tree.is_some(),
-                    match index.definition(spelling, path) {
-                        Known::Yes(found) =>
-                            format!("Yes({} {:?})", found.fact.qualified_name(), found.fact.kind),
-                        Known::Unknown(reason) => format!("Unknown({reason:?})"),
-                        Known::No => "No".to_string(),
-                    }
-                );
-                if spelling == "std::string" {
-                    let xstring = index.summaries_named_like("xstring");
-                    let string = index.summaries_named_like("string");
-                    eprintln!(
-                        "      index: {} summaries, {} distinct names | by_name: string {} basic_string {} \
-                         vector {} | by_scope: std::basic_string {} | files: xstring {} string-ish {}",
-                        index.len(),
-                        index.distinct_names(),
-                        index.name_postings("string"),
-                        index.name_postings("basic_string"),
-                        index.name_postings("vector"),
-                        index.scope_postings("std::basic_string"),
-                        xstring.len(),
-                        string.len(),
-                    );
-                    for path in string.iter().take(6) {
-                        eprintln!("        {}", path.display());
-                    }
-
-                    // **What the summary of `<xstring>` actually says**, which is the question that separates
-                    // "the class was never recorded" from "it was recorded under a name nothing asks for".
-                    // `basic_string` is written at `xstring:2344` as
-                    // `template <class _Elem, class _Traits, class _Alloc> class basic_string`, so a reading that
-                    // dropped it lost it in the *fact builder* rather than in any lookup.
-                    for (path, summary) in index.all_summaries() {
-                        let name = path.to_string_lossy();
-                        if !name.ends_with("xstring") && !name.ends_with("include/string") {
-                            continue;
-                        }
-                        let mut named: Vec<String> = summary
-                            .declarations
-                            .iter()
-                            .filter(|fact| fact.name.contains("basic"))
-                            .map(|fact| {
-                                format!(
-                                    "{:?} kind {:?} scope {:?} local {}",
-                                    fact.name, fact.kind, fact.scope, fact.local
-                                )
-                            })
-                            .collect();
-                        named.sort();
-                        named.dedup();
-                        eprintln!(
-                            "      {} has {} declaration(s); the {} named *basic*: {:?}",
-                            name,
-                            summary.declarations.len(),
-                            named.len(),
-                            named.iter().take(14).collect::<Vec<_>>()
-                        );
-                    }
-                }
-            }
 
             if names_a_type {
                 // **An alias is followed to the class that has the members.** `std::string` is
@@ -949,9 +846,7 @@ pub(crate) fn names_in_a_scope_at(
                     spelling,
                 );
                 let named = named.as_ref();
-                if false {
-                    eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
-                }
+
                 match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),
                     Known::Unknown(reason) => return Known::Unknown(reason),

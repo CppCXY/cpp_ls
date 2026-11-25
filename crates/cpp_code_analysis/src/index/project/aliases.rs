@@ -171,12 +171,6 @@ pub(crate) fn a_spelling_through_the_aliases_in(
             here.push((name.clone(), value.clone()));
         }
     }
-    if false {
-        eprintln!(
-            "[inference] alias step: {written:?} in {class:?} (class {class_name:?}, parameters {parameters:?}, \
-             arguments {arguments:?})"
-        );
-    }
 
     // **An unqualified name is a member of this class — or of a class the walk came through.**
     //
@@ -360,15 +354,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     // partial specialization and what lets the qualifier's own aliases (`_Mybase =
     // _Tree_val<_Traits>`) be substituted.
     let found = a_member_the_class_declares(index, scopes, root, path, &inner, member_name);
-    if false {
-        eprintln!(
-            "[inference] qualified: {written:?} -> qualifier {qualifier:?} resolved {inner:?}, member {member_name:?} \
-             ({member_arguments:?}), fact {:?}",
-            found
-                .as_ref()
-                .map(|fact| (fact.type_of.clone(), fact.pattern(), fact.kind))
-        );
-    }
+
     let Some(fact) = found else {
         return written.to_string();
     };
@@ -483,16 +469,7 @@ pub(crate) fn a_member_the_class_declares(
     // answered is the one that *has* one.
     let listed = members_of(index, scopes, root, path, class);
     let name = the_member_name(name);
-    if false {
-        match &listed {
-            Known::Yes(members) => eprintln!(
-                "[inference] member of {class:?}: {} listed, {} unlisted, looking for {name:?}",
-                members.members.len(),
-                members.unlisted.len()
-            ),
-            other => eprintln!("[inference] member of {class:?}: {other:?}"),
-        }
-    }
+
     // **A member of a specialization that does not match this use is not a member of this use.**
     //
     // `std::allocator_traits<allocator<T>>::value_type` had two answers in the index: the primary template's
@@ -752,11 +729,6 @@ pub(crate) fn the_class_an_arrow_points_at(
     // **Before `arrow` is partially moved below** — its parameters say whether an answer is one of them.
     let arrows_parameters = arrow.parameters().to_vec();
     let returns = arrow.returns?;
-    if false {
-        eprintln!(
-            "[inference] operator-> of {bare} on arguments {arguments:?}: the member wrote {returns:?}"
-        );
-    }
 
     if arguments.is_empty() {
         return None;
@@ -841,12 +813,7 @@ pub(crate) fn the_class_an_arrow_points_at(
             },
         };
     }
-    if false {
-        eprintln!(
-            "[inference] operator-> substitution: parameters {parameters:?}, the member's own {arrow_parameters:?}, {returns:?} -> {substituted:?} -> {target:?}",
-            arrow_parameters = arrows_parameters
-        );
-    }
+
     (!target.is_empty() && target != bare).then_some(target)
 }
 
@@ -929,28 +896,9 @@ pub(crate) fn the_element_type_of(
     // (the arrow of a class that has no `element_type`), so asking it here recursed until the stack ran out — measured,
     // the test that produced this line overflowed it. A list walks the bases and never asks about an arrow.
     let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
-        if false {
-            eprintln!("[inference] element_type: no member list for {class}");
-        }
         return None;
     };
-    if false {
-        let found: Vec<String> = members
-            .members
-            .iter()
-            .filter(|member| matches!(member.fact.name.as_str(), "element_type" | "value_type"))
-            .map(|member| {
-                format!(
-                    "{} kind {:?} type_of {:?}",
-                    member.fact.name, member.fact.kind, member.fact.type_of
-                )
-            })
-            .collect();
-        eprintln!(
-            "[inference] element_type: {class} has {} member(s), {found:?}",
-            members.members.len()
-        );
-    }
+
     for name in ["element_type", "value_type"] {
         let Some(fact) = members
             .members
@@ -965,12 +913,7 @@ pub(crate) fn the_element_type_of(
         };
         let substituted = crate::sema::types::substituted_spelling(written, &parameters, arguments);
         let target = base_type_name(&substituted).to_string();
-        if false {
-            eprintln!(
-                "[inference] element_type: {class}::{name} wrote {written:?} -> {substituted:?} -> {target:?} ({} member(s))",
-                members.members.len()
-            );
-        }
+
         // A parameter name is not an answer: it means the declaration named something this call cannot substitute.
         if !target.is_empty()
             && target != bare

@@ -736,19 +736,9 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
     let mut node = root.clone();
     // Read once — see `crate::probes`. This runs on every symbol resolution, and reading the environment per call
     // was the same mistake that cost 106 s and 40 s at two other sites of it.
-    let tracing = false;
-
     loop {
         let range = node.text_range();
         if !(usize::from(range.start()) <= offset && offset <= usize::from(range.end())) {
-            if tracing {
-                eprintln!(
-                    "  name_node_around({offset}): leaving {:?} {}..{} (does not contain)",
-                    CppSyntaxKind::from(node.kind()),
-                    usize::from(range.start()),
-                    usize::from(range.end())
-                );
-            }
             return found;
         }
 

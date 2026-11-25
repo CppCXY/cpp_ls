@@ -388,9 +388,6 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
             continue;
         }
         if kind != CppTokenKind::Colon {
-            if false {
-                eprintln!("[case] -> false (saw {kind:?})");
-            }
             return false;
         }
         // The colon belongs to a label when a `case`/`default` comes before it — the label's own expression (and its
@@ -399,9 +396,6 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
         while let Some(token) = label {
             match CppTokenKind::from(token.kind()) {
                 CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => {
-                    if false {
-                        eprintln!("[case] -> true (label found)");
-                    }
                     return true;
                 }
                 CppTokenKind::Semicolon

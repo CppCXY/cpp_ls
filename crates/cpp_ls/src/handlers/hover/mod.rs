@@ -529,7 +529,6 @@ fn hover_of_the_rendering(
     view: &FileView,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
-    let traced = false;
     let rendered = session.view(&view.path)?;
     // **The spelling is what keeps a macro argument's call site from mapping to the invocation's first token.** The
     // ordinary map walks written starts and, for an argument token whose written span the cook dropped, answers with
@@ -542,20 +541,9 @@ fn hover_of_the_rendering(
         .reading_offset_of_the_written(in_the_file.get(), &spelling)
         .map(|at| at.get())
         .or_else(|| session.the_rendering_offset(&view.path, in_the_file.get()));
-    if traced {
-        eprintln!(
-            "[rendering] {} at {} ({spelling:?}) maps to {mapped:?}",
-            view.path.display(),
-            in_the_file.get()
-        );
-    }
+
     let offset = mapped?;
-    if traced {
-        eprintln!(
-            "[rendering] the rendering view is {} byte(s)",
-            rendered.source.len()
-        );
-    }
+
     let offset = cpp_code_analysis::file::coordinates::ReadingOffset::new(offset);
     hover_of_the_program(session, &rendered, offset, in_the_file)
 }
@@ -827,21 +815,7 @@ fn hover_of_the_program(
                 // template parameters** is the general one — a partial specialization is a narrower shape
                 // (`vector<bool>`'s pattern has one parameter, the primary's two), so the general one is what a
                 // spelling that did not write the specialization means.
-                if false {
-                    eprintln!(
-                        "[types] {:?}",
-                        found
-                            .found
-                            .iter()
-                            .map(|definition| format!(
-                                "{} definition {} pattern {:?}",
-                                definition.file.display(),
-                                definition.fact.definition,
-                                definition.fact.pattern()
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                }
+
                 if let Some(the_type) = found
                     .found
                     .iter()
@@ -1824,18 +1798,7 @@ fn declaration_markdown(
     } else {
         None
     };
-    if false {
-        eprintln!(
-            "[card] heard {} local {} type_of {:?} => indexed {}",
-            found.fact.name,
-            found.fact.local,
-            found.fact.type_of,
-            indexed
-                .as_ref()
-                .map(|seen| format!("{}:{}", seen.file.display(), seen.fact.name))
-                .unwrap_or_else(|| "no".to_string())
-        );
-    }
+
     let found = match &indexed {
         Some(indexed) => indexed,
         None => found,
@@ -1947,17 +1910,7 @@ fn declaration_markdown(
     {
         *fact = the_member.fact.clone();
     }
-    if false {
-        eprintln!(
-            "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
-            fact.name,
-            fact.kind,
-            fact.scope,
-            fact.returns,
-            fact.parameter_list(),
-            fact.range
-        );
-    }
+
     let mut out = String::new();
 
     // **The instantiation the reader wrote is the signature they asked about.** A class template's fact describes
@@ -2205,16 +2158,7 @@ fn declaration_markdown(
     // decline. Measured: `std::vector<widget::Widget>` reported "not computed" while the arguments were right there
     // in `subject`.
     if matches!(fact.kind, DeclKind::Type)
-        && {
-            if false {
-                eprintln!(
-                    "[layout] asking for {:?} (subject {:?})",
-                    fact.name.as_str(),
-                    subject
-                );
-            }
-            true
-        }
+        && { true }
         && let Known::Yes(layout) = session.the_layout_of(
             view,
             if subject.is_empty() {

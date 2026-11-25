@@ -903,18 +903,6 @@ fn the_element_type_pointed_at(
         )
     });
     if !pointer_like {
-        if false {
-            let names: Vec<&str> = members
-                .members
-                .iter()
-                .map(|member| member.fact.name.as_str())
-                .filter(|name| name.starts_with("operator"))
-                .collect();
-            eprintln!(
-                "element_type: {class} is not pointer-like ({} member(s), operators {names:?})",
-                members.members.len()
-            );
-        }
         return None;
     }
     let arguments: Vec<String> = written

@@ -706,16 +706,7 @@ pub async fn on_semantic_tokens(
         let formats_for = phase.elapsed().as_millis();
         let phase = std::time::Instant::now();
         let data = encode(held, Some(&view), &names, &drawable, multi_line, &formats);
-        if false {
-            eprintln!(
-                "[semantic] {} name(s), {} token(s): classified {} ms | formats {} ms | encoded {} ms",
-                names.len(),
-                data.len() / 5,
-                classified,
-                formats_for,
-                phase.elapsed().as_millis()
-            );
-        }
+        
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
             data,

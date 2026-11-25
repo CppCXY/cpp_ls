@@ -1587,47 +1587,6 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         // condition of every guard arrives here — so reading the environment per call was a lock of the process on
         // the hottest path in the program. Measured: hoisting that one read took `a_guard_holds` from **271,479 ms**
         // to **192,350 ms**, and dropping the `to_string_lossy` beside it took it to **165,312 ms**.
-        if false {
-            let from_state = self.state.definitions.get(name).map(|binding| {
-                // **The shape, not just the name.** A definition whose parameter list or body did not survive the
-                // walk is a definition the expander cannot use: `NAME (x)` stops being a call, and an `#if` that
-                // asks for a *value* gets an identifier with none. Printing only "defined" hid that for several
-                // rounds — the lookup answered `Defined` while the guard still came out `None`.
-                let params = match &binding.definition.params {
-                    None => "object-like".to_string(),
-                    Some(list) => format!(
-                        "fn-like({:?})",
-                        list.iter()
-                            .map(|held| held.name.as_ref())
-                            .collect::<Vec<_>>()
-                    ),
-                };
-                let body: Vec<&str> = binding
-                    .definition
-                    .body
-                    .significant()
-                    .map(|token| token.text())
-                    .collect();
-                format!(
-                    "state(defined_in={} at={} {params} body={:?})",
-                    binding.defined_in.display(),
-                    binding.defined_at,
-                    body.join(" ")
-                )
-            });
-            let from_seed = match self.seed.lookup(name) {
-                crate::condition::Lookup::Defined(_) => "seed:Defined".to_string(),
-                crate::condition::Lookup::DefinedWithoutAValue => {
-                    "seed:DefinedWithoutAValue".to_string()
-                }
-                crate::condition::Lookup::Undefined => "seed:Undefined".to_string(),
-                crate::condition::Lookup::Unanswered => "seed:Unanswered".to_string(),
-            };
-            println!(
-                "cppls-lookup: {name} state={} {from_seed}",
-                from_state.as_deref().unwrap_or("none")
-            );
-        }
 
         if let Some(binding) = self.state.definitions.get(name) {
             // **A definition written below this condition has not happened yet.** An include guard is
@@ -2492,16 +2451,6 @@ impl TranslationUnit {
         // **The frame tree**, when the unit trace is on: what the renderer will walk, in the order it walks it. A
         // disagreement with cl.exe's `#line` sequence is a disagreement about include order, and this is our half of
         // that comparison — `cl /E` on the same interface unit is the other, and it costs 0.4 s.
-        if false && !self.frames.is_empty() {
-            for (index, frame) in self.frames.iter().enumerate() {
-                eprintln!(
-                    "[frame] {index:3} {} parent {:?} at {}",
-                    frame.file.file_name().unwrap_or_default().to_string_lossy(),
-                    frame.parent,
-                    frame.from_in_parent
-                );
-            }
-        }
 
         if !self.frames.is_empty() {
             cook.stitch(0, &mut out);
@@ -4105,22 +4054,11 @@ fn walk_one_file<'a>(
     // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
     // `#include` nesting limit is 200, and this is that number.
     if walked.spliced.contains(path) {
-        if false {
-            eprintln!("leave early (already spliced): {}", path.display());
-        }
         return None;
     }
 
     let already_read = !seen.insert(path);
-    if false {
-        eprintln!(
-            "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
-            path.display(),
-            already_read,
-            walked.spliced.contains(path),
-            walked.timeline.is_some(),
-        );
-    }
+
     if depth >= MAX_INCLUDE_DEPTH {
         walked.includes_skipped += 1;
         return None;
@@ -4794,15 +4732,7 @@ fn splice_a_contribution<'a>(
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
     }
-    if false {
-        eprintln!(
-            "splice: {} | {} changes, {} edges, {} events",
-            file.display(),
-            contribution.changes.len(),
-            contribution.edges.len(),
-            contribution.events.len(),
-        );
-    }
+
     walked.spliced.insert(file);
 
     true

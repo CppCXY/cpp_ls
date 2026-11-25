@@ -46,7 +46,6 @@ pub async fn on_code_action(
         .filter_map(named_by_a_diagnostic)
         .collect();
     // **Where the milliseconds go**, when asked.
-    let trace = false;
     let started = std::time::Instant::now();
 
     let prepared = started.elapsed();
@@ -63,15 +62,7 @@ pub async fn on_code_action(
         )?;
 
         let fixes = fixes_of_named(session, &view, offset, &wanted);
-        if trace {
-            eprintln!(
-                "[codeAction] file {:?}, rendering {:?}, fixes {:?}, {} action(s)",
-                after_the_file - started,
-                after_the_rendering - after_the_file,
-                after_the_rendering.elapsed(),
-                fixes.len()
-            );
-        }
+
         Some(
             fixes
                 .into_iter()
@@ -80,13 +71,7 @@ pub async fn on_code_action(
         )
     })
     .await;
-    if trace {
-        eprintln!(
-            "[codeAction] prepare {:?}, total {:?}",
-            prepared,
-            started.elapsed()
-        );
-    }
+
     answer
 }
 

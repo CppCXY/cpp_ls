@@ -72,9 +72,6 @@ pub async fn on_inlay_hint(
         // `catch_up` is that, as a question about **this file**: one parse of it when an edit is waiting, and
         // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
         // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
-        if false {
-            eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
-        }
     }
 
     // **A hint no longer waits for the project's index to drain.**
@@ -125,24 +122,6 @@ pub async fn on_inlay_hint(
         let hints_done = hints_started.elapsed();
         let types_started = std::time::Instant::now();
         let types = session.type_hints(&view, visible);
-        if false {
-            eprintln!(
-                "[inlay] {} parameter hint(s) in {hints_done:?}, {} type hint(s) in {:?}",
-                hints.len(),
-                types.len(),
-                types_started.elapsed(),
-            );
-        }
-        if false {
-            eprintln!("[inlay] {} type hint(s)", types.len());
-        }
-        if false {
-            eprintln!(
-                "[inlay] view {parsed:?}, hints {:?}, {} hint(s)",
-                started.elapsed() - parsed,
-                hints.len()
-            );
-        }
 
         Some(
             hints

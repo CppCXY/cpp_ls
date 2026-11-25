@@ -729,30 +729,6 @@ impl<'a> CppParser<'a> {
         let audit = self.audit_events();
 
         // **What the parse asked, and how often** — `CPPLS_PARSER_STATS=1`. See [`ParserCounts`].
-        if false {
-            let counts = &self.counts;
-            eprintln!(
-                "parser stats: {} event(s) | {} mark(s), {} close(s) | {} checkpoint(s), {} rollback(s), \
-                 {} speculative attempt(s) | {} type question(s), {} answered | {} `>` question(s) | \
-                 {} token(s)",
-                self.events.len(),
-                counts.marks.get(),
-                counts.closes.get(),
-                counts.checkpoints.get(),
-                counts.rollbacks.get(),
-                counts.attempted.get(),
-                counts.type_questions.get(),
-                counts.type_answers.get(),
-                counts.greater_than_questions.get(),
-                self.tokens.len(),
-            );
-            eprintln!(
-                "parser doc layer: {} group(s), {} ns total, {} ns each",
-                counts.comment_groups.get(),
-                counts.comment_nanos.get(),
-                counts.comment_nanos.get() / counts.comment_groups.get().max(1),
-            );
-        }
 
         debug_assert!(
             self.open_marks.is_empty(),

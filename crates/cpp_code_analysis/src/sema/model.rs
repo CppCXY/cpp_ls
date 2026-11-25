@@ -125,11 +125,7 @@ impl<'a> SemanticModel<'a> {
         // measure what the rules cost *without* the inference they do — the difference between this and the normal
         // run is the inference layer's share of a diagnostics pull, and it is what says whether the next work is in
         // the engine or in the walks. It is not a mode: the analysis it produces is deliberately wrong.
-        if false {
-            return Known::Unknown(crate::UnknownReason::UnknownType(Box::from(
-                expression.text().to_string().trim(),
-            )));
-        }
+
         // One borrow of the resolver for the whole inference, so a question that reaches into another file — and the
         // question *inside* that answer, recursively — all go through the same memo and the same resolver. The `RefCell`
         // is borrowed as a *field*, not as `self`, which is what keeps a second query on this model possible while this one

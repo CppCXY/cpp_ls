@@ -110,13 +110,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 && can_be_cooked(self, included)
                 && !refused(self, included)
             {
-                if false {
-                    eprintln!(
-                        "want_the_closure_cooked({}): queued {} (not read, cookable, not refused)",
-                        root.display(),
-                        included.display()
-                    );
-                }
                 remember(self, included);
                 self.cooking.want(included);
             }
@@ -506,14 +499,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         room.min(steps * 2).max(wave.len()),
                     )
                 };
-                if false {
-                    eprintln!(
-                        "ADVANCE wave of {} file(s) prepared {} in {:?}",
-                        wave.len(),
-                        made.len(),
-                        prepared_from.elapsed(),
-                    );
-                }
+
                 for (path, made) in made {
                     self.remember_a_prepared(path, made);
                 }
@@ -525,14 +511,6 @@ impl<F: FileProvider + Clone> Session<F> {
             let ready = self.prefetched.remove(&key);
             let step_started = std::time::Instant::now();
             done.push(self.index_one(path, priority, depth, ready, true));
-            if false {
-                eprintln!(
-                    "[advance] one step took {} ms ({} of {} step(s))",
-                    step_started.elapsed().as_millis(),
-                    taken + 1,
-                    steps
-                );
-            }
         }
 
         // Nothing left to read means nothing left to read *ahead*: what is still here was prepared for a queue that
@@ -550,29 +528,11 @@ impl<F: FileProvider + Clone> Session<F> {
         // through the pump, which had already been given the right slice. Passing nothing is not "passing no
         // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
         let units = Vec::new();
-        if false {
-            // **Counts, not the names.** A line with sixty-four absolute paths is ~10 KB, and through a redirected
-            // stderr that is a write which can block — inside this function, after `started.elapsed()` was taken, so
-            // the *caller* measures the block and the line itself does not. That is the whole of a "56 s batch" that
-            // this trace reported while the batch's own timer said 7 ms.
-            eprintln!(
-                "ADVANCE steps={} in {:?} done={}",
-                steps,
-                started.elapsed(),
-                done.len()
-            );
-        }
+
         let drain = {
             let finishing = std::time::Instant::now();
             let drain = self.finish_a_slice(&done, units);
-            if false {
-                eprintln!(
-                    "ADVANCE finish {} file(s) in {:?} (batch total {:?})",
-                    done.len(),
-                    finishing.elapsed(),
-                    started.elapsed(),
-                );
-            }
+
             drain
         };
 
@@ -600,13 +560,6 @@ impl<F: FileProvider + Clone> Session<F> {
         let prepared = self.prepare_the_drain(drain);
         let prepared_in = drain_started.elapsed();
         let committed = self.commit_the_drain(prepared);
-        if false {
-            eprintln!(
-                "ADVANCE drain prepared {:?}, committed {committed} in {:?}",
-                prepared_in,
-                drain_started.elapsed() - prepared_in,
-            );
-        }
 
         // **And a slice of the cooking queue, which this path used to leave to two other callers.** `index_everything`
         // and `diagnose_everything` both claim cooks; `advance` — the server's timer callback — did not, so a file a
@@ -625,19 +578,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
                 // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
                 let asked = claimed.len();
-                if false {
-                    eprintln!("advance: claiming {claimed:?}");
-                }
+
                 let materials = self.materials_for(claimed);
                 let gathered = materials.len();
                 let rendered = self.render_them(materials);
                 let built = rendered.len();
                 let committed = self.commit_them(rendered).len();
-                if false {
-                    eprintln!(
-                        "advance: claimed {asked}, gathered {gathered}, built {built}, committed {committed}"
-                    );
-                }
             }
         }
 
@@ -653,9 +599,6 @@ impl<F: FileProvider + Clone> Session<F> {
         if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
             let reading = std::time::Instant::now();
             self.read_a_program_now();
-            if false {
-                eprintln!("ADVANCE read_a_program_now in {:?}", reading.elapsed());
-            }
         }
 
         done
@@ -1461,8 +1404,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 ..PreparedDrain::default()
             };
         }
-        let tracing = false;
-
         // **The two halves are timed apart**, because a start-up regression of **90 %** was found inside this
         // function on a warm cache: 1761 summaries reused from disk in 4 s of real work, and 60 s in twelve calls of
         // this. `prepare_the_re_read` and one environment look the same from outside and have nothing to do with each
@@ -1473,13 +1414,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // **`true`: this caller can walk a timeline**, so the pass renders a file no slice unit covers instead of
             // keeping the raw reading of it. See `SummaryStore::prepare_the_re_read`'s `walk_its_own`.
             (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false, true));
-        if tracing && !files.is_empty() {
-            eprintln!(
-                "drain: re-read {} file(s) in {} ms",
-                files.len(),
-                started.elapsed().as_millis()
-            );
-        }
 
         // **Remembered under the text it was read from**, which is what the next `view` looks up. The text is taken
         // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
@@ -1502,13 +1436,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // not expand. Outside the writer, like the rendering below, and for the same measured reason: building an
             // environment walks the file's whole closure and copies every file's text (103.7 ms on MSVC's headers).
             let _ = self.the_macros_of(&path, &text);
-            if tracing {
-                eprintln!(
-                    "drain: environment for {} in {} ms",
-                    path.display(),
-                    step.elapsed().as_millis()
-                );
-            }
+
             Some((
                 (path, crate::cache::content_hash(&text)),
                 std::sync::Arc::new(reading),
@@ -1616,12 +1544,6 @@ impl<F: FileProvider + Clone> Session<F> {
             known.extend(refined.iter().map(|path| queue_key(path)));
         }
         if !waiting.is_empty() && self.pending_work() > 0 {
-            if false {
-                eprintln!(
-                    "re-read: {} file(s) go back on the queue — their closures are still filling",
-                    waiting.len()
-                );
-            }
             for path in waiting {
                 self.queue.again(path, Priority::Rest, 0);
             }

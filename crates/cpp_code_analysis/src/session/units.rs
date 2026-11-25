@@ -61,16 +61,7 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             let started = std::time::Instant::now();
             let made = session.view_of_the_file(path);
-            if false {
-                eprintln!(
-                    "[resolver] {:>5} ms  {} ({})",
-                    started.elapsed().as_millis(),
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.display().to_string()),
-                    if made.is_some() { "read" } else { "none" }
-                );
-            }
+
             seen.borrow_mut().insert(path.to_path_buf(), made.clone());
             made
         });
@@ -236,18 +227,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 };
 
                 let read_started = std::time::Instant::now();
-                if false {
-                    eprintln!("[unit] gathering the closure of {path:?}");
-                }
+
                 let (closure, closure_by_key) = { self.closure_with_text_from(path, Some(root)) };
                 let read_took = read_started.elapsed();
                 let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
-                if false {
-                    eprintln!(
-                        "[unit] closure of {path:?}: {} file(s), {closure_bytes} bytes in {read_took:?}",
-                        closure.len()
-                    );
-                }
+
                 let walk_started = std::time::Instant::now();
 
                 // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a
@@ -359,20 +343,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     // …and counted **by root**, which the total above cannot say. See [`Session::walks_by_root`].
                     if let Ok(mut walks) = self.walks_by_root.lock() {
                         *walks.entry(queue_key(path)).or_insert(0) += 1;
-                    }
-
-                    if false {
-                        eprintln!(
-                            "[unit] read {:>4} ms, walk {:>4} ms, put {:>4} ms, {} file(s) / {} bytes  {}",
-                            read_took.as_millis(),
-                            walk_took.as_millis(),
-                            put_took.as_millis(),
-                            closure.len(),
-                            closure_bytes,
-                            path.file_name()
-                                .map(|name| name.to_string_lossy().to_string())
-                                .unwrap_or_else(|| path.display().to_string())
-                        );
                     }
 
                     (walked, provisional)
@@ -845,19 +815,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // decode is the difference between a second unit read costing a second and costing a
         // moment.
         if let Some(cached) = self.store.cached_unit(key) {
-            if false {
-                eprintln!("unit render: key {key:016x} served from the cache");
-            }
             if let Ok(mut known) = self.rendered_unit.lock() {
                 *known = Some((key, cached.clone()));
             }
             return Some(cached);
-        }
-        if false {
-            eprintln!(
-                "unit render: key {key:016x} MISSED ({} source(s) to cook)",
-                sources.len()
-            );
         }
 
         let definitions = unit.definitions();
@@ -946,13 +907,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // records why: a rendering is a function of the reader as well as of the bytes, and a key that names only the
         // bytes cannot invalidate a stream whose inputs happen not to have moved.
         let key = crate::cache::a_rendering_key(&inputs);
-        if false {
-            eprintln!(
-                "unit inputs: {} file(s), reader {:016x}, key {key:016x}",
-                inputs.len(),
-                crate::cache::READING_FINGERPRINT
-            );
-        }
 
         (sources, key)
     }
@@ -996,14 +950,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 .or_else(|| self.store.cached_unit(units_key))
             && self.the_rendering_still_describes(&rendered, units_key)
         {
-            if false {
-                eprintln!(
-                    "unit gather: key {units_key:016x} served without the walk in {:?} ({} walked, {} token file(s))",
-                    started.elapsed(),
-                    rendered.walked.len(),
-                    rendered.files.len(),
-                );
-            }
             let program = crate::cache::content_hash(&rendered.text);
             let known = self
                 .unit_index
@@ -1051,17 +997,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     .map(|(_, cached)| cached.clone())
             })
             .or_else(|| self.store.cached_unit(units_key));
-        if false {
-            eprintln!(
-                "unit gather: key {units_key:016x} {} — walked {walked:?}, key {hashed:?} ({} file(s))",
-                if rendered.is_some() {
-                    "served"
-                } else {
-                    "MISSED"
-                },
-                unit.files().count(),
-            );
-        }
 
         let (program, known) = match &rendered {
             Some(rendered) => {
@@ -1269,37 +1204,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // declarations of the files that did **not** leak were never in doubt, and refusing them answered a
         // question nobody had asked.
         let mut placed = 0usize;
-        if false {
-            let names: Vec<String> = indexed
-                .files
-                .iter()
-                .map(|(path, _)| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                })
-                .filter(|name| name == "format" || name == "string" || name == "vector")
-                .collect();
-            eprintln!(
-                "unit commit: {} file(s); interesting: {names:?}",
-                indexed.files.len()
-            );
-        }
+
         for (path, cooked) in indexed.files {
             placed += 1;
-            if false && path.file_name().and_then(|name| name.to_str()) == Some("format") {
-                let in_std = cooked
-                    .declarations
-                    .iter()
-                    .filter(|fact| fact.name.as_str() == "format")
-                    .map(|fact| fact.scope.clone().unwrap_or_default())
-                    .take(4)
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "unit commit: <format> {} declaration(s); format in {in_std:?}",
-                    cooked.declarations.len()
-                );
-            }
+
             // **And the queue is told, so no per-file step reads it again.**
             self.queue.mark_worked(&path);
             // **The summary is left alone, and that is a measurement rather than an omission.** The tempting next
@@ -1395,13 +1303,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
         let reading = self.commit_a_unit_reading(prepared, records)?;
-        if false {
-            eprintln!(
-                "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
-                committing.elapsed(),
-                reading.files
-            );
-        }
+
         Some(reading)
     }
 
@@ -1870,7 +1772,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // "which of the four phases is the one that costs a minute", and no single number outside can answer it: the
         // same call measured 25 s, 44 s, 112 s and 506 s on unchanged inputs, against a 24 MB cache, so the answer is
         // not the cache and not the closure.
-        let tracing = false;
         let started = std::time::Instant::now();
         let mut last = started;
 
@@ -1879,29 +1780,13 @@ impl<F: FileProvider + Clone> Session<F> {
             // previous round brought in — a fresh walk each round, because a round is a handful of hashmap lookups
             // and the alternative is a worklist that has to be kept in step with the index.
             let wanted = self.modules_the_index_cannot_name(path);
-            if tracing {
-                eprintln!(
-                    "module read: wanted {:?} after {:?}",
-                    wanted,
-                    last.elapsed()
-                );
-                last = std::time::Instant::now();
-            }
 
             if wanted.is_empty() {
                 break;
             }
 
             let found = self.module_interface_units_of(&wanted, path);
-            if tracing {
-                eprintln!(
-                    "module read: resolved {} file(s) {:?} after {:?}",
-                    found.len(),
-                    found,
-                    last.elapsed()
-                );
-                last = std::time::Instant::now();
-            }
+
             if found.is_empty() {
                 break;
             }
@@ -1976,14 +1861,6 @@ impl<F: FileProvider + Clone> Session<F> {
             for unit in due {
                 let reading = std::time::Instant::now();
                 let read = self.read_the_unit(&unit);
-                if tracing {
-                    eprintln!(
-                        "module read: unit {} in {:?} ({} file(s))",
-                        unit.display(),
-                        reading.elapsed(),
-                        read.map_or(0, |reading| reading.files),
-                    );
-                }
             }
         }
 

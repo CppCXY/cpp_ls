@@ -91,13 +91,7 @@ pub(crate) fn member_candidates(
             .filter(|declaration| declaration.fact.name == member)
             .count()
     };
-    if false {
-        eprintln!(
-            "[candidates] {bare}::{member}: {} declaration(s) in scope, {} named",
-            all.len(),
-            named_of(&all)
-        );
-    }
+
     let from_the_index: Vec<(DeclFact, PathBuf)> = all
         .into_iter()
         .filter(|declaration| {

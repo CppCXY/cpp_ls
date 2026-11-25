@@ -421,14 +421,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `Session::render_the_unit` is a different rendering (measured: correct for the 28-line reproducer in
         // `docs/worklog.md`, while the summary this function builds is wrong). So the one text that matters gets a
         // way out, off unless asked for, like this crate's other traces.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            let _ = std::fs::create_dir_all(directory);
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unit".to_string());
-            let _ = std::fs::write(directory.join(format!("{name}.rendering")), &rendered.text);
-        }
+
         // **The stream is already cooked**, so there is nothing for a macro environment to add and a great deal for
         // it to get wrong: its answers are positional in the original file's coordinates while the parser reads the
         // rendering's. See the same note in [`FileIndexer::index`].
@@ -672,22 +665,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **The whole stream, its file boundaries and its file list**, when a dump directory is named: the only way
         // to see which file's text a wrong scope came from — the rendering has no file markers in it, and the
         // boundaries are what say where one file stops.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            let _ = std::fs::create_dir_all(directory);
-            let _ = std::fs::write(directory.join("unit.stream"), &stream.text);
-            let boundaries: Vec<String> = stream
-                .file_boundaries()
-                .iter()
-                .map(|at| at.to_string())
-                .collect();
-            let _ = std::fs::write(directory.join("unit.boundaries"), boundaries.join("\n"));
-            let files: Vec<String> = stream
-                .files
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect();
-            let _ = std::fs::write(directory.join("unit.files"), files.join("\n"));
-        }
 
         let parsing = std::time::Instant::now();
         let tree = {
@@ -705,41 +682,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         // **The errors this parse reported, and which file each one is in** — written only when a dump directory is
         // named. A rendering has no file markers in it, so a bare offset says nothing about which header is wrong.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            let boundaries = stream.file_boundaries();
-            let lines: Vec<String> = tree
-                .get_errors()
-                .iter()
-                .take(400)
-                .map(|error| {
-                    let at = usize::from(error.range.start());
-                    let index = boundaries
-                        .iter()
-                        .take_while(|boundary| **boundary <= at)
-                        .count();
-                    let file = stream
-                        .files
-                        .get(index)
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    format!("{at}\t{file}\t{:?}", error.message)
-                })
-                .collect();
-            let _ = std::fs::write(directory.join("unit.errors"), lines.join("\n"));
-        }
 
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            eprintln!(
-                "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
-                parsed.as_secs_f64() * 1000.0,
-                indexing.elapsed().as_secs_f64() * 1000.0,
-                stream.files.len(),
-                stream.text.len()
-            );
-        }
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
             .files
@@ -856,14 +802,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The text this summary is built from, when `CPPLS_DUMP_RENDERING_DIR` names a directory — the companion of the
         // same hook in [`FileIndexer::index_rendering`], and the only way to see which reading a wrong answer came
         // from when the file's own text parses correctly.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            let _ = std::fs::create_dir_all(directory);
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unit".to_string());
-            let _ = std::fs::write(directory.join(format!("{name}.parsed")), source);
-        }
+
         // See `index`: the content part of the key is the text, always. The caller supplies the part that
         // describes the *compilation* — the configuration and the directory the file sits in.
         //
@@ -907,14 +846,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let making = std::time::Instant::now();
         let (mut declarations, mut guards) =
             { build_facts(&scopes, &preprocessing, &root, &errors, keep_locals) };
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            eprintln!(
-                "[unit]   scopes {:>6.1} ms  facts {:>6.1} ms  ({} fact(s))",
-                scopes_ms,
-                making.elapsed().as_secs_f64() * 1000.0,
-                declarations.len()
-            );
-        }
 
         let mut interner = PathInterner::new(cfg!(windows));
         // **This file's compilation, not the project's** — see `CompilerConfig::for_file`.
@@ -1742,25 +1673,10 @@ fn file_what_was_found(
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
     // read here is a lock of the process environment plus an `OsString` built for an answer that cannot change
     // during a run.
-    let tracing = false;
     let interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
-    if tracing {
-        eprintln!("[attr] {} declaration(s) to place", declarations.len());
-    }
+
     for mut fact in declarations {
-        if tracing && interested(&fact.name) {
-            eprintln!(
-                "[attr] {} kind {:?} range {}..{}",
-                fact.name,
-                fact.kind,
-                fact.range.start_offset,
-                fact.range.end_offset()
-            );
-        }
         let Some((file, range)) = stream.written_span(fact.range) else {
-            if tracing && interested(&fact.name) {
-                eprintln!("[attr] {} -> no written span", fact.name);
-            }
             *unplaced += 1;
             continue;
         };
@@ -1769,12 +1685,6 @@ fn file_what_was_found(
             continue;
         };
         if name_file != file {
-            if tracing && interested(&fact.name) {
-                eprintln!(
-                    "[attr] {} -> the name is in file {name_file}, the declaration in {file}",
-                    fact.name
-                );
-            }
             *unplaced += 1;
             continue;
         }
@@ -1782,13 +1692,7 @@ fn file_what_was_found(
             *unplaced += 1;
             continue;
         }
-        if tracing && interested(&fact.name) {
-            eprintln!(
-                "[attr] {} -> file {file} {:?}",
-                fact.name,
-                files.get(file as usize).map(|(path, _)| path.file_name())
-            );
-        }
+
         fact.range = range;
         fact.name_range = name_range;
         if let Some((_, cooked)) = files.get_mut(file as usize) {

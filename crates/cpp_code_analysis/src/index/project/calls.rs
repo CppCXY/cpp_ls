@@ -1028,12 +1028,6 @@ pub(crate) fn declaration_of_a_callee(
             member_access_class_and_arguments(shapes, index, scopes, root, path, &class, &object);
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
-        if false {
-            eprintln!(
-                "[inference] callee: object {object:?} -> class {class:?}, arguments {arguments:?}, bindings empty {}",
-                bindings.is_empty()
-            );
-        }
         // The arguments as **spellings**, for the pattern rule — see [`direct_member`].
         let written_arguments: Vec<String> = arguments
             .iter()
@@ -1072,12 +1066,6 @@ pub(crate) fn declaration_of_a_callee(
             && let Some(chosen) = the_one_the_arguments_select(&types, &callable, &[])
             && let Some((fact, file)) = callable.get(chosen)
         {
-            if false {
-                eprintln!(
-                    "[inference] callee: {} candidate(s), the arguments chose {chosen}",
-                    callable.len()
-                );
-            }
             return Known::Yes(NamedDeclaration::Indexed(
                 fact.clone(),
                 file.clone(),
@@ -1561,33 +1549,8 @@ pub(crate) fn the_one_the_arguments_select(
         })
         .collect();
 
-    if false {
-        eprintln!(
-            "[inference] pick among {} candidates ({} usable), argument types {types:?} written {explicit_arguments:?}",
-            candidates.len(),
-            usable.len()
-        );
-        for (at, (fact, _)) in candidates.iter().enumerate() {
-            eprintln!(
-                "[inference]   candidate {at}: bits={} deleted={} params={:?}",
-                fact.modifiers.bits(),
-                fact.modifiers.contains(crate::DeclModifiers::DELETED),
-                fact.parameter_list()
-            );
-        }
-        for (at, (fact, _)) in candidates.iter().enumerate() {
-            eprintln!(
-                "[inference]   candidate {at}: scope {:?} returns {:?} params {:?}",
-                fact.scope,
-                fact.returns,
-                fact.parameter_list()
-            );
-        }
-    }
     let choice = crate::sema::overload::choose(types, &built);
-    if false {
-        eprintln!("[inference]   choice: {choice:?}");
-    }
+
     match choice {
         // The rank is a position in `built`, which is `usable`'s order — the original index is what the caller wants.
         crate::sema::overload::Choice::One(at) => usable.get(at).copied(),

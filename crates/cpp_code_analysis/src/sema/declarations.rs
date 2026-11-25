@@ -220,27 +220,7 @@ pub(crate) fn an_unnamed_class_body_named(
     // The **innermost** specifier sequence on the path is the declaration's own, the same reading
     // [`declared_type_of_with`] makes above.
     let mut unnamed = false;
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(specifiers) = &shape.specifiers {
             unnamed = a_class_body_without_a_tag(specifiers);
         }
@@ -320,27 +300,7 @@ pub(crate) fn declared_type_of_with(
     // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
     // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
     let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -1103,14 +1063,6 @@ impl DeclarationShapes {
             // [`Shape::pattern`].
             let pattern = match kind {
                 CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef => {
-                    if false {
-                        eprintln!(
-                            "[shape] class node {:?} at {:?}: text {:?}",
-                            kind,
-                            node.text_range(),
-                            node.text().to_string().lines().next().unwrap_or("")
-                        );
-                    }
                     written_class_pattern(&node)
                 }
                 _ => None,
@@ -1444,27 +1396,7 @@ pub(crate) fn declared_alias_target_with(
     // copied out rather than borrowed: the visitor is handed a reference valid only for its own call, which is the
     // shape of the walk (see [`DeclarationShapes::on_the_path`]).
     let mut declaration = None;
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if matches!(
             shape.kind,
             CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
@@ -3173,27 +3105,7 @@ pub(crate) fn declared_returns_of_with(
     let mut specifiers = None;
     let mut trailing = None;
     let mut declarator = None;
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -3875,27 +3787,7 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
     // [`declared_type_of`] makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut owner = None;
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         // **A class-like definition**: `class`/`struct`/`union` are one typed node, and an enum writes bases too (its
         // underlying type).
         if cpp_parser::CppClassDef::can_cast(shape.kind) || shape.kind == CppSyntaxKind::EnumDef {
@@ -4326,27 +4218,7 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// for its members and the class *further out* is not.
 pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
-    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if matches!(
             shape.kind,
             CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
@@ -5089,18 +4961,6 @@ impl<'a> DeclarationFacts<'a> {
 
         // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
         // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.
-        if false {
-            eprintln!(
-                "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms ({} declaration(s))  frees {:>6.1} ms  \
-                 reflection {:.1} ms  guards {:.1} ms",
-                walked.as_secs_f64() * 1000.0,
-                qualifying.elapsed().as_secs_f64() * 1000.0,
-                qualified_count,
-                freed.as_secs_f64() * 1000.0,
-                reflected.as_secs_f64() * 1000.0,
-                guarded.as_secs_f64() * 1000.0
-            );
-        }
 
         (facts, guards)
     }

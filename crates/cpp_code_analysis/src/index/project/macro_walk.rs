@@ -526,7 +526,6 @@ impl ProjectIndex {
     /// counted here, at the one place every reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it
     /// on.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
-        if false {}
         self.summaries.get(&normalize(path))
     }
 
@@ -670,9 +669,6 @@ impl ProjectIndex {
                         .any(|(_, prior)| !prior.declarations.is_empty())
                 }))
         {
-            if false {
-                eprintln!("insert: refused an empty reading of {path}");
-            }
             return;
         }
 
@@ -722,20 +718,7 @@ impl ProjectIndex {
             && (path.ends_with("stl_map.h")
                 || path.ends_with("iostream")
                 || path.ends_with("json.hpp"));
-        if tracing {
-            eprintln!(
-                "[names] insert_a_reading {}: sequence {:?} id {id} declarations {} diagnostics {:?}",
-                path,
-                self.sequence.get(&path),
-                reading.declarations.len(),
-                reading
-                    .diagnostics
-                    .iter()
-                    .take(3)
-                    .map(|diagnostic| &diagnostic.message)
-                    .collect::<Vec<_>>()
-            );
-        }
+
         if let Some(&sequence) = self.sequence.get(&path) {
             let previous = self
                 .cooked
@@ -750,12 +733,7 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
-        if false {
-            eprintln!(
-                "[cook] inserted {path}, cooked map now {}",
-                self.cooked.len()
-            );
-        }
+
         let readings = self.cooked.entry(path.clone()).or_default();
         match program {
             None => readings.on_its_own = Some(reading),
@@ -1762,27 +1740,7 @@ impl ProjectIndex {
         let (walk, walk_files) = self.the_visible_walk(visible_from);
         let files = walk_files.as_ref();
         let through_an_import = &walk.through_an_import;
-        if false {
-            eprintln!(
-                "[visibility] {} file(s) after the order step, from {}",
-                files.len(),
-                visible_from.display()
-            );
-        }
-        if false && walk_started.elapsed().as_micros() >= 500 {
-            let asks = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed) - asks_before;
-            let nanos = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed) - nanos_before;
-            eprintln!(
-                "[visibility] {:>5.1} ms, {} file(s), from {} — {asks} condition(s)/{} ms",
-                walk_started.elapsed().as_secs_f64() * 1000.0,
-                files.len(),
-                visible_from
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| visible_from.display().to_string()),
-                nanos / 1_000_000,
-            );
-        }
+
         // Everything below this line is reading facts out of files that are already known to be visible: the
         // filtering, the `DeclFact` clones, and the cooked-vs-raw deduplication. Timed apart from the walk because
         // the two have nothing in common — the walk is a question about the graph and this is a question about the
@@ -1812,31 +1770,6 @@ impl ProjectIndex {
                 }
             }
         };
-
-        if false
-            && let Narrow::Named(names) = narrow
-            && names.iter().any(|name| *name == "cout" || *name == "map")
-        {
-            let postings = match &postings {
-                Some(postings) => postings
-                    .iter()
-                    .map(|posting| {
-                        format!(
-                            "file {} id {} index {}",
-                            posting.file,
-                            posting.reading,
-                            posting.index()
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                None => vec!["no narrow".to_string()],
-            };
-            eprintln!(
-                "[names] visible_declarations {:?}: {} posting(s) — {postings:?}",
-                names,
-                postings.len()
-            );
-        }
 
         // One `(file, its candidates)` group at a time, in file order. Without postings a file's candidates are all of
         // its facts, which is what the empty group range stands for.
@@ -2148,17 +2081,7 @@ impl ProjectIndex {
             .ok()
             .and_then(|walks| walks.get(from).cloned())?;
         let now = self.the_walks_fingerprint(&remembered.contributors);
-        if false {
-            eprintln!(
-                "[visibility]   remembered walk from {from}: {} ({} contributor(s))",
-                if now == remembered.fingerprint {
-                    "hit"
-                } else {
-                    "MISS — an input it was made of changed"
-                },
-                remembered.contributors.len()
-            );
-        }
+
         if now != remembered.fingerprint {
             return None;
         }
@@ -2245,14 +2168,6 @@ impl ProjectIndex {
         let mut state = self.macros.clone();
         let macros_cloned = macros_started.elapsed();
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
-        if false && macros_started.elapsed().as_micros() >= 300 {
-            eprintln!(
-                "[visibility] the state: macro table cloned in {macros_cloned:?} ({} entry(ies)), \
-                 the translation unit's certain set in {:?}",
-                self.macros.len(),
-                macros_started.elapsed() - macros_cloned
-            );
-        }
 
         self.macro_candidates(
             Path::new(&from),
@@ -2730,14 +2645,7 @@ impl ProjectIndex {
                                     include.guard,
                                     include.range.start_offset,
                                 );
-                                if false {
-                                    CONDITION_NANOS.fetch_add(
-                                        started.elapsed().as_nanos() as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    CONDITION_ASKS
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
+
                                 if let Ok(mut answers) = self.visibility_answers.lock() {
                                     answers.insert(key, answer);
                                 }
@@ -2986,9 +2894,7 @@ impl ProjectIndex {
         // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the
         // index lookups — the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine"
         // from "the index" before either is optimised.
-        if false {
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
-        }
+
         // **One answer per spelling per pull** — see [`ProjectIndex::definition_answers`]. Measured on
         // `LuaSource.cpp`: 95 of one pull's 99 slow lookups were the same name (`std`), at 0.6–1.3 ms each.
         let key = (name.to_string(), normalize(visible_from));
@@ -3002,16 +2908,7 @@ impl ProjectIndex {
         }
         let started = std::time::Instant::now();
         let answer = self.definitions_inner(name, visible_from);
-        if false && started.elapsed().as_micros() >= 200 {
-            eprintln!(
-                "[lookup] {:>5.1} ms  {name}  ({} answer(s))",
-                started.elapsed().as_secs_f64() * 1000.0,
-                match &answer {
-                    Known::Yes(found) => found.found.len(),
-                    _ => 0,
-                }
-            );
-        }
+
         if let Ok(mut memo) = self.definition_answers.lock() {
             if memo.len() >= MAX_DEFINITION_ANSWERS {
                 memo.clear();
@@ -3465,13 +3362,8 @@ impl ProjectIndex {
         const ALIAS_DEPTH: usize = 4;
 
         let mut rewritten = name.to_string();
-        let tracing = false;
-
         for _ in 0..ALIAS_DEPTH {
             let segments: Vec<&str> = rewritten.split("::").collect();
-            if tracing {
-                eprintln!("[alias] trying {rewritten}");
-            }
 
             // The last segment is excluded: it is the name being looked for, and substituting it would be
             // answering a different question from the one the caller asked.
@@ -3482,21 +3374,7 @@ impl ProjectIndex {
                 // synonym is the one that says nothing about where `E` really lives.
                 let mut candidates = self.files_declaring(&prefix, visible_from);
                 candidates.sort_by_key(|found| found.fact.kind == DeclKind::Other);
-                if tracing {
-                    eprintln!(
-                        "[alias] prefix {prefix}: {:?}",
-                        candidates
-                            .iter()
-                            .map(|found| format!(
-                                "{} {:?} scope {:?} type {:?}",
-                                found.fact.name,
-                                found.fact.kind,
-                                found.fact.scope,
-                                found.fact.type_of
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                }
+
                 let alias = candidates.into_iter().next()?;
 
                 // A prefix that names the entity **itself** — an `enum class` reached through a `using`, a class

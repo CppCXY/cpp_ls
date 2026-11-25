@@ -130,35 +130,6 @@ impl Branch {
         // The variable is read once — see `crate::probes`. This is called for every branch of every region of every
         // condition of every guard, tens of millions of times in one index, and reading the environment here was a
         // lock of the process per branch: **40 s** of a real project's index, measured.
-        if false {
-            let wanted = "";
-            let mentions = self
-                .tokens
-                .iter()
-                .any(|token| token.text().contains(wanted));
-            if mentions {
-                let answer = match self.kind {
-                    DirectiveKind::If | DirectiveKind::Elif => {
-                        evaluate_recording(&self.tokens, macros).0.is_true()
-                    }
-                    DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
-                    DirectiveKind::Ifndef => {
-                        is_defined(self.name.as_deref(), macros).map(|defined| !defined)
-                    }
-                    DirectiveKind::Else => Some(true),
-                    _ => None,
-                };
-                println!(
-                    "cppls-guard: {:?} mentions {wanted} -> {answer:?}",
-                    self.tokens
-                        .iter()
-                        .map(|token| token.text())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                return answer;
-            }
-        }
 
         match self.kind {
             DirectiveKind::If | DirectiveKind::Elif => self.an_expression_holds(macros),

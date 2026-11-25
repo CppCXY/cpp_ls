@@ -958,12 +958,6 @@ pub fn members_of_with(
     let started = std::time::Instant::now();
     let key = (class.to_string(), path.to_path_buf());
     if let Some(known) = index.cached_member_list(&key) {
-        if false && started.elapsed().as_micros() >= 300 {
-            eprintln!(
-                "[member] {:>5.1} ms  hit   {class}",
-                started.elapsed().as_secs_f64() * 1000.0
-            );
-        }
         return known;
     }
 
@@ -1018,39 +1012,11 @@ pub fn members_of_with(
     if let Known::Yes(list) = &listed {
         index.remember_member_list(key, list);
     }
-    if false && started.elapsed().as_micros() >= 300 {
-        let held = index
-            .member_lists
-            .lock()
-            .map(|known| known.len())
-            .unwrap_or(0);
-        eprintln!(
-            "[member] {:>5.1} ms  miss  {class}  ({} member(s), {} unlisted base(s), {held} held)",
-            started.elapsed().as_secs_f64() * 1000.0,
-            match &listed {
-                Known::Yes(list) => list.members.len(),
-                _ => 0,
-            },
-            match &listed {
-                Known::Yes(list) => list.unlisted.len(),
-                _ => 0,
-            }
-        );
-    }
 
     // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
     // which is the difference between "the base walk worked" and "the list happens to be long". Off unless asked
     // for, like this crate's other traces.
-    if false && let Known::Yes(list) = &listed {
-        eprintln!(
-            "members_of({class}) -> {} member(s), unlisted {:?}",
-            list.members.len(),
-            list.unlisted
-                .iter()
-                .map(|base| format!("{} ({:?})", base.spelling, base.reason))
-                .collect::<Vec<_>>()
-        );
-    }
+
     listed
 }
 
@@ -1075,13 +1041,7 @@ impl ProjectIndex {
         if !cached.list.unlisted.is_empty() && cached.read_at != read_now {
             return None;
         }
-        if false {
-            eprintln!(
-                "members_of({}) -> {} member(s), cached",
-                key.0,
-                cached.list.members.len()
-            );
-        }
+
         Some(Known::Yes(cached.list.clone()))
     }
 
@@ -1299,9 +1259,6 @@ pub(crate) fn members_of_inner(
             a_type_spelling_with_its_arguments(class),
         );
     if let Some(missing) = missing {
-        if false {
-            eprintln!("members_of_inner: {class} names {missing}, which nothing declares");
-        }
         return Known::Yes(MemberList {
             members: Vec::new(),
             unlisted: vec![UnlistedBase {
@@ -1347,9 +1304,6 @@ pub(crate) fn members_of_inner(
         // the index is a subset of the translation unit — so this arm exists for totality, not for a case.
         Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
     };
-    if false && own.is_empty() {
-        eprintln!("members_of_inner: {class} has no own members (after alias resolution)");
-    }
 
     // **A namespace alias answers with its target's members.** `namespace views = ranges::views;` is how libstdc++ spells
     // `std::views`, and the index records it as a `Namespace` whose `type_of` is the target — not as a type alias, so
@@ -1477,9 +1431,6 @@ pub(crate) fn members_of_inner(
             // never repeat, and the spellings are the thing to look at: `_Tuple_impl<0, _Elements...>` is a base that
             // becomes `_Tuple_impl<0 + 1, _Elements...>` one level down, which is a new type every time and therefore an
             // unbounded number of levels. `CPPLS_TRACE_MEMBERS=1`.
-            if false {
-                eprintln!("[members] {class} level {depth}: {shown}");
-            }
 
             // **A base clause whose head is an *alias template* is not a class.** `conditional_t<…>` is a Type fact
             // with a `type_of` target and no members, so `direct_members("conditional_t")` answered an **empty class**
@@ -1757,14 +1708,9 @@ pub(crate) fn substitute_a_base_clause(
     clause: &str,
 ) -> String {
     let Some((head, mut arguments)) = split_template_arguments(shown) else {
-        if false {
-            eprintln!("[clause] {shown:?} is not a template id; clause {clause:?}");
-        }
         return clause.to_string();
     };
-    if false {
-        eprintln!("[clause] {shown:?} -> head {head:?}, arguments {arguments:?}");
-    }
+
     // **The class is keyed by its bare name.** The spelling here is often qualified — `std::allocator_traits<…>` —
     // and `files_declaring` matches the name a fact records, which is the bare one. A qualified lookup therefore
     // found nothing and the clause came back with its parameters still standing: measured on the conditional
@@ -1787,18 +1733,10 @@ pub(crate) fn substitute_a_base_clause(
     names.truncate(arguments.len());
     arguments.truncate(names.len());
     if names.is_empty() {
-        if false {
-            eprintln!(
-                "[clause] {shown:?}: no parameters for {head:?} ({} candidate(s))",
-                candidates.len()
-            );
-        }
         return clause.to_string();
     }
     let substituted = crate::sema::types::substituted_spelling(clause, &names, &arguments);
-    if false {
-        eprintln!("[clause] {shown:?}: {names:?} <- {arguments:?} gives {substituted:?}");
-    }
+
     substituted
 }
 
@@ -1846,9 +1784,6 @@ pub(crate) fn the_classes_a_base_clause_names(
     clause: &str,
 ) -> Vec<String> {
     let mut spelling = clause.trim().to_string();
-    if false {
-        eprintln!("[base-clause] asked about {clause:?}");
-    }
 
     for _ in 0..MAX_ALIAS_HOPS {
         let without_typename = spelling
@@ -1856,9 +1791,6 @@ pub(crate) fn the_classes_a_base_clause_names(
             .unwrap_or(&spelling)
             .trim()
             .to_string();
-        if false {
-            eprintln!("[base-clause]   step: {without_typename:?}");
-        }
 
         // **A member type** — `Class<…>::member`.
         if let Some((class, member)) = split_at_the_last_scope(&without_typename) {

@@ -96,13 +96,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .the_stored_cooked_reading_with_rendering(&resolved)
         {
             let committed = self.commit_a_stored_cook(resolved, cooked, rendered);
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                log::info!(
-                    "cook: {} served from the disk in {:?}",
-                    path.as_ref().display(),
-                    started.elapsed()
-                );
-            }
+
             return committed;
         }
         let materials = self.cooking_materials(path.as_ref())?;
@@ -113,51 +107,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // the same escape hatch `index_rendering` has, for the other half of the pipeline. A parse that goes wrong only
         // in the *cooked* reading cannot be seen in `inspect tree` (which reads the file's own text), and without the
         // text every diagnosis is a guess about what the macros produced.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            let _ = std::fs::create_dir_all(directory);
-            let name = path
-                .as_ref()
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unit".to_string());
-            let _ = std::fs::write(
-                directory.join(format!("{name}.cooked.rendering")),
-                &rendered.indexed.rendered.text,
-            );
-            // **And why anything was left unexpanded.** A macro the expander declined is invisible in the text — its
-            // name is still a name — so a reader asking "why is this not expanded" needs the note the expander kept.
-            // The notes are the first few (`Expander::note` bounds them), each with the position it is about.
-            let notes: Vec<String> = rendered
-                .indexed
-                .diagnostics
-                .iter()
-                .map(|diagnostic| format!("{diagnostic:?}"))
-                .collect();
-            let _ = std::fs::write(
-                directory.join(format!("{name}.expansion")),
-                notes.join("\n"),
-            );
-        }
+
         let rendered_for = render_started.elapsed().as_millis();
         let committed = self.commit_a_cooked(rendered);
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            log::info!(
-                "cook: {} gathered {} ms | rendered {} ms | committed {} ms | total {} ms | {}",
-                path.as_ref().display(),
-                gathered,
-                rendered_for,
-                started
-                    .elapsed()
-                    .as_millis()
-                    .saturating_sub(gathered + rendered_for),
-                started.elapsed().as_millis(),
-                if committed.is_some() {
-                    "filed"
-                } else {
-                    "dropped"
-                }
-            );
-        }
+
         committed
     }
 
@@ -353,12 +306,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // than cooked now from half of one and *stored* — a stored reading is keyed by its closure, so the wrong
         // answer outlives the moment that produced it.
         if held.is_none() && !self.is_locally_ready(&path) {
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!(
-                    "cooking: {} refused | its closure is not indexed yet",
-                    path.display()
-                );
-            }
             return None;
         }
         let (unit, configuration) = match held {
@@ -497,27 +444,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // false positive `lvm.c` measured (7 errors at one position, all of them the cut). The count is printed by the
         // probe because no user-facing answer may depend on it yet; `CookedStream::exhausted` is the fact a consumer
         // that reports would need.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            eprintln!(
-                "render_cook: {} {} token(s) of {} cooked, exhausted {}",
-                path.display(),
-                stream.tokens.len(),
-                tokens.len(),
-                stream.exhausted
-            );
-        }
+
         let rendered = stream.render();
         let indexer = FileIndexer::new(files, config);
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            eprintln!(
-                "render_cook: {} text {} tokens {} rendered {} ({})",
-                path.display(),
-                text.len(),
-                tokens.len(),
-                rendered.text.len(),
-                if unit.is_some() { "unit" } else { "composed" }
-            );
-        }
+
         let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
             declarations: indexed.summary.declarations.len(),
@@ -567,12 +497,6 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|text| crate::cache::content_hash(&text));
         let text_hash_ms = started.elapsed().as_millis();
         if !self.is_current(&revision) || current != Some(text_hash) {
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!(
-                    "commit_a_cooked: dropped {} | the text changed while it was being rendered",
-                    path.display()
-                );
-            }
             if Arc::ptr_eq(&self.identity, &revision.session) && self.files.exists(&path) {
                 self.want_cooked_reading(&path);
             }
@@ -589,29 +513,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // than by a second read of the file, so the entry cannot describe one text under another's key.
         if let Ok(mut known) = self.renderings.lock() {
             let key = a_rendering_key(&path, text_hash);
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!("commit: path {:?} hash {:?}", path, text_hash);
-            }
+
             let before = known.len();
             let weight = indexed.rendered.weight();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!(
-                    "commit_a_cooked: inserted {} | cache {} -> {}",
-                    path.display(),
-                    before,
-                    known.len()
-                );
-            }
-        } else if let Some(directory) = Option::<&std::path::Path>::None {
-            // **The other way this can silently not happen**: the cache lock is poisoned, which leaves it exactly as
-            // it was while the facts go into the index — "read" and "available" apart again, which is the state this
-            // whole change is about.
-            eprintln!(
-                "commit_a_cooked: NOT inserted {} | lock {}",
-                path.display(),
-                self.renderings.lock().is_ok()
-            );
         }
         let before_the_disk = started.elapsed().as_millis();
         {
@@ -622,17 +527,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The rendering, kept beside the facts** --- a record with only the facts is one a hit cannot answer
             // from, because every query that reads the tree needs the text and the spans.
             let cooked: crate::index::CookedFile = indexed.into();
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                // **How many declarations the cook found**, which the cache line above does not say: a cook that
-                // renders an empty stream is filed as "this file has been read" and then shadows the file's
-                // summary, and the count is the one number that tells that apart from a file that declares
-                // nothing.
-                eprintln!(
-                    "commit_a_cooked: {} declaration(s) for {}",
-                    cooked.declarations.len(),
-                    path.display()
-                );
-            }
+
             let declared = cooked.declarations.len();
             // **No disk write here.** Serialising and writing a whole rendering is what made an index-slice commit
             // hold the writer for seconds. Mark the path; the delayed persistence pass writes at most a few records
@@ -644,18 +539,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let inserting = std::time::Instant::now();
             self.store.index_mut().insert_cooked(&path, cooked);
             let inserted = inserting.elapsed().as_millis();
-            if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!(
-                    "commit timing {}: total {} ms | text+hash {} ms | cache {} ms | disk {} ms | index {} ms | {} declaration(s)",
-                    path.display(),
-                    started.elapsed().as_millis(),
-                    text_hash_ms,
-                    before_the_disk.saturating_sub(text_hash_ms),
-                    written,
-                    inserted,
-                    declared
-                );
-            }
+
             // **Cooked here counts as asked**, so the closure loop does not queue it again the moment its reading is
             // evicted from the index's bounded map — a file cooked by a program read or by a query is exactly the
             // "already read" this loop is trying to reach.
@@ -714,9 +598,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn claim_cooking(&mut self, how_many: usize) -> Vec<PathBuf> {
         // **An A/B for the measurement, not a setting**: with `CPPLS_NO_COOKS` set the pump cooks nothing, which
         // is how much of the `containers.cpp` growth is the cooking pass itself rather than the indexing.
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            return Vec::new();
-        }
+
         self.cooking.take(how_many)
     }
 
@@ -736,12 +618,7 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         for path in asked {
             if !built.iter().any(|made| made == path) {
-                if let Some(directory) = Option::<&std::path::Path>::None {
-                    eprintln!("refused a cook that built nothing: {}", path.display());
-                }
                 refused.insert(queue_key(path));
-            } else if let Some(directory) = Option::<&std::path::Path>::None {
-                eprintln!("a cook built: {}", path.display());
             }
         }
     }
@@ -760,25 +637,11 @@ impl<F: FileProvider + Clone> Session<F> {
     )> {
         let resolved = self.store.index().summary(path)?.path.clone();
         match self.store.the_stored_cook_reason(&resolved) {
-            Ok((cooked, rendered)) => {
-                if let Some(directory) = Option::<&std::path::Path>::None {
-                    eprintln!(
-                        "cooking: {} served from the disk ({} declaration(s))",
-                        resolved.display(),
-                        cooked.declarations.len()
-                    );
-                }
-                Some((resolved, cooked, rendered))
-            }
+            Ok((cooked, rendered)) => Some((resolved, cooked, rendered)),
             Err(reason) => {
                 // **Named, because "0 hits" is not a diagnosis.** `not stored` is a cold cache; `no closure` is the
                 // index not holding every file the key is built from yet, which is a race the pump can lose.
-                if let Some(directory) = Option::<&std::path::Path>::None {
-                    eprintln!(
-                        "cooking: {} has no stored cook: {reason}",
-                        resolved.display()
-                    );
-                }
+
                 None
             }
         }
@@ -793,13 +656,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 if let Some((cooked, rendered)) =
                     self.store.the_stored_cooked_reading_with_rendering(&path)
                 {
-                    if let Some(directory) = Option::<&std::path::Path>::None {
-                        eprintln!(
-                            "cooking: {} served from the disk ({} declaration(s))",
-                            path.display(),
-                            cooked.declarations.len()
-                        );
-                    }
                     return Some(AClaimedCook::Stored(path, cooked, rendered));
                 }
                 let built = self.cooking_materials(&path);
@@ -827,7 +683,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
     pub fn render_them(&self, claimed: Vec<AClaimedCook>) -> AClaimedSlice {
-        let tracing = false;
         let mut slice = AClaimedSlice::default();
         for cook in claimed {
             match cook {
@@ -842,7 +697,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     // never cooked, which the pump reads as "no work left".
                     match built {
                         Some(rendered) => slice.fresh.push(rendered),
-                        None if tracing => eprintln!("cooking: {} did not render", path.display()),
                         None => {}
                     }
                 }
@@ -914,13 +768,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // **Not stored, and not claimed.** The map is a property of the parse this slice did not do.
             mapped: crate::MapReport::default(),
         };
-        if let Some(directory) = Option::<&std::path::Path>::None {
-            eprintln!(
-                "cooking: filed {} from the disk | {} declaration(s)",
-                path.display(),
-                reading.declarations
-            );
-        }
+
         self.stored_cooks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.store.index_mut().insert_cooked(&path, cooked);

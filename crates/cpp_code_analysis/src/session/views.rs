@@ -129,23 +129,8 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| requested.to_path_buf());
         // **A miss is otherwise indistinguishable from "never cooked"**, which is what made a file that *had* been
         // cooked answer `None` for every query about it. See `CPPLS_TRACE_VIEW`.
-        if false {
-            eprintln!(
-                "view: asked {:?} key {:?} summary {} held {}",
-                requested,
-                key,
-                self.store.index().summary(requested).is_some(),
-                self.vfs.held(&key).is_some()
-            );
-        }
+
         let file = self.vfs.held(&key)?;
-        if false {
-            eprintln!(
-                "view: file.path {:?} hash {:?}",
-                file.path,
-                crate::cache::content_hash(&file.text)
-            );
-        }
 
         // **The rendering, or a request for it — never the file's own tokens.**
         //
@@ -183,9 +168,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     environment: None,
                 };
                 if let Some(held) = self.a_view_already_parsed(&key) {
-                    if false {
-                        eprintln!("view: {} came from the cache", file.path.display());
-                    }
                     return Some(held);
                 }
                 let view = FileView::parse_rendering_in(file, &rendered, &config.config);
@@ -193,18 +175,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 Some(view)
             }
             None => {
-                if false {
-                    // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
-                    // write and a read that disagree about either half are a miss that looks exactly like "this file
-                    // was never cooked". The count says whether the cache has anything at all.
-                    eprintln!(
-                        "view: no rendering for {} | hash {} | {} entr(ies) cached | open {}",
-                        file.path.display(),
-                        crate::cache::content_hash(&file.text),
-                        self.renderings.lock().map(|known| known.len()).unwrap_or(0),
-                        file.open
-                    );
-                }
                 self.ask_for_a_rendering(&file.path, &file.text);
                 None
             }
@@ -293,9 +263,6 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn ask_for_the_cooked_reading(&self, path: &Path) {
         if let Ok(mut work) = self.macro_work.lock() {
             let queued = work.want(path);
-            if false {
-                eprintln!("[ask] queued {queued}: {}", path.display());
-            }
         }
     }
 
@@ -318,17 +285,9 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(requested)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| requested.to_path_buf());
-        let traced = false;
         let file = self.vfs.held(&key)?;
         let rendered = self.known_rendering_of(&file.path, &file.text);
-        if traced {
-            let renderings = self.renderings.lock().map(|known| known.len()).unwrap_or(0);
-            eprintln!(
-                "[map] held {:?}, rendering known {}, {renderings} cached",
-                file.path,
-                rendered.is_some()
-            );
-        }
+
         let rendered = rendered?;
         rendered.the_rendering_offset_of(in_the_file)
     }
