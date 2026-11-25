@@ -216,8 +216,21 @@ async fn compute(
             message: "diagnostics require a file URI".to_string(),
         };
     };
-    snapshot_query(context.analysis(), cancel, move |session| {
-        diagnose_file(session, &path).map(|(_, items)| items)
+    let retry = cancel.clone();
+    let query_path = path.clone();
+    let mut outcome = snapshot_query(context.analysis(), cancel, move |session| {
+        diagnose_file(session, &query_path).map(|(_, items)| items)
     })
-    .await
+    .await;
+    if matches!(outcome, RequestOutcome::Missing) {
+        if !context.analysis().prepare_for_a_diagnostic(&path).await {
+            return RequestOutcome::Missing;
+        }
+        let retry_path = path.clone();
+        outcome = snapshot_query(context.analysis(), retry, move |session| {
+            diagnose_file(session, &retry_path).map(|(_, items)| items)
+        })
+        .await;
+    }
+    outcome
 }

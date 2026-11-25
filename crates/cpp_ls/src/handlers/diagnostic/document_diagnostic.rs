@@ -22,18 +22,24 @@ pub async fn on_pull_document_diagnostic(
         };
     };
     let for_the_query = path.clone();
-    let outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
-        let answer = super::diagnose_file(session, &for_the_query).map(|(_, items)| items);
-        // **A pull is where a session's tables are biggest**, so it is where the breakdown is worth printing: the
-        // report is the session's own accounting, not the resident set, and the two differ by the allocator's slack —
-        // which is the number a "memory keeps growing" report is about. `CPPLS_TRACE_MEMORY=1` in the server's
-        // environment.
-        if crate::probes::memory_tables() {
-            eprintln!("[memory] pull: {}", session.memory_report());
-        }
-        answer
+    let retry_token = cancel_token.clone();
+    let mut outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
+        super::diagnose_file(session, &for_the_query).map(|(_, items)| items)
     })
     .await;
+    if matches!(outcome, RequestOutcome::Missing) {
+        if !context.analysis().prepare_for_a_diagnostic(&path).await {
+            return RequestOutcome::Failed {
+                code: lsp_server::ErrorCode::RequestFailed,
+                message: format!("diagnostics could not be read for {}", path.display()),
+            };
+        }
+        let retry_path = path.clone();
+        outcome = snapshot_query(context.analysis(), retry_token, move |session| {
+            super::diagnose_file(session, &retry_path).map(|(_, items)| items)
+        })
+        .await;
+    }
 
     match outcome {
         RequestOutcome::Ready(items) => {
