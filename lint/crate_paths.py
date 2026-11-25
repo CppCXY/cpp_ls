@@ -114,28 +114,24 @@ def file_info(path: pathlib.Path):
 
 def existing_names(text):
     names=set()
-    for line in masked(text).split('\n'):
+    for line in masked(text).splitlines():
         mm=re.match(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)",line)
         if mm: names.add(mm.group(1))
-    # Parse use declarations, including multiline groups.
     joined=' '.join(masked(text).splitlines())
     for m in re.finditer(r"\buse\s+([^;]+);",joined):
         body=m.group(1)
-        prefix=''
-        if '{' in body:
-            prefix=body.split('{',1)[0]
-        for item in re.split(r",",body):
-            item=item.strip()
-            if item in ('','{','}'): continue
-            if item.endswith('{'): continue
-            item=item.rstrip('}').strip()
+        prefix=body.split('{',1)[0] if '{' in body else ''
+        flat=body.replace('{',' , ').replace('}', ' , ')
+        for item in re.split(r",",flat):
+            item=item.strip().strip(':').strip()
+            if not item or item in ('crate','super','self','std','core','alloc'): continue
             if ' as ' in item: item=item.split(' as ')[-1].strip()
             if item=='self':
                 parts=prefix.rstrip(':').split('::')
-                if parts: names.add(parts[-1])
-            else:
-                name=splits=item.split('::')[-1].strip()
-                if name: names.add(name)
+                if parts and parts[-1]: names.add(parts[-1])
+                continue
+            name=item.split('::')[-1].strip()
+            if name and re.match(r'^[A-Za-z_][A-Za-z0-9_]*$',name): names.add(name)
     return names
 
 def check(paths):
@@ -161,7 +157,8 @@ def fix(paths, verify=True):
             by_scope.setdefault((sc[0],sc[1],sc[2]),set()).add(seg)
         imports=[]; replace=set()
         for (start,end,indent),segs in by_scope.items():
-            existing=existing_names('\n'.join(lines[start-1:end]))
+            begin = max(start - 1, 0)
+            existing=existing_names('\n'.join(line.rstrip('\r') for line in lines[begin:end]))
             for seg in segs:
                 replace.add(seg)
                 if seg not in existing:
