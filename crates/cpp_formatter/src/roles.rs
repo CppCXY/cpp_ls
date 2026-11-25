@@ -388,7 +388,7 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
             continue;
         }
         if kind != CppTokenKind::Colon {
-            if std::env::var_os("CPPLS_TRACE_CASE").is_some() {
+            if false {
                 eprintln!("[case] -> false (saw {kind:?})");
             }
             return false;
@@ -399,7 +399,7 @@ fn opens_a_case_body(open: &cpp_parser::CppSyntaxToken) -> bool {
         while let Some(token) = label {
             match CppTokenKind::from(token.kind()) {
                 CppTokenKind::CaseKeyword | CppTokenKind::DefaultKeyword => {
-                    if std::env::var_os("CPPLS_TRACE_CASE").is_some() {
+                    if false {
                         eprintln!("[case] -> true (label found)");
                     }
                     return true;

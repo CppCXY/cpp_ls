@@ -1130,7 +1130,7 @@ impl<F: FileProvider> SummaryStore<F> {
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
         timeline: Option<&crate::TranslationUnit>,
     ) -> Prepared {
-        let tracing = crate::probes::cooking();
+        let tracing = false;
         let entered = std::time::Instant::now();
         let Some(source) = ({ self.files.read(path) }) else {
             return Prepared {
@@ -1419,7 +1419,7 @@ impl<F: FileProvider> SummaryStore<F> {
     ) -> Vec<(PathBuf, Prepared)> {
         use std::sync::{Condvar, Mutex};
 
-        let tracing = crate::probes::cooking();
+        let tracing = false;
         let before = prepared_stages();
         let started = std::time::Instant::now();
 
@@ -1906,7 +1906,7 @@ impl<F: FileProvider> SummaryStore<F> {
         match self.the_stored_refinement_reason(path) {
             Ok(summary) => Some(summary),
             Err(reason) => {
-                if crate::probes::cooking() {
+                if false {
                     eprintln!("refinement: {} skipped: {reason}", path.display());
                 }
                 None
@@ -2168,7 +2168,7 @@ impl<F: FileProvider> SummaryStore<F> {
             served += 1;
         }
         self.stats.stored_refinements_served += served;
-        if crate::probes::cooking() && !still_to_do.is_empty() {
+        if false && !still_to_do.is_empty() {
             eprintln!(
                 "re-read: {served} stored refinement(s) served, {} rebuilt (nothing stored for them)",
                 still_to_do.len()
@@ -2205,7 +2205,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // file's text and asks a question about every `#define` in the project — and from outside they are the same
         // call. Measured on a real project: four files took 315 ms with a timeline and 18 000 ms without, so the
         // first question about a slow start-up here is *which form ran*, and these counts answer it.
-        let tracing = crate::probes::cooking();
+        let tracing = false;
         let started = std::time::Instant::now();
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
@@ -3255,7 +3255,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 .cmp(&right.from_offset)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        if crate::probes::cooking() {
+        if false {
             Self::trace_the_composed_environment(
                 path,
                 &order,

@@ -149,7 +149,7 @@ fn a_local_is_offered_while_it_is_being_typed() {
     let mut session = session_with_the_project();
     let view = cooked_view(&mut session, "/p/a.cpp");
 
-    if std::env::var_os("CPPLS_TRACE_COORDINATES").is_some() {
+    if false {
         let reading = view
             .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
                 offset,

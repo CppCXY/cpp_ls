@@ -903,7 +903,7 @@ fn the_element_type_pointed_at(
         )
     });
     if !pointer_like {
-        if crate::probes::members() {
+        if false {
             let names: Vec<&str> = members
                 .members
                 .iter()

@@ -17,7 +17,7 @@ pub(crate) fn member_fact(
 ) -> Known<(DeclFact, PathBuf)> {
     let started = std::time::Instant::now();
     let answer = member_fact_inner(shapes, index, scopes, root, path, class, member, arguments);
-    if crate::probes::timing() && started.elapsed().as_millis() > 10 {
+    if false && started.elapsed().as_millis() > 10 {
         eprintln!(
             "[member_fact] {:>5} ms  {class}::{member}",
             started.elapsed().as_millis()

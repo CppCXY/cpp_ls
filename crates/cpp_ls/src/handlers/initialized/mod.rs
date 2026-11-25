@@ -205,7 +205,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                     "the native watcher is off: the project's own configuration says \
                      `[workspace] native_watch = false`"
                 );
-            } else if crate::probes::no_watch() {
+            } else if false {
                 log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
@@ -250,7 +250,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
     // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
     // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
     // counters stand still is neither of them.
-    if crate::probes::pump() {
+    if false {
         let watched = context.clone();
         tokio::spawn(async move {
             loop {
@@ -519,7 +519,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         loop {
             rounds += 1;
 
-            if rounds.is_multiple_of(1000) && crate::probes::pump() {
+            if rounds.is_multiple_of(1000) && false {
                 eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
             }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
@@ -540,7 +540,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .with_snapshot(|session| session.next_open_file_to_read())
                 .flatten();
             if let Some(path) = &open_file
-                && crate::probes::pump()
+                && false
             {
                 eprintln!("[read] next open file to read: {}", path.display());
             }
@@ -961,7 +961,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // `pending 0` and nothing cooked is the report this exists for. The numbers are the session's own
             // estimates ([`cpp_code_analysis::MemoryReport`]), not the allocator's: the byte counter that used to
             // print them beside a process-wide total is gone, because an allocator is not the place for a measurement.
-            if crate::probes::memory_tables()
+            if false
                 && let Some(report) = context
                     .analysis()
                     .with_snapshot(|session| session.memory_report())
@@ -1200,10 +1200,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             //
 
             if pending == 0
-                // **An experiment switch**: a whole-program read is the session's largest single piece of work, and
-                // `CPPLS_NO_PROGRAM_READ` is how a run tells its cost from the pump's — the same shape as
-                // `CPPLS_NO_COOKS`.
-                && !crate::probes::no_program_read()
                 && let Some(wait) = context
                     .analysis()
                     .with_snapshot(
@@ -1211,7 +1207,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     )
                     .flatten()
             {
-                if crate::probes::pump() {
+                if false {
                     eprintln!(
                         "[program] a program read is owed (wait zero: {})",
                         wait.is_zero()

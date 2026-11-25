@@ -120,7 +120,7 @@ impl Project {
 
 impl Drop for Project {
     fn drop(&mut self) {
-        if std::env::var_os("CPPLS_KEEP_FIXTURE").is_none() {
+        if true {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }

@@ -500,7 +500,7 @@ pub(crate) fn an_element_type_through_the_members(
         return None;
     }
     let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
-        if crate::probes::inference() {
+        if false {
             eprintln!("[inference] element_type: no member list for {class}");
         }
         return None;
@@ -522,7 +522,7 @@ pub(crate) fn an_element_type_through_the_members(
         };
         let substituted = crate::sema::types::substituted_spelling(written, parameters, arguments);
         let target = base_type_name(&substituted).to_string();
-        if crate::probes::inference() {
+        if false {
             eprintln!(
                 "[inference] element_type: {class}::{name} wrote {written:?} -> {substituted:?} -> {target:?}"
             );

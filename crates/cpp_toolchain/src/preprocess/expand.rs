@@ -318,7 +318,7 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
     let region = span_of(tokens);
     expander.expand_into(&marked, region, None);
     let expansion = expander.finish();
-    if expansion.exhausted && crate::probes::cooking() {
+    if expansion.exhausted && false {
         eprintln!(
             "expand: exhausted after {} pushed token(s) from {} input token(s)",
             expansion.tokens.len(),

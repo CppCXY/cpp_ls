@@ -1142,11 +1142,8 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
 
         // **The trace is asked for through `crate::probes`, which reads its variable once.** `definition_at` is the
         // expander's own name resolution and runs for every macro name it meets — tens of millions of times in an
-        // index of a real project — so a `std::env::var_os` and a `to_string_lossy` here cost 106 s and 40 s at the
         // two other sites of the same shape. See that module for why every probe moved there.
-        if let Some(wanted) = crate::probes::macro_name()
-            && wanted == name
-        {
+        if false {
             match &found {
                 None => {
                     // Which layer missed, and why — the three answers are the whole diagnosis.

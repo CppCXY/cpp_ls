@@ -96,7 +96,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .the_stored_cooked_reading_with_rendering(&resolved)
         {
             let committed = self.commit_a_stored_cook(resolved, cooked, rendered);
-            if crate::probes::cooking() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 log::info!(
                     "cook: {} served from the disk in {:?}",
                     path.as_ref().display(),
@@ -113,7 +113,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // the same escape hatch `index_rendering` has, for the other half of the pipeline. A parse that goes wrong only
         // in the *cooked* reading cannot be seen in `inspect tree` (which reads the file's own text), and without the
         // text every diagnosis is a guess about what the macros produced.
-        if let Some(directory) = crate::probes::dump_rendering_dir() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             let _ = std::fs::create_dir_all(directory);
             let name = path
                 .as_ref()
@@ -140,7 +140,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let rendered_for = render_started.elapsed().as_millis();
         let committed = self.commit_a_cooked(rendered);
-        if crate::probes::cooking() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             log::info!(
                 "cook: {} gathered {} ms | rendered {} ms | committed {} ms | total {} ms | {}",
                 path.as_ref().display(),
@@ -353,7 +353,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // than cooked now from half of one and *stored* — a stored reading is keyed by its closure, so the wrong
         // answer outlives the moment that produced it.
         if held.is_none() && !self.is_locally_ready(&path) {
-            if crate::probes::cooking() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!(
                     "cooking: {} refused | its closure is not indexed yet",
                     path.display()
@@ -497,7 +497,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // false positive `lvm.c` measured (7 errors at one position, all of them the cut). The count is printed by the
         // probe because no user-facing answer may depend on it yet; `CookedStream::exhausted` is the fact a consumer
         // that reports would need.
-        if crate::probes::cooking() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             eprintln!(
                 "render_cook: {} {} token(s) of {} cooked, exhausted {}",
                 path.display(),
@@ -508,7 +508,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let rendered = stream.render();
         let indexer = FileIndexer::new(files, config);
-        if crate::probes::cooking() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             eprintln!(
                 "render_cook: {} text {} tokens {} rendered {} ({})",
                 path.display(),
@@ -567,7 +567,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|text| crate::cache::content_hash(&text));
         let text_hash_ms = started.elapsed().as_millis();
         if !self.is_current(&revision) || current != Some(text_hash) {
-            if crate::probes::cooking() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!(
                     "commit_a_cooked: dropped {} | the text changed while it was being rendered",
                     path.display()
@@ -589,13 +589,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // than by a second read of the file, so the entry cannot describe one text under another's key.
         if let Ok(mut known) = self.renderings.lock() {
             let key = a_rendering_key(&path, text_hash);
-            if crate::probes::view() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!("commit: path {:?} hash {:?}", path, text_hash);
             }
             let before = known.len();
             let weight = indexed.rendered.weight();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
-            if crate::probes::cooking() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!(
                     "commit_a_cooked: inserted {} | cache {} -> {}",
                     path.display(),
@@ -603,7 +603,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     known.len()
                 );
             }
-        } else if crate::probes::cooking() {
+        } else if let Some(directory) = Option::<&std::path::Path>::None {
             // **The other way this can silently not happen**: the cache lock is poisoned, which leaves it exactly as
             // it was while the facts go into the index — "read" and "available" apart again, which is the state this
             // whole change is about.
@@ -622,7 +622,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The rendering, kept beside the facts** --- a record with only the facts is one a hit cannot answer
             // from, because every query that reads the tree needs the text and the spans.
             let cooked: crate::index::CookedFile = indexed.into();
-            if crate::probes::cooking() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 // **How many declarations the cook found**, which the cache line above does not say: a cook that
                 // renders an empty stream is filed as "this file has been read" and then shadows the file's
                 // summary, and the count is the one number that tells that apart from a file that declares
@@ -644,7 +644,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let inserting = std::time::Instant::now();
             self.store.index_mut().insert_cooked(&path, cooked);
             let inserted = inserting.elapsed().as_millis();
-            if crate::probes::view() {
+            if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!(
                     "commit timing {}: total {} ms | text+hash {} ms | cache {} ms | disk {} ms | index {} ms | {} declaration(s)",
                     path.display(),
@@ -714,7 +714,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn claim_cooking(&mut self, how_many: usize) -> Vec<PathBuf> {
         // **An A/B for the measurement, not a setting**: with `CPPLS_NO_COOKS` set the pump cooks nothing, which
         // is how much of the `containers.cpp` growth is the cooking pass itself rather than the indexing.
-        if crate::probes::no_cooks() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             return Vec::new();
         }
         self.cooking.take(how_many)
@@ -736,11 +736,11 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         for path in asked {
             if !built.iter().any(|made| made == path) {
-                if crate::probes::cooking() {
+                if let Some(directory) = Option::<&std::path::Path>::None {
                     eprintln!("refused a cook that built nothing: {}", path.display());
                 }
                 refused.insert(queue_key(path));
-            } else if crate::probes::cooking() {
+            } else if let Some(directory) = Option::<&std::path::Path>::None {
                 eprintln!("a cook built: {}", path.display());
             }
         }
@@ -761,7 +761,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let resolved = self.store.index().summary(path)?.path.clone();
         match self.store.the_stored_cook_reason(&resolved) {
             Ok((cooked, rendered)) => {
-                if crate::probes::cooking() {
+                if let Some(directory) = Option::<&std::path::Path>::None {
                     eprintln!(
                         "cooking: {} served from the disk ({} declaration(s))",
                         resolved.display(),
@@ -773,7 +773,7 @@ impl<F: FileProvider + Clone> Session<F> {
             Err(reason) => {
                 // **Named, because "0 hits" is not a diagnosis.** `not stored` is a cold cache; `no closure` is the
                 // index not holding every file the key is built from yet, which is a race the pump can lose.
-                if crate::probes::cooking() {
+                if let Some(directory) = Option::<&std::path::Path>::None {
                     eprintln!(
                         "cooking: {} has no stored cook: {reason}",
                         resolved.display()
@@ -793,7 +793,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 if let Some((cooked, rendered)) =
                     self.store.the_stored_cooked_reading_with_rendering(&path)
                 {
-                    if crate::probes::cooking() {
+                    if let Some(directory) = Option::<&std::path::Path>::None {
                         eprintln!(
                             "cooking: {} served from the disk ({} declaration(s))",
                             path.display(),
@@ -808,7 +808,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 // that decides whether there is work left reads `cooked == 0` as "nothing to do". Naming the reason
                 // is what separates "the summary is not in the index yet" (a state) from "the unit is provisional"
                 // (also a state) from a defect.
-                if built.is_none() && crate::probes::cooking() {
+                if built.is_none() && false {
                     let indexed = self.store.index().summary(&path).is_some();
                     let (unit, provisional) = match self.unit_and_state_of(&path) {
                         Some((_, provisional)) => ("held", provisional),
@@ -827,7 +827,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
     pub fn render_them(&self, claimed: Vec<AClaimedCook>) -> AClaimedSlice {
-        let tracing = crate::probes::cooking();
+        let tracing = false;
         let mut slice = AClaimedSlice::default();
         for cook in claimed {
             match cook {
@@ -914,7 +914,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // **Not stored, and not claimed.** The map is a property of the parse this slice did not do.
             mapped: crate::MapReport::default(),
         };
-        if crate::probes::cooking() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             eprintln!(
                 "cooking: filed {} from the disk | {} declaration(s)",
                 path.display(),

@@ -171,7 +171,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
             here.push((name.clone(), value.clone()));
         }
     }
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] alias step: {written:?} in {class:?} (class {class_name:?}, parameters {parameters:?}, \
              arguments {arguments:?})"
@@ -360,7 +360,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     // partial specialization and what lets the qualifier's own aliases (`_Mybase =
     // _Tree_val<_Traits>`) be substituted.
     let found = a_member_the_class_declares(index, scopes, root, path, &inner, member_name);
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] qualified: {written:?} -> qualifier {qualifier:?} resolved {inner:?}, member {member_name:?} \
              ({member_arguments:?}), fact {:?}",
@@ -483,7 +483,7 @@ pub(crate) fn a_member_the_class_declares(
     // answered is the one that *has* one.
     let listed = members_of(index, scopes, root, path, class);
     let name = the_member_name(name);
-    if crate::probes::inference() {
+    if false {
         match &listed {
             Known::Yes(members) => eprintln!(
                 "[inference] member of {class:?}: {} listed, {} unlisted, looking for {name:?}",
@@ -752,7 +752,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     // **Before `arrow` is partially moved below** — its parameters say whether an answer is one of them.
     let arrows_parameters = arrow.parameters().to_vec();
     let returns = arrow.returns?;
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] operator-> of {bare} on arguments {arguments:?}: the member wrote {returns:?}"
         );
@@ -841,7 +841,7 @@ pub(crate) fn the_class_an_arrow_points_at(
             },
         };
     }
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] operator-> substitution: parameters {parameters:?}, the member's own {arrow_parameters:?}, {returns:?} -> {substituted:?} -> {target:?}",
             arrow_parameters = arrows_parameters
@@ -929,12 +929,12 @@ pub(crate) fn the_element_type_of(
     // (the arrow of a class that has no `element_type`), so asking it here recursed until the stack ran out — measured,
     // the test that produced this line overflowed it. A list walks the bases and never asks about an arrow.
     let Known::Yes(members) = members_of(index, scopes, root, path, class) else {
-        if crate::probes::inference() {
+        if false {
             eprintln!("[inference] element_type: no member list for {class}");
         }
         return None;
     };
-    if crate::probes::inference() {
+    if false {
         let found: Vec<String> = members
             .members
             .iter()
@@ -965,7 +965,7 @@ pub(crate) fn the_element_type_of(
         };
         let substituted = crate::sema::types::substituted_spelling(written, &parameters, arguments);
         let target = base_type_name(&substituted).to_string();
-        if crate::probes::inference() {
+        if false {
             eprintln!(
                 "[inference] element_type: {class}::{name} wrote {written:?} -> {substituted:?} -> {target:?} ({} member(s))",
                 members.members.len()

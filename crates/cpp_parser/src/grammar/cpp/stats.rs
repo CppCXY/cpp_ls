@@ -1091,7 +1091,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             Ok(marker)
         }
         Err(err) => {
-            if crate::probes::declaration_trace() {
+            if false {
                 eprintln!(
                     "[decl] the declaration reading failed at {}: {err:?}",
                     p.current_token_range().start_offset

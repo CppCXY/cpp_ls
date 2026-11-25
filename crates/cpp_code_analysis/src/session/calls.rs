@@ -738,7 +738,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     && !member.fact.modifiers.contains(crate::DeclModifiers::STATIC)
             })
             .count();
-        if crate::probes::layout() {
+        if false {
             eprintln!(
                 "[layout] data-members {data_members} of {}, budget {LAYOUT_MEMBER_BUDGET}",
                 list.members.len()
@@ -758,7 +758,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }) || self.an_anonymous_member_is_a_union(&head, view);
         // **The environment a member's type is read in** — the class's parameters, the arguments the use wrote (or
         // the declaration's own defaults), and the class's own members, which is where a member alias lives.
-        if crate::probes::layout() {
+        if false {
             eprintln!(
                 "[layout] class {head:?} arguments {arguments:?} as-written {:?} members {}",
                 as_written
@@ -911,7 +911,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let at = view.source.len();
         if let Some(body) = self.macro_body_at(&view.path, at, dimension) {
-            if crate::probes::layout() {
+            if false {
                 eprintln!(
                     "[layout] dimension {dimension:?} macro body {body:?} -> {:?}",
                     a_constant_expression(&body)
@@ -932,7 +932,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 return Some(value as usize);
             }
         }
-        if crate::probes::layout() {
+        if false {
             eprintln!("[layout] dimension {dimension:?} is not a number this layer can read");
         }
         None
@@ -1152,13 +1152,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // `const l_signalT`, and with them unsized the card said "not computed" naming `base_ci` and `hookmask`.
         // `a_builtin_in_memory` strips qualifiers itself; this is the same stripping for the steps that ask the index.
         let spelled = spelled_without_its_qualifiers(spelled);
-        if crate::probes::layout() {
+        if false {
             eprintln!("[layout] depth {depth} size of {spelled:?}");
         }
         if let Some(environment) = instantiation
             && mentions_a_parameter(spelled, environment.parameters)
         {
-            if crate::probes::layout() {
+            if false {
                 eprintln!("[layout]   still a parameter");
             }
             return None;
@@ -1221,12 +1221,12 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             if let Some(target) = self.the_target_of_an_alias_template(&head, &resolved, &view.path)
             {
-                if crate::probes::layout() {
+                if false {
                     eprintln!("[layout]   alias template {head} -> {target}");
                 }
                 return self.the_size_of_a_type_in(view, &target, depth + 1, None);
             }
-            if crate::probes::layout() {
+            if false {
                 eprintln!("[layout]   no class and no alias template for {head} with {resolved:?}");
             }
             return None;

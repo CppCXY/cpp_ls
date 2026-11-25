@@ -1028,7 +1028,7 @@ pub(crate) fn declaration_of_a_callee(
             member_access_class_and_arguments(shapes, index, scopes, root, path, &class, &object);
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
-        if crate::probes::inference() {
+        if false {
             eprintln!(
                 "[inference] callee: object {object:?} -> class {class:?}, arguments {arguments:?}, bindings empty {}",
                 bindings.is_empty()
@@ -1072,7 +1072,7 @@ pub(crate) fn declaration_of_a_callee(
             && let Some(chosen) = the_one_the_arguments_select(&types, &callable, &[])
             && let Some((fact, file)) = callable.get(chosen)
         {
-            if crate::probes::inference() {
+            if false {
                 eprintln!(
                     "[inference] callee: {} candidate(s), the arguments chose {chosen}",
                     callable.len()
@@ -1561,7 +1561,7 @@ pub(crate) fn the_one_the_arguments_select(
         })
         .collect();
 
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] pick among {} candidates ({} usable), argument types {types:?} written {explicit_arguments:?}",
             candidates.len(),
@@ -1585,7 +1585,7 @@ pub(crate) fn the_one_the_arguments_select(
         }
     }
     let choice = crate::sema::overload::choose(types, &built);
-    if crate::probes::inference() {
+    if false {
         eprintln!("[inference]   choice: {choice:?}");
     }
     match choice {

@@ -1386,7 +1386,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
         out
     } else {
         // **A diagnostic for the fallback**: which token first differs tells the rule that merged or split one.
-        if std::env::var_os("CPPLS_TRACE_FALLBACK").is_some() {
+        if false {
             let after = tokens::stream(&out);
             for (at, (mine, theirs)) in stream.tokens.iter().zip(&after.tokens).enumerate() {
                 if mine.kind != theirs.kind || mine.text != theirs.text {

@@ -174,7 +174,7 @@ pub struct DiagTrace(Option<(&'static str, std::time::Instant)>);
 
 impl DiagTrace {
     pub fn new(what: &'static str) -> DiagTrace {
-        DiagTrace(crate::probes::diagnostics().then(|| (what, std::time::Instant::now())))
+        DiagTrace(false.then(|| (what, std::time::Instant::now())))
     }
 }
 
@@ -1868,7 +1868,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                     true,
                     Some(&search),
                 );
-                if crate::probes::units() {
+                if false {
                     eprintln!(
                         "[unit] cook  {:>6.1} ms  ({} file(s), {} bytes)",
                         cooking.elapsed().as_secs_f64() * 1000.0,

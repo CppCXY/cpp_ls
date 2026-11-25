@@ -91,7 +91,7 @@ pub(crate) fn member_candidates(
             .filter(|declaration| declaration.fact.name == member)
             .count()
     };
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[candidates] {bare}::{member}: {} declaration(s) in scope, {} named",
             all.len(),

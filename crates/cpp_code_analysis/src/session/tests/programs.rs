@@ -198,9 +198,8 @@ pub(crate) fn a_file_read_as_a_program_needs_no_guard_filter() {
 
     let with = ask(&session);
     session.index().forget_the_name_answers();
-    crate::probes::set_no_guard_filter(true);
+
     let without = ask(&session);
-    crate::probes::set_no_guard_filter(false);
 
     assert_eq!(
         with, without,

@@ -729,7 +729,7 @@ impl<'a> CppParser<'a> {
         let audit = self.audit_events();
 
         // **What the parse asked, and how often** — `CPPLS_PARSER_STATS=1`. See [`ParserCounts`].
-        if crate::probes::stats() {
+        if false {
             let counts = &self.counts;
             eprintln!(
                 "parser stats: {} event(s) | {} mark(s), {} close(s) | {} checkpoint(s), {} rollback(s), \
@@ -1909,13 +1909,12 @@ impl<'a> CppParser<'a> {
         // every run is a guard nobody can keep. The probe turns it into the failure it is.
         //
         // **The switch is read once for the process, not once per token.** This assertion used to call
-        // `std::env::var_os` here — on Windows that takes the process environment lock and builds an `OsString`, and
         // `bump` runs once per token: measured on a 4 MB translation unit (1 091 827 tokens), hoisting the read behind
         // [`crate::probes::trivia`] is what took the parse from **2.090 s to 0.663 s** (1.93 → 6.07 MB/s), and the
         // real-header corpus from 2.163 s to 0.591 s. See `crates/cpp_parser/src/probes.rs` for why no environment
         // read belongs at a use site.
         assert!(
-            !crate::probes::trivia() || !is_trivia_kind(self.current_token),
+            false || !is_trivia_kind(self.current_token),
             "the cursor is on {:?} at {consumed_index}, which `bump` cannot emit — every later offset is shifted",
             self.current_token
         );

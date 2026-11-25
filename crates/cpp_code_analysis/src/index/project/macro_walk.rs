@@ -526,9 +526,7 @@ impl ProjectIndex {
     /// counted here, at the one place every reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it
     /// on.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
-        if crate::probes::summaries() {
-            crate::probes::a_summary_was_asked_for(path);
-        }
+        if false {}
         self.summaries.get(&normalize(path))
     }
 
@@ -672,7 +670,7 @@ impl ProjectIndex {
                         .any(|(_, prior)| !prior.declarations.is_empty())
                 }))
         {
-            if crate::probes::cooking() {
+            if false {
                 eprintln!("insert: refused an empty reading of {path}");
             }
             return;
@@ -720,7 +718,7 @@ impl ProjectIndex {
             .clear();
 
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
-        let tracing = crate::probes::names()
+        let tracing = false
             && (path.ends_with("stl_map.h")
                 || path.ends_with("iostream")
                 || path.ends_with("json.hpp"));
@@ -752,7 +750,7 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
-        if crate::probes::cooking() {
+        if false {
             eprintln!(
                 "[cook] inserted {path}, cooked map now {}",
                 self.cooked.len()
@@ -1764,14 +1762,14 @@ impl ProjectIndex {
         let (walk, walk_files) = self.the_visible_walk(visible_from);
         let files = walk_files.as_ref();
         let through_an_import = &walk.through_an_import;
-        if crate::probes::visibility() {
+        if false {
             eprintln!(
                 "[visibility] {} file(s) after the order step, from {}",
                 files.len(),
                 visible_from.display()
             );
         }
-        if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
+        if false && walk_started.elapsed().as_micros() >= 500 {
             let asks = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed) - asks_before;
             let nanos = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed) - nanos_before;
             eprintln!(
@@ -1815,7 +1813,7 @@ impl ProjectIndex {
             }
         };
 
-        if crate::probes::names()
+        if false
             && let Narrow::Named(names) = narrow
             && names.iter().any(|name| *name == "cout" || *name == "map")
         {
@@ -2150,7 +2148,7 @@ impl ProjectIndex {
             .ok()
             .and_then(|walks| walks.get(from).cloned())?;
         let now = self.the_walks_fingerprint(&remembered.contributors);
-        if crate::probes::visibility() {
+        if false {
             eprintln!(
                 "[visibility]   remembered walk from {from}: {} ({} contributor(s))",
                 if now == remembered.fingerprint {
@@ -2247,7 +2245,7 @@ impl ProjectIndex {
         let mut state = self.macros.clone();
         let macros_cloned = macros_started.elapsed();
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
-        if crate::probes::timing() && macros_started.elapsed().as_micros() >= 300 {
+        if false && macros_started.elapsed().as_micros() >= 300 {
             eprintln!(
                 "[visibility] the state: macro table cloned in {macros_cloned:?} ({} entry(ies)), \
                  the translation unit's certain set in {:?}",
@@ -2732,7 +2730,7 @@ impl ProjectIndex {
                                     include.guard,
                                     include.range.start_offset,
                                 );
-                                if crate::probes::timing() {
+                                if false {
                                     CONDITION_NANOS.fetch_add(
                                         started.elapsed().as_nanos() as u64,
                                         std::sync::atomic::Ordering::Relaxed,
@@ -2988,7 +2986,7 @@ impl ProjectIndex {
         // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the
         // index lookups — the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine"
         // from "the index" before either is optimised.
-        if crate::probes::no_index_lookup() {
+        if false {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
         }
         // **One answer per spelling per pull** — see [`ProjectIndex::definition_answers`]. Measured on
@@ -3004,7 +3002,7 @@ impl ProjectIndex {
         }
         let started = std::time::Instant::now();
         let answer = self.definitions_inner(name, visible_from);
-        if crate::probes::timing() && started.elapsed().as_micros() >= 200 {
+        if false && started.elapsed().as_micros() >= 200 {
             eprintln!(
                 "[lookup] {:>5.1} ms  {name}  ({} answer(s))",
                 started.elapsed().as_secs_f64() * 1000.0,
@@ -3416,11 +3414,9 @@ impl ProjectIndex {
         // answers without this step, so the two answers can be compared over the same questions: with a rendering for
         // most files (⑱ makes the rendering the reading) this filter should have almost nothing left to remove, and
         // "almost nothing" is a number this crate's style asks for rather than a claim. See `tests/patch_probe.rs`.
-        if !crate::probes::no_guard_filter() {
-            candidates.retain(|found| {
-                self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
-            });
-        }
+        candidates.retain(|found| {
+            self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
+        });
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
         // nothing else — "one declaration, and two that might be" is not "one declaration".
@@ -3469,7 +3465,7 @@ impl ProjectIndex {
         const ALIAS_DEPTH: usize = 4;
 
         let mut rewritten = name.to_string();
-        let tracing = crate::probes::alias();
+        let tracing = false;
 
         for _ in 0..ALIAS_DEPTH {
             let segments: Vec<&str> = rewritten.split("::").collect();

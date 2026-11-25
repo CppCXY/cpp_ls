@@ -592,7 +592,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         last,
                     )
                 })?;
-        if crate::probes::hover() {
+        if false {
             eprintln!(
                 "[across] {:?} -> {first}..={stop}: {:?}",
                 expression.text().to_string(),

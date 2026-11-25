@@ -736,7 +736,7 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
     let mut node = root.clone();
     // Read once — see `crate::probes`. This runs on every symbol resolution, and reading the environment per call
     // was the same mistake that cost 106 s and 40 s at two other sites of it.
-    let tracing = crate::probes::coordinates();
+    let tracing = false;
 
     loop {
         let range = node.text_range();

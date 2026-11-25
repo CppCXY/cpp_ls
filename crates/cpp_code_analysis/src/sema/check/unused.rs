@@ -247,7 +247,7 @@ impl Check for Unused {
                 ),
             );
         }
-        if crate::probes::diagnostics() {
+        if false {
             eprintln!(
                 "[unused] {} declaration(s), {} local(s): counted tokens {} ms | bodies {} ms | loop {} ms",
                 context.summary.declarations.len(),

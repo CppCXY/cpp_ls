@@ -58,7 +58,6 @@ pub mod hash;
 pub mod include;
 pub mod paths;
 pub mod preprocess;
-pub mod probes;
 pub mod project;
 pub mod token;
 

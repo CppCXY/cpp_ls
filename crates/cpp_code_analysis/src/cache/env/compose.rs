@@ -212,9 +212,7 @@ impl Fold<'_> {
             let visibility = guards.visibility_of(step.guard, step.at, |condition_at| {
                 Over::new(self.env_at(condition_at), self.seed)
             });
-            if let Some(wanted) = crate::probes::step_name()
-                && step_label(step).contains(wanted)
-            {
+            if false {
                 let over = Over::new(self.env_at(step.at), self.seed);
                 eprintln!(
                     "[step] {} at {} -> {:?} | env {} | under {} | __cplusplus {:?} | seed complete {}",

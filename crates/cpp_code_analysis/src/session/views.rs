@@ -129,7 +129,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| requested.to_path_buf());
         // **A miss is otherwise indistinguishable from "never cooked"**, which is what made a file that *had* been
         // cooked answer `None` for every query about it. See `CPPLS_TRACE_VIEW`.
-        if crate::probes::view() {
+        if false {
             eprintln!(
                 "view: asked {:?} key {:?} summary {} held {}",
                 requested,
@@ -139,7 +139,7 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         let file = self.vfs.held(&key)?;
-        if crate::probes::view() {
+        if false {
             eprintln!(
                 "view: file.path {:?} hash {:?}",
                 file.path,
@@ -183,7 +183,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     environment: None,
                 };
                 if let Some(held) = self.a_view_already_parsed(&key) {
-                    if crate::probes::view() {
+                    if false {
                         eprintln!("view: {} came from the cache", file.path.display());
                     }
                     return Some(held);
@@ -193,7 +193,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 Some(view)
             }
             None => {
-                if crate::probes::cooking() {
+                if false {
                     // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
                     // write and a read that disagree about either half are a miss that looks exactly like "this file
                     // was never cooked". The count says whether the cache has anything at all.
@@ -293,7 +293,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn ask_for_the_cooked_reading(&self, path: &Path) {
         if let Ok(mut work) = self.macro_work.lock() {
             let queued = work.want(path);
-            if crate::probes::cooking() {
+            if false {
                 eprintln!("[ask] queued {queued}: {}", path.display());
             }
         }
@@ -318,7 +318,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(requested)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| requested.to_path_buf());
-        let traced = crate::probes::hover();
+        let traced = false;
         let file = self.vfs.held(&key)?;
         let rendered = self.known_rendering_of(&file.path, &file.text);
         if traced {

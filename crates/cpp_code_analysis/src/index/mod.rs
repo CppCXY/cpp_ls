@@ -421,7 +421,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `Session::render_the_unit` is a different rendering (measured: correct for the 28-line reproducer in
         // `docs/worklog.md`, while the summary this function builds is wrong). So the one text that matters gets a
         // way out, off unless asked for, like this crate's other traces.
-        if let Some(directory) = crate::probes::dump_rendering_dir() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             let _ = std::fs::create_dir_all(directory);
             let name = path
                 .file_name()
@@ -672,7 +672,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **The whole stream, its file boundaries and its file list**, when a dump directory is named: the only way
         // to see which file's text a wrong scope came from — the rendering has no file markers in it, and the
         // boundaries are what say where one file stops.
-        if let Some(directory) = crate::probes::dump_rendering_dir() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             let _ = std::fs::create_dir_all(directory);
             let _ = std::fs::write(directory.join("unit.stream"), &stream.text);
             let boundaries: Vec<String> = stream
@@ -705,7 +705,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         // **The errors this parse reported, and which file each one is in** — written only when a dump directory is
         // named. A rendering has no file markers in it, so a bare offset says nothing about which header is wrong.
-        if let Some(directory) = crate::probes::dump_rendering_dir() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             let boundaries = stream.file_boundaries();
             let lines: Vec<String> = tree
                 .get_errors()
@@ -731,7 +731,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let parsed = parsing.elapsed();
         let indexing = std::time::Instant::now();
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
-        if crate::probes::units() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             eprintln!(
                 "[unit] parse {:>6.1} ms  facts {:>6.1} ms  {} file(s), {} byte(s)",
                 parsed.as_secs_f64() * 1000.0,
@@ -856,7 +856,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The text this summary is built from, when `CPPLS_DUMP_RENDERING_DIR` names a directory — the companion of the
         // same hook in [`FileIndexer::index_rendering`], and the only way to see which reading a wrong answer came
         // from when the file's own text parses correctly.
-        if let Some(directory) = crate::probes::dump_rendering_dir() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             let _ = std::fs::create_dir_all(directory);
             let name = path
                 .file_name()
@@ -907,7 +907,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let making = std::time::Instant::now();
         let (mut declarations, mut guards) =
             { build_facts(&scopes, &preprocessing, &root, &errors, keep_locals) };
-        if crate::probes::units() {
+        if let Some(directory) = Option::<&std::path::Path>::None {
             eprintln!(
                 "[unit]   scopes {:>6.1} ms  facts {:>6.1} ms  ({} fact(s))",
                 scopes_ms,
@@ -1742,7 +1742,7 @@ fn file_what_was_found(
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
     // read here is a lock of the process environment plus an `OsString` built for an answer that cannot change
     // during a run.
-    let tracing = crate::probes::attribution();
+    let tracing = false;
     let interested = |name: &str| matches!(name, "cout" | "map" | "wcout" | "multimap");
     if tracing {
         eprintln!("[attr] {} declaration(s) to place", declarations.len());

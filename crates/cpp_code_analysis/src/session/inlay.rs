@@ -375,7 +375,7 @@ where
 
         // **Where a hint's milliseconds go**, when asked. One line per call separates them, and a
         // repeated callee spelling is visible in it.
-        let trace = crate::probes::inlay();
+        let trace = false;
         // **Printed before the resolution, not only after it.** A call that never finishes never reaches the report
         // below — measured: `inlayHint` on `containers.cpp` sat in one call for sixteen seconds and a gigabyte, and the
         // last line the trace had printed was the call *before* it. This line is what names it.

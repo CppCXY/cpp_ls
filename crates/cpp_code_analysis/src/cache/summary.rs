@@ -1587,9 +1587,7 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         // condition of every guard arrives here — so reading the environment per call was a lock of the process on
         // the hottest path in the program. Measured: hoisting that one read took `a_guard_holds` from **271,479 ms**
         // to **192,350 ms**, and dropping the `to_string_lossy` beside it took it to **165,312 ms**.
-        if let Some(wanted) = crate::probes::lookup_name()
-            && wanted == name
-        {
+        if false {
             let from_state = self.state.definitions.get(name).map(|binding| {
                 // **The shape, not just the name.** A definition whose parameter list or body did not survive the
                 // walk is a definition the expander cannot use: `NAME (x)` stops being a call, and an `#if` that
@@ -2494,7 +2492,7 @@ impl TranslationUnit {
         // **The frame tree**, when the unit trace is on: what the renderer will walk, in the order it walks it. A
         // disagreement with cl.exe's `#line` sequence is a disagreement about include order, and this is our half of
         // that comparison — `cl /E` on the same interface unit is the other, and it costs 0.4 s.
-        if crate::probes::units() && !self.frames.is_empty() {
+        if false && !self.frames.is_empty() {
             for (index, frame) in self.frames.iter().enumerate() {
                 eprintln!(
                     "[frame] {index:3} {} parent {:?} at {}",
@@ -4107,14 +4105,14 @@ fn walk_one_file<'a>(
     // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
     // `#include` nesting limit is 200, and this is that number.
     if walked.spliced.contains(path) {
-        if crate::probes::splice() {
+        if false {
             eprintln!("leave early (already spliced): {}", path.display());
         }
         return None;
     }
 
     let already_read = !seen.insert(path);
-    if crate::probes::splice() {
+    if false {
         eprintln!(
             "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
             path.display(),
@@ -4796,7 +4794,7 @@ fn splice_a_contribution<'a>(
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
     }
-    if crate::probes::splice() {
+    if false {
         eprintln!(
             "splice: {} | {} changes, {} edges, {} events",
             file.display(),

@@ -220,7 +220,7 @@ pub(crate) fn an_unnamed_class_body_named(
     // The **innermost** specifier sequence on the path is the declaration's own, the same reading
     // [`declared_type_of_with`] makes above.
     let mut unnamed = false;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -320,7 +320,7 @@ pub(crate) fn declared_type_of_with(
     // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
     // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
     let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -1103,7 +1103,7 @@ impl DeclarationShapes {
             // [`Shape::pattern`].
             let pattern = match kind {
                 CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef => {
-                    if crate::probes::inference() {
+                    if false {
                         eprintln!(
                             "[shape] class node {:?} at {:?}: text {:?}",
                             kind,
@@ -1444,7 +1444,7 @@ pub(crate) fn declared_alias_target_with(
     // copied out rather than borrowed: the visitor is handed a reference valid only for its own call, which is the
     // shape of the walk (see [`DeclarationShapes::on_the_path`]).
     let mut declaration = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -1503,7 +1503,8 @@ pub(crate) fn declared_alias_target_with(
     // list with `unlisted ["{inta;intb;}"]` while its two members sat under the scope `Object`, and as the
     // **21 539 of 40 000** refusals in neovim's member questions. C declares almost every struct this way, so the
     // shape is the common one rather than a corner.
-    if let Some(named) = the_class_a_typedef_body_names(specifiers, binding.name.spelled().as_ref()) {
+    if let Some(named) = the_class_a_typedef_body_names(specifiers, binding.name.spelled().as_ref())
+    {
         return Some(named);
     }
 
@@ -3172,7 +3173,7 @@ pub(crate) fn declared_returns_of_with(
     let mut specifiers = None;
     let mut trailing = None;
     let mut declarator = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -3874,7 +3875,7 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
     // [`declared_type_of`] makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut owner = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -4005,7 +4006,8 @@ fn fact_for(
     // enclosing scope would be a name that cannot be used unqualified there), so the split belongs here, where the
     // fact is built. Until the grammar learned the shape, an out-of-class definition reached this point with its name
     // swallowed by the specifier sequence; now the declarator's name *is* the qualified spelling.
-    let (name, scope): (std::borrow::Cow<'_, str>, Option<String>) = match spelled.rsplit_once("::") {
+    let (name, scope): (std::borrow::Cow<'_, str>, Option<String>) = match spelled.rsplit_once("::")
+    {
         // A local never carries a qualifier: `S::f` at block scope is a call, not a declaration.
         Some((qualifier, last)) if !local && !qualifier.is_empty() && !last.is_empty() => (
             std::borrow::Cow::Owned(last.to_string()),
@@ -4055,7 +4057,9 @@ fn fact_for(
             // `EmmyLuaCodeStyle`, `e.U.Start.Kind` answered "the type of `e.U` is not known here". The name used is
             // the one the parser already gives the anonymous type's **own members** as their scope —
             // `MarkEvent::U` — which is what makes the member lookup below it work.
-            .or_else(|| an_unnamed_class_body_named(scope.as_deref(), name.as_ref(), shapes, binding))
+            .or_else(|| {
+                an_unnamed_class_body_named(scope.as_deref(), name.as_ref(), shapes, binding)
+            })
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
@@ -4322,7 +4326,7 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// for its members and the class *further out* is not.
 pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
+    let trace = false;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if trace {
             eprintln!(
@@ -5085,7 +5089,7 @@ impl<'a> DeclarationFacts<'a> {
 
         // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
         // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms ({} declaration(s))  frees {:>6.1} ms  \
                  reflection {:.1} ms  guards {:.1} ms",

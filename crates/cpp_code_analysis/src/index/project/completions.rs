@@ -370,7 +370,7 @@ pub fn name_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
     let phase = std::time::Instant::now();
-    if crate::probes::completion() {
+    if false {
         eprintln!(
             "[completion] the position: scope {:?}, written {:?}",
             position.scope, position.written
@@ -406,7 +406,7 @@ pub fn name_completions_at(
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     };
-    if crate::probes::completion() {
+    if false {
         eprintln!(
             "[completion] the listing took {:?} for {} name(s)",
             phase.elapsed(),
@@ -589,7 +589,7 @@ pub(crate) fn visible_names(
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
-    if crate::probes::completion() {
+    if false {
         eprintln!("[completion]   the class tier: {:?}", phase.elapsed());
     }
     let chain_phase = std::time::Instant::now();
@@ -658,7 +658,7 @@ pub(crate) fn visible_names(
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
-    if crate::probes::completion() {
+    if false {
         eprintln!("[completion]   the chain: {:?}", chain_phase.elapsed());
     }
     let global_phase = std::time::Instant::now();
@@ -670,7 +670,7 @@ pub(crate) fn visible_names(
         chain.len(),
         written,
     ));
-    if crate::probes::completion() {
+    if false {
         eprintln!(
             "[completion]   the global tier: {:?}",
             global_phase.elapsed()
@@ -679,7 +679,7 @@ pub(crate) fn visible_names(
 
     let sort_phase = std::time::Instant::now();
     sort_and_hide(&mut names);
-    if crate::probes::completion() {
+    if false {
         eprintln!("[completion]   the sort: {:?}", sort_phase.elapsed());
     }
     Known::Yes(names)
@@ -854,7 +854,7 @@ pub(crate) fn names_in_a_scope_at(
             //                                        arm `std::string::` offered **0** items.
             // ```
             let names_a_type = a_spelling_names_a_type(index, spelling, path);
-            if crate::probes::members() {
+            if false {
                 let bare = spelling.rsplit("::").next().unwrap_or(spelling);
                 let facts: Vec<String> = index
                     .every_fact_named(bare)
@@ -949,7 +949,7 @@ pub(crate) fn names_in_a_scope_at(
                     spelling,
                 );
                 let named = named.as_ref();
-                if crate::probes::members() {
+                if false {
                     eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
                 }
                 match names_of_a_class(index, scopes, root, path, named) {

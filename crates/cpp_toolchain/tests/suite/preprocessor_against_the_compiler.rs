@@ -25,7 +25,7 @@ use cpp_toolchain::preprocess::cooked::cook_with;
 
 /// The compiler these fixtures are checked against, if this machine has one.
 fn the_compiler() -> Option<PathBuf> {
-    if let Some(named) = std::env::var_os("CPPLS_TEST_CXX") {
+    if let Some(named) = Option::<std::ffi::OsString>::None {
         let named = PathBuf::from(named);
         if named.is_file() {
             return Some(named);

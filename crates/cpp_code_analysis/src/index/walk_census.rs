@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Is the census on? **The read lives in [`crate::probes`]**, where every other switch's does: a probe that read the
 /// environment per entry would be measuring itself, which is the mistake that module exists to remove.
 fn enabled() -> bool {
-    crate::probes::walk_census()
+    false
 }
 
 static ENTRIES: AtomicU64 = AtomicU64::new(0);

@@ -185,12 +185,12 @@ impl<F: FileProvider + Clone> Session<F> {
             // the asking side of the rendering contract — on a miss it records the file and answers `None`, and the
             // pump renders it. Nothing here guesses: the files are the index's own facts about the qualifier.
             let needed = self.files_a_qualified_name_needs(qualifier, &view.path);
-            if crate::probes::cooking() {
+            if false {
                 eprintln!("[ask] {qualifier}: needed {needed:?}");
             }
             for file in needed.into_iter().take(8) {
                 let cooked = self.store.index().cooked_declarations(&file).is_some();
-                if crate::probes::cooking() {
+                if false {
                     eprintln!("[ask] {} cooked {cooked}", file.display());
                 }
                 if !cooked {

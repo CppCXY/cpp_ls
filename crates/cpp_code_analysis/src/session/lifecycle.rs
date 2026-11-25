@@ -161,7 +161,7 @@ impl<F: FileProvider + Clone> Session<F> {
             documents,
             store,
             filter,
-            share_contributions: crate::probes::share(),
+            share_contributions: false,
             project_paths: project
                 .iter()
                 .map(|path| (queue_key(path), path.clone()))

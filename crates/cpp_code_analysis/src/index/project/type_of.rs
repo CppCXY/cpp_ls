@@ -257,7 +257,7 @@ pub(crate) fn type_of_expression_memoed(
     // bounded by anything. Measured on a real C++23 project: `module_graph.cpp` overflowed the stack with 32 MB on
     // `text_of(site.file).content.substr(…).starts_with(name)`, and no log said which questions repeated. One line per
     // question answers that, and it is the only instrument that can.
-    if crate::probes::types() {
+    if false {
         eprintln!(
             "[type_of] depth {depth:>2}  {:?}",
             expression
@@ -275,7 +275,7 @@ pub(crate) fn type_of_expression_memoed(
         memo, shapes, index, declaring, scopes, root, path, expression, depth,
     );
 
-    if crate::probes::timing() && started.elapsed().as_millis() > 5 {
+    if false && started.elapsed().as_millis() > 5 {
         eprintln!(
             "[type_of] {:>5} ms  depth {depth}  {:?}",
             started.elapsed().as_millis(),
@@ -1280,7 +1280,7 @@ pub(crate) fn type_of_expression_inner(
                             let written = a_members_answer_as_a_type(
                                 index, scopes, root, path, &type_of, &returns,
                             );
-                            if crate::probes::inference() {
+                            if false {
                                 eprintln!(
                                     "[inference] subscript on {:?}: the member wrote {:?}, the type is {:?}",
                                     type_of.to_string(),
@@ -2103,7 +2103,7 @@ pub(crate) fn operator_returns_of_with_arguments(
     // [`ProjectIndex::template_parameters_for`].
     let parameters = index.template_parameters_for(&class, path, &written_arguments);
     let parameter_names = &parameters;
-    if crate::probes::inference() {
+    if false {
         eprintln!(
             "[inference] operator_returns_of({class}, {operator}): parameters {parameters:?}, arguments {written_arguments:?}"
         );
@@ -2165,7 +2165,7 @@ pub(crate) fn operator_returns_of_with_arguments(
                     !object_is_const || fact.modifiers.contains(crate::DeclModifiers::CONST)
                 })
                 .collect();
-            if crate::probes::inference() {
+            if false {
                 eprintln!(
                     "[rank] {class}::{wanted}: {} candidate(s): {:?}",
                     callable.len(),

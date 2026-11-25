@@ -61,7 +61,7 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             let started = std::time::Instant::now();
             let made = session.view_of_the_file(path);
-            if crate::probes::timing() {
+            if false {
                 eprintln!(
                     "[resolver] {:>5} ms  {} ({})",
                     started.elapsed().as_millis(),
@@ -236,13 +236,13 @@ impl<F: FileProvider + Clone> Session<F> {
                 };
 
                 let read_started = std::time::Instant::now();
-                if crate::probes::units() {
+                if false {
                     eprintln!("[unit] gathering the closure of {path:?}");
                 }
                 let (closure, closure_by_key) = { self.closure_with_text_from(path, Some(root)) };
                 let read_took = read_started.elapsed();
                 let closure_bytes: usize = closure.iter().map(|(_, text)| text.len()).sum();
-                if crate::probes::units() {
+                if false {
                     eprintln!(
                         "[unit] closure of {path:?}: {} file(s), {closure_bytes} bytes in {read_took:?}",
                         closure.len()
@@ -361,7 +361,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         *walks.entry(queue_key(path)).or_insert(0) += 1;
                     }
 
-                    if crate::probes::timing() {
+                    if false {
                         eprintln!(
                             "[unit] read {:>4} ms, walk {:>4} ms, put {:>4} ms, {} file(s) / {} bytes  {}",
                             read_took.as_millis(),
@@ -724,11 +724,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // has (an `_STD_BEGIN`-shaped `#define` inside a conditional region). A consumer reading the environment
             // reads both, so Gate 0 compares both.
             let mut bindings: Vec<(String, Option<bool>, String)> = Vec::new();
-            let wanted = crate::probes::step_name();
             cpp_parser::MacroFacts::for_each_definition(&view, &mut |facts| {
-                if wanted.is_some_and(|name| facts.name == name) {
-                    eprintln!("[walk] definition {} in {}", facts.name, file.display());
-                }
                 bindings.push((
                     facts.name.to_string(),
                     Some(facts.function_like),
@@ -741,9 +737,6 @@ impl<F: FileProvider + Clone> Session<F> {
             let definitions = bindings.len();
             cpp_parser::MacroFacts::for_each_body_in_force(&view, &mut |facts| {
                 let name = facts.name.to_string();
-                if wanted.is_some_and(|wanted| wanted == name) {
-                    eprintln!("[walk] body-in-force {} in {}", name, file.display());
-                }
                 if bindings[..definitions].iter().any(|known| known.0 == name) {
                     return;
                 }
@@ -852,7 +845,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // decode is the difference between a second unit read costing a second and costing a
         // moment.
         if let Some(cached) = self.store.cached_unit(key) {
-            if crate::probes::units() {
+            if false {
                 eprintln!("unit render: key {key:016x} served from the cache");
             }
             if let Ok(mut known) = self.rendered_unit.lock() {
@@ -860,7 +853,7 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             return Some(cached);
         }
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "unit render: key {key:016x} MISSED ({} source(s) to cook)",
                 sources.len()
@@ -953,7 +946,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // records why: a rendering is a function of the reader as well as of the bytes, and a key that names only the
         // bytes cannot invalidate a stream whose inputs happen not to have moved.
         let key = crate::cache::a_rendering_key(&inputs);
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "unit inputs: {} file(s), reader {:016x}, key {key:016x}",
                 inputs.len(),
@@ -1003,7 +996,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .or_else(|| self.store.cached_unit(units_key))
             && self.the_rendering_still_describes(&rendered, units_key)
         {
-            if crate::probes::units() {
+            if false {
                 eprintln!(
                     "unit gather: key {units_key:016x} served without the walk in {:?} ({} walked, {} token file(s))",
                     started.elapsed(),
@@ -1058,7 +1051,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     .map(|(_, cached)| cached.clone())
             })
             .or_else(|| self.store.cached_unit(units_key));
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "unit gather: key {units_key:016x} {} — walked {walked:?}, key {hashed:?} ({} file(s))",
                 if rendered.is_some() {
@@ -1276,7 +1269,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // declarations of the files that did **not** leak were never in doubt, and refusing them answered a
         // question nobody had asked.
         let mut placed = 0usize;
-        if crate::probes::units() {
+        if false {
             let names: Vec<String> = indexed
                 .files
                 .iter()
@@ -1294,9 +1287,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         for (path, cooked) in indexed.files {
             placed += 1;
-            if crate::probes::units()
-                && path.file_name().and_then(|name| name.to_str()) == Some("format")
-            {
+            if false && path.file_name().and_then(|name| name.to_str()) == Some("format") {
                 let in_std = cooked
                     .declarations
                     .iter()
@@ -1404,7 +1395,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let gathered = gathering.elapsed();
         let committing = std::time::Instant::now();
         let reading = self.commit_a_unit_reading(prepared, records)?;
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "unit read: prepare {gathered:?} (walk + cook + parse), commit {:?} ({} file(s) filed)",
                 committing.elapsed(),
@@ -1879,7 +1870,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // "which of the four phases is the one that costs a minute", and no single number outside can answer it: the
         // same call measured 25 s, 44 s, 112 s and 506 s on unchanged inputs, against a 24 MB cache, so the answer is
         // not the cache and not the closure.
-        let tracing = crate::probes::units();
+        let tracing = false;
         let started = std::time::Instant::now();
         let mut last = started;
 

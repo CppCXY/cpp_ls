@@ -174,7 +174,7 @@ impl<F: FileProvider + Clone> Session<F> {
         {
             let loading = std::time::Instant::now();
             self.vfs.load(&path);
-            if crate::probes::units() {
+            if false {
                 eprintln!(
                     "[step] load {} took {} us",
                     path.display(),
@@ -219,7 +219,7 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         let timed = std::time::Instant::now();
         let timeline_ask = std::time::Instant::now();
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "[step] timeline question for {} took {} ms (timeline {})",
                 path.display(),
@@ -254,7 +254,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 None => self.store.get(&path),
             },
         };
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "[step] {} read in {} ms after a {} ms timeline question (timeline {})",
                 path.display(),
@@ -275,7 +275,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_default();
         let after = self.store.stats();
         let outcome = outcome_of(before, after);
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "[step] {} includes+stats took {} us ({} include(s))",
                 path.display(),
@@ -292,7 +292,7 @@ impl<F: FileProvider + Clone> Session<F> {
         for include in includes {
             self.queue.add(include, priority, depth + 1);
         }
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "[step] {} queued {include_count} include(s) in {} us",
                 path.display(),
@@ -579,7 +579,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
-        let tracing = crate::probes::cooking();
+        let tracing = false;
 
         loop {
             let round_started = std::time::Instant::now();
@@ -694,7 +694,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 committed
             };
             let cook = cook_started.elapsed();
-            if crate::probes::units() {
+            if false {
                 // **Three timers, each taken where it happened** rather than one derived by subtraction: the round
                 // that appeared to take 56 s had an `advance` of 7 ms and a cook of 1 µs, so the 56 s was in neither
                 // and the derived figure could not say where. The three now print their own walls.
@@ -944,13 +944,13 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             wanted.remove(&path);
             if self.store.index().summary(&path).is_none() {
-                if crate::probes::cooking() {
+                if false {
                     eprintln!("refinement ask not yet: {} (no summary)", path.display());
                 }
                 not_yet.push(path);
                 continue;
             }
-            if crate::probes::cooking() {
+            if false {
                 eprintln!("refinement ask taken: {}", path.display());
             }
             if let Some(at) = self

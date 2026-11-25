@@ -46,7 +46,7 @@ pub async fn on_code_action(
         .filter_map(named_by_a_diagnostic)
         .collect();
     // **Where the milliseconds go**, when asked.
-    let trace = cpp_code_analysis::probes::code_action();
+    let trace = false;
     let started = std::time::Instant::now();
 
     let prepared = started.elapsed();

@@ -529,7 +529,7 @@ fn hover_of_the_rendering(
     view: &FileView,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
-    let traced = crate::probes::hover();
+    let traced = false;
     let rendered = session.view(&view.path)?;
     // **The spelling is what keeps a macro argument's call site from mapping to the invocation's first token.** The
     // ordinary map walks written starts and, for an argument token whose written span the cook dropped, answers with
@@ -827,7 +827,7 @@ fn hover_of_the_program(
                 // template parameters** is the general one — a partial specialization is a narrower shape
                 // (`vector<bool>`'s pattern has one parameter, the primary's two), so the general one is what a
                 // spelling that did not write the specialization means.
-                if crate::probes::hover() {
+                if false {
                     eprintln!(
                         "[types] {:?}",
                         found
@@ -1824,7 +1824,7 @@ fn declaration_markdown(
     } else {
         None
     };
-    if crate::probes::hover() {
+    if false {
         eprintln!(
             "[card] heard {} local {} type_of {:?} => indexed {}",
             found.fact.name,
@@ -1947,7 +1947,7 @@ fn declaration_markdown(
     {
         *fact = the_member.fact.clone();
     }
-    if crate::probes::debug_card() {
+    if false {
         eprintln!(
             "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
             fact.name,
@@ -2206,7 +2206,7 @@ fn declaration_markdown(
     // in `subject`.
     if matches!(fact.kind, DeclKind::Type)
         && {
-            if crate::probes::hover() {
+            if false {
                 eprintln!(
                     "[layout] asking for {:?} (subject {:?})",
                     fact.name.as_str(),

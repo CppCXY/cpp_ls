@@ -204,7 +204,7 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
         let started = std::time::Instant::now();
         T::check(context);
         let took = started.elapsed();
-        if crate::probes::diagnostics() && took.as_millis() >= 2 {
+        if false && took.as_millis() >= 2 {
             eprintln!(
                 "[diagnostics]   check {:<45} {:>6} ms",
                 std::any::type_name::<T>()

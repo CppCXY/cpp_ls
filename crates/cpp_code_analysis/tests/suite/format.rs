@@ -412,7 +412,7 @@ void f(int y, double d) {
 #[test]
 #[ignore = "a measurement: needs CPPLS_FILE"]
 fn what_the_walk_costs() {
-    let Some(path) = std::env::var_os("CPPLS_FILE").map(std::path::PathBuf::from) else {
+    let Some(path) = Option::<std::path::PathBuf>::None else {
         eprintln!("skipped: set CPPLS_FILE");
         return;
     };

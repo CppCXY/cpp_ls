@@ -110,7 +110,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 && can_be_cooked(self, included)
                 && !refused(self, included)
             {
-                if crate::probes::cooking() {
+                if false {
                     eprintln!(
                         "want_the_closure_cooked({}): queued {} (not read, cookable, not refused)",
                         root.display(),
@@ -506,7 +506,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         room.min(steps * 2).max(wave.len()),
                     )
                 };
-                if crate::probes::units() {
+                if false {
                     eprintln!(
                         "ADVANCE wave of {} file(s) prepared {} in {:?}",
                         wave.len(),
@@ -525,7 +525,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let ready = self.prefetched.remove(&key);
             let step_started = std::time::Instant::now();
             done.push(self.index_one(path, priority, depth, ready, true));
-            if crate::probes::units() {
+            if false {
                 eprintln!(
                     "[advance] one step took {} ms ({} of {} step(s))",
                     step_started.elapsed().as_millis(),
@@ -550,7 +550,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // through the pump, which had already been given the right slice. Passing nothing is not "passing no
         // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
         let units = Vec::new();
-        if crate::probes::units() {
+        if false {
             // **Counts, not the names.** A line with sixty-four absolute paths is ~10 KB, and through a redirected
             // stderr that is a write which can block — inside this function, after `started.elapsed()` was taken, so
             // the *caller* measures the block and the line itself does not. That is the whole of a "56 s batch" that
@@ -565,7 +565,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let drain = {
             let finishing = std::time::Instant::now();
             let drain = self.finish_a_slice(&done, units);
-            if crate::probes::units() {
+            if false {
                 eprintln!(
                     "ADVANCE finish {} file(s) in {:?} (batch total {:?})",
                     done.len(),
@@ -600,7 +600,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let prepared = self.prepare_the_drain(drain);
         let prepared_in = drain_started.elapsed();
         let committed = self.commit_the_drain(prepared);
-        if crate::probes::units() {
+        if false {
             eprintln!(
                 "ADVANCE drain prepared {:?}, committed {committed} in {:?}",
                 prepared_in,
@@ -625,7 +625,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
                 // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
                 let asked = claimed.len();
-                if crate::probes::cooking() {
+                if false {
                     eprintln!("advance: claiming {claimed:?}");
                 }
                 let materials = self.materials_for(claimed);
@@ -633,7 +633,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 let rendered = self.render_them(materials);
                 let built = rendered.len();
                 let committed = self.commit_them(rendered).len();
-                if crate::probes::cooking() {
+                if false {
                     eprintln!(
                         "advance: claimed {asked}, gathered {gathered}, built {built}, committed {committed}"
                     );
@@ -653,7 +653,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
             let reading = std::time::Instant::now();
             self.read_a_program_now();
-            if crate::probes::units() {
+            if false {
                 eprintln!("ADVANCE read_a_program_now in {:?}", reading.elapsed());
             }
         }
@@ -1461,7 +1461,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 ..PreparedDrain::default()
             };
         }
-        let tracing = crate::probes::cooking();
+        let tracing = false;
 
         // **The two halves are timed apart**, because a start-up regression of **90 %** was found inside this
         // function on a warm cache: 1761 summaries reused from disk in 4 s of real work, and 60 s in twelve calls of
@@ -1616,7 +1616,7 @@ impl<F: FileProvider + Clone> Session<F> {
             known.extend(refined.iter().map(|path| queue_key(path)));
         }
         if !waiting.is_empty() && self.pending_work() > 0 {
-            if crate::probes::cooking() {
+            if false {
                 eprintln!(
                     "re-read: {} file(s) go back on the queue — their closures are still filling",
                     waiting.len()

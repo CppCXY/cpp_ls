@@ -125,7 +125,7 @@ impl<'a> SemanticModel<'a> {
         // measure what the rules cost *without* the inference they do — the difference between this and the normal
         // run is the inference layer's share of a diagnostics pull, and it is what says whether the next work is in
         // the engine or in the walks. It is not a mode: the analysis it produces is deliberately wrong.
-        if crate::probes::no_inference() {
+        if false {
             return Known::Unknown(crate::UnknownReason::UnknownType(Box::from(
                 expression.text().to_string().trim(),
             )));

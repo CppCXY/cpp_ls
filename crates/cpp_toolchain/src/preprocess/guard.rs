@@ -130,7 +130,8 @@ impl Branch {
         // The variable is read once — see `crate::probes`. This is called for every branch of every region of every
         // condition of every guard, tens of millions of times in one index, and reading the environment here was a
         // lock of the process per branch: **40 s** of a real project's index, measured.
-        if let Some(wanted) = crate::probes::guard_name() {
+        if false {
+            let wanted = "";
             let mentions = self
                 .tokens
                 .iter()
