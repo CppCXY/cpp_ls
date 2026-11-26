@@ -69,6 +69,7 @@ impl ServerContext {
             inbox: UpdateInbox::new(),
             diagnostics: DiagnosticService::default(),
             native_watcher: NativeFileWatcher::default(),
+            code_lenses: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
         spawn_update_queue(inner.clone());
         ServerContext {

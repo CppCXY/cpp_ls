@@ -46,6 +46,15 @@ impl ServerContextSnapshot {
         &self.inner.native_watcher
     }
 
+    /// The last successful lens list for each document — see [`ServerContextInner::code_lenses`].
+    pub fn code_lenses(
+        &self,
+    ) -> &std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<lsp_types::CodeLens>>>,
+    > {
+        &self.inner.code_lenses
+    }
+
     /// The client's pending notifications, applied by one worker before request barriers complete.
     pub fn inbox(&self) -> &UpdateInbox {
         &self.inner.inbox
@@ -70,4 +79,12 @@ pub struct ServerContextInner {
     pub inbox: UpdateInbox,
     pub diagnostics: DiagnosticService,
     pub native_watcher: NativeFileWatcher,
+    /// **The last lens list answered for each document.** A code lens is a count of references, and the count is
+    /// computed from the file's summary — which an edit deliberately drops before the writer rebuilds it. Answering
+    /// the drop as an empty list made every keystroke clear the lenses and the next refresh redraw them, which moves
+    /// the lines below a lens and reads as the whole window jumping. Keeping the last answer lets the request be
+    /// answered with the number it had until a new summary exists; the refresh after the index drains then updates it.
+    pub code_lenses: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<lsp_types::CodeLens>>>,
+    >,
 }

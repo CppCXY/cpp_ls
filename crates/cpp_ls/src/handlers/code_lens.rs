@@ -62,8 +62,10 @@ pub async fn on_code_lens(
 ) -> RequestOutcome<Vec<CodeLens>> {
     let uri = params.text_document.uri;
     let client = context.lsp_features().client_id();
+    let cache = context.code_lenses().clone();
+    let key = uri.to_string();
 
-    snapshot_query(context.analysis(), cancel_token, move |session| {
+    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference
         // about the editor rather than about the analysis — so it is answered here, at the edge, before any query is
@@ -79,9 +81,46 @@ pub async fn on_code_lens(
         // indexing drains) is what asks again, so the number can be low for a moment and then settle, without ever
         // vanishing.
         let view = session.view_of_the_file(&path)?;
+        // **The summary is the lens list, and an edit drops it before the writer rebuilds it.** Returning an empty
+        // list in that window is what clears every lens and then redraws it — a blank line appearing and disappearing
+        // above a function. `None` is the honest `Missing` outcome below, where the last answered list is served.
+        let _ = session.index().summary(&view.path)?;
         Some(lenses_of(session, &view, &uri, client))
     })
-    .await
+    .await;
+
+    match answer {
+        RequestOutcome::Ready(lenses) => {
+            if !lenses.is_empty() {
+                if let Ok(mut held) = cache.lock() {
+                    held.insert(key, lenses.clone());
+                }
+                return RequestOutcome::Ready(lenses);
+            }
+            // **An empty list is not a statement that the functions went away.** While the references index is
+            // filling, `places_of` answers `Unknown` for a declaration and this file's lens is deliberately omitted;
+            // returning that omission as an empty list clears every lens and redraws it on the next refresh. Serve
+            // the last list until a non-empty one replaces it.
+            let last = cache
+                .lock()
+                .ok()
+                .and_then(|held| held.get(&key).cloned())
+                .unwrap_or_default();
+            RequestOutcome::Ready(last)
+        }
+        // **A dropped summary is not "there are no functions".** Serve the last list this document answered with;
+        // only a document with no earlier answer gets an empty one. The refresh after the index drains is what makes
+        // the number current.
+        RequestOutcome::Missing => {
+            let last = cache
+                .lock()
+                .ok()
+                .and_then(|held| held.get(&key).cloned())
+                .unwrap_or_default();
+            RequestOutcome::Ready(last)
+        }
+        other => other,
+    }
 }
 
 /// **One lens per function this file declares or defines**, with the number of places that use it.
