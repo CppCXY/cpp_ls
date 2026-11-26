@@ -165,7 +165,7 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// it searches, and the answer is one directory probe — cheap enough that the table is cleared rather than
     /// evicted when it fills.
     include_searches: std::sync::Mutex<
-        std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf), Option<PathBuf>>,
+        std::collections::HashMap<(IncludeForm, bool, Box<str>, PathBuf, String), Option<PathBuf>>,
     >,
     /// **What each file contributed to a walk**, shared between this store's units — see
     /// [`crate::index::walk_cache`].
@@ -3365,11 +3365,12 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         let directory = path.parent().unwrap_or(Path::new("."));
+        let config = self.config.for_file(path);
 
         summary
             .includes
             .iter()
-            .all(|fact| self.where_it_resolves_now(fact, directory) == fact.resolved)
+            .all(|fact| self.where_it_resolves_now(fact, directory, &config) == fact.resolved)
     }
 
     /// **Where an `#include` resolves *now*** — the search, remembered for the life of the store.
@@ -3391,7 +3392,19 @@ impl<F: FileProvider> SummaryStore<F> {
     /// its index already answers from summaries read at one moment, so remembering the searches of that moment cannot
     /// be less current than what is already in memory — and it is *more* consistent than the loop it replaces, where
     /// two files verified a millisecond apart could disagree if a header appeared between them.
-    fn where_it_resolves_now(&self, fact: &IncludeFact, directory: &Path) -> Option<PathBuf> {
+    ///
+    /// **The configuration is the file's own**, not the store's project-wide one. A source file's compile command
+    /// carries include directories a header's does not, and the parser that wrote the summary used
+    /// [`CompilerConfig::for_file`] (`FileIndexer::scan_includes`); validating with the project-wide list asked a
+    /// different question and answered a different path. On the neovim checkout that rejected every source summary:
+    /// the summary said `build/src/nvim/auto/...generated.h`, validation searched the project-wide paths and found
+    /// `build/include/...generated.h`, and each warm start re-parsed every `.c` file.
+    fn where_it_resolves_now(
+        &self,
+        fact: &IncludeFact,
+        directory: &Path,
+        config: &CompilerConfig,
+    ) -> Option<PathBuf> {
         // An angled include's search does not look at the including file's directory, so it is not part of the
         // question — and leaving it out is what turns four hundred `<vector>`s into one search.
         let key = (
@@ -3403,6 +3416,11 @@ impl<F: FileProvider> SummaryStore<F> {
                 IncludeForm::Quote | IncludeForm::Macro => directory.to_path_buf(),
             },
         );
+        // **The same include spelling can resolve differently for different files**, because a source file's
+        // compile command carries include paths a header's does not. The question is therefore the spelling plus the
+        // configuration that asks it, not the spelling alone.
+        let search_key = self.include_search_key(&key, config);
+        let key = (key.0, key.1, key.2, key.3, search_key);
 
         if let Ok(searches) = self.include_searches.lock()
             && let Some(known) = searches.get(&key)
@@ -3410,20 +3428,7 @@ impl<F: FileProvider> SummaryStore<F> {
             return known.clone();
         }
 
-        // **The database, before the filesystem.** The in-memory table above is what makes one session cheap; this is
-        // what makes the *next* one cheap, and the doc above measures what it is worth: on `EmmyLuaCodeStyle` a warm
-        // start spent **9.3 s** in `prepare_a_wave`, of which the summary decode was 0.4 s and these searches were the
-        // rest. The key carries the include-path set, so a project whose configuration names different paths asks a
-        // different question rather than reading the old answer.
-        let stored_key = self.include_search_key(&key);
-        if let Some(known) = self.stored_include_search(&stored_key) {
-            if let Ok(mut searches) = self.include_searches.lock() {
-                searches.insert(key, known.clone());
-            }
-            return known;
-        }
-
-        let resolver = crate::include::IncludeResolver::new(&self.files, &self.config);
+        let resolver = crate::include::IncludeResolver::new(&self.files, config);
         let mut interner = crate::file::paths::PathInterner::new(cfg!(windows));
         let resolved = resolver
             .resolve(&fact.as_include(), directory, None, &mut interner)
@@ -3436,48 +3441,36 @@ impl<F: FileProvider> SummaryStore<F> {
             }
             searches.insert(key, resolved.clone());
         }
-        self.remember_include_search(&stored_key, resolved.as_deref());
 
         resolved
     }
 
-    /// **The key a resolution is remembered under across sessions** — see [`SummaryStore::where_it_resolves_now`].
+    /// **The key a resolution is remembered under for this session** — see [`SummaryStore::where_it_resolves_now`].
     ///
-    /// The in-memory key is the question: form, whether it is a `#include_next`, the spelling, and (for a quoted
-    /// include) the directory asked from. A stored answer must survive a configuration change, so the include-path set
-    /// and the target are folded in as well — a project that points its includes somewhere else asks a different
-    /// question and cannot read the old answer.
-    fn include_search_key(&self, memory: &(IncludeForm, bool, Box<str>, PathBuf)) -> String {
+    /// The in-memory key is the question: form, whether it is a `#include_next`, the spelling, the directory asked
+    /// from, and the **file's own configuration**. The last part is what keeps a source file's search from answering
+    /// a header's: a compile command may put an include directory ahead of the project-wide list, and the same
+    /// spelling then resolves differently in the two files.
+    ///
+    /// **Not persisted.** A stored answer names a path from an earlier filesystem; a path that still exists is not
+    /// evidence that it is still the path the search chooses, and using one here rejects summaries that mention a
+    /// header that moved — see `a_second_session_does_not_trust_a_stored_include_search`.
+    fn include_search_key(
+        &self,
+        memory: &(IncludeForm, bool, Box<str>, PathBuf),
+        config: &CompilerConfig,
+    ) -> String {
         let (form, is_next, spelling, directory) = memory;
-        let paths: Vec<String> = self
-            .config
+        let paths: Vec<String> = config
             .include_paths
             .iter()
             .map(|path| format!("{}:{}", path.directory.to_string_lossy(), path.is_system))
             .collect();
         let folded = format!(
             "{form:?}|{is_next}|{spelling}|{directory:?}|{paths:?}|{:?}",
-            self.config.dialect()
+            config.dialect()
         );
         crate::cache::content_hash(&folded).to_string()
-    }
-
-    /// **The answer a previous session stored** — `None` when it never asked, `Some(None)` when it asked and the
-    /// include did not resolve (which is an answer: a header nobody's path reaches is not a question worth re-asking).
-    fn stored_include_search(&self, key: &str) -> Option<Option<PathBuf>> {
-        let database = self.summary_database()?;
-        let answer = database.include_search(key).ok().flatten()?;
-        Some((!answer.is_empty()).then(|| PathBuf::from(answer)))
-    }
-
-    fn remember_include_search(&self, key: &str, resolved: Option<&Path>) {
-        let Some(database) = self.summary_database() else {
-            return;
-        };
-        let answer = resolved
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let _ = database.put_include_search(key, &answer);
     }
 
     /// The work set when `path` changes: the file, and everything that transitively includes it.

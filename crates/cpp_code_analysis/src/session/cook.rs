@@ -624,6 +624,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 .put_the_cooked_reading_with_rendering(&path, &cooked, &rendered);
             written += 1;
         }
+        // **The summaries built while the pump was busy are on the same batched writer.** A process that exits with
+        // them in memory teaches the next start nothing, and this is the one call the server already makes every two
+        // seconds outside the analysis write lock — the same place the cooked records above are written down.
+        self.store.flush_summaries();
         written
     }
 

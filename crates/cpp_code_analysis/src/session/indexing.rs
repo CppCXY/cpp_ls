@@ -696,6 +696,13 @@ impl<F: FileProvider + Clone> Session<F> {
         self.queue.pending()
     }
 
+    /// **Flush the summary cache's buffered writes.** The cache batches summaries and notes, and a process that
+    /// exits with a batch still in memory loses exactly the work the next start would have reused. The pump calls
+    /// this at the end of a slice, where the writes it just committed are already paid for.
+    pub fn flush_the_summary_cache(&self) {
+        self.store.flush_summaries();
+    }
+
     /// **Everything the session has left to do**: the index queue, the cooking backlog, and the second pass.
     ///
     /// What a pump loops on. A caller looping on [`Session::pending`] alone would stop while the files it has open
