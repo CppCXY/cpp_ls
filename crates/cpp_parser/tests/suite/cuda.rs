@@ -9,11 +9,14 @@
 //! What is deliberately *not* here: the CUDA built-in types and variables (`dim3`, `threadIdx`, `float4`, …). Those
 //! are declarations `nvcc`'s headers make, not syntax, and they are the analysis layer's to provide.
 
-use cpp_parser::{CppParser, ParserConfig};
+use cpp_parser::{CppParser, ParserConfig, ProjectLanguage};
 
 /// Parse `source` as CUDA and fail with every error it reported.
 fn parses_as_cuda(name: &str, source: &str) {
-    let tree = CppParser::parse(source, ParserConfig::default().with_cuda(true));
+    let tree = CppParser::parse(
+        source,
+        ParserConfig::default().with_language_family(ProjectLanguage::Cuda),
+    );
     let errors = tree.get_errors();
     assert!(
         errors.is_empty(),
@@ -111,7 +114,10 @@ fn a_kernel_launch_is_one_expression() {
 #[test]
 fn the_launch_is_a_node_of_its_own() {
     let source = "void host() { kernel<<<1, 32>>>(out); }";
-    let tree = CppParser::parse(source, ParserConfig::default().with_cuda(true));
+    let tree = CppParser::parse(
+        source,
+        ParserConfig::default().with_language_family(ProjectLanguage::Cuda),
+    );
     let kinds: Vec<String> = tree
         .get_red_root()
         .descendants()
@@ -162,7 +168,10 @@ fn a_launch_is_three_shifts_to_a_cpp_parser() {
     // of the switch. The C++ reading is not silent about it either — it reports an error, which is what a reader
     // editing a project that has never seen `nvcc` should see.
     let source = "void host() { kernel<<<1, 32>>>(out); }";
-    let as_cuda = CppParser::parse(source, ParserConfig::default().with_cuda(true));
+    let as_cuda = CppParser::parse(
+        source,
+        ParserConfig::default().with_language_family(ProjectLanguage::Cuda),
+    );
     let as_cpp = CppParser::parse(source, ParserConfig::default());
     let launches = |tree: &cpp_parser::CppSyntaxTree| {
         tree.get_red_root()

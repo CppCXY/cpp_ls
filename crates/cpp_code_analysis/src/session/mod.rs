@@ -565,7 +565,7 @@ pub(crate) enum Which {
 pub(crate) struct PerFileConfig {
     config: std::sync::Arc<CompilerConfig>,
     language: cpp_parser::features::LanguageConfig,
-    cuda: bool,
+    family: cpp_parser::ProjectLanguage,
 }
 
 /// **What a cached view was parsed from**, and the whole reason a stale one cannot be served.
@@ -598,7 +598,7 @@ pub(crate) struct ViewKey {
     /// The file's own text, by hash — what a **buffer view** was parsed from.
     text: u64,
     id: file::paths::FileId,
-    cuda: bool,
+    family: cpp_parser::ProjectLanguage,
     language: Option<cpp_parser::features::LanguageConfig>,
     open: bool,
     /// **The macro environment a buffer view was parsed with**, when there was one. `None` is the empty environment,
@@ -620,7 +620,7 @@ fn a_rendering_key(path: &Path, text_hash: u64) -> (PathBuf, u64) {
 
 fn buffer_view_key(
     file: &VfsFile,
-    cuda: bool,
+    family: cpp_parser::ProjectLanguage,
     environment: Option<Arc<cpp_parser::MacroEnvironment>>,
 ) -> ViewKey {
     ViewKey {
@@ -628,7 +628,7 @@ fn buffer_view_key(
         rendering: None,
         text: cache::content_hash(&file.text),
         id: file.id,
-        cuda,
+        family,
         language: None,
         open: file.open,
         environment: environment.map(EnvironmentId),
@@ -1545,6 +1545,12 @@ impl Session<DiskFiles> {
             None => config,
         };
 
+        // **And Ascend C**, whose toolkit directories and AICore grammar are the same kind of project statement.
+        let config = match &project_config.config.compile.ascend {
+            Some(ascend) => ascend.applied_to(config, &root),
+            None => config,
+        };
+
         // **Which compiler this is**, asked of the compiler rather than guessed from the flags: GCC and Clang
         // predefine `__GNUC__`, MSVC predefines `_MSC_VER`, and they arrive in the table the same call that gave
         // the search paths (see `toolchain::discover`). It matters to the *parser*, which has to know what
@@ -1669,8 +1675,8 @@ pub struct PreparedFile {
 #[derive(Clone)]
 struct BufferViewMaterials {
     file: VfsFile,
-    cuda: bool,
-    /// The language the file is compiled as — see [`FileView::parse_with_cuda`].
+    family: cpp_parser::ProjectLanguage,
+    /// The language the file is compiled as — see [`FileView::parse_with_family`].
     language: Option<cpp_parser::features::LanguageConfig>,
     environment: Option<Arc<cpp_parser::MacroEnvironment>>,
 }
@@ -1683,9 +1689,10 @@ struct PreparedBufferView {
 
 impl BufferViewMaterials {
     fn parse(self) -> PreparedBufferView {
-        let key = buffer_view_key(&self.file, self.cuda, self.environment.clone());
+        let key = buffer_view_key(&self.file, self.family, self.environment.clone());
         let macros = self.environment.unwrap_or_default();
-        let view = FileView::parse_with_cuda(&self.file, macros.as_ref(), self.cuda, self.language);
+        let view =
+            FileView::parse_with_family(&self.file, macros.as_ref(), self.family, self.language);
         let weight = a_view_weighs(&view);
         PreparedBufferView {
             key,

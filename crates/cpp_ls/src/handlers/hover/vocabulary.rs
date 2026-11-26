@@ -94,7 +94,11 @@ mod tests {
     fn token_of(source: &str, needle: &str, cuda: bool) -> cpp_parser::CppSyntaxToken {
         let tree = cpp_parser::CppParser::parse(
             source,
-            cpp_parser::ParserConfig::default().with_cuda(cuda),
+            cpp_parser::ParserConfig::default().with_language_family(if cuda {
+                cpp_parser::ProjectLanguage::Cuda
+            } else {
+                cpp_parser::ProjectLanguage::Cpp
+            }),
         );
         let at = source.find(needle).expect("the fixture names it") + needle.len() / 2;
         cpp_parser::token_at(&tree.get_red_root(), at).expect("a token at the offset")

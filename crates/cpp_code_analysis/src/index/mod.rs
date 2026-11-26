@@ -317,7 +317,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
         let mut config = ParserConfig::default()
             .with_dialect(self.config.dialect())
-            .with_cuda(self.config.cuda())
+            .with_language_family(self.config.language())
             .with_language(self.config.language_for(path));
         // **The closure's macros, which the doc on this type promised and this call did not pass.** A file's own
         // `#define`s reach the grammar through the directive walk; one from an included header does not, and the rule
@@ -446,7 +446,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // rendering's. See the same note in [`FileIndexer::index`].
         let config = ParserConfig::default()
             .with_dialect(self.config.dialect())
-            .with_cuda(self.config.cuda())
+            .with_language_family(self.config.language())
             .with_language(self.config.language_for(path));
         let tree = CppParser::parse(&rendered.text, config);
         let mut summary = self.index_tree(path, &rendered.text, &tree, key, true);
@@ -620,7 +620,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let config = || {
             ParserConfig::default()
                 .with_dialect(self.config.dialect())
-                .with_cuda(self.config.cuda())
+                .with_language_family(self.config.language())
                 // **The language the unit is compiled as.** A translation unit is one language, and `root` names it: a
                 // `main.c` whose stream writes `struct T *new = …` must be read with C's keyword table, or the
                 // declaration is an error and the whole program is filed from a recovery tree. See

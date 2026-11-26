@@ -80,8 +80,8 @@ pub use token::Token;
 pub use condition::{ConditionExpr, EvalError, Lookup, MacroValues, NoMacros, Value};
 pub use config::{
     CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,
-    config_from_arguments, parse_compile_commands, predefined_macros_of, project_config_from_flags,
-    split_command_line,
+    ProjectLanguage, config_from_arguments, parse_compile_commands, predefined_macros_of,
+    project_config_from_flags, split_command_line,
 };
 pub use directive::{
     Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,

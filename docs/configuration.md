@@ -175,6 +175,27 @@ case-insensitive.
 ties go to the one written first. **Every** target that describes the file contributes, nearest first. A file **no**
 target describes is compiled exactly as `[compile]` says. A target with no `sources` describes nothing.
 
+#### `[compile.ascend]` — an Ascend C project
+
+```toml
+[compile.ascend]
+enable = true                                   # read it as Ascend C without an `ccec` in the database
+toolkit = "C:/Ascend/ascend-toolkit/latest"
+include = ["src/kernels/include"]               # extra include directories for AICore units
+args = ["-DASCENDC_CPU_DEBUG"]                 # extra flags, appended to whatever won
+```
+
+Ascend C is C++ plus Huawei's AICore kernel vocabulary: `__aicore__`, `__global__`, `__gm__`, `__ubuf__`,
+`__cbuf__`, `__fbuf__`, `__ca__`, `__cb__`, `__cc__`, and the `AscendC::TPipe` / `GlobalTensor` / `LocalTensor` names
+from `kernel_operator.h`. `enable` is the escape hatch for a project with no compile database; `toolkit` adds the
+installation's `compiler/tikcpp/tikcfw` and `interface` header directories, which is what makes
+`#include "kernel_operator.h"` resolve.
+
+**A project belongs to exactly one family.** `[compile.cuda]`, `[unreal]` and `[compile.ascend]` are mutually
+exclusive: enabling two is a configuration error and none of them is applied until only one is on. The analysis holds
+the family as one enum (`ProjectLanguage`: `Cpp`, `Cuda`, `Unreal`, `AscendC`) rather than three independent flags, so
+the impossible combination cannot be represented internally.
+
 #### `[compile.cuda]` — a CUDA project
 
 ```toml
@@ -360,6 +381,8 @@ needs the standard library's index, which is the reason the rule can run at all.
 [format_strings] enable  std  printf  scanf      + [format_strings.functions]
 
 [unreal]     enable  engine
+[compile.cuda] enable toolkit host_compiler include args
+[compile.ascend] enable toolkit include args
 locale       "zh-CN"
 ```
 

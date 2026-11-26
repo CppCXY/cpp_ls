@@ -60,7 +60,7 @@ impl<'a> Memory<'a> {
     }
 
     /// A session over the same files, with the configuration the caller states — how a test reads a **CUDA** project
-    /// (`CompilerConfig::with_cuda`), or one for a particular compiler.
+    /// (`CompilerConfig::with_language_family`), or one for a particular compiler.
     pub(crate) fn session_with(&self, config: CompilerConfig) -> Session<MemoryFiles> {
         Session::with_config(
             &self.root,

@@ -169,6 +169,24 @@ pub(crate) fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationK
         return None;
     }
 
+    // **Ascend C's placement qualifiers, and only in an Ascend C unit.** The toolkit's kernel language adds
+    // `__aicore__` (a kernel function), `__global__`/`__host__`/`__device__`, and the memory-space qualifiers
+    // (`__gm__`, `__ubuf__`, `__cbuf__`, `__fbuf__`, `__ca__`, `__cb__`, `__cc__`). Without this a declaration such
+    // as `__global__ __aicore__ void kernel(...)` is read as an identifier type followed by another name, and the
+    // kernel body is lost.
+    if p.family().is_ascend_c() {
+        let ascend = match p.current_token_text() {
+            "__aicore__" | "__global__" | "__host__" | "__device__" | "__gm__" | "__ubuf__"
+            | "__cbuf__" | "__fbuf__" | "__ca__" | "__cb__" | "__cc__" => {
+                Some(ImplementationKeyword::Bare)
+            }
+            _ => None,
+        };
+        if ascend.is_some() {
+            return ascend;
+        }
+    }
+
     // **CUDA's placement qualifiers, and only in a CUDA unit.** `nvcc` adds them to the language: they say where a
     // function or a variable lives (host, device, both, constant memory, shared memory), and to a C++ parser they are
     // just names — so `__global__ void k() {}` reads as a declaration of a variable `__global__` of type `void`,
@@ -177,7 +195,7 @@ pub(crate) fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationK
     //
     // Gated on [`CppParser::cuda`] because that is the whole point of the switch: in a project that has never seen
     // `nvcc`, `__global__` is an ordinary identifier and must keep parsing as one.
-    if p.cuda() {
+    if p.family().is_cuda() {
         let cuda = match p.current_token_text() {
             // The placement qualifiers: no semantics to this layer beyond "a specifier stands here".
             "__global__" | "__device__" | "__host__" | "__shared__" | "__constant__"

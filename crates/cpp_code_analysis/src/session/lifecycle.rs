@@ -334,7 +334,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let worked_out = std::sync::Arc::new(PerFileConfig {
             language,
-            cuda: config.cuda(),
+            family: config.language(),
             config,
         });
         if let Ok(mut known) = self.config_for_file.lock() {

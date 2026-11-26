@@ -938,15 +938,15 @@ impl FileView {
     /// of a `.cu` file (or of a header included by one) must read the placement qualifiers and the launch brackets the
     /// same way the indexer did. Two readings of one file that disagreed about whether `k<<<1, 1>>>()` is a call would
     /// be two answers to every question asked about it, and the session's is the one the editor shows.
-    pub fn parse_with_cuda(
+    pub fn parse_with_family(
         file: &VfsFile,
         macros: &cpp_parser::MacroEnvironment,
-        cuda: bool,
+        family: cpp_parser::ProjectLanguage,
         language: Option<cpp_parser::features::LanguageConfig>,
     ) -> FileView {
         let source = file.text.clone();
         let mut config = cpp_parser::ParserConfig::default()
-            .with_cuda(cuda)
+            .with_language_family(family)
             .with_macros_from_includes(macros);
         // **The language the file is compiled as**, when the session knows it: a `.c` file read with C++'s keyword
         // table cannot name a variable `new` or a parameter `delete` — see `CppLexer::name_to_kind`.
@@ -972,7 +972,7 @@ impl FileView {
         }
     }
     pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
-        Self::parse_with_cuda(file, macros, false, None)
+        Self::parse_with_family(file, macros, cpp_parser::ProjectLanguage::Cpp, None)
     }
 
     /// **A view of what the preprocessor produced**, rather than of the file's own tokens.
@@ -996,18 +996,18 @@ impl FileView {
         file: &VfsFile,
         rendered: &preprocess::cooked::RenderedCooked,
     ) -> FileView {
-        Self::parse_rendering_with_cuda(file, rendered, false)
+        Self::parse_rendering_with_family(file, rendered, cpp_parser::ProjectLanguage::Cpp)
     }
 
     /// [`FileView::parse_rendering`] for a **CUDA** unit — the session's configuration decides, and the reason is the
-    /// one [`FileView::parse_with_cuda`] gives: the reading an editor asks questions about must agree with the reading
+    /// one [`FileView::parse_with_family`] gives: the reading an editor asks questions about must agree with the reading
     /// the index was built from.
-    pub fn parse_rendering_with_cuda(
+    pub fn parse_rendering_with_family(
         file: &VfsFile,
         rendered: &preprocess::cooked::RenderedCooked,
-        cuda: bool,
+        family: cpp_parser::ProjectLanguage,
     ) -> FileView {
-        Self::parse_rendering_with_the_files_own_language(file, rendered, cuda, None)
+        Self::parse_rendering_with_the_files_own_language(file, rendered, family, None)
     }
 
     /// **A rendering parsed as the language the file is**, which is not a detail: the parser's feature set decides
@@ -1027,7 +1027,7 @@ impl FileView {
         Self::parse_rendering_with_the_files_own_language(
             file,
             rendered,
-            config.cuda(),
+            config.language(),
             Some(config.language_for(&file.path)),
         )
     }
@@ -1035,12 +1035,12 @@ impl FileView {
     fn parse_rendering_with_the_files_own_language(
         file: &VfsFile,
         rendered: &preprocess::cooked::RenderedCooked,
-        cuda: bool,
+        family: cpp_parser::ProjectLanguage,
         language: Option<cpp_parser::features::LanguageConfig>,
     ) -> FileView {
         let source: Arc<str> = Arc::from(rendered.text.as_str());
         let line_index = Arc::new(LineIndex::parse(&source));
-        let mut parser_config = cpp_parser::ParserConfig::default().with_cuda(cuda);
+        let mut parser_config = cpp_parser::ParserConfig::default().with_language_family(family);
         if let Some(language) = language {
             parser_config = parser_config.with_language(language);
         }

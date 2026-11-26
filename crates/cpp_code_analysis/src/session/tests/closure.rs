@@ -311,7 +311,8 @@ pub(crate) fn cuda_words_are_offered_only_by_a_cuda_project() {
     let text = "void f() {\n    __dev\n}\n";
     let files = MemoryFiles::new().with_file("/p/a.cu", text);
     let fixture = Memory::new("cuda-completion", &files);
-    let mut session = fixture.session_with(CompilerConfig::new().with_cuda(true));
+    let mut session = fixture
+        .session_with(CompilerConfig::new().with_language_family(crate::ProjectLanguage::Cuda));
     session.did_open("/p/a.cu", text);
     session.index_everything();
 
@@ -353,7 +354,8 @@ pub(crate) fn the_built_in_variables_and_vector_types_complete_too() {
     let text = "void f() {\n    thr\n}\n";
     let files = MemoryFiles::new().with_file("/p/a.cu", text);
     let fixture = Memory::new("cuda-completion-kinds", &files);
-    let mut session = fixture.session_with(CompilerConfig::new().with_cuda(true));
+    let mut session = fixture
+        .session_with(CompilerConfig::new().with_language_family(crate::ProjectLanguage::Cuda));
     session.did_open("/p/a.cu", text);
     session.index_everything();
     let path = std::path::PathBuf::from("/p/a.cu");

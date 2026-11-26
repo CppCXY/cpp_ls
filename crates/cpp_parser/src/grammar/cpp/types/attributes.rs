@@ -312,7 +312,7 @@ pub(crate) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
             // to the declarator, and a kernel written with `__launch_bounds__` lost the body that followed.
             let spelling = p.current_token_text().to_string();
             p.bump();
-            if ((p.cuda()
+            if ((p.family().is_cuda()
                 && matches!(
                     spelling.as_str(),
                     "__launch_bounds__" | "__maxnreg__" | "__align__" | "__cluster_dims__"

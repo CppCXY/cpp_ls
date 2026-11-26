@@ -15,6 +15,12 @@
 //! toolkit = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
 //! host_compiler = "cl"                            # the host dialect: cl (MSVC) or g++/clang++ (GNU)
 //!
+//! [compile.ascend]                                # an Ascend C project: see `AscendSection`
+//! enable = true
+//! toolkit = "C:/Ascend/ascend-toolkit/latest"
+//!
+//! # CUDA, Unreal and Ascend C are mutually exclusive: a project enables at most one.
+//!
 //! [compile]
 //! database = "build/compile_commands.json"        # where the compile database is, if discovery guesses wrong
 //! compiler = "clang++"                            # or a path; absent means "the toolchain discovery decides"
@@ -119,6 +125,7 @@ use crate::file::paths::FileProvider;
 // a general configuration file, and the work each will grow (engine discovery, generated headers, the toolkit's
 // layout) belongs beside its keys. Re-exported because `config::CudaSection` is the path the rest of the crate and
 // the documentation already spell.
+pub use super::ascend::AscendSection;
 pub use super::cuda::CudaSection;
 pub use super::ue::UnrealSection;
 
@@ -273,6 +280,12 @@ pub struct CompileSection {
     /// `nvcc` is not installed by default and the headers it ships are not on any system path.
     #[serde(default)]
     pub cuda: Option<CudaSection>,
+    /// **`[compile.ascend]`** — Huawei Ascend C, when the toolchain discovery sees only a host compiler.
+    ///
+    /// See [`AscendSection`]: `enable` turns the AICore grammar on, `toolkit` adds the installation's
+    /// `kernel_operator.h` directories, and `args` are appended to whichever flags won.
+    #[serde(default)]
+    pub ascend: Option<AscendSection>,
     /// Extra include directories, by the directory they apply to; `"*"` applies to the whole project.
     ///
     /// Paths are relative to the workspace root. This exists for the project that compiles one subtree with an
@@ -1176,6 +1189,41 @@ where
 
 /// The checks serde cannot make: values that are the right *type* and still unusable.
 fn validate(report: &mut ConfigReport) {
+    // **A project belongs to one family.** CUDA, Unreal and Ascend C each change the grammar and the project rules,
+    // and a file that enables two has no single reading. This is an error rather than a precedence rule: picking one
+    // silently would make the section the reader wrote disappear. None of them is applied until the file says one.
+    {
+        let cuda = report
+            .config
+            .compile
+            .cuda
+            .as_ref()
+            .is_some_and(|section| section.enable);
+        let unreal = report
+            .config
+            .unreal
+            .as_ref()
+            .is_some_and(|section| section.is_on());
+        let ascend = report
+            .config
+            .compile
+            .ascend
+            .as_ref()
+            .is_some_and(|section| section.enable);
+        let active = [cuda, unreal, ascend].into_iter().filter(|on| *on).count();
+        if active > 1 {
+            report.problems.push(ConfigProblem::error(
+                "more than one project family is enabled: choose one of `[compile.cuda] enable = true`, \
+                 `[unreal] enable/engine`, or `[compile.ascend] enable = true`. They change the same reading, so \
+                 none of them is applied until only one is on."
+                    .to_string(),
+            ));
+            report.config.compile.cuda = None;
+            report.config.unreal = None;
+            report.config.compile.ascend = None;
+        }
+    }
+
     if let Some(cache_dir) = &report.config.index.cache_dir {
         let path = Path::new(cache_dir);
         let one_component = path.components().count() == 1;
@@ -1513,6 +1561,70 @@ mod tests {
             "{:?}",
             problems(&report)
         );
+    }
+
+    #[test]
+    fn the_ascend_section_is_read_and_applied() {
+        let report = parse(
+            "[compile.ascend]\n\
+             enable = true\n\
+             include = ['kernels/include']\n\
+             args = ['-DASCENDC_CPU_DEBUG']\n",
+        );
+        assert_eq!(problems(&report), Vec::<String>::new());
+        let ascend = report
+            .config
+            .compile
+            .ascend
+            .as_ref()
+            .expect("the section is here");
+        assert!(ascend.enable);
+        assert_eq!(ascend.args, vec!["-DASCENDC_CPU_DEBUG"]);
+
+        let config = ascend.applied_to(include::config::CompilerConfig::new(), Path::new("/p"));
+        assert!(
+            config.ascend_c(),
+            "`enable` is the parser's Ascend C switch"
+        );
+        assert_eq!(config.language(), include::config::ProjectLanguage::AscendC);
+        assert!(
+            config
+                .include_paths
+                .iter()
+                .any(|path| path.directory == Path::new("/p/kernels/include")),
+            "the project's own kernel include: {:?}",
+            config.include_paths
+        );
+    }
+
+    /// **A project belongs to one family.** The three section shapes each describe how the same file is read; a file
+    /// that enables two has no single reading, and silently picking one would make the other section vanish from the
+    /// configuration the reader wrote.
+    #[test]
+    fn two_project_families_are_a_configuration_error() {
+        for source in [
+            "[compile.cuda]\nenable = true\n\n[unreal]\nenable = true\n",
+            "[compile.cuda]\nenable = true\n\n[compile.ascend]\nenable = true\n",
+            "[unreal]\nenable = true\n\n[compile.ascend]\nenable = true\n",
+        ] {
+            let report = parse(source);
+            assert_eq!(
+                report.problems.len(),
+                1,
+                "{source}: {:?}",
+                problems(&report)
+            );
+            assert!(
+                report.problems[0]
+                    .message
+                    .contains("more than one project family"),
+                "{source}: {:?}",
+                problems(&report)
+            );
+            assert!(report.config.compile.cuda.is_none());
+            assert!(report.config.unreal.is_none());
+            assert!(report.config.compile.ascend.is_none());
+        }
     }
 
     #[test]

@@ -30,6 +30,7 @@ is read, the same words in a function's own position are not.
 | Indexed extensions | `c cc cpp cxx c++ h hh hpp hxx h++ ipp inl tpp tcc cppm ixx`, plus anything in `[workspace].source_extensions` (`cuh`, `cppm`) |
 | Where files come from | `compile_commands.json` → `.cppls.toml` → the project scan; an `#include` no search path can place falls back to matching the tail of its path against the tree |
 | CUDA | `.cu`/`.cuh` files and an `nvcc` build are read as CUDA; `[compile.cuda]` turns that on without a database |
+| Ascend C | `__aicore__`, `__global__`, `__gm__`/`__ubuf__`/`__cbuf__`/`__fbuf__`, the `__ca__`/`__cb__`/`__cc__` memory spaces; `[compile.ascend]` turns the reading on without a compile database |
 
 ## 2. Standards and language features
 

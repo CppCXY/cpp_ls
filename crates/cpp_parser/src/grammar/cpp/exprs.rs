@@ -2215,7 +2215,9 @@ fn parse_postfix_suffixes(p: &mut CppParser, mut expr: parser::CompleteMarker) -
             // The configuration is an `ArgumentList` of its own because it is not a call's argument list: it holds 2
             // to 4 comma-separated *expressions* (`grid`, `block`, `shared memory bytes`, `stream`), and a consumer
             // that wants them must be able to tell them from the call's.
-            CppTokenKind::LeftShift if p.cuda() && p.peek_next_token() == CppTokenKind::Less => {
+            CppTokenKind::LeftShift
+                if p.family().is_cuda() && p.peek_next_token() == CppTokenKind::Less =>
+            {
                 let m = expr.precede(p, CppSyntaxKind::CudaLaunchExpr);
                 p.bump(); // `<<`
                 expect_token(p, CppTokenKind::Less)?; // the third `<`

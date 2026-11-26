@@ -7154,7 +7154,101 @@ fn a_doc_links_completion_carries_the_edit_for_the_word() {
     server.notify("exit", Value::Null);
 }
 
-/// **A function's reference count is a lens the client can draw** — over the wire.
+/// **An Ascend C project is read as Ascend C.** `__aicore__`/`__global__`/`__gm__` are qualifiers only in this family,
+/// and the configured kernel include is what makes `kernel_operator.h` resolve. A completion after a `LocalTensor` is
+/// the end-to-end check that the family reached both the parser and the project configuration.
+#[test]
+fn an_ascend_project_reads_its_kernel_syntax_and_headers() {
+    const HEADER: &str = "\
+#pragma once
+namespace AscendC {
+template <typename T> struct LocalTensor {
+    __ubuf__ T *address;
+    __ubuf__ T *GetPhyAddr() const { return address; }
+};
+struct TPipe { };
+template <int Position, int Depth> struct TQue { };
+}
+using GM_ADDR = __gm__ uint8_t *;
+";
+    const SOURCE: &str = "\
+#include \"kernel_operator.h\"
+using namespace AscendC;
+extern \"C\" __global__ __aicore__ void add_kernel(GM_ADDR x) {
+    LocalTensor<float> local;
+    local.
+}
+";
+    let project = Project::new("ascend-family");
+    std::fs::create_dir_all(project.root().join("include")).expect("the include directory");
+    project.write(
+        ".cppls.toml",
+        "[compile.ascend]\nenable = true\ninclude = [\"include\"]\n",
+    );
+    project.write("include/kernel_operator.h", HEADER);
+    let main = project.root().join("add_kernel.cpp");
+    project.write("add_kernel.cpp", SOURCE);
+    let uri = uri_of(&main);
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let line = SOURCE
+        .lines()
+        .position(|text| text.trim() == "local.")
+        .expect("the access") as u64;
+    let character = SOURCE
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find("local."))
+        .expect("the access")
+        + "local.".len();
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"].as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["label"] == json!("GetPhyAddr"))
+            })
+        },
+    );
+    let items = answer["result"]["items"]
+        .as_array()
+        .expect("the Ascend member list");
+    let address = items
+        .iter()
+        .find(|item| item["label"] == json!("GetPhyAddr"))
+        .expect("the LocalTensor member");
+    assert_eq!(
+        address["detail"], "T * ()",
+        "the toolkit type's own signature reaches the list: {address}"
+    );
+}
 ///
 /// The count is the number of places that *use* the function: not its definition, not the declaration in the header.
 /// Answered as `textDocument/codeLens`, so a client that asks gets one lens per function in the file.

@@ -7,21 +7,48 @@ use crate::{
     symbols::{MacroFacts, SymbolTable},
 };
 
+/// **Which project family a translation unit belongs to** — the one value that selects the grammar's extension rules.
+///
+/// The families are mutually exclusive: CUDA's launch brackets and placement qualifiers, Ascend C's AICore qualifiers,
+/// and ordinary C++ are three different readings of the same text. Unreal is a C++ framework, not a grammar extension,
+/// but it is in the same enum because a project is one of these families and the configuration must not carry two
+/// independent switches that can both be true.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ProjectLanguage {
+    /// Ordinary C or C++, read by the host compiler.
+    #[default]
+    Cpp,
+    /// CUDA: `__global__`/`__device__` placement and `<<<…>>>` launches.
+    Cuda,
+    /// Unreal Engine: C++ plus the engine's conventions (the parser itself adds no grammar).
+    Unreal,
+    /// Ascend C: Huawei's AICore placement qualifiers and memory spaces.
+    AscendC,
+}
+
+impl ProjectLanguage {
+    pub fn is_cuda(self) -> bool {
+        self == Self::Cuda
+    }
+
+    pub fn is_unreal(self) -> bool {
+        self == Self::Unreal
+    }
+
+    pub fn is_ascend_c(self) -> bool {
+        self == Self::AscendC
+    }
+}
+
 pub struct ParserConfig<'cache> {
     pub level: CppLanguageLevel,
-    /// **Is this translation unit CUDA?** — the one switch the grammar's CUDA rules are behind.
+    /// **Which project family this translation unit belongs to.**
     ///
-    /// A separate question from `level` and from `dialect`, and separate from *both* on purpose: `nvcc` compiles
-    /// CUDA with a host compiler, so a `.cu` file is C++20 *and* MSVC *and* CUDA at once. What this flag adds is the
-    /// syntax those two do not have — the execution-configuration brackets of a kernel launch
-    /// (`kernel<<<grid, block>>>(args)`) and the qualifiers that place a function or a variable on the host or the
-    /// device (`__global__`, `__device__`, `__shared__`, …) — and it is off by default so that a plain C++ file is
-    /// parsed exactly as it was written.
-    ///
-    /// It is set by the analysis from the project's toolchain (`__CUDACC__` in the predefined macros, or an `nvcc`
-    /// command), which is what keeps CUDA's spelling from being accepted in a project that has never seen it: a
-    /// `__global__` in ordinary C++ is a name, not a qualifier, and a `<<<` is three shift operators.
-    pub cuda: bool,
+    /// The grammar has one switch per family, not one flag per extension: CUDA and Ascend C are mutually exclusive
+    /// project families, and Unreal is a set of C++ conventions. Keeping three booleans here would allow the parser to
+    /// be told an impossible combination; one value cannot. The grammar matches the family whose reserved spellings
+    /// it is adding.
+    pub family: ProjectLanguage,
     /// Which compiler's own reserved spellings mean what — see [`Dialect`].
     ///
     /// A separate question from `level`, and the reason is written on [`Dialect`]: `-std=gnu++20` is C++20 *and*
@@ -124,7 +151,7 @@ fn dialect_vendor(dialect: Dialect) -> features::Vendor {
 impl<'cache> ParserConfig<'cache> {
     pub fn new(level: CppLanguageLevel, node_cache: Option<&'cache mut NodeCache>) -> Self {
         Self {
-            cuda: false,
+            family: ProjectLanguage::Cpp,
             level,
             dialect: Dialect::default(),
             dialect_was_named: false,
@@ -144,12 +171,10 @@ impl<'cache> ParserConfig<'cache> {
         self
     }
 
-    /// **Read this translation unit as CUDA** — see [`ParserConfig::cuda`].
-    ///
-    /// Off unless a toolchain said `nvcc`: the launch brackets and the placement qualifiers are then ordinary C++
-    /// (`<<<` is three shifts) rather than syntax this parser invents for a project that never had them.
-    pub fn with_cuda(mut self, cuda: bool) -> Self {
-        self.cuda = cuda;
+    /// **Read this translation unit as one project family** — the one switch the grammar's extension rules are
+    /// behind. See [`ParserConfig::family`].
+    pub fn with_language_family(mut self, family: ProjectLanguage) -> Self {
+        self.family = family;
         self
     }
 
@@ -298,7 +323,7 @@ impl<'cache> ParserConfig<'cache> {
 impl Default for ParserConfig<'_> {
     fn default() -> Self {
         Self {
-            cuda: false,
+            family: ProjectLanguage::Cpp,
             level: CppLanguageLevel::default_level(),
             dialect: Dialect::default(),
             dialect_was_named: false,

@@ -103,7 +103,7 @@ impl CudaSection {
         root: &std::path::Path,
     ) -> include::config::CompilerConfig {
         if self.enable {
-            config = config.with_cuda(true);
+            config = config.with_language_family(crate::ProjectLanguage::Cuda);
         }
         if let Some(host) = &self.host_compiler {
             let name = host

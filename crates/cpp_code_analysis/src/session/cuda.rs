@@ -427,7 +427,8 @@ mod tests {
             };
             let tree = cpp_parser::CppParser::parse(
                 &source,
-                cpp_parser::ParserConfig::default().with_cuda(true),
+                cpp_parser::ParserConfig::default()
+                    .with_language_family(cpp_parser::ProjectLanguage::Cuda),
             );
             assert!(
                 tree.get_errors().is_empty(),

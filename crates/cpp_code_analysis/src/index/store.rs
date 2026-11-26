@@ -3562,9 +3562,16 @@ impl<F: FileProvider> SummaryStore<F> {
             Dialect::Gnu => b'g',
             Dialect::Msvc => b'm',
         });
-        // …and **whether the unit is CUDA**, for the same reason one step stronger: the same text is a kernel
-        // definition to `nvcc` and to nobody else, so a summary made under one reading must never answer the other.
-        bytes.push(if self.config.cuda() { b'c' } else { b'-' });
+        // …and **which project family the unit is**, for the same reason one step stronger: the same text is a
+        // kernel definition to `nvcc`, an AICore kernel to `ccec`, and to nobody else, so a summary made under one
+        // reading must never answer another. Unreal is not a grammar switch, but its conventions and defines change
+        // what the project's own headers mean, so it is part of the same key byte.
+        bytes.push(match self.config.language() {
+            crate::ProjectLanguage::Cpp => b'-',
+            crate::ProjectLanguage::Cuda => b'c',
+            crate::ProjectLanguage::Unreal => b'u',
+            crate::ProjectLanguage::AscendC => b'a',
+        });
         bytes.push(0);
 
         // **Whether an include nothing could place may be looked for in the tree**, because it changes which file a

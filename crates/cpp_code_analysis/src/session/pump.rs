@@ -948,7 +948,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .filter(|file| file.open)
                 .map(|file| BufferViewMaterials {
                     file: file.clone(),
-                    cuda: self.config.cuda(),
+                    family: self.config.language(),
                     language: Some(self.config_for_file(&file.path).language),
                     environment: self.known_macros_of(&file.path, &file.text),
                 });
@@ -994,7 +994,7 @@ impl<F: FileProvider + Clone> Session<F> {
             && view.key
                 == buffer_view_key(
                     current,
-                    self.config.cuda(),
+                    self.config.language(),
                     self.known_macros_of(&current.path, &current.text),
                 )
         {

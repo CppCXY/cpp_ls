@@ -1636,7 +1636,7 @@ impl Toolchain {
         // it changes: a project compiled by `nvcc` has `.cu` files and headers written with `__device__` in them, and
         // the grammar has to know before it reads the first one.
         if self.cuda {
-            config = config.with_cuda(true);
+            config = config.with_language_family(crate::ProjectLanguage::Cuda);
         }
 
         // **The standard the compiler was asked about**, when the project did not state one. It is the same

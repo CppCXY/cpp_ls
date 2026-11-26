@@ -9,6 +9,8 @@
 #[path = "suite/common/mod.rs"]
 mod common;
 
+#[path = "suite/ascend.rs"]
+mod ascend;
 #[path = "suite/ast.rs"]
 mod ast;
 #[path = "suite/c_language.rs"]

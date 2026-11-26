@@ -33,6 +33,7 @@
 //! When nothing can be worked out, the analysis says so — conditions stay `Unknown` and the include stays
 //! unresolved — rather than inventing a configuration that makes the numbers look better.
 
+pub mod ascend;
 pub mod build;
 pub mod config;
 pub mod cuda;

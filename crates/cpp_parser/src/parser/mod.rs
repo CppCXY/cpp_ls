@@ -8,6 +8,6 @@ pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, ParseAnchor};
 #[allow(unused)]
 pub use marker::*;
 #[allow(unused)]
-pub use parser_config::ParserConfig;
+pub use parser_config::{ParserConfig, ProjectLanguage};
 #[allow(unused)]
 pub use type_names::TypeNames;

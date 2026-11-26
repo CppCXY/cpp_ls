@@ -164,7 +164,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     // identity covers both.
                     text: 0,
                     id: file.id,
-                    cuda: config.cuda,
+                    family: config.family,
                     language: Some(config.language),
                     open: file.open,
                     // A rendering has no invocations left in it, so its parse takes no macro environment.
@@ -360,15 +360,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // of this file's own text with an environment that has not moved. The identity is the environment *object* —
         // held in the key, so its address cannot be reused under it — and `None` for the empty one, which is one value
         // however often it is made.
-        let key = buffer_view_key(file, self.config.cuda(), known.clone());
+        let key = buffer_view_key(file, self.config.language(), known.clone());
         if let Some(held) = self.a_view_already_parsed(&key) {
             return Some(held);
         }
         let macros = known.unwrap_or_default();
-        let view = FileView::parse_with_cuda(
+        let view = FileView::parse_with_family(
             file,
             macros.as_ref(),
-            self.config.cuda(),
+            self.config.language(),
             Some(self.config_for_file(&file.path).language),
         );
         self.remember_a_view(key, &view);

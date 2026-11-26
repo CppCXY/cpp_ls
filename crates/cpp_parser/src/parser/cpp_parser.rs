@@ -1269,14 +1269,13 @@ impl<'a> CppParser<'a> {
         self.parse_config.language()
     }
 
-    /// **Is this translation unit CUDA?** — see [`crate::ParserConfig::cuda`], which is where the switch is set.
+    /// **Which project family this translation unit belongs to** — see [`crate::ParserConfig::family`].
     ///
-    /// The grammar asks this in exactly two places: the specifier sequence (the placement qualifiers:
-    /// `__global__ void k()`, `__device__ int f()`) and the postfix loop (the execution configuration of a launch:
-    /// `k<<<grid, block>>>(args)`). Both are *syntax* the language does not have, so a project that never saw `nvcc`
-    /// must not read them — a `<<<` there is three shifts.
-    pub(crate) fn cuda(&self) -> bool {
-        self.parse_config.cuda
+    /// The grammar has one switch per family, not one flag per extension. CUDA asks this in the specifier sequence
+    /// (the placement qualifiers) and the postfix loop (the launch brackets); Ascend C asks it in the specifier
+    /// sequence for its AICore qualifiers.
+    pub(crate) fn family(&self) -> crate::ProjectLanguage {
+        self.parse_config.family
     }
 
     /// Enter a template argument list, recording the bracket depth it began at.

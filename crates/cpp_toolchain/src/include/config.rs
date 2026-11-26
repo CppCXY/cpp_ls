@@ -26,6 +26,8 @@ use crate::paths;
 use crate::project;
 use std::path::{Path, PathBuf};
 
+pub use cpp_parser::ProjectLanguage;
+
 use cpp_parser::Dialect;
 
 /// An include search directory.
@@ -159,14 +161,12 @@ pub struct CompilerConfig {
     /// them would serve one target's facts to the other.
     pub dialect: Dialect,
 
-    /// **Read this project as CUDA** — see [`cpp_parser::ParserConfig::cuda`], which is the switch the grammar's
-    /// CUDA rules are behind.
+    /// **Which project family this is** — ordinary C++, CUDA, Unreal Engine, or Ascend C. See [`ProjectLanguage`].
     ///
-    /// Set by the toolchain (`__CUDACC__` in the predefined macros, or an `nvcc` compiler) and by a project that says
-    /// so in `.cppls.toml`. Not the same question as [`CompilerConfig::dialect`]: `nvcc` compiles host code with a host
-    /// compiler, so a CUDA program is C++ *and* MSVC-or-GNU *and* CUDA — three independent layers, which is why this is
-    /// a flag rather than another [`Dialect`] variant.
-    pub cuda: bool,
+    /// This is one value rather than a flag per family so that the impossible combinations are unrepresentable. A
+    /// CUDA project is still C++ and still MSVC-or-GNU, which is why the compiler dialect stays a separate field; the
+    /// family says which extra grammar and project rules apply.
+    pub language: ProjectLanguage,
 
     /// The directory the compilation was run in.
     ///
@@ -613,15 +613,30 @@ impl CompilerConfig {
         self.dialect
     }
 
-    /// **Read this project as CUDA** — see [`CompilerConfig::cuda`].
-    pub fn with_cuda(mut self, cuda: bool) -> Self {
-        self.cuda = cuda;
+    /// **Set the project family** — the one value the parser and the project rules read. See [`ProjectLanguage`].
+    pub fn with_language_family(mut self, family: ProjectLanguage) -> Self {
+        self.language = family;
         self
     }
 
-    /// Is this project CUDA? — see [`CompilerConfig::cuda`].
+    /// Is this project CUDA?
     pub fn cuda(&self) -> bool {
-        self.cuda
+        self.language.is_cuda()
+    }
+
+    /// Is this project Ascend C?
+    pub fn ascend_c(&self) -> bool {
+        self.language.is_ascend_c()
+    }
+
+    /// Is this project Unreal Engine code?
+    pub fn unreal(&self) -> bool {
+        self.language.is_unreal()
+    }
+
+    /// The project family this configuration names.
+    pub fn language(&self) -> ProjectLanguage {
+        self.language
     }
 
     pub fn with_working_directory(mut self, directory: impl Into<PathBuf>) -> Self {
