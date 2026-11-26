@@ -327,19 +327,19 @@ fn snippets_of(supported: bool) -> Snippets {
 
 /// One analysis item, as the protocol's item.
 ///
-/// # Why the detail is not here
+/// # The short type line
 ///
-/// `detail` and `labelDetails.detail` are the two fields the protocol says a client may show beside the label, and
-/// this server has something to put in both — a function's return type and parameter list, a variable's type, a
-/// class's bases. **They are left out on purpose**, and asked for again in `completionItem/resolve`:
+/// `labelDetails.detail` is the one field the protocol says a client may draw **beside the label** without resolving
+/// the item. A member list is exactly where that matters: `capacity`, `items` and `size` are indistinguishable until
+/// the reader knows two are counts and one is a pointer, and a reader looking at the popup has not selected any row to
+/// resolve. The analysis has the one-line type already (`CompletionItem::detail`), so it goes in both places:
 ///
-/// * a completion is answered while somebody is typing, and the list is several hundred items. A parameter list per
-///   item is the largest part of the answer, and the client shows a *few dozen rows* of it;
-/// * `resolve` is the protocol's answer to exactly this problem — it is sent for **the one item the user is
-///   looking at**, which is the only item whose detail anybody will read.
+/// * `labelDetails.detail` for the list a client can draw immediately;
+/// * `detail` for clients that read that field from the list response.
 ///
-/// The cost is one round trip before a client can draw a row's second column, and the protocol is built for it: a
-/// client that never resolves simply shows the label, which is the item minus a hint rather than a broken item.
+/// The **full declaration and documentation** stay behind `completionItem/resolve`: a parameter list per item is the
+/// largest part of a several-hundred-item answer, and resolve is sent for the one item the user is looking at. The
+/// distinction is the short type (one line, cheap) against the documentation (a parse, one item).
 ///
 /// # Why `sortText` and not `sortText` alone
 ///
@@ -363,6 +363,13 @@ fn item_for(
         // here: a member list rendered as three bare names. The handler sends it verbatim; a client that wants the
         // full declaration asks `completionItem/resolve`, which is a different question.
         detail: item.detail.clone(),
+        label_details: item
+            .detail
+            .as_ref()
+            .map(|detail| CompletionItemLabelDetails {
+                detail: Some(format!("  {detail}")),
+                description: None,
+            }),
         // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`. This is
         // what makes the deferral above possible: the detail is not sent, and the *identity* that produces it is.
         data: item
@@ -488,8 +495,9 @@ pub async fn on_completion_resolve(
     .await;
 
     if let RequestOutcome::Ready((detail, documentation)) = resolved {
-        // 3.17 lets a client draw the label and this as one line, which is what the analysis's `detail` was written
-        // for — a function's return type and parameter list, a variable's type, a class's bases.
+        // **The resolve replaces the short type with the full declaration** — a function's return type and parameter
+        // list, a class's bases — and adds its documentation. The list already carried the short line; this is the
+        // one item the reader selected.
         item.label_details = detail.as_ref().map(|detail| CompletionItemLabelDetails {
             detail: Some(format!("  {detail}")),
             description: None,

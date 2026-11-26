@@ -1886,6 +1886,11 @@ fn a_members_members_are_offered_over_the_wire() {
         json!("int"),
         "the member's type belongs beside its name: {size}"
     );
+    assert_eq!(
+        size["labelDetails"]["detail"],
+        json!("  int"),
+        "a 3.17 client draws this beside the label without resolving: {size}"
+    );
     let resolved = server.request(4, "completionItem/resolve", size.clone());
     assert_eq!(
         resolved["result"]["detail"],
