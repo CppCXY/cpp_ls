@@ -116,6 +116,8 @@ for the analysis's checks (`publish = false`).
 `<<<…>>>` launch blocks and the CUDA keywords, and a `[cuda]` section tells the analysis where the toolkit's headers
 are. What a compiler enforces about device code is not modelled.
 
+**Ascend**: The Ascend AI Core is supported with specific checks for kernel code, ensuring compliance with device restrictions such as prohibiting dynamic memory allocation and C++ exceptions.
+
 ## Documentation comments
 
 A documentation comment is **a language of its own**, not prose the analysis skips. `///` and `//!` mark one line;
