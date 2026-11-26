@@ -82,6 +82,7 @@ fn find_cstyle_cast(project: &Project, language_id: &str) -> bool {
     // A pull is answered once the file is cooked, so a few tries is the honest wait — the first may land before the
     // index has read the header at all (see `prepare_for_a_diagnostic`).
     let header_path = root.join("a.h");
+    let mut saw_a_full_report = false;
     for id in 10..30 {
         std::thread::sleep(Duration::from_millis(250));
         let answer = server.request(
@@ -94,11 +95,17 @@ fn find_cstyle_cast(project: &Project, language_id: &str) -> bool {
             return true;
         }
         if text.contains("\"kind\":\"full\"") {
-            // A full report with no `cstyle-cast` in it: the answer this project gives.
-            return false;
+            // **A full report is not yet the final answer.** The first pull after `didOpen` may land before the
+            // header's cooked reading exists; the checks are withheld and the report carries only syntax errors.
+            // Keep asking until the analysis has the reading, so a C++ project is not judged by its startup state.
+            saw_a_full_report = true;
         }
     }
-    panic!("the server never answered a full report for the header");
+    assert!(
+        saw_a_full_report,
+        "the server never answered a full report for the header"
+    );
+    false
 }
 
 struct Project {
