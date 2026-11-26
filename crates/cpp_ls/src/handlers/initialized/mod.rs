@@ -610,6 +610,22 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     let started = std::time::Instant::now();
                     let (done, drain) = session.commit_a_wave(prepared, wave);
                     let taken = done.len();
+                    let reused = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Reused)
+                        .count();
+                    let built = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Built)
+                        .count();
+                    let unstored = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Unstored)
+                        .count();
+                    let missing = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Missing)
+                        .count();
                     let held = started.elapsed().as_millis();
 
                     // **All the work, not just the indexing queue.** A session that has read every file still has
@@ -686,8 +702,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         // re-instrumenting.
                         log::info!(
                             "index slice: prepared {prepared_count} in {prepared_in} ms, committed {taken}, write lock \
-                             held {held} ms, {cooking} to cook, {pending_now} left",
-                            cooking = claimed.len()
+                             held {held} ms, {} to cook, {pending_now} left",
+                            claimed.len()
+                        );
+                        log::info!(
+                            "index cache: {reused} reused, {built} built, {unstored} unstored, {missing} missing"
                         );
                     }
                     (pending_now, drain, claimed, held, taken)
@@ -981,24 +1000,26 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // knows which files exist and can answer questions about them; the second pass makes those answers
                 // better, not available. So the bar follows the queue (`Session::pending`) and the pump keeps
                 // draining everything (`was_pending` still reads `pending_work`).
-                let to_read = match context
+                let (to_read, to_cook, to_reread) = match context
                     .analysis()
-                    .query_blocking(|session| Some(session.pending()))
+                    .query_blocking(|session| {
+                        Some((
+                            session.pending(),
+                            session.pending_cooking(),
+                            session.re_read_backlog(),
+                        ))
+                    })
                     .await
                 {
-                    crate::context::RequestOutcome::Ready(count) => count,
-                    _ => pending,
+                    crate::context::RequestOutcome::Ready(counts) => counts,
+                    _ => (pending, 0, 0),
                 };
-                // **And the second pass, which the queue count does not see.** `pending` is the count of files the
-                // session still has to *read*; the re-read pass that turns each of them into a compiler's reading is
-                // `pending_work() - pending`, and a bar that only counts the first says "0 files to read" while the
-                // machine is busy — reported from an editor as "the read finished and it is still working, so I
-                // thought it had hung".
-                let still = pending.saturating_sub(to_read);
                 let message = if to_read > 0 {
-                    format!("{to_read} files to read, {still} to re-read")
+                    format!("{to_read} files to read, {to_cook} to cook, {to_reread} to re-read")
                 } else {
-                    format!("re-reading {still} file(s) for the compiler's view")
+                    format!(
+                        "re-reading {to_reread} file(s), cooking {to_cook} file(s) for the compiler's view"
+                    )
                 };
 
                 // **A message per slice is a message per keystroke's worth of work, and that is too many.** Slices are
