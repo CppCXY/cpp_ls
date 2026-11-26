@@ -62,8 +62,6 @@ pub async fn on_code_lens(
 ) -> RequestOutcome<Vec<CodeLens>> {
     let uri = params.text_document.uri;
     let client = context.lsp_features().client_id();
-    let cache = context.code_lenses().clone();
-    let key = uri.to_string();
 
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -75,49 +73,19 @@ pub async fn on_code_lens(
         if session.project_config().config.code_lens.enable == Some(false) {
             return Some(Vec::new());
         }
-        // **Answer from what is known, and let the refresh correct it.** Withholding the list while the index catches up
-        // made every keystroke *clear* the lenses and redraw them seconds later — a redraw is worse than a number that
-        // grows: the editor is told the answer changed, not that it is unknown. `workspace/codeLens/refresh` (sent when
-        // indexing drains) is what asks again, so the number can be low for a moment and then settle, without ever
-        // vanishing.
         let view = session.view_of_the_file(&path)?;
-        // **The summary is the lens list, and an edit drops it before the writer rebuilds it.** Returning an empty
-        // list in that window is what clears every lens and then redraws it — a blank line appearing and disappearing
-        // above a function. `None` is the honest `Missing` outcome below, where the last answered list is served.
-        let _ = session.index().summary(&view.path)?;
-        Some(lenses_of(session, &view, &uri, client))
+        complete_lenses_of(session, &view, &uri, client)
     })
     .await;
 
     match answer {
-        RequestOutcome::Ready(lenses) => {
-            if !lenses.is_empty() {
-                if let Ok(mut held) = cache.lock() {
-                    held.insert(key, lenses.clone());
-                }
-                return RequestOutcome::Ready(lenses);
-            }
-            // **An empty list is not a statement that the functions went away.** While the references index is
-            // filling, `places_of` answers `Unknown` for a declaration and this file's lens is deliberately omitted;
-            // returning that omission as an empty list clears every lens and redraws it on the next refresh. Serve
-            // the last list until a non-empty one replaces it.
-            let last = cache
-                .lock()
-                .ok()
-                .and_then(|held| held.get(&key).cloned())
-                .unwrap_or_default();
-            RequestOutcome::Ready(last)
-        }
-        // **A dropped summary is not "there are no functions".** Serve the last list this document answered with;
-        // only a document with no earlier answer gets an empty one. The refresh after the index drains is what makes
-        // the number current.
+        // **A partial list is not an answer.** LSP has no "keep what you have": a code-lens response replaces the
+        // client's list. Returning the functions whose counts are known while another is still `Unknown` makes the
+        // visible lines change on every keystroke, and returning an empty list clears them. `ContentModified` says
+        // the request could not be answered for the document as it is; the client keeps what it is showing, and the
+        // refresh after a load is what asks again once the answer exists.
         RequestOutcome::Missing => {
-            let last = cache
-                .lock()
-                .ok()
-                .and_then(|held| held.get(&key).cloned())
-                .unwrap_or_default();
-            RequestOutcome::Ready(last)
+            RequestOutcome::Cancelled(crate::context::CancelSource::ContentModified)
         }
         other => other,
     }
@@ -127,18 +95,29 @@ pub async fn on_code_lens(
 ///
 /// The file's own summary is the list: a `DeclKind::Function` that is not local. A local lambda or a nested helper is
 /// not what a reader counts callers of.
+///
+/// `None` means the question cannot be answered completely yet — no summary, or a declaration whose reference query
+/// is `Unknown` while the index is filling. The wire handler turns that into `ContentModified` rather than sending a
+/// partial list; see [`complete_lenses_of`] and `on_code_lens`.
+#[cfg(test)]
 pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
     uri: &Uri,
     client: ClientId,
 ) -> Vec<CodeLens> {
-    let Some(held) = session.files().held(&view.path) else {
-        return Vec::new();
-    };
-    let Some(summary) = session.index().summary(&view.path) else {
-        return Vec::new();
-    };
+    complete_lenses_of(session, view, uri, client).unwrap_or_default()
+}
+
+/// The complete answer, or `None` when one of its counts is not known yet.
+fn complete_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    uri: &Uri,
+    client: ClientId,
+) -> Option<Vec<CodeLens>> {
+    let held = session.files().held(&view.path)?;
+    let summary = session.index().summary(&view.path)?;
 
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
@@ -185,10 +164,10 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         let Known::Yes(places) =
             super::references::places_of(session, fact, view.path.clone(), false)
         else {
-            // A declaration no query can name — a template parameter, a name from a header nothing read. `Unknown`
-            // is not "no uses": the lens then says nothing about a number rather than `0 references`, which would be
-            // the same false claim the whole-file report was about.
-            continue;
+            // **Unknown is not zero, and it is not a list we may send partially.** The client would replace its
+            // lenses with a list missing this function, then replace them again when the references index catches up.
+            // The handler answers `ContentModified`; the refresh after a load asks once more.
+            return None;
         };
         let locations = locations_of(session, &places);
         let uses = places.len();
@@ -199,7 +178,7 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
             data: None,
         });
     }
-    lenses
+    Some(lenses)
 }
 
 /// The places, as protocol locations — for the files this session holds.
