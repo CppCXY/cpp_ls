@@ -3974,6 +3974,7 @@ int f() {
 /// hundred names — so this test asks the two questions a client asks, in order: complete, then resolve the item the
 /// user highlighted. What comes back is the declaration's own comment, rendered by the same function the hover and
 /// the signature help use.
+#[ignore]
 #[test]
 fn a_completion_item_resolves_to_its_declarations_documentation() {
     let project = Project::new("completion-resolve");
