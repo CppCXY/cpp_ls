@@ -358,6 +358,11 @@ fn item_for(
     CompletionItem {
         label: item.label.clone(),
         kind: Some(completion_kind(item.kind)),
+        // **The type line beside the name.** It is the one piece of information that tells two members apart in
+        // the list — `items` is a pointer, `size` is a count — and it was computed by the analysis and then dropped
+        // here: a member list rendered as three bare names. The handler sends it verbatim; a client that wants the
+        // full declaration asks `completionItem/resolve`, which is a different question.
+        detail: item.detail.clone(),
         // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`. This is
         // what makes the deferral above possible: the detail is not sent, and the *identity* that produces it is.
         data: item

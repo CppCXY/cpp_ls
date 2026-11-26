@@ -1878,14 +1878,13 @@ fn a_members_members_are_offered_over_the_wire() {
         "a **field** rather than a variable, because it is reached through an object — the completion layer \
          distinguishes the two positions, and a client draws them with different icons: {size}"
     );
-    // **The line's second column is not in the list**, and that is the design rather than an omission: a type or a
-    // parameter list per item is the largest part of a completion answer, and a client draws a few dozen rows of it.
-    // The protocol's answer is `completionItem/resolve`, sent for the one item a user is looking at — so this asks
-    // for it, exactly as a client does, and checks that it comes back.
+    // **The short type line is in the list.** It tells `items` from `size` without opening anything, and a
+    // macro-declared struct has no other place to show it. The full declaration is still fetched by
+    // `completionItem/resolve` for the one item a user is looking at; the list carries only the one-line type.
     assert_eq!(
         size["detail"],
-        Value::Null,
-        "the detail is left for `completionItem/resolve`: {size}"
+        json!("int"),
+        "the member's type belongs beside its name: {size}"
     );
     let resolved = server.request(4, "completionItem/resolve", size.clone());
     assert_eq!(
@@ -2316,6 +2315,16 @@ void f() {
     let items = response["result"]["items"]
         .as_array()
         .unwrap_or_else(|| panic!("a member list: {response}"));
+    let size = items
+        .iter()
+        .find(|item| item["label"] == "size")
+        .unwrap_or_else(|| panic!("the size member: {response}"));
+    assert!(
+        size["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("int")),
+        "the member's type belongs beside its name: {size}"
+    );
     for item in items {
         let range = &item["textEdit"]["range"];
         assert_eq!(
