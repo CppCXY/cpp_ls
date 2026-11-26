@@ -69,5 +69,3 @@ jobs:
         fetch-depth: 2
     - name: Check changed files
       run: python lint/crate_paths.py check --changed
-
-
