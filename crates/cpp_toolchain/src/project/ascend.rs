@@ -81,6 +81,17 @@ impl AscendSection {
                 .include_paths
                 .push(include::config::IncludePath::system(directory));
         }
+        // **`args` are flags, not only a residue for `for_file`.** Without this parse a project with no compile
+        // database had `-D…` in `extra_args` and nothing in `defines`, so the cook decided every `#ifdef __CCE__`
+        // against a macro table that had never seen it: the device branch disappeared, and the C++ around it was read
+        // as host code. The same list stays in `extra_args` for the per-file pass a database needs.
+        let from_arguments = include::config::config_from_arguments(&self.args, None);
+        config.include_paths.extend(from_arguments.include_paths);
+        config.defines.extend(from_arguments.defines);
+        config.undefines.extend(from_arguments.undefines);
+        if from_arguments.standard.is_some() {
+            config.standard = from_arguments.standard;
+        }
         config.extra_args.extend(self.args.iter().cloned());
         config
     }

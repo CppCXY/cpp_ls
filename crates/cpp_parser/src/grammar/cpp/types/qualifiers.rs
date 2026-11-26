@@ -177,7 +177,10 @@ pub(crate) fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationK
     if p.family().is_ascend_c() {
         let ascend = match p.current_token_text() {
             "__aicore__" | "__global__" | "__host__" | "__device__" | "__gm__" | "__ubuf__"
-            | "__cbuf__" | "__fbuf__" | "__ca__" | "__cb__" | "__cc__" => {
+            | "__cbuf__" | "__fbuf__" | "__ca__" | "__cb__" | "__cc__" | "__simd_vf__"
+            | "__simd_callee__" | "__simt_vf__" | "__simt_callee__" | "__mix__" | "__cube__"
+            | "__vector__" | "__aicpu__" | "__forceinline__" | "__noinline__"
+            | "__launch_bounds__" | "__maxnreg__" | "__schedmode__" => {
                 Some(ImplementationKeyword::Bare)
             }
             _ => None,
@@ -244,6 +247,19 @@ pub(crate) fn at_a_placement_qualifier(p: &CppParser) -> bool {
                 | "__ca__"
                 | "__cb__"
                 | "__cc__"
+                | "__simd_vf__"
+                | "__simd_callee__"
+                | "__simt_vf__"
+                | "__simt_callee__"
+                | "__mix__"
+                | "__cube__"
+                | "__vector__"
+                | "__aicpu__"
+                | "__forceinline__"
+                | "__noinline__"
+                | "__launch_bounds__"
+                | "__maxnreg__"
+                | "__schedmode__"
         );
     }
     if p.family().is_cuda() {

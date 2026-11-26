@@ -1589,6 +1589,14 @@ mod tests {
         assert_eq!(config.language(), include::config::ProjectLanguage::AscendC);
         assert!(
             config
+                .defines
+                .iter()
+                .any(|define| define.name.as_ref() == "ASCENDC_CPU_DEBUG"),
+            "the section's -D is in the project-wide macro table: {:?}",
+            config.defines
+        );
+        assert!(
+            config
                 .include_paths
                 .iter()
                 .any(|path| path.directory == Path::new("/p/kernels/include")),

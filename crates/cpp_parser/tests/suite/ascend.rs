@@ -42,9 +42,40 @@ fn the_aicore_qualifiers_are_specifiers_in_an_ascend_unit() {
             "extern C kernel",
             "extern \"C\" __global__ __aicore__ void kernel(__gm__ float *out) { out[0] = 1.0f; }",
         ),
+        (
+            "simd and mix qualifiers",
+            "__simd_vf__ inline void vf() { } __global__ __mix__(1, 2) void kernel() { }",
+        ),
+        (
+            "simt qualifiers",
+            "__simt_vf__ __simt_callee__ void helper() { }",
+        ),
     ] {
         parses_as_ascend(name, source);
     }
+}
+
+#[test]
+fn the_simd_and_mix_qualifiers_are_specifiers_not_macros() {
+    let source = "__simd_vf__ inline void vf() { }\n__global__ __mix__(1, 2) void kernel() { }\n";
+    let tree = CppParser::parse(
+        source,
+        ParserConfig::default().with_language_family(ProjectLanguage::AscendC),
+    );
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+    let kinds: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .map(|node| format!("{:?}", node.kind()))
+        .collect();
+    assert!(
+        !kinds.iter().any(|kind| kind.contains("MacroCall")),
+        "the CCE qualifiers belong to the declaration: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| kind.contains("ArgumentList")),
+        "`__mix__(1, 2)` keeps its argument group: {kinds:?}"
+    );
 }
 
 #[test]

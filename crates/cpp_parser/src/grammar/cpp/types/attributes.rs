@@ -317,6 +317,11 @@ pub(crate) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
                     spelling.as_str(),
                     "__launch_bounds__" | "__maxnreg__" | "__align__" | "__cluster_dims__"
                 ))
+                || (p.family().is_ascend_c()
+                    && matches!(
+                        spelling.as_str(),
+                        "__mix__" | "__launch_bounds__" | "__maxnreg__" | "__schedmode__"
+                    ))
                 // **`__based(p)` names the storage a pointer is based on**, and its argument is the compiler's
                 // pointer language (`void`, a name, an expression) — kept as a token group for the same reason.
                 || spelling == "__based")
