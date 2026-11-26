@@ -220,6 +220,49 @@ pub(crate) fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationK
     ordinary_implementation_keyword(p)
 }
 
+/// **Does a placement qualifier of the unit's own family stand at the cursor?**
+///
+/// [`an_implementation_keyword`] also answers the implementation's ordinary spellings (`__extension__`, `__inline`),
+/// which are prefixes or specifiers but not a declaration's first word. This is the narrower question the statement
+/// rule needs: a word that can *begin* a CUDA/Ascend C declaration, not any compiler keyword at all.
+pub(crate) fn at_a_placement_qualifier(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+    let text = p.current_token_text();
+    if p.family().is_ascend_c() {
+        return matches!(
+            text,
+            "__aicore__"
+                | "__global__"
+                | "__host__"
+                | "__device__"
+                | "__gm__"
+                | "__ubuf__"
+                | "__cbuf__"
+                | "__fbuf__"
+                | "__ca__"
+                | "__cb__"
+                | "__cc__"
+        );
+    }
+    if p.family().is_cuda() {
+        return matches!(
+            text,
+            "__global__"
+                | "__device__"
+                | "__host__"
+                | "__shared__"
+                | "__constant__"
+                | "__managed__"
+                | "__grid_constant__"
+                | "__forceinline__"
+                | "__noinline__"
+        );
+    }
+    false
+}
+
 /// The spellings that are the compiler's own in **every** dialect — the ones `an_implementation_keyword` answers
 /// before it asks whether the unit is CUDA.
 pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {

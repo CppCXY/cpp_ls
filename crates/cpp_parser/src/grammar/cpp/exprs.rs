@@ -2208,15 +2208,18 @@ fn parse_postfix_suffixes(p: &mut CppParser, mut expr: parser::CompleteMarker) -
                 }
                 expr = m.complete(p);
             }
-            // **A CUDA kernel launch.** `k<<<grid, block>>>(a, b)` is not C++ at all — `<<<` is `<<` and `<` — and
-            // only a CUDA unit may read it that way ([`CppParser::cuda`]): in ordinary C++ the same tokens are three
-            // shifts and a syntax error, so a project that never saw `nvcc` keeps exactly the parse it had.
+            // **A CUDA or Ascend C kernel launch.** `k<<<grid, block>>>(a, b)` is not C++ at all — `<<<` is `<<` and
+            // `<` — and only a unit in one of those families may read it that way ([`CppParser::family`]): in ordinary
+            // C++ the same tokens are three shifts and a syntax error, so a project that never saw `nvcc`/`ccec`
+            // keeps exactly the parse it had. Ascend C's host launch has the same bracket shape
+            // (`kernel<<<blockDim, nullptr, stream>>>(args)`).
             //
             // The configuration is an `ArgumentList` of its own because it is not a call's argument list: it holds 2
             // to 4 comma-separated *expressions* (`grid`, `block`, `shared memory bytes`, `stream`), and a consumer
             // that wants them must be able to tell them from the call's.
             CppTokenKind::LeftShift
-                if p.family().is_cuda() && p.peek_next_token() == CppTokenKind::Less =>
+                if (p.family().is_cuda() || p.family().is_ascend_c())
+                    && p.peek_next_token() == CppTokenKind::Less =>
             {
                 let m = expr.precede(p, CppSyntaxKind::CudaLaunchExpr);
                 p.bump(); // `<<`

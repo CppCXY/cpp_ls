@@ -236,6 +236,17 @@ pub enum NameModifier {
 /// answer that several unrelated declarations share comes back `Ambiguous` and gets **no** colour, which is this
 /// layer's way of refusing to guess.
 pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
+    classified_names_in_family(index, view, crate::ProjectLanguage::Cpp)
+}
+
+/// **The same pass for one project family.** Ascend C's qualifiers are identifiers to the lexer and reserved
+/// spellings to `ccec`; the family is what lets the colouring say so. CUDA's vocabulary is added by the server's
+/// own predefined-macro table rather than here, because its words are macros/declarations in the toolkit headers.
+pub fn classified_names_in_family(
+    index: &ProjectIndex,
+    view: &FileView,
+    family: crate::ProjectLanguage,
+) -> Vec<Name> {
     // Timed because this runs on the interactive path — once per request for the file being edited — and because
     // "how much does a colour cost" is a question the probe in `examples/semantic_probe.rs` answers from here
     // rather than from a second implementation of the pass.
@@ -438,6 +449,24 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 declaration: define.start_offset == at,
                 modifiers: Vec::new(),
                 provenance: Provenance::Macro,
+            });
+            continue;
+        }
+
+        // **Ascend C's qualifiers, which are identifiers to the lexer.** `__aicore__`, `__gm__` and the memory-space
+        // family are reserved in the Ascend C family; without this branch the index has no declaration for them and
+        // the token either disappears or takes a header declaration of the same spelling. The family is the switch —
+        // the same text in ordinary C++ is an ordinary name.
+        if family.is_ascend_c()
+            && crate::ascend::word(text)
+                .is_some_and(|word| word.kind == crate::ascend::WordKind::Qualifier)
+        {
+            out.push(Name {
+                range,
+                kind: NameKind::Keyword,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: Provenance::Builtin,
             });
             continue;
         }

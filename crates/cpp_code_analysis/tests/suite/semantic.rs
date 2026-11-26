@@ -12,6 +12,13 @@ use cpp_code_analysis::{
 use cpp_code_analysis::{DeclKind, DeclModifiers, Known};
 
 fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
+    session_with_family(files, cpp_code_analysis::ProjectLanguage::Cpp)
+}
+
+fn session_with_family(
+    files: &[(&str, &str)],
+    family: cpp_code_analysis::ProjectLanguage,
+) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
     for (path, source) in files {
         memory = memory.with_file(*path, *source);
@@ -22,7 +29,7 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         "/p",
         providers,
         WatchFilter::new("/p"),
-        CompilerConfig::default(),
+        CompilerConfig::default().with_language_family(family),
     );
     session.add_project_files(
         files
@@ -2794,6 +2801,34 @@ fn a_use_before_the_declaration_finds_nothing() {
 /// **`wchar_t` and its three siblings are types, not variables.** The lexer has no token kind for them and hands
 /// them over as identifiers, so without the builtin check they reach the index — which has no declaration — and
 /// either disappear or take whatever declaration a header happens to give the spelling.
+#[test]
+fn ascend_qualifiers_are_keywords_in_the_ascend_family() {
+    let source = "__global__ __aicore__ void kernel(__gm__ float *out) { }\n";
+    let session = session_with_family(
+        &[("/p/a.cpp", source)],
+        cpp_code_analysis::ProjectLanguage::AscendC,
+    );
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let kinds: Vec<(String, NameKind)> = session
+        .classified_names(&view)
+        .into_iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()]
+                    .trim()
+                    .to_string(),
+                name.kind,
+            )
+        })
+        .collect();
+    for spelling in ["__global__", "__aicore__", "__gm__"] {
+        assert!(
+            kinds.contains(&(spelling.to_string(), NameKind::Keyword)),
+            "{spelling} must be a keyword: {kinds:?}"
+        );
+    }
+}
+
 #[test]
 fn the_wide_character_builtins_are_types() {
     let source = "wchar_t a; char8_t b; char16_t c; char32_t d;";

@@ -26,7 +26,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// [`Session::pending`] reaches zero.
     pub fn classified_names(&self, view: &FileView) -> Vec<semantic::Name> {
         use cpp_parser::CppTokenKind;
-        let mut names = semantic::classified_names(self.store.index(), view);
+        let mut names =
+            semantic::classified_names_in_family(self.store.index(), view, self.config.language());
 
         // **The predefined macros, which no file declares.** `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`,
         // `__cplusplus` and the compiler's own five hundred are defined by the *compiler*, so the walk above — which
@@ -180,7 +181,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 .enumerate()
                 .map(|(index, name)| (name.range.start_offset, index))
                 .collect();
-            for name in semantic::classified_names(self.store.index(), &own) {
+            for name in semantic::classified_names_in_family(
+                self.store.index(),
+                &own,
+                self.config.language(),
+            ) {
                 match at_offset.get(&name.range.start_offset) {
                     Some(&index) => names[index] = name,
                     None => {

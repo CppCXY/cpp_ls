@@ -948,7 +948,9 @@ pub enum CppSyntaxKind {
     /// e.g.: `register int x;`, `register unsigned int r0;`
     RegisterSpec,
 
-    /// **A CUDA kernel launch** — `kernel<<<grid, block, shmem, stream>>>(args)`.
+    /// **A CUDA or Ascend C kernel launch** — `kernel<<<grid, block, shmem, stream>>>(args)`. Both families spell
+    /// the same bracket shape; the node is shared because the syntax is, and the family decides which compiler's
+    /// qualifiers surround it.
     ///
     /// Not C++ at all: `<<<` and `>>>` are lexed as `<<` `<` and `>>` `>`, and in ordinary C++ the line is three
     /// shifts and a syntax error. `nvcc` reads it as the execution configuration of a call, and so does this parser

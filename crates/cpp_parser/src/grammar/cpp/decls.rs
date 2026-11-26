@@ -5312,6 +5312,12 @@ pub fn starts_declaration(p: &mut CppParser) -> bool {
             true
         }
 
+        // **A placement qualifier the target's compiler spells itself also begins a declaration.** `__global__ void
+        // kernel()` is a CUDA kernel and `__aicore__ void kernel()` is an Ascend C kernel, but both words are
+        // identifiers to the lexer. Without this anchor the statement rule read them as a macro call, and the
+        // declaration's body was lost — the same shape as `_Atomic` above, one family further out.
+        CppTokenKind::Identifier if types::at_a_placement_qualifier(p) => true,
+
         // **A type the target's compiler spells itself also begins a declaration** — `__int128`, `_Decimal64`,
         // `_Complex double` (GNU), `__int64` (MSVC). They are identifiers rather than keyword kinds, so the
         // statement rule had no anchor for them; `_Complex` was the visible one, read as a macro call followed by a

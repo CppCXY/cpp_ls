@@ -942,6 +942,14 @@ fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
         return false;
     }
 
+    // **A placement qualifier is not a macro standing for a declaration either.** `__global__ __aicore__ void
+    // kernel()` is one declaration in its family, and this rule's run-of-names shape otherwise took the two
+    // qualifiers for invocations and left the declaration starting at `void` — the body survived, but the kernel
+    // was no longer the declaration the qualifiers belong to.
+    if types::at_a_placement_qualifier(p) {
+        return false;
+    }
+
     let after = decls::kind_after_the_run_of_names(p);
     starts_a_new_declaration(after) || ends_the_scope(after)
 }
