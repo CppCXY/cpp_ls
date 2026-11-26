@@ -56,12 +56,25 @@ impl AscendSection {
             } else {
                 root.join(toolkit)
             };
-            // The layout of an Ascend installation, nearest first. The two `tikcfw` directories are where
-            // `kernel_operator.h` and its interface headers live; `include` is the toolkit's public header root.
+            // The layout of an Ascend installation, nearest first. Older layouts keep `kernel_operator.h` under
+            // `compiler/tikcpp/tikcfw`; CANN 9.x (what DeepGEMM-Ascend builds against) keeps the same files under
+            // `aarch64-linux/tikcpp` and the C API (`c_api/asc_simd.h`) under `aarch64-linux/asc/include`.
             for relative in [
                 "compiler/tikcpp/tikcfw",
                 "compiler/tikcpp/tikcfw/interface",
                 "include",
+                "aarch64-linux/include",
+                "aarch64-linux/asc",
+                "aarch64-linux/asc/include",
+                "aarch64-linux/asc/include/adv_api",
+                "aarch64-linux/asc/include/basic_api",
+                "aarch64-linux/asc/include/c_api",
+                "aarch64-linux/asc/include/interface",
+                "aarch64-linux/asc/include/micro_api",
+                "aarch64-linux/asc/include/simt_api",
+                "aarch64-linux/asc/include/utils",
+                "aarch64-linux/tikcpp/tikcfw",
+                "aarch64-linux/tikcpp/tikcfw/interface",
             ] {
                 let directory = toolkit.join(relative);
                 if directory.is_dir() {
