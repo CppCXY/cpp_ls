@@ -708,6 +708,17 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         log::info!(
                             "index cache: {reused} reused, {built} built, {unstored} unstored, {missing} missing"
                         );
+                        if built > 0 {
+                            let misses: Vec<String> = done
+                                .iter()
+                                .filter(|step| {
+                                    step.outcome == cpp_code_analysis::StepOutcome::Built
+                                })
+                                .take(5)
+                                .map(|step| step.path.display().to_string())
+                                .collect();
+                            log::info!("index cache misses: {misses:?}");
+                        }
                     }
                     (pending_now, drain, claimed, held, taken)
                 })
