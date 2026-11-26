@@ -316,7 +316,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         .map(|headers| headers.clone())
                         .unwrap_or_default(),
                     context,
-                    self.config.cuda(),
+                    self.config.language(),
                     self.the_completion_budget(),
                     &[],
                 );
@@ -340,7 +340,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         .read()
                         .map(|headers| headers.clone())
                         .unwrap_or_default(),
-                    self.config.cuda(),
+                    self.config.language(),
                     self.the_completion_budget(),
                     &[],
                 );
@@ -374,7 +374,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .map(|headers| headers.clone())
                             .unwrap_or_default(),
                         context,
-                        self.config.cuda(),
+                        self.config.language(),
                         self.the_completion_budget(),
                         &[],
                     );
@@ -398,7 +398,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             .map(|headers| headers.clone())
                             .unwrap_or_default(),
                         context,
-                        self.config.cuda(),
+                        self.config.language(),
                         self.the_completion_budget(),
                         &[],
                     );
@@ -431,7 +431,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             offset.get(),
             &headers,
-            self.config.cuda(),
+            self.config.language(),
             self.the_completion_budget(),
             &unincluded,
         );

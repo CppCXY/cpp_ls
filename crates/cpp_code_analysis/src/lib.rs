@@ -88,7 +88,9 @@ pub use cpp_toolchain::{include, preprocess, project};
 // One of them is said from outside this crate: `inspect` reaches `TypeHintKind` through the root.
 pub use cache::{align, env, memory, summary, summary_codec, unit_codec};
 pub use index::{effect, surface};
-pub use session::{completion, cuda, definition, doc, folding, format, inlay, semantic, signature};
+pub use session::{
+    ascend, completion, cuda, definition, doc, folding, format, inlay, semantic, signature,
+};
 
 // The folders are the *organisation*; the modules inside them keep their own names, and they are re-exported here so
 // that every path written before a reorganisation still resolves. The four that moved down a layer keep their

@@ -78,6 +78,20 @@ pub fn cuda_hover(token: &cpp_parser::CppSyntaxToken, cuda: bool) -> Option<Stri
     Some(known(word.hover_key).unwrap_or_else(|| word.detail.to_string()))
 }
 
+/// **What an Ascend C word means** — `None` unless the project is an Ascend C project.
+///
+/// The same rule as [`cuda_hover`]: the lexer leaves `__aicore__` and `__gm__` as identifiers, and the project family
+/// is what makes them reserved. The long text is the `ascend` section of the locale file; the table's one-line
+/// description is the fallback, so a key added late is a thin popup rather than none.
+pub fn ascend_hover(token: &cpp_parser::CppSyntaxToken, ascend_c: bool) -> Option<String> {
+    if !ascend_c {
+        return None;
+    }
+
+    let word = cpp_code_analysis::ascend::word(token.text())?;
+    Some(known(word.hover_key).unwrap_or_else(|| word.detail.to_string()))
+}
+
 /// One key, or `None` when the table has no entry for it.
 ///
 /// `rust-i18n` answers a missing key with the key itself, so "the answer is the key" *is* the absence — checked
@@ -163,6 +177,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Every Ascend C word has a popup in every locale**, and the family switch is what makes it answer.
+    #[test]
+    fn every_ascend_word_has_its_popup_in_every_locale() {
+        const EN: &str = include_str!("../../../locales/en.yml");
+        const ZH: &str = include_str!("../../../locales/zh-CN.yml");
+
+        for word in cpp_code_analysis::ascend::words() {
+            let leaf = word
+                .hover_key
+                .strip_prefix("ascend.")
+                .expect("a key under the ascend section");
+            let line = format!("{leaf}:");
+            for (name, source) in [("en", EN), ("zh-CN", ZH)] {
+                assert!(
+                    source
+                        .lines()
+                        .any(|line_of| line_of.trim_start().starts_with(&line)),
+                    "{} has no `{leaf}` entry in {name}.yml",
+                    word.name
+                );
+            }
+        }
+
+        let source = "__global__ __aicore__ void kernel(__gm__ float *out) { }\n";
+        let tree = cpp_parser::CppParser::parse(
+            source,
+            cpp_parser::ParserConfig::default()
+                .with_language_family(cpp_parser::ProjectLanguage::AscendC),
+        );
+        let at = source.find("__aicore__").expect("the fixture") + 2;
+        let token = cpp_parser::token_at(&tree.get_red_root(), at).expect("a token");
+        let text = ascend_hover(&token, true).expect("an Ascend C project has an answer");
+        assert!(text.contains("__aicore__"), "the popup names it: {text}");
+        assert!(text.contains("AI Core"), "and says what it is: {text}");
+        assert!(
+            ascend_hover(&token, false).is_none(),
+            "the same token outside the family is an ordinary name"
+        );
     }
 
     /// **A CUDA word has a popup only in a CUDA project**, and the popup names the word it describes.

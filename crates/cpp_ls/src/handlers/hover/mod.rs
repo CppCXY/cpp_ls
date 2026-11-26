@@ -462,15 +462,20 @@ pub fn hover(
             return Some(markdown(text));
         }
 
-        // **…and CUDA's own vocabulary, which is not keywords at all.** `__global__` is an identifier to the lexer and
-        // a specifier to a CUDA compiler, so the question is the project's *family* rather than the token's kind —
-        // see `cpp_code_analysis::cuda`. It is asked after the keyword table and not before: a word that is both (none
-        // is today, but `warpSize` is a name a project may also declare) belongs to the declaration if there is one,
-        // and `hover_of_the_program` has already had its say by the time this runs.
-        if covers_the_cursor
-            && let Some(text) = vocabulary::cuda_hover(&token, session.config().cuda())
-        {
-            return Some(markdown(text));
+        // **…and CUDA's / Ascend C's own vocabulary, which is not keywords at all.** `__global__` and `__aicore__` are
+        // identifiers to the lexer and specifiers to their compilers, so the question is the project's *family* rather
+        // than the token's kind. It is asked after the keyword table and not before: a word that is both belongs to
+        // the declaration if there is one, and `hover_of_the_program` has already had its say by the time this runs.
+        if covers_the_cursor {
+            let family = session.config().language();
+            let text = match family {
+                cpp_parser::ProjectLanguage::Cuda => vocabulary::cuda_hover(&token, true),
+                cpp_parser::ProjectLanguage::AscendC => vocabulary::ascend_hover(&token, true),
+                _ => None,
+            };
+            if let Some(text) = text {
+                return Some(markdown(text));
+            }
         }
     }
 

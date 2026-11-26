@@ -57,6 +57,8 @@
 
 use crate::CompilerConfig;
 use crate::OfferedName;
+use crate::ProjectLanguage;
+use crate::ascend;
 use crate::completion;
 use crate::cuda;
 use crate::file;
@@ -459,7 +461,7 @@ pub fn completion_at(
     path: &Path,
     offset: usize,
     headers: &HeaderIndex,
-    cuda: bool,
+    family: ProjectLanguage,
     budget: usize,
     unincluded: &[Unincluded],
 ) -> CompletionSet {
@@ -468,7 +470,7 @@ pub fn completion_at(
     // rendering — hands it over instead of having it asked again of the wrong tree.
     let asked = context_at(root, offset);
     completion_with(
-        index, scopes, root, path, offset, headers, asked, cuda, budget, unincluded,
+        index, scopes, root, path, offset, headers, asked, family, budget, unincluded,
     )
 }
 
@@ -486,7 +488,7 @@ pub fn completion_with(
     offset: usize,
     headers: &HeaderIndex,
     context: CompletionContext,
-    cuda: bool,
+    family: ProjectLanguage,
     budget: usize,
     unincluded: &[Unincluded],
 ) -> CompletionSet {
@@ -512,10 +514,10 @@ pub fn completion_with(
             .set
         }
         CompletionContext::Qualified(position) => names(
-            index, scopes, root, path, &position, offset, false, cuda, budget, unincluded, None,
+            index, scopes, root, path, &position, offset, false, family, budget, unincluded, None,
         ),
         CompletionContext::Name(position) => names(
-            index, scopes, root, path, &position, offset, true, cuda, budget, unincluded, None,
+            index, scopes, root, path, &position, offset, true, family, budget, unincluded, None,
         ),
         CompletionContext::DirectiveName { written, range } => directives(&written, range),
         // **A module name is answered by the session, not here**, and the empty set says so rather than guessing:
@@ -534,7 +536,8 @@ pub fn completion_with(
             // what the program already declares. No keywords and no snippets — a macro's name is an identifier, and
             // a control-flow statement is not one — which is why this goes through the name query only.
             names(
-                index, scopes, root, path, &position, offset, false, cuda, budget, unincluded, None,
+                index, scopes, root, path, &position, offset, false, family, budget, unincluded,
+                None,
             )
         }
         CompletionContext::Include {
@@ -567,8 +570,8 @@ pub fn completion_with(
                     range,
                 };
                 names(
-                    index, scopes, root, path, &position, offset, false, cuda, budget, unincluded,
-                    None,
+                    index, scopes, root, path, &position, offset, false, family, budget,
+                    unincluded, None,
                 )
             }
         }
@@ -583,7 +586,7 @@ pub fn completion_with(
             wants,
         } => doc_comments(index, path, &written, range, wants),
         CompletionContext::DocLink { written, range } => doc_link_names(
-            index, scopes, root, path, &written, range, cuda, budget, unincluded,
+            index, scopes, root, path, &written, range, family, budget, unincluded,
         ),
         // **A code block is code**, so it is answered with the same list a statement gets — keywords and snippets
         // included, because that is what a reader writing an example is writing.
@@ -594,7 +597,7 @@ pub fn completion_with(
                 range,
             };
             names(
-                index, scopes, root, path, &position, 0, true, cuda, budget, unincluded, None,
+                index, scopes, root, path, &position, 0, true, family, budget, unincluded, None,
             )
         }
     }
@@ -618,7 +621,7 @@ fn doc_link_names(
     path: &Path,
     written: &str,
     range: SourceRange,
-    cuda: bool,
+    family: ProjectLanguage,
     budget: usize,
     unincluded: &[Unincluded],
 ) -> CompletionSet {
@@ -648,7 +651,7 @@ fn doc_link_names(
         &position,
         0,
         false,
-        cuda,
+        family,
         budget,
         unincluded,
         Some(Known::Yes(listing)),
@@ -1375,7 +1378,7 @@ fn names(
     position: &sema::resolve::NamePosition,
     offset: usize,
     with_table: bool,
-    cuda: bool,
+    family: ProjectLanguage,
     budget: usize,
     unincluded: &[Unincluded],
     // **The listing, when the caller already has it.** A documentation comment has no scope and no tree node, so the
@@ -1605,7 +1608,7 @@ fn names(
         // CUDA compiler will see is a claim that is false. The kinds differ on purpose: a qualifier is a keyword, a
         // built-in variable is a variable, and a vector type is a class, because that is what each would be if a
         // toolkit header had declared it.
-        if cuda {
+        if family.is_cuda() {
             for word in cuda::words() {
                 let matched = matching::quality(word.name, &listed_prefix);
                 if matched == matching::NONE {
@@ -1615,6 +1618,28 @@ fn names(
                     cuda::WordKind::Qualifier => ItemKind::Keyword,
                     cuda::WordKind::Builtin => ItemKind::Variable,
                     cuda::WordKind::VectorType => ItemKind::Class,
+                };
+                scored.push(Scored {
+                    score: Score::new(Score::KEYWORD, 0),
+                    matched,
+                    item: CompletionItem::word(word.name, kind, word.detail),
+                });
+            }
+        }
+
+        // **Ascend C's vocabulary, when the project is Ascend C.** The same rule as CUDA's: the lexer reads
+        // `__aicore__` as an identifier, and the family is what makes it a specifier. The toolkit types and runtime
+        // functions are here too, so a completion works before `kernel_operator.h` has been read.
+        if family.is_ascend_c() {
+            for word in ascend::words() {
+                let matched = matching::quality(word.name, &listed_prefix);
+                if matched == matching::NONE {
+                    continue;
+                }
+                let kind = match word.kind {
+                    ascend::WordKind::Qualifier => ItemKind::Keyword,
+                    ascend::WordKind::Builtin => ItemKind::Function,
+                    ascend::WordKind::Type => ItemKind::Class,
                 };
                 scored.push(Scored {
                     score: Score::new(Score::KEYWORD, 0),

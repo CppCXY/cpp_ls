@@ -1991,12 +1991,13 @@ impl<F: FileProvider> effect::Reads for SessionReads<'_, F> {
 /// **What a cooking slice claimed and produced** --- the two kinds of reading, re-exported because the server's
 /// pump gathers and commits them from outside this module. See [cook::AClaimedSlice].
 pub use cook::{AClaimedCook, AClaimedSlice};
+/// **What a file's words are**, for the highlighter: the query layer's own vocabulary, next to the request that
+/// wants it.
+pub mod ascend;
 mod calls;
 pub mod completion;
 mod constrained;
 mod cook;
-/// **What a file's words are**, for the highlighter: the query layer's own vocabulary, next to the request that
-/// wants it.
 pub mod cuda;
 /// **A missing member's definition as text** --- the code action behind a diagnostic, which is a session question
 /// because the class it belongs to may be declared in another file.

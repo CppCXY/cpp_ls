@@ -7177,6 +7177,7 @@ using namespace AscendC;
 extern \"C\" __global__ __aicore__ void add_kernel(GM_ADDR x) {
     LocalTensor<float> local;
     local.
+    __ai
 }
 ";
     let project = Project::new("ascend-family");
@@ -7248,6 +7249,52 @@ extern \"C\" __global__ __aicore__ void add_kernel(GM_ADDR x) {
         address["detail"], "T * ()",
         "the toolkit type's own signature reaches the list: {address}"
     );
+
+    // **The family's vocabulary is offered too**, not only the toolkit's declarations: `__ai` lists the AICore
+    // qualifier with its one-line description.
+    let qualifier_line = SOURCE
+        .lines()
+        .position(|text| text.trim() == "__ai")
+        .expect("the qualifier line") as u64;
+    let qualifier_character = SOURCE
+        .lines()
+        .nth(qualifier_line as usize)
+        .and_then(|text| text.find("__ai"))
+        .expect("the qualifier line")
+        + "__ai".len();
+    let qualifiers = server.ask_until_it(
+        300,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": qualifier_line, "character": qualifier_character },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"].as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["label"] == json!("__aicore__"))
+            })
+        },
+    );
+    let qualifier = qualifiers["result"]["items"]
+        .as_array()
+        .expect("the qualifier list")
+        .iter()
+        .find(|item| item["label"] == json!("__aicore__"))
+        .expect("the AICore qualifier");
+    assert!(
+        qualifier["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("AICore")),
+        "the qualifier's one-line description reaches the list: {qualifier}"
+    );
+    assert_eq!(qualifier["kind"], 14, "it is a keyword: {qualifier}");
 }
 ///
 /// The count is the number of places that *use* the function: not its definition, not the declaration in the header.
