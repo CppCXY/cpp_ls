@@ -467,6 +467,36 @@ pub struct ProjectIndex {
     /// contributors are recorded with it), and the whole map is cleared when a file the index has never seen arrives,
     /// because that can change how an `#include` resolves for a closure that does not contain it.
     macro_environments: std::sync::Mutex<HashMap<(String, String), CachedMacroWalk>>,
+    /// **The macro state at one offset of one file** — [`ProjectIndex::macros_at`], remembered.
+    ///
+    /// This is the walk behind *every* `#if` decision the index makes for a declaration — the guard filter every
+    /// candidate of a name passes through ([`ProjectIndex::a_guard_is_taken`]). It was not remembered, and it costs
+    /// **71 ms** per call on `wtypes.h` (a MinGW header included through `windows.h`): measured on neovim's
+    /// `channel.c`, one semantic-token request asked for **18 states — two distinct offsets, nine times each** — and
+    /// paid **1.3 s**, of which the classification itself was 1.3 ms. The cache is keyed by the offset because that is
+    /// the question; the guard verdicts on top of it are keyed by the fact, which is what made the same state be
+    /// computed once per fact.
+    ///
+    /// Invalidated exactly like [`ProjectIndex::macro_environments`]: an entry is dropped when a file it read is
+    /// re-read, and the whole map when a file the index has never seen arrives.
+    macro_states_at: std::sync::Mutex<HashMap<(String, usize), std::sync::Arc<CachedMacroState>>>,
+    /// **The guard verdicts a query's one walk answered**, per file it was asked from — see
+    /// [`ProjectIndex::answer_the_guards`] and [`ProjectIndex::install_answered_guards`].
+    ///
+    /// Kept by root and stamp rather than passed down as a parameter because the question is asked deep inside
+    /// `certain_declarations` → `visible_declarations` → the guard filter, code every other caller shares; a value
+    /// that depends only on the index's revision is a cache, not hidden state, and it is looked up *by the root the
+    /// question belongs to*, so two documents being classified at once cannot read each other's answers.
+    answered_guards: std::sync::Mutex<
+        HashMap<
+            String,
+            (
+                u64,
+                std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>,
+            ),
+        >,
+    >,
+
     /// **Every macro name in force in one file** — [`ProjectIndex::macro_names_in_force`]'s walk, remembered.
     ///
     /// Same measurement, same invalidation: the colouring pass asks about every identifier in the file and this is
@@ -528,6 +558,16 @@ struct CachedMacroWalk {
     environment: MacroEnvironment,
 }
 
+/// One entry of [`ProjectIndex::macro_states_at`]: the state, and **the files it was made of**.
+///
+/// Shared by every question about that offset — the guard filter asks once per fact, and the answer is the same
+/// object — so it is held behind an `Arc` rather than cloned for each caller.
+#[derive(Debug)]
+struct CachedMacroState {
+    contributors: Vec<String>,
+    state: Marked,
+}
+
 /// One entry of [`ProjectIndex::macro_names`] — the same shape, for the whole-name-set walk.
 #[derive(Debug)]
 struct CachedMacroNames {
@@ -541,6 +581,13 @@ struct CachedMacroNames {
 /// so a few hundred entries is tens of megabytes at worst. Cleared whole when full, like the other memos: the sets
 /// that matter are "the names this file asks about", which are asked together.
 const MAX_CACHED_MACRO_WALKS: usize = 256;
+
+/// How many per-offset macro states [`ProjectIndex::macros_at`] may hold before the map is emptied.
+///
+/// One per `#if` condition the guard filter asked about. A colouring pass asks about the conditions of the regions
+/// its declarations are in, which is tens of files — so this bound is generous for one file and still bounds a
+/// session that walks a whole project; the state itself is a macro table, so the map is kept small on purpose.
+const MAX_CACHED_MACRO_STATES: usize = 256;
 
 /// How many declaration answers [`ProjectIndex::definition_answers`] may hold before it is emptied.
 ///

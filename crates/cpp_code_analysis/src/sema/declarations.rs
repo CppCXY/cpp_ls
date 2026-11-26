@@ -1913,6 +1913,15 @@ pub(crate) fn freed_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> u6
     mask
 }
 
+/// **Does this text spell anything that releases memory?** — the cheap filter in front of [`fill_the_frees`].
+///
+/// The sweep walks the whole rendering, so a file that cannot free anything skips it. The spellings are the ones
+/// [`scan_unconditional_statements`] recognises: `free`, `delete`, `std::destroy_at`. `free` alone was the first
+/// version, and it made a file whose only release is `delete p;` silent about the function that frees its parameter.
+fn names_a_release(rendered: &str) -> bool {
+    rendered.contains("free") || rendered.contains("delete") || rendered.contains("destroy_at")
+}
+
 /// **Fill [`DeclFact::frees`](crate::DeclFact::frees) for every function of one file**, in a single walk.
 ///
 /// The map is built once — every declaration that has a body, keyed by the offset its name starts at — and then each
@@ -4918,7 +4927,10 @@ impl<'a> DeclarationFacts<'a> {
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
         // Neither sweep can find anything in a file that never spells its marker, and both were paid per file.
-        if rendered.contains("free") {
+        // **The marker is every spelling that releases memory, not the word `free`.** It was `free` alone, and a file
+        // whose only release is `delete p;` — the C++ spelling of the same act — skipped the sweep and recorded no
+        // function as freeing its parameter, so the call-site half of `use-after-free` was silent for it.
+        if names_a_release(&rendered) {
             fill_the_frees(root, &mut facts);
         }
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and

@@ -324,9 +324,6 @@ impl<F: FileProvider + Clone> Session<F> {
     /// read it as "no such file" — [`Session::is_indexed`] and [`Session::pending_cooking`] are how those are told
     /// apart.
     pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        // **Held the way the VFS holds it, and asked for it the same way.** The VFS normalizes a path on the way in
-        // and on the way out, so a lookup by a caller's spelling finds the file; the *queue* is keyed the same, so
-        // the request below names the file the session will actually cook.
         let requested = path.as_ref();
         let file = self.vfs.held(requested)?;
         // Queue it **only if there is nothing to read yet** — the rule `view` states, and the reason this one used to
@@ -335,7 +332,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // (`crates/cpp_ls/tests/loop_probe.rs`): ten diagnostics pulls caused **five** cooks, the same two headers
         // each time (`types.h`, `stl_vector.h`), each a render and a parse — and raising the cache from 8 to 64
         // entries changed the count **not at all**, which is what named the cause: the ask, not the eviction.
-        if self.known_rendering_of(&file.path, &file.text).is_none() {
+        // **Is a rendering in memory?** — and deliberately not "is one *known*": `known_rendering_of` falls back to
+        // the disk record, and reading and decoding one is **150 ms** for a header whose closure is large. This call
+        // only decides whether to *ask* for a rendering; the view below is parsed from the file's own text either
+        // way, so the disk was read for an answer nothing here uses. Measured on `channel.c`: four headers at
+        // 152–162 ms each, on **every** inlay-hint request (`channel.h`, `proc.h`, `uv.h`, `typval.h`).
+        if !self.a_rendering_is_known_in_memory(&file.path, &file.text) {
             self.ask_for_a_rendering(&file.path, &file.text);
         }
 
@@ -409,13 +411,41 @@ impl<F: FileProvider + Clone> Session<F> {
         ))
     }
 
+    /// **Whether a rendering for this text is in memory**, without consulting the disk — see
+    /// [`Session::view_of_the_file`], which wants to know only whether to ask for one.
+    pub(crate) fn a_rendering_is_known_in_memory(&self, path: &Path, text: &str) -> bool {
+        let text_hash = crate::cache::content_hash(text);
+        if let Ok(open) = self.open_renderings.lock()
+            && let Some((hash, _)) = open.get(&queue_key(path))
+            && *hash == text_hash
+        {
+            return true;
+        }
+        self.renderings
+            .lock()
+            .ok()
+            .and_then(|mut known| known.get(&a_rendering_key(path, text_hash)).map(|_| ()))
+            .is_some()
+    }
+
     /// The rendering for `text`, **if it is already read** — a hash and a lookup, and nothing else.
     pub(crate) fn known_rendering_of(
         &self,
         path: &Path,
         text: &str,
     ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
-        let key = a_rendering_key(path, crate::cache::content_hash(text));
+        let text_hash = crate::cache::content_hash(text);
+        // **The open document's own rendering first, and it is not in the budget** — see
+        // [`Session::open_renderings`]: the LRU is filled by a pass over the closure, and the file the reader is
+        // editing is the one rendering that must survive it. Measured: after twenty seconds of indexing, `ids.`
+        // answered 0 members because the rendering had been evicted.
+        if let Ok(open) = self.open_renderings.lock()
+            && let Some((hash, rendered)) = open.get(&queue_key(path))
+            && *hash == text_hash
+        {
+            return Some(rendered.clone());
+        }
+        let key = a_rendering_key(path, text_hash);
         if let Some(found) = self.renderings.lock().ok()?.get(&key).cloned() {
             return Some(found);
         }
@@ -459,6 +489,17 @@ impl<F: FileProvider + Clone> Session<F> {
         text_hash: u64,
         rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     ) {
+        // **An open document is pinned outside the budget** — see [`Session::open_renderings`]: the LRU is filled by
+        // a pass over the closure, and evicting the rendering of the file being edited is what made member
+        // completion answer with nothing on a warm index.
+        if self.documents.is_open(path)
+            && let Ok(mut open) = self.open_renderings.lock()
+        {
+            open.insert(
+                queue_key(path),
+                (text_hash, std::sync::Arc::clone(&rendered)),
+            );
+        }
         let weight = rendered.weight();
         if let Ok(mut known) = self.renderings.lock() {
             known.insert(a_rendering_key(path, text_hash), rendered, weight);

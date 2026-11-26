@@ -26,8 +26,11 @@
 //! answered with the file's global names instead of the object's members.
 //!
 //! The dispatcher records the current sequence on the message loop, and the spawned task waits for the worker to
-//! apply it. Later changes are not part of an immutable snapshot: if one starts before the request finishes, the
-//! request receives `ContentModified`. See [`crate::context::update_queue`].
+//! apply it. What happens to a **later** change is a per-method policy: a refreshable list (semantic tokens, inlay
+//! hints, code lenses, symbols, a pull diagnostic) is answered `ContentModified` without running, because the next
+//! keystroke asks again; an interactive question (completion, hover, signature help, definition) is answered from
+//! whatever the barrier applied — see [`crate::handlers::a_newer_change_cancels`] and
+//! [`crate::context::ServerContext::task`].
 
 use std::error::Error;
 
@@ -94,14 +97,55 @@ macro_rules! dispatch_request {
                             // **How much of the client's stream this request is entitled to see.** Read here, on the
                             // task that has just read the messages in order, and applied inside the request's own task.
                             let upto = snapshot.inbox().record_request();
-                            $context.task(id.clone(), upto, move |cancel_token| {
+                            // **Whether a newer edit makes this request pointless** (a refreshable list), and
+                            // whether it is an interactive question that is answered from whatever applied.
+                            let cancellable = crate::handlers::a_newer_change_cancels(<$req_type>::METHOD);
+                            // **A newer question about this document makes this one pointless**, and the older one
+                            // is cancelled *before it computes* — see [`ServerContext::supersede`].
+                            let slot_uri: Option<String> = serde_json::to_value(&params)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("textDocument")
+                                        .and_then(|document| document.get("uri"))
+                                        .and_then(|uri| uri.as_str())
+                                        .map(str::to_string)
+                                });
+                            let slot: Option<(String, String)> = slot_uri
+                                .as_deref()
+                                .map(|uri| (<$req_type>::METHOD.to_string(), uri.to_string()));
+                            $context
+                                .supersede(<$req_type>::METHOD, slot_uri.as_deref(), &id)
+                                .await;
+                            $context
+                                .task(id.clone(), upto, cancellable, slot, move |cancel_token| {
                                 let snapshot = snapshot.clone();
                                 async move {
                                     let started = std::time::Instant::now();
                                     crate::context::catch_up_upto(&snapshot, upto).await;
                                     let waited = started.elapsed();
                                     let started = std::time::Instant::now();
-                                    let answer = $handler(snapshot, params, cancel_token).await;
+                                    // **Do not pay for an answer the next keystroke has already asked over.**
+                                    //
+                                    // Two ways a request becomes pointless while it waits, and both must stop here
+                                    // rather than run and be discarded (`task`'s `select!` cannot stop a handler that
+                                    // is already inside a blocking query — measured, a cancelled semantic-tokens
+                                    // request ran **1.42 s** and the writer waited **1.1 s** for the lock it held):
+                                    //
+                                    // 1. a refreshable list whose text moved on (the next keystroke asks again);
+                                    // 2. a newer request for **the same method and document** arrived, which is the
+                                    //    client telling us the answer it wants is a different one.
+                                    let answer = if cancel_token.is_cancelled() {
+                                        crate::context::RequestOutcome::Cancelled(
+                                            crate::context::CancelSource::Client,
+                                        )
+                                    } else if cancellable && snapshot.inbox().started() > upto {
+                                        crate::context::RequestOutcome::Cancelled(
+                                            crate::context::CancelSource::ContentModified,
+                                        )
+                                    } else {
+                                        $handler(snapshot, params, cancel_token).await
+                                    };
                                     let took = started.elapsed();
                                     if (waited + took).as_millis() >= 50 {
                                         log::warn!(

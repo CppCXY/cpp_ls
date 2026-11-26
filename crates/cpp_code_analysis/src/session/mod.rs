@@ -1021,6 +1021,22 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// file that sees it. Keyed by the definition's own text, so it needs no invalidation: the same text is the same
     /// definition, and a file that changed contributes a different one.
     parsed_definitions: std::sync::Mutex<crate::ParsedDefinitions>,
+    /// **The `Configuration` a composed cook renders in, cached against the environment it was made from.**
+    ///
+    /// `cooking_materials` composes an environment from the index and then materialises it as a `Configuration` —
+    /// measured **21–29 ms** for neovim's `main.c`, on every keystroke, from an environment that had not changed.
+    /// Keyed by the index's spelling and the context hash; validated by the environment's own fingerprint, which is
+    /// exactly the input the configuration is a function of (the table plus the seed).
+    configurations: std::sync::Mutex<
+        HashMap<
+            (String, u64),
+            (
+                u64,
+                std::sync::Arc<crate::preprocess::cooked::Configuration>,
+                std::time::Instant,
+            ),
+        >,
+    >,
     /// **A file's `CompilerConfig`, worked out once** — see [`Session::config_for_file`].
     ///
     /// [`CompilerConfig::for_file`] clones the whole configuration, applies the project's `remove_args`/`extra_args`
@@ -1046,6 +1062,25 @@ pub struct Session<F: FileProvider = DiskFiles> {
         cache::cache_lru::Cache<
             (PathBuf, u64),
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+        >,
+    >,
+    /// **The rendering of each document somebody has open, kept outside the budget.**
+    ///
+    /// The table above holds `RENDERING_ENTRIES` renderings and a pass over a project's closure fills it at once.
+    /// Measured on neovim's `channel.c`: twenty seconds after a reader opened the file and typed `ids.`, the file's
+    /// own rendering had been **evicted** — `session.view` answered `None`, so member completion fell back to the
+    /// file's text parsed with an empty environment and offered **0 members**, while the same request a second after
+    /// the edit (rendering still in the table) offered `capacity`, `items`, `size`. An open document is the one
+    /// rendering that must not be evicted: it is the file the reader is looking at.
+    ///
+    /// Keyed by [`queue_key`] and validated by the text hash, so a stale entry is inert rather than wrong.
+    open_renderings: std::sync::Mutex<
+        HashMap<
+            String,
+            (
+                u64,
+                std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+            ),
         >,
     >,
     /// **Views already built**, by what they were parsed from — the answer to "a pull is a parse per request".
@@ -1567,7 +1602,7 @@ pub struct CookingMaterials {
     /// Two fields rather than one because they are not equivalent: a `MacroView` is a **position** in a walk,
     /// so it answers `#define`s that arrive mid-file and directives that split a declaration; a materialised
     /// `Configuration` is the state a file *starts* with. The walk stays preferred wherever it exists.
-    pub configuration: Option<crate::preprocess::cooked::Configuration>,
+    pub configuration: Option<std::sync::Arc<crate::preprocess::cooked::Configuration>>,
     /// The file's own text.
     pub text: String,
     /// **The hash of that text**, which is what the commit compares the file's text against — see
@@ -1749,8 +1784,15 @@ pub struct PreparedDrain {
         std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     )>,
     revision: Option<SessionRevision>,
+    /// What a bounded drain did **not** read — put back on the queues by [`Session::commit_the_drain`].
     retry_files: Vec<PathBuf>,
     retry_environments: Vec<PathBuf>,
+    /// **Every file the drain was for**, kept for the one case a bounded drain cannot serve: the revision moved
+    /// between preparing and committing, so nothing was applied and the whole drain is owed again. Without it a fresh
+    /// (bounded) drain that goes stale has only its leftovers to put back, and the files it never read are lost —
+    /// measured by `a_stale_drain_keeps_its_refinement_request`.
+    owed_files: Vec<PathBuf>,
+    owed_environments: Vec<PathBuf>,
 }
 
 /// **A unit read whose expensive half is done** — see [`Session::prepare_a_unit_reading`].

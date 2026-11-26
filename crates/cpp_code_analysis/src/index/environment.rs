@@ -502,6 +502,10 @@ pub fn visibility_at(
         return Visibility::Unknown;
     };
 
+    // **The full state is what an include decision needs** — see the note on `macros_at_only`, which this was
+    // tried with and which cannot work: a walk decides *which files it even reaches* from its own state, and a
+    // state narrowed to one question's names answers `#ifdef GUARD` for every include in the closure as
+    // "not defined". Kept as the measured record rather than re-learned.
     summary.guards.visibility_of(guard, offset, |condition_at| {
         MacrosHere::from_summary(index.macros_at(path, condition_at), summary, condition_at)
     })

@@ -296,6 +296,12 @@ impl UpdateInbox {
         self.started_change.subscribe()
     }
 
+    /// **How many content changes have started being applied** — what a refreshable request compares with the
+    /// `upto` it recorded, before it pays for an answer about text the next keystroke has already replaced.
+    pub fn started(&self) -> u64 {
+        *self.started_change.borrow()
+    }
+
     /// Wait until there is something to apply, or `timeout` passes.
     pub async fn wait_for_work(&self, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, self.work.notified())

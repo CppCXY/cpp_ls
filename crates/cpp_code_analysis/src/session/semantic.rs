@@ -298,6 +298,61 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     let included_macros: std::cell::OnceCell<std::collections::HashSet<String>> =
         std::cell::OnceCell::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
+    // **Every guard question this pass is about to ask, answered by one walk through the file's translation unit.**
+    //
+    // Each answer used to cost `visibility_at` → `macros_at`: a walk of the *header's* closure, 276 files and
+    // sixteen thousand names, ~65 ms — and `channel.c` asks twenty-five of them on its first pass (638 ms, while the
+    // classification itself is 30 ms). One walk from this file reaches the same headers with the state already
+    // built, so the questions are collected here and `answer_the_guards` answers them at the moment the walk passes
+    // each condition. What it does not reach falls back to the per-header walk inside `a_guard_is_taken`.
+    // The guard lives until this function returns, which is what makes the answers visible to the filter.
+    {
+        let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
+        let mut questions: Vec<(String, u32, usize)> = Vec::new();
+        let mut asked_about: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for token in view.tree.get_tokens() {
+            if token.kind != CppTokenKind::Identifier {
+                continue;
+            }
+            let at = token.range.start_offset;
+            let Some(text) = view.get_token_text(token.range) else {
+                continue;
+            };
+            // A token the loop answers from the file itself never reaches the index, and asking the index about it
+            // here would be work the loop does not do.
+            if declared.contains_key(&at) || macros.contains_key(text) || included.contains(text) {
+                continue;
+            }
+            let written = match qualified.get(&at) {
+                Some(qualified) => qualified.as_str(),
+                None => text,
+            };
+            if !asked_about.insert(written) {
+                continue;
+            }
+            for found in index.files_declaring(written, &view.path) {
+                if let crate::FactGuard::Region(region) = found.fact.guard {
+                    questions.push((
+                        crate::index::project::normalize(&found.file),
+                        region,
+                        found.fact.range.start_offset,
+                    ));
+                }
+            }
+        }
+        if !questions.is_empty() {
+            let answers = index.answer_the_guards(&view.path, &questions);
+
+            let mut installed: HashMap<(String, u32, usize), crate::Visibility> = HashMap::new();
+            for (question, answer) in questions.iter().zip(answers) {
+                if let Some(answer) = answer {
+                    installed.insert(question.clone(), answer);
+                }
+            }
+
+            index.install_answered_guards(&view.path, installed);
+        }
+    }
     let mut out: Vec<Name> = Vec::new();
 
     // **The identifiers a qualified name is spelled with, from the *tree*.** `X::Y` is a node —

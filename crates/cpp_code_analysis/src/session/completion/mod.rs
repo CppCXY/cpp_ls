@@ -2059,6 +2059,11 @@ const HEADER_BUDGET: usize = 200;
 /// A **payload** bound rather than a UI one: a client renders ten rows and still receives all of them, and 14 351
 /// items was 4.5 MB of JSON for one keystroke. Two hundred is more than any list a reader scrolls and small enough
 /// that the request stays a few kilobytes.
+///
+/// **A 200-item budget was measured and refused.** On `channel.c` a one-character completion answered 1 000 items
+/// in 126 ms and 200 items in 121 ms — the payload was not the cost — while the fair, round-robin cut dropped
+/// `kvec_t` from the `k` list, which is the name a reader typing `k` in `channel_all_info` is looking for. The
+/// budget stays at 1 000 and the *cost per item* is what has to come down.
 pub const ITEM_BUDGET: usize = 1000;
 
 /// Put the items in order, apply the budget, and say whether anything was cut.

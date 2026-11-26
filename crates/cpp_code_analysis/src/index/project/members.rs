@@ -1117,7 +1117,7 @@ impl ProjectIndex {
     /// (`visibility_at`), and `Unknown` comes back **true**: a guard this layer cannot decide must not silence a
     /// finding, the same rule the declaration lookup follows.
     pub fn the_guard_is_taken(&self, file: &Path, guard: crate::FactGuard, offset: usize) -> bool {
-        self.a_guard_is_taken(file, guard, offset)
+        self.a_guard_is_taken(file, guard, offset, None)
     }
 
     /// **Is the branch this declaration is written in the one the configuration takes?**
@@ -1131,11 +1131,19 @@ impl ProjectIndex {
         file: &Path,
         guard: crate::FactGuard,
         offset: usize,
+        answered: Option<&HashMap<(String, u32, usize), crate::Visibility>>,
     ) -> bool {
         let region = match guard {
             crate::FactGuard::Unconditional => return true,
             crate::FactGuard::Region(region) => region,
         };
+        // **Already answered by this query's one walk** — see `ProjectIndex::answer_the_guards`, which turns the
+        // twenty-five 276-file walks of a colouring pass into one. Absent, the filter walks as it always did.
+        if let Some(answers) = answered
+            && let Some(answer) = answers.get(&(normalize(file), region, offset))
+        {
+            return *answer != crate::Visibility::Inactive;
+        }
         let key = (file.to_path_buf(), offset, region);
         if let Ok(known) = self.guard_answers.lock()
             && let Some(answer) = known.get(&key)
@@ -1190,6 +1198,19 @@ impl ProjectIndex {
                 });
             } else {
                 names.clear();
+            }
+        }
+        // **And the per-offset states**, which are built by the same walk and invalidated by the same evidence.
+        if let Ok(mut states) = self.macro_states_at.lock() {
+            if known_to_the_index {
+                states.retain(|_, cached| {
+                    !cached
+                        .contributors
+                        .iter()
+                        .any(|file| file.as_str() == wanted.as_str())
+                });
+            } else {
+                states.clear();
             }
         }
     }

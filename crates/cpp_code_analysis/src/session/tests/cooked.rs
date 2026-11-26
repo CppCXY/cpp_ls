@@ -674,6 +674,10 @@ pub(crate) fn a_cook_writes_its_rendering_to_the_disk() {
     session.did_open("/p/a.cpp", source);
     session.index_everything();
     session.cook("/p/a.cpp").expect("the file cooks");
+    // **The commit marks the record and the quiet pass writes it** — see `Session::persist_cooked`: a write inside
+    // the commit is what made a program read hold the writer for seconds. `index_everything` already ran that pass
+    // for the file it cooked, so this may find the record and answer from it; either way the record is on the disk.
+    let _ = session.persist_cooked(std::time::Duration::ZERO);
 
     let (cooked, rendered) = session
         .store

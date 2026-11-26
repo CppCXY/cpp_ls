@@ -353,6 +353,16 @@ where
 
     // Declaring files, parsed once each: a file with twenty calls into it is parsed once, not twenty times.
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
+    // **One shape table for the whole answer.** A `ShapeTable` is a `OnceCell`, and every call passed a **fresh**
+    // one — so the declaration-shape walk of this file was made again for every call that resolved. Measured on
+    // neovim's `channel.c`: `inlayHint` answered 225 hints in **904 ms**; the walk is the cost, and there is one
+    // file. Completion and hover already share one per request; this loop did not.
+    let shapes: crate::sema::declarations::ShapeTable =
+        crate::sema::declarations::ShapeTable::new();
+    // **And one type memo for the whole answer**, for the same reason: `callee_of_a_call` built a fresh `TypeMemo`
+    // per call, so a file whose calls name the same variables (`channel`, `proc`, …) re-resolved every one of them
+    // from scratch. Measured on `channel.c`: four calls at **160 ms each**, on every request.
+    let types = crate::index::project::TypeMemo::default();
 
     for call in call_expressions(&view.root, range) {
         // **A call with nothing to hint cannot produce a hint, and resolving it is the expensive part.**
@@ -398,7 +408,8 @@ where
         let names =
             constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
                 let Known::Yes(callee) = callee_of_a_call(
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &types,
+                    &shapes,
                     index,
                     &mut |_: &Path| None,
                     &view.scopes,
@@ -427,7 +438,6 @@ where
         let Some(names) = names else {
             continue;
         };
-
         // The arguments were read before the callee: they are what decides whether this call is worth resolving.
         for (argument, name) in arguments.iter().zip(names.iter()) {
             // A parameter with no name breaks the alignment for every parameter *after* it rather than shifting

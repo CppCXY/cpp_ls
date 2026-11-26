@@ -118,6 +118,33 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// which is what [`Session::is_refined`] has to report for the majority of a project, where the second pass decides
     /// nothing and rebuilds nothing.
     refined_marks: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// **The macro environment a file's closure composes, and the witness it was built from.**
+    ///
+    /// `the_indexed_environment` walks the whole include closure and decides every guarded `#define` — measured
+    /// **184–190 ms** for neovim's `main.c`, on a warm index, and it was being built **twice for one keystroke**: once
+    /// to form the key a stored cooked record is looked up by (`the_record_environment`), once to compose the
+    /// environment the rendering is made in (`Session::cooking_materials`). Neither input changes when the reader
+    /// edits a function body.
+    ///
+    /// The witness is a closure fingerprint that **ignores the root file's own text** — the environment is built from
+    /// the closure's `#define`s and the root's `#include` offsets, and the root's own facts are deliberately excluded
+    /// from it (`the_indexed_environment`). So a body edit leaves the witness where it was and the entry is served;
+    /// a header edit, an include edit, or a file the index has not read changes it and the environment is rebuilt.
+    ///
+    /// Keyed by the index's spelling and the file's context hash; bounded, because an environment is tens of
+    /// thousands of entries and this is a cache of the files somebody is actually looking at.
+    environments: std::sync::Mutex<
+        std::collections::HashMap<
+            (String, u64),
+            (u64, u64, std::sync::Arc<cpp_parser::MacroEnvironment>, u64),
+        >,
+    >,
+    /// **When each entry above was last used** — the clock that makes the cache an LRU rather than a lottery.
+    ///
+    /// A drain cooks hundreds of headers while one file is being typed in, and those headers' environments are never
+    /// asked for again; without recency the file the reader is in would be evicted between two keystrokes by work it
+    /// did not ask for.
+    environment_clock: std::sync::atomic::AtomicU64,
     ///
     /// Opened on first use rather than in `with_provider`, because the cache directory is only final after
     /// `with_cache_directory` and a store that opened the wrong directory would be a store with two caches.
@@ -575,6 +602,8 @@ impl<F: FileProvider> SummaryStore<F> {
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
             refined_marks: std::sync::Mutex::new(std::collections::HashSet::new()),
+            environments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            environment_clock: std::sync::atomic::AtomicU64::new(0),
             summary_database: std::sync::OnceLock::new(),
             cache_file: cache::cache_db::DATABASE_FILE,
             generation: 0,
@@ -1704,9 +1733,32 @@ impl<F: FileProvider> SummaryStore<F> {
     /// not have, is hashed as that state rather than refusing the whole key: measured on `EmmyLuaCodeStyle`, refusing
     /// cost **1445 of 1745** files. The state is stable, so it is the honest answer.
     pub fn the_closure_fingerprint(&self, path: &Path) -> Option<u64> {
+        self.the_closure_fingerprint_of(path, true, true)
+    }
+
+    /// **The same number, with the root file's own text optionally left out.**
+    ///
+    /// The environment a closure composes deliberately excludes the root's own `#define`s — the renderer reads those
+    /// itself, in order, from offset 0 (`the_indexed_environment`) — so the root's text is not an input to it. The
+    /// environment cache is keyed by this witness, and a reader typing a function body changes the root's text and
+    /// nothing else: with the text counted, every keystroke would invalidate the environment it did not change.
+    ///
+    /// `refuse_a_missing_summary` is the difference between the two callers: a *record key* must not be computed for
+    /// a closure the index does not fully hold (a collision would serve a record for text it was not written from),
+    /// while a *witness* hashes "not indexed" as a state — the environment walk skips such a file, so a file that
+    /// arrives later changes the witness and the environment is rebuilt.
+    fn the_closure_fingerprint_of(
+        &self,
+        path: &Path,
+        the_root_text_counts: bool,
+        refuse_a_missing_summary: bool,
+    ) -> Option<u64> {
         const THE_WIDEST_CLOSURE: usize = 8192;
         /// A domain separator, so that "unresolved `x.h`" cannot collide with a path that happens to hash the same.
         const UNRESOLVED_INCLUDE: u64 = 0x8f3a_2c11_5e6b_9d07;
+        /// And one for a file the index has not read, when the caller tolerates that.
+        const MISSING_SUMMARY: u64 = 0x51d0_c0de_9a3b_7e21;
+        let root = normalize_path(path, cfg!(windows));
         // The constant that stood here is gone: an absent summary answers `None`, not a value that collides.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
@@ -1728,11 +1780,19 @@ impl<F: FileProvider> SummaryStore<F> {
                 // constant, which made two different texts of the same unindexed header produce the *same* key —
                 // and that header is exactly the file whose text just changed. A miss is correct; a collision is
                 // a record served for text it was not written from.
-                return None;
+                if refuse_a_missing_summary {
+                    return None;
+                }
+                parts.push(fnv1a64(key.as_bytes()) ^ MISSING_SUMMARY);
+                continue;
             };
             let mut bytes = Vec::with_capacity(16 + key.len());
             bytes.extend_from_slice(key.as_bytes());
-            bytes.extend_from_slice(&summary.key.content_hash.to_le_bytes());
+            if the_root_text_counts || key != root {
+                bytes.extend_from_slice(&summary.key.content_hash.to_le_bytes());
+            } else {
+                bytes.extend_from_slice(&0u64.to_le_bytes());
+            }
             parts.push(fnv1a64(&bytes));
             for include in &summary.includes {
                 match include.resolved.as_ref() {
@@ -1749,6 +1809,57 @@ impl<F: FileProvider> SummaryStore<F> {
         Some(fnv1a64(&bytes))
     }
 
+    /// **The macro environment a file is rendered in, cached against the witness that produced it.**
+    ///
+    /// See the field's note: a cook needs this twice (the stored record's key and the rendering's environment) and a
+    /// keystroke changes neither. `None` when the closure is not fully indexed — a caller's answer is "no environment
+    /// yet", not an empty one.
+    pub(crate) fn the_environment(
+        &self,
+        path: &Path,
+    ) -> Option<(u64, std::sync::Arc<cpp_parser::MacroEnvironment>)> {
+        let key = (normalize_path(path, cfg!(windows)), self.context_hash(path));
+        let witness = self.the_closure_fingerprint_of(path, false, false)?;
+        let tick = self
+            .environment_clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut hit = None;
+        if let Ok(mut cache) = self.environments.lock()
+            && let Some(entry) = cache.get_mut(&key)
+            && entry.0 == witness
+        {
+            entry.3 = tick;
+            hit = Some((entry.1, entry.2.clone()));
+        }
+        if let Some(hit) = hit {
+            return Some(hit);
+        }
+        let environment = std::sync::Arc::new(self.the_indexed_environment(path)?);
+        let fingerprint = environment.fingerprint();
+        if let Ok(mut cache) = self.environments.lock() {
+            if cache.len() >= 8
+                && !cache.contains_key(&key)
+                && let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.3)
+                    .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+            cache.insert(key, (witness, fingerprint, environment.clone(), tick));
+        }
+        Some((fingerprint, environment))
+    }
+
+    /// The environment alone, for a caller that does not need its fingerprint.
+    pub(crate) fn an_environment_of(
+        &self,
+        path: &Path,
+    ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
+        self.the_environment(path)
+            .map(|(_, environment)| environment)
+    }
+
     /// **The environment half of a cooked record's key**: the macros in force for this file, hashed.
     ///
     /// The records keyed on [`SummaryStore::the_closure_fingerprint`] before this, which hashes the content of every
@@ -1762,8 +1873,10 @@ impl<F: FileProvider> SummaryStore<F> {
     /// `the_stored_refinement_mark` the same way. Moving one of the two made the mark unfindable — measured as
     /// `a_refinement_is_served_to_the_next_session` answering `stored_refinements_served: 0`.
     fn the_record_environment(&self, path: &Path) -> Option<u64> {
-        self.the_indexed_environment(path)
-            .map(|environment| environment.fingerprint())
+        // Through the cache: a cook asks for this and then for the environment itself, and building it twice was
+        // **375 ms of one keystroke's write lock** on neovim's `main.c`.
+        self.the_environment(path)
+            .map(|(fingerprint, _)| fingerprint)
     }
 
     /// **Record that the second pass found nothing to repair in a file** — the half of the cache a rebuilt summary
@@ -1891,12 +2004,13 @@ impl<F: FileProvider> SummaryStore<F> {
         self.the_stored_cook_reason(path).ok()
     }
 
-    /// **Why a stored cook is not usable, named** — the instrument a hit rate is read with: `not stored` and `no
-    /// closure` are both misses, and only one of them is about the cache.
-    pub fn the_stored_cook_reason(
-        &self,
-        path: &Path,
-    ) -> Result<(CookedFile, crate::preprocess::cooked::RenderedCooked), &'static str> {
+    /// **The bytes of a stored cook record, undecoded** — so the decode can happen outside the lock.
+    ///
+    /// A record is a file's whole rendering: measured at **~100–350 ms** to decode for neovim's headers, and it was
+    /// being decoded under the session's read lock, so every request (and the writer's cook behind them) waited for
+    /// it. The key's construction is the cheap half and the only half that needs the store; the bytes and the decode
+    /// are a pure function of what comes back.
+    pub fn the_stored_cook_bytes(&self, path: &Path) -> Result<Vec<u8>, &'static str> {
         let source = self.files.read(path).ok_or("no text")?;
         let fingerprint = self.the_record_environment(path).ok_or("no closure")?;
         let key = CacheKey {
@@ -1905,7 +2019,16 @@ impl<F: FileProvider> SummaryStore<F> {
             env: fingerprint,
         };
         let database = self.summary_database().ok_or("no database")?;
-        let bytes = database.cooked_reading(key).ok_or("not stored")?;
+        database.cooked_reading(key).ok_or("not stored")
+    }
+
+    /// **Why a stored cook is not usable, named** — the instrument a hit rate is read with: `not stored` and `no
+    /// closure` are both misses, and only one of them is about the cache.
+    pub fn the_stored_cook_reason(
+        &self,
+        path: &Path,
+    ) -> Result<(CookedFile, crate::preprocess::cooked::RenderedCooked), &'static str> {
+        let bytes = self.the_stored_cook_bytes(path)?;
         let (cooked, rendered) =
             crate::summary_codec::decode_the_cooked_record(&bytes).map_err(|_| "undecodable")?;
         let rendered = rendered.ok_or("no rendering")?;

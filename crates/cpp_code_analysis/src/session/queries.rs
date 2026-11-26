@@ -829,7 +829,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // digits in this file) is not yet in force at offset 0. Measured on Lua 5.5.0's `lcode.c:1933`,
         // `cast_byte(~PF_VAHID)`: the card said "a macro whose value is `1`" and "Expands to `PF_VAHID`" — the name,
         // because the binding from `lobject.h` sat past the synthetic source's end.
-        let environment = self.store.the_indexed_environment(&view.path)?;
+        let environment = self.store.an_environment_of(&view.path)?;
         let seed = crate::preprocess::macros::MacroTable::from_marked(self.store.index().macros());
         let configuration = {
             let mut parsed = self
@@ -837,7 +837,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             crate::preprocess::cooked::configuration_from_environment_as_of(
-                &environment,
+                &*environment,
                 offset.get(),
                 true,
                 &mut parsed,

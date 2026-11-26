@@ -3304,8 +3304,16 @@ impl ProjectIndex {
         // answers without this step, so the two answers can be compared over the same questions: with a rendering for
         // most files (⑱ makes the rendering the reading) this filter should have almost nothing left to remove, and
         // "almost nothing" is a number this crate's style asks for rather than a claim. See `tests/patch_probe.rs`.
+        // **The verdicts this query's one walk already produced**, when there are any: the filter then answers from
+        // a map instead of walking the header's closure — see `ProjectIndex::answer_the_guards`.
+        let answered = self.answered_guards_of(visible_from);
         candidates.retain(|found| {
-            self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
+            self.a_guard_is_taken(
+                &found.file,
+                found.fact.guard,
+                found.fact.range.start_offset,
+                answered.as_deref(),
+            )
         });
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
@@ -3675,19 +3683,46 @@ impl ProjectIndex {
     /// this and a caller asking about thousands of them should use the incremental state
     /// [`ProjectIndex::macro_environment`] builds while it walks.
     pub fn macros_at(&self, path: &Path, offset: usize) -> Marked {
+        // **The question is the offset, so the answer is keyed by it.** Every fact guarded by the same region asks
+        // for the same state — measured on `channel.c`: 18 asks, two distinct offsets, 71 ms each, 1.3 s of a
+        // semantic-token request whose classification was 1.3 ms.
+        let key = (normalize(path), offset);
+        if let Ok(memo) = self.macro_states_at.lock()
+            && let Some(cached) = memo.get(&key)
+        {
+            return cached.state.clone();
+        }
         let mut state = self.macros.clone();
         let certain = self.certainly_in_the_translation_unit(path);
-
+        let mut visited: HashSet<String> = HashSet::new();
         self.macro_candidates(
             path,
             &mut Vec::new(),
             false,
-            &mut HashSet::new(),
+            &mut visited,
             &certain,
             &mut Collecting::Nothing,
             &mut state,
             Some(offset),
         );
+        let contributors: Vec<String> = visited.into_iter().collect();
+        if let Ok(mut memo) = self.macro_states_at.lock() {
+            if memo.len() >= MAX_CACHED_MACRO_STATES
+                && let Some(oldest) = memo.keys().next().cloned()
+            {
+                // **One entry out, not the whole map.** Emptying on overflow threw away the states the colouring
+                // pass had just paid for: the hint pass asks about offsets of its own, and clearing them here made
+                // the next semantic-token request pay the walks again.
+                memo.remove(&oldest);
+            }
+            memo.insert(
+                key,
+                std::sync::Arc::new(CachedMacroState {
+                    contributors,
+                    state: state.clone(),
+                }),
+            );
+        }
 
         state
     }
@@ -3895,8 +3930,14 @@ impl ProjectIndex {
                 break;
             }
 
+            // **A guard question due at or before this point is answered from the state the walk has right
+            // here** — that is the whole of `answer_the_guards`: one walk through the translation unit answers
+            // every `#ifdef` a colouring pass is about to ask, instead of one 276-file walk per header.
+            collecting.due(summary, &path, at, state);
+
             if take_fact {
                 let fact = facts.next().expect("peeked");
+
                 let reach = self.fact_reach(
                     summary,
                     &mut verdicts,
@@ -3994,6 +4035,121 @@ impl ProjectIndex {
             Visibility::Inactive => FactReach::Inactive,
             Visibility::Unknown => FactReach::Unknown,
         }
+    }
+
+    /// **Answer every guard question a query is about to ask, with one walk through the file's translation unit.**
+    ///
+    /// The alternative — and what every request did until this existed — is `visibility_at` per candidate, which
+    /// builds a macro state of the *header's* closure for each question: `channel.c` asks **twenty-five** of them on
+    /// its first colouring pass, each a 276-file walk of sixteen thousand names (65 ms), and the pass answered in
+    /// **638 ms**. One walk from the file being coloured reaches the same headers in the order a compiler would,
+    /// with the state already built, so each question is a lookup at the moment the walk passes its condition.
+    ///
+    /// A question the walk never reaches (a header behind an `#include` this translation unit does not take) is
+    /// left unanswered, and the caller falls back to `visibility_at` for it.
+    pub fn answer_the_guards(
+        &self,
+        root: &Path,
+        questions: &[(String, u32, usize)],
+    ) -> Vec<Option<crate::Visibility>> {
+        let mut walk = GuardWalk::new();
+        let mut asked: Vec<Option<Vec<(u32, usize)>>> = Vec::with_capacity(questions.len());
+        for (file, region, fact_offset) in questions {
+            let summary = self.summaries.get(&normalize(Path::new(file)));
+            let Some(summary) = summary else {
+                walk.question();
+                asked.push(None);
+                continue;
+            };
+            let question = walk.question();
+            let chain: Vec<(u32, usize)> = summary
+                .guards
+                .conditions_of(*region)
+                .into_iter()
+                .map(|at| (at.region, at.condition_at))
+                .collect();
+            for (condition_region, condition_at) in &chain {
+                walk.ask(
+                    question,
+                    file,
+                    *condition_region,
+                    *condition_at,
+                    *fact_offset,
+                );
+            }
+            asked.push(Some(chain));
+        }
+
+        let certain = self.certainly_in_the_translation_unit(root);
+        let mut state = self.macros.clone();
+        self.macro_candidates(
+            root,
+            &mut Vec::new(),
+            false,
+            &mut HashSet::new(),
+            &certain,
+            &mut Collecting::Guards(&mut walk),
+            &mut state,
+            None,
+        );
+
+        asked
+            .into_iter()
+            .enumerate()
+            .map(|(question, chain)| {
+                let chain = chain?;
+                let answers = &walk.answers[question];
+                let mut unknown = false;
+                for (region, _) in chain {
+                    match answers.get(&region).copied().flatten() {
+                        Some(true) => {}
+                        Some(false) => return Some(crate::Visibility::Inactive),
+                        None => unknown = true,
+                    }
+                }
+                Some(if unknown {
+                    crate::Visibility::Unknown
+                } else {
+                    crate::Visibility::Active
+                })
+            })
+            .collect()
+    }
+
+    /// **Install the verdicts [`ProjectIndex::answer_the_guards`] produced**, so the guard filter finds them
+    /// instead of walking each header's closure again. Keyed by the file the questions were asked from, and
+    /// dropped when the index changes.
+    pub fn install_answered_guards(
+        &self,
+        root: &Path,
+        answers: HashMap<(String, u32, usize), crate::Visibility>,
+    ) {
+        if answers.is_empty() {
+            return;
+        }
+        if let Ok(mut installed) = self.answered_guards.lock() {
+            // **One entry per open document**, and a stale one is worthless: an entry answers only at the revision
+            // it was made at, which is what lets the answers be reused without being able to be wrong.
+            if installed.len() >= 8
+                && let Some(oldest) = installed.keys().next().cloned()
+            {
+                installed.remove(&oldest);
+            }
+            installed.insert(
+                normalize(root),
+                (self.changed, std::sync::Arc::new(answers)),
+            );
+        }
+    }
+
+    /// The verdicts installed for `root`, when they are still about this revision.
+    fn answered_guards_of(
+        &self,
+        root: &Path,
+    ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>> {
+        let installed = self.answered_guards.lock().ok()?;
+        let (stamp, answers) = installed.get(&normalize(root))?;
+        (*stamp == self.changed).then(|| std::sync::Arc::clone(answers))
     }
 
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
@@ -4142,7 +4298,91 @@ pub(crate) enum Collecting<'a> {
     /// pays one walk per condition in the closure. Carried this way the state is already in hand when the edge is
     /// crossed, which is what [`crate::index::environment::MacrosHere::from_walk`] exists for.
     Visibility(&'a mut Seen),
+    /// **Guard questions a query is about to ask**, answered from the state the walk has at each condition — see
+    /// [`ProjectIndex::answer_the_guards`].
+    Guards(&'a mut GuardWalk),
     Nothing,
+}
+
+/// The questions one walk answers about `#if` regions, and the verdicts it collected.
+///
+/// A colouring pass asks "is this declaration compiled" once per candidate, and each answer costs a walk of the
+/// header's closure (`macros_at`: 276 files, 65 ms, sixteen thousand names). Every one of those questions can be
+/// answered by **one** walk through the file being coloured, which reaches the same headers — so the questions are
+/// registered here by condition offset, the walk evaluates each as it passes, and the answers are combined into a
+/// [`crate::Visibility`] afterwards by the rule `SummaryGuards::visibility_of` states.
+pub(crate) struct GuardWalk {
+    /// `(file, condition offset)` → the questions waiting on that condition.
+    due: HashMap<(String, usize), Vec<Due>>,
+    /// Per question: the region it tests → whether that region's branch holds.
+    answers: Vec<HashMap<u32, Option<bool>>>,
+}
+
+/// One question waiting on one condition of its chain.
+struct Due {
+    question: usize,
+    region: u32,
+    fact_offset: usize,
+}
+
+impl GuardWalk {
+    fn new() -> Self {
+        GuardWalk {
+            due: HashMap::new(),
+            answers: Vec::new(),
+        }
+    }
+
+    fn question(&mut self) -> usize {
+        self.answers.push(HashMap::new());
+        self.answers.len() - 1
+    }
+
+    fn ask(
+        &mut self,
+        question: usize,
+        file: &str,
+        region: u32,
+        condition_at: usize,
+        fact_offset: usize,
+    ) {
+        self.due
+            .entry((file.to_string(), condition_at))
+            .or_default()
+            .push(Due {
+                question,
+                region,
+                fact_offset,
+            });
+    }
+
+    /// Answer every question whose condition the walk has now passed.
+    fn due(&mut self, summary: &FileSummary, file: &str, at: usize, state: &Marked) {
+        let waiting: Vec<(String, usize)> = self
+            .due
+            .keys()
+            .filter(|(wanted, offset)| wanted == file && *offset < at)
+            .cloned()
+            .collect();
+        for key in waiting {
+            let Some(questions) = self.due.remove(&key) else {
+                continue;
+            };
+            let condition_at = key.1;
+            for due in questions {
+                let holds = summary
+                    .guards
+                    .region_at(due.region, due.fact_offset)
+                    .and_then(|region| {
+                        region.visibility(&crate::index::environment::MacrosHere::from_walk(
+                            state,
+                            condition_at,
+                        ))
+                    });
+                self.answers[due.question].insert(due.region, holds);
+            }
+        }
+    }
 }
 
 /// The files one root can see, and which of them are in view only through an `import`.
@@ -4215,6 +4455,12 @@ impl Seen {
 }
 
 impl Collecting<'_> {
+    /// **A guard question whose condition the walk has just passed** — see [`Collecting::Guards`].
+    pub(crate) fn due(&mut self, summary: &FileSummary, file: &str, at: usize, state: &Marked) {
+        if let Collecting::Guards(walk) = self {
+            walk.due(summary, file, at, state);
+        }
+    }
     /// **One** fact, if the caller is collecting facts about that name — or **every** name, when it is collecting
     /// the environment ([`Collecting::Names`]).
     pub(crate) fn fact(
@@ -4261,6 +4507,7 @@ impl Collecting<'_> {
             Collecting::Name(name, out) => Collecting::Name(name, out),
             Collecting::Names(out) => Collecting::Names(out),
             Collecting::Visibility(seen) => Collecting::Visibility(seen),
+            Collecting::Guards(walk) => Collecting::Guards(walk),
             Collecting::Nothing => Collecting::Nothing,
         }
     }

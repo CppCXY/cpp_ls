@@ -73,6 +73,22 @@ const COMMIT_A_SLICE: usize = 4;
 /// Sixteen is the middle: it spreads the decode over the cores without making one insert a stall a request can feel.
 const COOK_A_SLICE: usize = 16;
 
+/// **How much of a drain one read hold is allowed to do.**
+///
+/// The drain was unbounded — every file the wave left and every environment its slice named — and it runs under the
+/// session's read lock. Measured on neovim's `main.c`: one drain held the lock for **1842 ms**, and the writer's
+/// twenty-millisecond cook queued behind it while every request queued behind the writer. The leftovers go back on
+/// the queues ([`Session::commit_the_drain`] does it) and the next slice takes them.
+const DRAIN_FILES_A_HOLD: usize = 1;
+
+/// How many files' macro environments one read hold builds — see [`DRAIN_FILES_A_HOLD`]. Each is a closure walk, so
+/// the bound is wider than the re-read's and still one slice's worth.
+const DRAIN_ENVIRONMENTS_A_HOLD: usize = 4;
+
+/// **How many stored cook records one read hold decodes** — see [`DRAIN_FILES_A_HOLD`] for why the slice is wider than
+/// the hold. Each record is a file's whole closure's text, measured at ~100 ms, so four is what a request can wait for.
+const COOKS_A_HOLD: usize = 1;
+
 /// Feedback target for adjusting wave size, not a hard end-to-end latency deadline.
 const INDEX_SLICE_MS: u64 = 30;
 
@@ -493,11 +509,28 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         // idle timeout); one that spins shows thousands, which is what the `containers.cpp` report measured.
         let mut rounds = 0u64;
         let rounds_started = std::time::Instant::now();
+        let mut last_applied = context.inbox().applied();
         loop {
             rounds += 1;
 
             if rounds.is_multiple_of(1000) && false {
                 eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
+            }
+            // **Do not index while the reader is typing.**
+            //
+            // The pump's slices hold the session's read lock for 170–360 ms at a time (a stored record's decode was
+            // 100–350 ms of that; see `read a cook slice`), the writer's `didChange` batch waits for that lock, and
+            // **every request in flight waits for the writer's batch** — that is the barrier. Measured through the
+            // protocol while a reader typed into `channel.c` at 80 ms: the writer waited **0.9–1.1 s** per batch and
+            // completion answered in **1.3–1.6 s**, with a list three seconds stale. The index is not what the reader
+            // needs in those hundred milliseconds; the writer's own cook of the edited file (22 ms) is, and it still
+            // happens. So a pump that sees the client's edits arrive waits for a quiet moment instead of competing.
+            const A_QUIET_MOMENT: std::time::Duration = std::time::Duration::from_millis(120);
+            let applied_now = context.inbox().applied();
+            if applied_now != last_applied {
+                last_applied = applied_now;
+                tokio::time::sleep(A_QUIET_MOMENT).await;
+                continue;
             }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
             // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
@@ -689,71 +722,74 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 asked.len()
             );
             let cooking_began = std::time::Instant::now();
-            let (prepared_drain, stored_cooks, cooks, cooking_revision) = context
+            // **The stored-record decode, in holds of four.**
+            //
+            // This used to be one `run_blocking` for the whole slice — the decode of sixteen records, the gather of
+            // the ones that have none, and the drain — and one lock hold paid for all of it: measured on neovim's
+            // `main.c`, **1549 ms** with the writer's twenty-millisecond cook behind it and every request behind
+            // that. The decode is why the slice is wide (each record is a whole closure's text), so the width stays
+            // and the *hold* is cut: four records, then four more, then the drain.
+            let mut stored_cooks = Vec::new();
+            let mut cooks = Vec::new();
+            for piece in asked.chunks(COOKS_A_HOLD) {
+                let piece = piece.to_vec();
+                let (records, gathered) = context
+                    .analysis()
+                    .run_blocking("read a cook slice", move |session| {
+                        let mut records = Vec::new();
+                        let mut cooks = Vec::new();
+                        for path in &piece {
+                            match session.a_stored_cook_record(path) {
+                                Some(record) => records.push(record),
+                                None => {
+                                    if let Some(cook) = session.gather_a_cook(path) {
+                                        cooks.push(cook);
+                                    }
+                                }
+                            }
+                        }
+                        Some((records, cooks))
+                    })
+                    .await
+                    .unwrap_or_default();
+                // **The decode, off the lock.** A record is the file's whole rendering and decoding one is
+                // 100–350 ms for a header's closure; doing it under the read guard put every request — and the
+                // writer's twenty-millisecond cook — behind it (measured: **1549 ms** for one slice).
+                let stored = tokio::task::block_in_place(|| {
+                    records
+                        .into_iter()
+                        .filter_map(|(path, bytes)| {
+                            match cpp_code_analysis::summary_codec::decode_the_cooked_record(&bytes)
+                            {
+                                Ok((cooked, Some(rendered))) => Some((path, cooked, rendered)),
+                                _ => None,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                });
+                stored_cooks.extend(stored);
+                cooks.extend(gathered);
+            }
+            let prepared = context
                 .analysis()
                 .run_blocking("prepare the drain", move |session| {
                     let revision = session.revision();
-                    // **The disk before the render**, per claimed file: a record with its rendering is a cook this
-                    // slice does not run at all — it is filed straight into the index, and the rendering answers
-                    // `view` immediately.
-                    //
-                    // **In parallel, because decoding a stored record is most of a cold start's drain.** Measured on
-                    // neovim's `ui.c`: the drain's compute was **26.8 s** of a 57 s start, and it was neither the
-                    // re-read pass (0.9 s, traced) nor the environments (`prepare_the_drain`'s own loop, which the
-                    // engine now splits across cores) — it is this loop, which decodes four renderings per slice and
-                    // each one is a whole closure's text. Three or four of them are independent, and the slice is
-                    // the only caller, so the chunks are cut here and the answers are kept in the order asked for.
-                    let decide = |path: &std::path::PathBuf| match session.a_stored_cook(path) {
-                        Some(record) => (Some(record), None),
-                        None => (None, session.gather_a_cook(path)),
-                    };
-                    let cores = std::thread::available_parallelism()
-                        .map(|cores| cores.get())
-                        .unwrap_or(4)
-                        .min(claimed.len().max(1));
-                    let mut stored = Vec::new();
-                    let mut cooks = Vec::new();
-                    if cores <= 1 || claimed.len() < 4 {
-                        for path in &claimed {
-                            let (record, cook) = decide(path);
-                            stored.extend(record);
-                            cooks.extend(cook);
-                        }
-                    } else {
-                        let chunk = claimed.len().div_ceil(cores);
-                        let mut pieces: Vec<(Vec<_>, Vec<_>)> = Vec::new();
-                        std::thread::scope(|scope| {
-                            let mut handles = Vec::with_capacity(cores);
-                            for piece in claimed.chunks(chunk) {
-                                handles.push(scope.spawn(move || {
-                                    let mut stored = Vec::new();
-                                    let mut cooks = Vec::new();
-                                    for path in piece {
-                                        let (record, cook) = decide(path);
-                                        stored.extend(record);
-                                        cooks.extend(cook);
-                                    }
-                                    (stored, cooks)
-                                }));
-                            }
-                            for handle in handles {
-                                pieces.push(handle.join().unwrap_or_default());
-                            }
-                        });
-                        for (records, gathered) in pieces {
-                            stored.extend(records);
-                            cooks.extend(gathered);
-                        }
-                    }
                     Some((
-                        session.prepare_the_drain(drain),
-                        stored,
-                        cooks,
-                        Some(revision),
+                        // **Bounded, because this is one read hold.** Two files to re-read and eight environments
+                        // to render: the rest goes back on the queues and the next slice takes it.
+                        session.prepare_the_drain(
+                            drain,
+                            DRAIN_FILES_A_HOLD,
+                            DRAIN_ENVIRONMENTS_A_HOLD,
+                        ),
+                        revision,
                     ))
                 })
-                .await
-                .unwrap_or_default();
+                .await;
+            let (prepared_drain, cooking_revision) = match prepared {
+                Some((prepared, revision)) => (prepared, Some(revision)),
+                None => (Default::default(), None),
+            };
             let prepared_the_drain = cooking_began.elapsed().as_millis();
             let rendering = std::time::Instant::now();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;

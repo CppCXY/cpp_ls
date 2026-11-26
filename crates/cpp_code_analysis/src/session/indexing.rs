@@ -671,6 +671,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 if forgotten > 0 {
                     log::debug!("index: forgot {forgotten} summary(ies) over the byte budget");
                 }
+                // **And the cook records, which the commit only marked.** A session that has just indexed is exactly
+                // the moment the debounce exists for: writing them during the commit made a program read hold the
+                // writer for seconds, and writing them here is one quiet pass at the end. A caller that says "index
+                // everything" gets the records too — that is what a warm start reads.
+                let written = self.persist_cooked(std::time::Duration::ZERO);
+                if written > 0 {
+                    log::debug!("index: wrote {written} cooked record(s)");
+                }
                 return total;
             }
         }

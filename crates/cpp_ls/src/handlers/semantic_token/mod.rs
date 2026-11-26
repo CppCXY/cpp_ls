@@ -685,7 +685,7 @@ pub async fn on_semantic_tokens(
             return None;
         }
 
-    let names = session.classified_names(&view);
+        let names = session.classified_names(&view);
 
         // **The format strings of the file**, read from its own text — and only when a project has not turned every
         // family off, which is the one state in which the pass costs nothing at all.

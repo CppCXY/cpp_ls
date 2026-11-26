@@ -1290,7 +1290,9 @@ pub(crate) fn callees_of_a_call(
             Known::Yes(found) if !found.is_empty() => Known::Yes(found),
             other => match other {
                 Known::Unknown(reason) => Known::Unknown(reason),
-                _ => match callee_of_a_call(&shapes, index, declaring, scopes, root, path, call) {
+                _ => match callee_of_a_call(
+                    &memo, &shapes, index, declaring, scopes, root, path, call,
+                ) {
                     Known::Yes(one) => Known::Yes(vec![one]),
                     Known::Unknown(reason) => Known::Unknown(reason),
                     Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1685,6 +1687,7 @@ pub(crate) fn member_callees(
 /// the name: a `const`, a `static` or a return type is outside the declarator, and a declaration may hold more
 /// than one declarator (`void (*f(int a))(int b)`).
 pub(crate) fn callee_of_a_call(
+    memo: &TypeMemo,
     shapes: &crate::sema::declarations::ShapeTable,
     index: &ProjectIndex,
     declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
@@ -1693,7 +1696,6 @@ pub(crate) fn callee_of_a_call(
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Known<Callee> {
-    let memo = TypeMemo::default();
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -1702,7 +1704,7 @@ pub(crate) fn callee_of_a_call(
     };
 
     match declaration_of_a_callee(
-        &memo, shapes, index, declaring, scopes, root, path, &callee, written,
+        memo, shapes, index, declaring, scopes, root, path, &callee, written,
     ) {
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),

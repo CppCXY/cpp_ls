@@ -253,28 +253,39 @@ impl AnalysisState {
             let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
                 !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
             };
-            if (typed.is_empty() && !raw.items.is_empty())
-                || (!typed.is_empty() && has_the_prefix(&raw))
-            {
-                return Some(raw);
-            }
             let Some(rendered) = session.view(&path) else {
+                // **No rendering is a temporary state, and it is stated as one.** The file's own text, parsed with
+                // whatever environment is known for it, is offered and marked incomplete so the client asks again —
+                // the writer cooks this file on every edit, so the next request has the compiler's reading.
                 let mut incomplete = raw;
                 incomplete.incomplete = true;
                 return Some(incomplete);
             };
             let mut found = session.completions(&rendered, offset);
-            if found.items.is_empty() || (!typed.is_empty() && !has_the_prefix(&found)) {
+            // **The rendering wins whenever it answers, even if the file's own text also has a match.**
+            //
+            // This used to hand `raw` back as soon as the *file's* reading contained one item starting with the
+            // typed prefix — and a C file parsed without its macros has hundreds of names from the index, so `i`
+            // answered 803 items whose first were `int64_t_cmp`, `if`, `include` and **not the local `ids`** the
+            // reader was typing at. The rendering is the reading that has locals, members and macro-declared names;
+            // the file's own text is the fallback for a prefix only it can answer.
+            let raw_answers = has_the_prefix(&raw);
+            let rendering_answers = has_the_prefix(&found);
+            if !rendering_answers && (raw_answers || found.items.is_empty()) {
                 return Some(raw);
             }
             let start =
                 rendered.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
                     found.replace.start_offset,
                 ));
-            let end =
-                rendered.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
+            // **The end of a range maps with `file_offset_of_end`.** `file_offset_of` answers where an offset
+            // *starts*, so the end of a name that is the last token of a line came back as the first character of the
+            // next line — measured as a completion item whose edit replaced `HWND__` and the newline after it.
+            let end = rendered.file_offset_of_end(
+                cpp_code_analysis::file::coordinates::ReadingOffset::new(
                     found.replace.end_offset(),
-                ));
+                ),
+            );
             if let (Some(start), Some(end)) = (start, end) {
                 found.replace = cpp_parser::SourceRange::new(
                     start.get(),

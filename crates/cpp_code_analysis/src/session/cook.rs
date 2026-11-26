@@ -162,6 +162,52 @@ impl<F: FileProvider + Clone> Session<F> {
         ) as std::sync::Arc<dyn cpp_toolchain::FeatureProbe>)
     }
 
+    /// **The `Configuration` a composed cook renders in** — the environment materialised, cached by its fingerprint.
+    ///
+    /// `cooking_materials` composes an environment from the index and then turns it into a table; the table is a
+    /// function of that environment and the seed, and the fingerprint names the environment exactly. Measured on
+    /// neovim's `main.c`: **21–29 ms** per keystroke to rebuild a table nothing had changed.
+    fn a_configuration_for(
+        &self,
+        path: &Path,
+    ) -> Option<std::sync::Arc<crate::preprocess::cooked::Configuration>> {
+        let (fingerprint, environment) = self.store.the_environment(path)?;
+        let key = (queue_key(path), self.store.context_hash(path));
+        let asked = std::time::Instant::now();
+        if let Ok(cache) = self.configurations.lock()
+            && let Some((known, configuration, _)) = cache.get(&key)
+            && *known == fingerprint
+        {
+            return Some(configuration.clone());
+        }
+        let configuration = {
+            let mut parsed = self
+                .parsed_definitions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::sync::Arc::new(
+                crate::preprocess::cooked::configuration_from_environment_and(
+                    &*environment,
+                    true,
+                    &mut parsed,
+                ),
+            )
+        };
+        if let Ok(mut cache) = self.configurations.lock() {
+            if cache.len() >= 8
+                && !cache.contains_key(&key)
+                && let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.2)
+                    .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+            cache.insert(key, (fingerprint, configuration.clone(), asked));
+        }
+        Some(configuration)
+    }
+
     pub fn cooking_materials(&self, path: &Path) -> Option<CookingMaterials> {
         let path = self.store.index().summary(path)?.path.clone();
         let key = SummaryKey::new(0, self.store.context_hash(&path));
@@ -262,21 +308,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // The definition cache is the run's, not this file's: a definition's text does not depend on which file asked
         // for it, and without it every cook re-lexes and re-parses the whole closure's bodies (`configuration_from_
         // environment_and`'s own note measures 12.2 s of a 40 s census on exactly that).
-        let mut parsed = self
-            .parsed_definitions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut composed = || {
-            self.store
-                .the_indexed_environment(&path)
-                .map(|environment| {
-                    crate::preprocess::cooked::configuration_from_environment_and(
-                        &environment,
-                        true,
-                        &mut parsed,
-                    )
-                })
-        };
+        let composed = || self.a_configuration_for(&path);
         // includes it renders 217 875. Nothing is walked when the designated root's timeline is already in hand
         // (held), which is the case the fast path above exists for.
         // **S1: a cook composes, and never walks.** The environment a file needs is a function of its text and the
@@ -325,7 +357,6 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             None => (None, Some(composed()?)),
         };
-        drop(parsed);
 
         let text = self.files.read(&path)?;
         let text_hash = crate::cache::content_hash(&text);
@@ -503,13 +534,11 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // Keyed by the hash of the text it was **made from** — the same one the check above just compared — rather
         // than by a second read of the file, so the entry cannot describe one text under another's key.
-        if let Ok(mut known) = self.renderings.lock() {
-            let key = a_rendering_key(&path, text_hash);
-
-            let _before = known.len();
-            let weight = indexed.rendered.weight();
-            known.insert(key, std::sync::Arc::clone(&indexed.rendered), weight);
-        }
+        //
+        // **And pinned when the file is open**, outside the LRU's budget: a pass over the project's closure fills the
+        // table, and the file the reader is editing must keep its rendering or the next completion answers from the
+        // file's own text with an empty environment (measured: `ids.` → 0 members twenty seconds after the edit).
+        self.remember_a_rendering(&path, text_hash, std::sync::Arc::clone(&indexed.rendered));
         {
             // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
             // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
@@ -543,8 +572,15 @@ impl<F: FileProvider + Clone> Session<F> {
     /// cache, so a file edited again while it waits is either absent or has a newer rendering; the record key is
     /// recomputed from the current text by [`crate::SummaryStore::put_the_cooked_reading_with_rendering`].
     pub fn persist_cooked(&self, min_age: std::time::Duration) -> usize {
-        let now = std::time::Instant::now();
-        let due: Vec<std::path::PathBuf> = match self.cook_persistence.lock() {
+        // **A time budget, not a count.** The pass runs under the session's read lock, and a reader holding it is what
+        // a writer waits for — measured on neovim's `channel.c` while a reader typed: an `index slice` update waited
+        // **1.1 s** for `inner.read()`, and every request waited for that update. The number of records a writer can
+        // put down in 25 ms varies with their size, so the budget is the clock: what is left goes back on the queue,
+        // still dirty, and the next pass (the server asks every two seconds) takes it.
+        const A_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
+        let started = std::time::Instant::now();
+        let now = started;
+        let mut due: Vec<std::path::PathBuf> = match self.cook_persistence.lock() {
             Ok(mut dirty) => {
                 let due: Vec<_> = dirty
                     .iter()
@@ -559,8 +595,26 @@ impl<F: FileProvider + Clone> Session<F> {
             Err(_) => return 0,
         };
         let mut written = 0;
-        for path in due {
-            let Some(rendered) = self.rendering_of(&path) else {
+        while let Some(path) = due.pop() {
+            if written > 0 && started.elapsed() >= A_HOLD {
+                // **The rest waits.** Put back with their original age, so a file is not re-written just because a
+                // previous pass was busy.
+                if let Ok(mut dirty) = self.cook_persistence.lock() {
+                    for path in due {
+                        dirty
+                            .entry(queue_key(&path))
+                            .or_insert((path, std::time::Instant::now() - min_age));
+                    }
+                }
+                break;
+            }
+            // **The rendering the commit remembered, not one rebuilt here.** `rendering_of` walks the file's
+            // translation unit when the table has no entry (`translation_unit_of`), and a persistence pass that walks
+            // is a persistence pass that costs a program read — measured as three walks in one fixture.
+            let Some(text) = self.files.read(&path) else {
+                continue;
+            };
+            let Some(rendered) = self.known_rendering_of(&path, &text) else {
                 continue;
             };
             let Some(cooked) = self.store.index().cooked_reading(&path).cloned() else {
@@ -610,10 +664,18 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
 
-    /// **The cook the disk already holds for `path`** — the record with its rendering, as the pump's claim needs it.
+    /// **The bytes of the record the disk holds for `path`** — the claim's cheap half, so the decode can happen
+    /// outside the lock (`SummaryStore::the_stored_cook_bytes`).
     ///
     /// The name is resolved the way every cook resolves it (the index's own spelling), because the store's key is
     /// built from the path the index holds and a caller's spelling of the same file is not that path.
+    pub fn a_stored_cook_record(&self, path: &Path) -> Option<(PathBuf, Vec<u8>)> {
+        let resolved = self.store.index().summary(path)?.path.clone();
+        let bytes = self.store.the_stored_cook_bytes(&resolved).ok()?;
+        Some((resolved, bytes))
+    }
+
+    /// **The cook the disk already holds for `path`** — the record with its rendering, as the pump's claim needs it.
     pub fn a_stored_cook(
         &self,
         path: &Path,
@@ -722,15 +784,9 @@ impl<F: FileProvider + Clone> Session<F> {
         let text_hash = self
             .text(&path)
             .map(|text| crate::cache::content_hash(&text))?;
-        // **The rendering, where a `view` will look for it** — the reason this record carries one at all.
-        if let Ok(mut known) = self.renderings.lock() {
-            let weight = rendered.weight();
-            known.insert(
-                a_rendering_key(&path, text_hash),
-                std::sync::Arc::new(rendered),
-                weight,
-            );
-        }
+        // **The rendering, where a `view` will look for it** — the reason this record carries one at all. Through
+        // `remember_a_rendering`, so an open document's copy is pinned outside the LRU's budget.
+        self.remember_a_rendering(&path, text_hash, std::sync::Arc::new(rendered));
         // **The declarations the file's own text does not have** — the same count `render_cook` makes, and the only
         // number a stored record cannot carry: it is a comparison with the summary, not a property of the reading.
         let already_declared: std::collections::HashSet<String> = self
