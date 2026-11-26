@@ -4,12 +4,19 @@
 //! resolved class, so each name here is pattern-matched against the class it may mean.
 
 use super::*;
+use crate::Binding;
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::ScopeKind;
+use crate::ScopeTree;
+use crate::sema;
+use crate::summary;
 use smol_str::SmolStr;
 
 pub(crate) fn direct_member(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -33,7 +40,7 @@ pub(crate) fn direct_member(
     {
         return Some((
             fact_from_binding_with(
-                crate::sema::declarations::shapes_from(shapes, root),
+                sema::declarations::shapes_from(shapes, root),
                 root,
                 class,
                 binding,
@@ -95,7 +102,7 @@ pub(crate) fn direct_member(
     // A caller that already knows the arguments (from an object's type, say) passes them itself; one that does not —
     // the nested-name walk, which has only a spelling — gets them here.
     let from_the_spelling: Option<Vec<String>> = class.split_once('<').map(|(_, rest)| {
-        crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+        sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
     });
     let (class, arguments) = match (class.split_once('<'), from_the_spelling.as_ref()) {
         (Some((head, _)), Some(written)) => (head.trim(), Some(written.as_slice())),
@@ -258,10 +265,10 @@ pub(crate) fn arguments_in_a_spelling(written: &str) -> Option<Vec<String>> {
 pub(crate) fn fact_from_binding(
     root: &cpp_parser::CppSyntaxNode,
     class: &str,
-    binding: &crate::Binding,
+    binding: &Binding,
 ) -> DeclFact {
     fact_from_binding_with(
-        &crate::sema::declarations::DeclarationShapes::of(root),
+        &sema::declarations::DeclarationShapes::of(root),
         root,
         class,
         binding,
@@ -278,15 +285,15 @@ pub(crate) fn fact_from_binding(
 /// the same fix, that [`DeclarationShapes`](crate::sema::declarations::DeclarationShapes) records for the index
 /// builder.
 pub(crate) fn fact_from_binding_with(
-    shapes: &crate::sema::declarations::DeclarationShapes,
+    shapes: &sema::declarations::DeclarationShapes,
     root: &cpp_parser::CppSyntaxNode,
     class: &str,
-    binding: &crate::Binding,
+    binding: &Binding,
 ) -> DeclFact {
     let _ = root;
     DeclFact {
-        enumerator: binding.kind == crate::BindingKind::Enumerator,
-        split_by_a_directive: crate::sema::declarations::split_by_a_directive_with(shapes, binding),
+        enumerator: binding.kind == BindingKind::Enumerator,
+        split_by_a_directive: sema::declarations::split_by_a_directive_with(shapes, binding),
         // **The spelling, the same one the index stores** — `operator[]`, `~Widget`, `operator int`.
         //
         // This path used to answer an empty name for every declaration without an identifier, on the argument that
@@ -313,24 +320,24 @@ pub(crate) fn fact_from_binding_with(
         // namespaces enclose a body. It is unreachable in practice here, because this path exists for members
         // and a member is never a local; the caller that does need it asks the file's summary, where the reading
         // was made with the scopes in hand. See [`DeclFact::in_namespace`].
-        kind: crate::DeclKind::from_binding_kind(binding.kind),
+        kind: DeclKind::from_binding_kind(binding.kind),
         // The same bits the index fills — a fact must say the same thing whichever path produced it.
         // **No rendering here**: this path is handed a node and no file text, and the attribute is a sibling of the
         // declaration — a member query never asks for `[[maybe_unused]]`, so the bit is left unset rather than guessed.
-        modifiers: crate::sema::declarations::declared_modifiers_with(shapes, binding),
+        modifiers: sema::declarations::declared_modifiers_with(shapes, binding),
         // **The other answer the index writes**, and for the same reason: a member function's body is where a
         // `delete` lives, so a call site that asks "does this free my argument" must not depend on which path built
         // the fact.
-        frees: crate::sema::declarations::freed_parameters_of(root, binding)
-            .min(u64::from(u16::MAX)) as u16,
+        frees: sema::declarations::freed_parameters_of(root, binding).min(u64::from(u16::MAX))
+            as u16,
         // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any other,
         // and a hover on a `UPROPERTY` member should find its specifiers wherever the member is declared.
-        type_of: crate::sema::declarations::declared_type_of_with(shapes, binding)
+        type_of: sema::declarations::declared_type_of_with(shapes, binding)
             .or_else(|| {
                 // **A member whose type is an unnamed class body**, named the way the index names it — see
                 // [crate::sema::declarations::an_unnamed_class_body_named]. The two paths that build a fact must
                 // agree, and this one is what a member query against the open file uses.
-                crate::sema::declarations::an_unnamed_class_body_named(
+                sema::declarations::an_unnamed_class_body_named(
                     Some(class),
                     &binding.name.text(),
                     shapes,
@@ -348,33 +355,28 @@ pub(crate) fn fact_from_binding_with(
         // (deduced_returns_of); what it refuses is the unusable operator spelling, which the _with form still
         // returns — the wrapper declared_returns_of would build a whole declaration table to say the same thing,
         // and that fallback was measured at 1 000 builds for one 901-line diagnostic pass.
-        returns: crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-            .or_else(|| crate::sema::declarations::declared_returns_of_with(shapes, binding))
+        returns: sema::declarations::declared_returns_of_in(shapes, root, binding)
+            .or_else(|| sema::declarations::declared_returns_of_with(shapes, binding))
             .map(SmolStr::from),
         // **The same residue the index records**, because a member query is exactly the reader that has the class:
         // `parameters` and the class's file are both in hand here. See [`crate::DeclFact::returns_in_the_class`].
         //
         // The rare fields are one box — see [`crate::summary::DeclDetail`] and the measurement there.
-        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+        detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
             // `None`, and it is a **gap rather than an answer** — this path is handed a node and no scope tree, so it
             // cannot say which namespaces enclose a body. It is unreachable in practice here, because this path exists
             // for members and a member is never a local. See [`DeclFact::in_namespace`].
             in_namespace: None,
             returns_in_the_class: {
-                let returns =
-                    crate::sema::declarations::declared_returns_of_in(shapes, root, binding)
-                        .or_else(|| {
-                            crate::sema::declarations::declared_returns_of_with(shapes, binding)
-                        });
+                let returns = sema::declarations::declared_returns_of_in(shapes, root, binding)
+                    .or_else(|| sema::declarations::declared_returns_of_with(shapes, binding));
                 if returns.is_some() {
                     None
                 } else {
-                    crate::sema::declarations::the_returns_the_class_has_to_resolve(
-                        shapes, root, binding,
-                    )
+                    sema::declarations::the_returns_the_class_has_to_resolve(shapes, root, binding)
                 }
             },
-            bases: crate::sema::declarations::declared_bases_of_with(shapes, binding),
+            bases: sema::declarations::declared_bases_of_with(shapes, binding),
             reflection: None,
             // **Read by the index path too**, when a member query leaves the file: the annotation is a fact like any
             // other, and a hover on a `UPROPERTY` member should find its specifiers wherever it is declared.
@@ -382,28 +384,26 @@ pub(crate) fn fact_from_binding_with(
             // produced it. These were empty here, with the argument that substitution is the caller's step.
             // Substitution still is — what these carry is the *names* to substitute and the class's written
             // **pattern**, and a caller that has the use's arguments cannot pair them without them.
-            parameters: crate::sema::declarations::declared_template_parameters_with(
-                shapes, binding,
-            ),
+            parameters: sema::declarations::declared_template_parameters_with(shapes, binding),
             constraints: Vec::new(),
             // **The clause the declaration writes**, from the same shape table the modifiers come from — the two
             // paths that build a fact must say the same thing.
-            requires_clause: crate::sema::declarations::the_requires_clause_with(shapes, binding),
-            parameter_defaults: crate::sema::declarations::declared_parameter_defaults_with(
+            requires_clause: sema::declarations::the_requires_clause_with(shapes, binding),
+            parameter_defaults: sema::declarations::declared_parameter_defaults_with(
                 shapes, binding,
             ),
-            pattern: crate::sema::declarations::pattern_of(shapes, binding),
+            pattern: sema::declarations::pattern_of(shapes, binding),
             // …but the **parameter list as written** is here, because this is the path a member list's detail line is
             // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this.
             // See [DeclFact::parameter_list].
             parameter_list: match binding.kind {
-                crate::BindingKind::Function
-                | crate::BindingKind::Constructor
-                | crate::BindingKind::Destructor
-                | crate::BindingKind::ConversionFunction
-                | crate::BindingKind::OperatorFunction
-                | crate::BindingKind::LiteralOperator => {
-                    crate::sema::declarations::declared_parameters_with(shapes, binding)
+                BindingKind::Function
+                | BindingKind::Constructor
+                | BindingKind::Destructor
+                | BindingKind::ConversionFunction
+                | BindingKind::OperatorFunction
+                | BindingKind::LiteralOperator => {
+                    sema::declarations::declared_parameters_with(shapes, binding)
                 }
                 _ => None,
             },
@@ -458,13 +458,13 @@ pub(crate) fn names_a_template_parameter(spelling: &str, parameters: &[String]) 
 /// about what a type has.
 pub(crate) fn bases_of(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
 ) -> Known<Vec<String>> {
     bases_of_with(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -475,9 +475,9 @@ pub(crate) fn bases_of(
 
 /// [ases_of], with the file's declaration table threaded in — see [crate::sema::declarations::ShapeTable].
 pub(crate) fn bases_of_with(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -486,9 +486,9 @@ pub(crate) fn bases_of_with(
 }
 
 pub(crate) fn bases_of_inner(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -507,12 +507,10 @@ pub(crate) fn bases_of_inner(
                 .find(|binding| binding.name.identifier_text() == Some(name))
         })
     {
-        return Known::Yes(lookup_names(
-            &crate::sema::declarations::declared_bases_of_with(
-                crate::sema::declarations::shapes_from(shapes, root),
-                binding,
-            ),
-        ));
+        return Known::Yes(lookup_names(&sema::declarations::declared_bases_of_with(
+            sema::declarations::shapes_from(shapes, root),
+            binding,
+        )));
     }
 
     // **Every declaration of the class, not the first one, and `Ambiguous` is not a failure.**
@@ -556,7 +554,7 @@ pub(crate) fn bases_of_inner(
                 && let Some(bare) = class.rsplit("::").next()
             {
                 for (_, fact) in index.every_fact_named(bare) {
-                    if fact.kind != crate::DeclKind::Type {
+                    if fact.kind != DeclKind::Type {
                         continue;
                     }
                     for base in lookup_names(fact.bases()) {
@@ -598,7 +596,7 @@ pub(crate) fn lookup_names(bases: &[String]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
 
     for base in bases {
-        let parsed = crate::sema::types::parse_type_spelling(base);
+        let parsed = sema::types::parse_type_spelling(base);
         collect_class_names(&parsed, &mut names);
     }
 
@@ -610,7 +608,7 @@ pub(crate) fn lookup_names(bases: &[String]) -> Vec<String> {
 /// The walk is over the **parsed type** rather than its text, so `_Normal_allocator_traits<_Alloc>`
 /// contributes `_Normal_allocator_traits` and not `_Alloc`, and a class named inside a nested template
 /// argument is found at whatever depth it was written.
-pub(crate) fn collect_class_names(ty: &crate::sema::types::Type, into: &mut Vec<String>) {
+pub(crate) fn collect_class_names(ty: &sema::types::Type, into: &mut Vec<String>) {
     if let Some(name) = ty.class_name()
         && !name.is_empty()
         && !into.iter().any(|kept| kept == name)
@@ -645,7 +643,7 @@ pub(crate) fn collect_class_names(ty: &crate::sema::types::Type, into: &mut Vec<
 /// both ask it through [`is_declared`], so "the buffer first, the index second" is not decided twice.
 pub(crate) fn resolved_in_the_enclosing_scopes(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     path: &Path,
     owner: &str,
     base: &str,
@@ -670,14 +668,14 @@ pub(crate) fn resolved_in_the_enclosing_scopes(
 ///
 /// The nearest class-like scope on the chain, which is the same answer in a member function, in a nested class's
 /// member function (the nested class wins, correctly) and in a default member initialiser.
-pub(crate) fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
+pub(crate) fn enclosing_class(scopes: &ScopeTree, offset: usize) -> Option<String> {
     let innermost = scopes.scope_at(offset)?;
 
     scopes.scope_chain(innermost).into_iter().find_map(|scope| {
         let data = scopes.scope(scope)?;
         // One variant for class, struct and union: the difference is access, which is a member's property
         // rather than the scope's. See `ScopeKind`.
-        (data.kind == crate::ScopeKind::Class)
+        (data.kind == ScopeKind::Class)
             .then(|| scopes.qualified_name_of(scope))
             .flatten()
     })
@@ -698,7 +696,7 @@ pub(crate) fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Optio
 /// A free function's qualified name has no `::` and so names no class, which is the right answer for `this` there —
 /// there is none.
 pub(crate) fn class_of_the_enclosing_definition(
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     offset: usize,
 ) -> Option<String> {
     if let Some(class) = enclosing_class(scopes, offset) {

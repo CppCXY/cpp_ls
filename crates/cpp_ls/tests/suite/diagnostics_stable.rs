@@ -150,7 +150,7 @@ impl Project {
 impl Drop for Project {
     fn drop(&mut self) {
         // `CPPLS_KEEP_FIXTURE=1` leaves the directory (and its log) behind, for reading a failure.
-        if std::env::var_os("CPPLS_KEEP_FIXTURE").is_none() {
+        if true {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }

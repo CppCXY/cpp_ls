@@ -25,6 +25,7 @@
 //! over the summaries the session holds, and a partial index gives a partial list rather than a
 //! guess.
 
+use crate::handlers;
 use cpp_code_analysis::{FileProvider, Known, Session};
 use lsp_types::{
     ClientCapabilities, ImplementationProviderCapability, Location, Range, ServerCapabilities,
@@ -43,11 +44,6 @@ pub async fn on_goto_implementation(
 ) -> RequestOutcome<GotoImplementationResponse> {
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -123,8 +119,7 @@ pub fn definitions_of<F: FileProvider + Clone>(
     // the *definition* in the `.cpp` carries `Base` — so a comparison on the fact's own scope would never match. The
     // cursor's enclosing class is the same answer both declarations were written under, and it is what Find
     // References and Go to Definition use for the same reason.
-    let owner =
-        crate::handlers::references::the_class_the_cursor_is_in(&view.scopes, &view.root, offset);
+    let owner = handlers::references::the_class_the_cursor_is_in(&view.scopes, &view.root, offset);
     let mut wanted: Vec<(String, Option<String>)> = found
         .found
         .iter()

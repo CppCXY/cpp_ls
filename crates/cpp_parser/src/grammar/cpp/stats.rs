@@ -4,6 +4,9 @@
 //! telling them apart is the parser's central ambiguity. [`parse_declaration_or_expression_statement`]
 //! is where that is resolved; the control-flow rules below are ordinary recursive descent.
 
+use crate::features;
+use crate::grammar;
+use crate::parser;
 use crate::{
     grammar::{
         ParseResult,
@@ -386,7 +389,7 @@ fn block_follow(p: &CppParser) -> bool {
 /// node the statement opened, so callers can recover by skipping tokens without having to know how
 /// deep the failed rule got.
 pub fn parse_stat(p: &mut CppParser) -> ParseResult {
-    let _phase = crate::parser::phases::during("statement");
+    let _phase = parser::phases::during("statement");
     let base = p.open_marks();
 
     // **A pragma operator is a statement of its own, and it has no `;`.** doctest's assertion macros expand to
@@ -554,7 +557,7 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 fn at_an_asm_statement(p: &CppParser) -> bool {
     // **`asm` is a GNU extension**, so the spelling only means the construct where the configuration says so: in a
     // strict C++23 parse it is an identifier, and `asm (…) ;` is the call an identifier followed by parentheses is.
-    if !p.language().support(crate::features::Feature::AsmBlock) {
+    if !p.language().support(features::Feature::AsmBlock) {
         return false;
     }
     if p.current_token() != CppTokenKind::Identifier
@@ -1090,13 +1093,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             }
             Ok(marker)
         }
-        Err(err) => {
-            if crate::probes::declaration_trace() {
-                eprintln!(
-                    "[decl] the declaration reading failed at {}: {err:?}",
-                    p.current_token_range().start_offset
-                );
-            }
+        Err(_err) => {
             // Not a declaration. Rewind **first**: the question below is asked about the token the statement began
             // at, and the failed attempt left the cursor somewhere past it.
             p.rollback(checkpoint);
@@ -1913,7 +1910,7 @@ fn at_the_implementations_handler(p: &CppParser) -> bool {
 fn parse_parenthesized_filter(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
-    crate::grammar::cpp::exprs::parse_expr(p)?;
+    grammar::cpp::exprs::parse_expr(p)?;
     expect_token(p, CppTokenKind::RightParen)?;
     Ok(m.complete(p))
 }
@@ -1932,7 +1929,7 @@ fn at_the_implementations_try(p: &CppParser) -> bool {
         // at the {, which is what a compiler without the extension reports
         // (docs/worklog.md P1-2).
         && p.language()
-            .support(crate::features::Feature::StructuredExceptionHandling)
+            .support(features::Feature::StructuredExceptionHandling)
         && p.peek_next_token() == CppTokenKind::LeftBrace
 }
 
@@ -2164,11 +2161,10 @@ fn parse_goto_statement(p: &mut CppParser) -> ParseResult {
     // statement stopped after `goto` and reported `expected ;, but get *` (measured on a nine-file C corpus, and pinned
     // by `a_computed_goto_and_a_negative_case_range_parse`).
     if p.current_token() == CppTokenKind::Star
-        && p.language()
-            .support(crate::features::Feature::LabelsAsValues)
+        && p.language().support(features::Feature::LabelsAsValues)
     {
         p.bump();
-        if let Err(err) = crate::grammar::cpp::exprs::parse_expr(p) {
+        if let Err(err) = grammar::cpp::exprs::parse_expr(p) {
             p.close_marks_above(base);
             return Err(err);
         }

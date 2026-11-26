@@ -631,3 +631,33 @@ struct Holder {
     assert_eq!(layout.fields[0].size, 8);
     assert_eq!(layout.fields[1].offset, 8);
 }
+
+/// **A typedef of a builtin is the builtin's size**, not the empty class's one byte. `Integer` is
+/// `typedef int64_t Integer` in neovim's API definitions, and its card said `size 1 byte(s)` because an alias has no
+/// members and the empty-class rule answered.
+#[test]
+fn a_typedef_of_a_builtin_reports_the_builtins_size() {
+    let layout = layout("typedef int64_t Integer;\n", "Integer");
+    assert_eq!(layout.size, 8);
+    assert_eq!(layout.alignment, 8);
+    assert!(layout.fields.is_empty());
+}
+
+/// **A data member spelled with an alias is the aliased type's size.**
+#[test]
+fn a_member_spelled_with_an_alias_uses_the_aliased_size() {
+    let layout = layout(
+        "\
+typedef int64_t Integer;
+struct Holder {
+    Integer value;
+    char tag;
+};
+",
+        "Holder",
+    );
+    assert_eq!(layout.size, 16);
+    assert_eq!(layout.alignment, 8);
+    assert_eq!(layout.fields[0].size, 8);
+    assert_eq!(layout.fields[1].offset, 8);
+}

@@ -354,7 +354,7 @@ fn a_stale_drain_keeps_its_refinement_request() {
     let wave = session.prepare_a_wave(1);
     let (_, drain) = session.commit_a_wave(wave, 1);
     assert!(!drain.is_empty(), "the fixture has refinement work");
-    let prepared = session.prepare_the_drain(drain);
+    let prepared = session.prepare_the_drain(drain, usize::MAX, usize::MAX);
 
     session.did_change(&path, "int new_name;\n");
     assert_eq!(session.commit_the_drain(prepared), 0);

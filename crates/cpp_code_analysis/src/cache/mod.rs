@@ -467,7 +467,13 @@ use std::path::{Path, PathBuf};
 /// branch of `#if __has_builtin(__builtin_expect)` where the compiler takes the then branch — a difference in which
 /// declarations exist, not merely in how they are described. The key is content plus `context_hash`, neither of which
 /// moves for either change, so only the version reaches the old rows.
-pub const FORMAT_VERSION: u32 = 62;
+/// # Why this moved to 63
+///
+/// **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
+/// and `main` into one declaration; the `#else` side is an `OldStyleParameterList`, and walking it for modifiers found
+/// a body-local `static`. Summaries written before this record `nvim_main` as `static`; the content hash cannot see a
+/// reader change, so only the version reaches them.
+pub const FORMAT_VERSION: u32 = 63;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
@@ -515,7 +521,7 @@ pub const READING_FINGERPRINT: u64 = {
     hash = fnv1a(hash, cpp_parser::VERSION.as_bytes());
     hash = fnv1a(hash, env!("CARGO_PKG_VERSION").as_bytes());
     hash = fnv1a(hash, &FORMAT_VERSION.to_le_bytes());
-    hash = fnv1a(hash, &crate::summary_codec::CODEC_VERSION.to_le_bytes());
+    hash = fnv1a(hash, &summary_codec::CODEC_VERSION.to_le_bytes());
     hash
 };
 
@@ -703,6 +709,7 @@ fn a_rendering_key_by(inputs: &[(&std::path::Path, u64)], fingerprint: u64) -> u
 #[cfg(test)]
 mod tests {
     use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
+    use crate::index;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -832,10 +839,9 @@ mod tests {
 
     #[allow(dead_code)]
     fn write(directory: &Path, source: &str, fingerprint_shift: u64) -> PathBuf {
-        let mut summary =
-            crate::index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
+        let mut summary = index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
         summary.key.reading_fingerprint ^= fingerprint_shift;
-        crate::index::write_summary(&summary, directory).expect("the summary is written")
+        index::write_summary(&summary, directory).expect("the summary is written")
     }
 
     // A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.

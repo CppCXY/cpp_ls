@@ -27,15 +27,17 @@
 //! derived declaration — so the plural query is the same cost as the singular one.
 
 use super::*;
+use crate::ScopeTree;
+use crate::sema;
 
 /// **Every declaration of `member` in `class`**, in declaration order — the set a call's arguments choose from.
 ///
 /// The returned path is where the declaration's body is: the file the fact was read from, which is what a caller
 /// reading a member's body for a deduced return needs.
 pub(crate) fn member_candidates(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -57,7 +59,7 @@ pub(crate) fn member_candidates(
             .map(|binding| {
                 (
                     fact_from_binding_with(
-                        crate::sema::declarations::shapes_from(shapes, root),
+                        sema::declarations::shapes_from(shapes, root),
                         root,
                         class,
                         binding,
@@ -74,7 +76,7 @@ pub(crate) fn member_candidates(
     // **The class's arguments come off its spelling**, so the partial-specialization rule can compare them; see
     // `direct_member`, which documents why the pattern test is what picks a specialization rather than its primary.
     let from_the_spelling: Option<Vec<String>> = class.split_once('<').map(|(_, rest)| {
-        crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+        sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
     });
     let (bare, written) = match (class.split_once('<'), from_the_spelling.as_ref()) {
         (Some((head, _)), Some(written)) => (head.trim(), Some(written.as_slice())),
@@ -85,19 +87,7 @@ pub(crate) fn member_candidates(
     // class has no such member" without this line, and it is the line that found the alias defect this query had:
     // `basic_json::operator[]` answered 0 while `members_of("basic_json")` listed 8 of them, because the alias step
     // handed it the unqualified spelling (see `operator_returns_of_with_arguments`).
-    let named_of = |declarations: &[crate::VisibleDeclaration<'_>]| -> usize {
-        declarations
-            .iter()
-            .filter(|declaration| declaration.fact.name == member)
-            .count()
-    };
-    if crate::probes::inference() {
-        eprintln!(
-            "[candidates] {bare}::{member}: {} declaration(s) in scope, {} named",
-            all.len(),
-            named_of(&all)
-        );
-    }
+
     let from_the_index: Vec<(DeclFact, PathBuf)> = all
         .into_iter()
         .filter(|declaration| {

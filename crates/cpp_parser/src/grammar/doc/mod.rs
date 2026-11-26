@@ -26,6 +26,8 @@
 //! That is what makes the layer safe to run on every keystroke, and it is the same contract the C++
 //! layer has: never panic, never drop a byte, never stop.
 
+use crate::kind;
+use crate::parser;
 mod commands;
 
 use crate::{
@@ -272,7 +274,7 @@ pub fn parse_comment_group(p: &mut CppParser<'_>, comments: &[CommentSource]) ->
     // `@endcode` would produce a node holding the word `endcode` and none of the code, which is
     // worse than useless to a consumer that wants to render the snippet.
     let mut code_block_depth = 0usize;
-    let mut open_code_block: Option<crate::parser::Marker> = None;
+    let mut open_code_block: Option<parser::Marker> = None;
 
     // **One body for the whole group**, not one per comment.
     //
@@ -292,9 +294,9 @@ pub fn parse_comment_group(p: &mut CppParser<'_>, comments: &[CommentSource]) ->
         // between two comments of a group can be.
         for range in comment.separator_tokens() {
             let kind = if file[range.start_offset..range.end_offset()].contains('\n') {
-                crate::kind::CppTokenKind::Newline
+                kind::CppTokenKind::Newline
             } else {
-                crate::kind::CppTokenKind::Whitespace
+                kind::CppTokenKind::Whitespace
             };
             p.push_doc_token(kind, range);
         }
@@ -375,7 +377,7 @@ struct DocParser<'a, 'p> {
     /// Carried across comments because `@code` and `@endcode` are usually on different `///` lines,
     /// and the node has to span everything between them. Opening it at the `@endcode` would give a
     /// consumer a "code block" holding the word `endcode` and none of the code.
-    open_code_block: Option<crate::parser::Marker>,
+    open_code_block: Option<parser::Marker>,
 }
 
 impl<'a, 'p> DocParser<'a, 'p> {
@@ -387,7 +389,7 @@ impl<'a, 'p> DocParser<'a, 'p> {
         is_block: bool,
         end_offset: usize,
         code_block_depth: usize,
-        open_code_block: Option<crate::parser::Marker>,
+        open_code_block: Option<parser::Marker>,
     ) -> Self {
         DocParser {
             p,

@@ -26,6 +26,7 @@
 //! header the analysis has not read. So the two "no" answers are kept apart — [`UnknownReason::NotDeclaredHere`]
 //! says the name is somewhere else, which is a fact about the file, while [`Known::No`] would say it is nowhere.
 
+use crate::ScopeKind;
 use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, SourceRange};
 
 use crate::sema::symbol::{
@@ -736,19 +737,9 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
     let mut node = root.clone();
     // Read once — see `crate::probes`. This runs on every symbol resolution, and reading the environment per call
     // was the same mistake that cost 106 s and 40 s at two other sites of it.
-    let tracing = crate::probes::coordinates();
-
     loop {
         let range = node.text_range();
         if !(usize::from(range.start()) <= offset && offset <= usize::from(range.end())) {
-            if tracing {
-                eprintln!(
-                    "  name_node_around({offset}): leaving {:?} {}..{} (does not contain)",
-                    CppSyntaxKind::from(node.kind()),
-                    usize::from(range.start()),
-                    usize::from(range.end())
-                );
-            }
             return found;
         }
 
@@ -1249,7 +1240,7 @@ pub fn definitions_at(
             // When this scope declares the name only *later*, the walk continues rather than stopping: at the use the
             // later declaration is not in scope, and an enclosing scope's earlier one still is (`int x; { f(); int x;
             // }` calls with the outer `x` visible).
-            let a_class = scope_data.kind == crate::ScopeKind::Class;
+            let a_class = scope_data.kind == ScopeKind::Class;
             let visible: Vec<Binding> = found
                 .into_iter()
                 .filter(|binding| a_class || binding.name_range.start_offset <= offset)
@@ -1409,7 +1400,7 @@ fn using_directive_targets(scopes: &ScopeTree, offset: usize) -> Vec<ScopeId> {
         .iter()
         .enumerate()
         .filter(|(_, scope)| {
-            scope.kind == crate::ScopeKind::Namespace
+            scope.kind == ScopeKind::Namespace
                 && scope
                     .name
                     .as_deref()
@@ -1550,6 +1541,8 @@ mod tests {
         definition_at, header_name_at, identifier_written_at, name_at, name_node_at,
         qualified_name_at,
     };
+    use crate::Binding;
+    use crate::NoMacroBodies;
     use crate::sema::scopes::build_scopes;
     use crate::sema::symbol::{BindingKind, Known, UnknownReason};
     use cpp_parser::{CppParser, ParserConfig};
@@ -1576,10 +1569,10 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle:?} is not in {source:?}"))
     }
 
-    fn definition_of(source: &str, needle: &str) -> Known<crate::Binding> {
+    fn definition_of(source: &str, needle: &str) -> Known<Binding> {
         let parsed = tree(source);
         let root = parsed.get_red_root();
-        let scopes = build_scopes(&root, &crate::NoMacroBodies);
+        let scopes = build_scopes(&root, &NoMacroBodies);
 
         definition_at(&scopes, &root, at(source, needle))
     }

@@ -42,6 +42,7 @@
 //! Only the worker applies notifications. Requests observe its completed sequence and never take ownership of an
 //! in-progress update, so cancelling a waiter cannot drop the update.
 
+use crate::util;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -102,7 +103,7 @@ pub enum UpdateEvent {
     /// It carries the configuration the client **already reported**, not the params of the notification: the read is a
     /// server→client round trip, and awaiting one here would hold the queue's apply lock across a wait for a client that
     /// may be waiting for an answer queued behind the same lock. The handler reads; this event is the application.
-    Configuration(crate::handlers::ClientConfig),
+    Configuration(handlers::ClientConfig),
 }
 
 impl UpdateEvent {
@@ -296,6 +297,12 @@ impl UpdateInbox {
         self.started_change.subscribe()
     }
 
+    /// **How many content changes have started being applied** — what a refreshable request compares with the
+    /// `upto` it recorded, before it pays for an answer about text the next keystroke has already replaced.
+    pub fn started(&self) -> u64 {
+        *self.started_change.borrow()
+    }
+
     /// Wait until there is something to apply, or `timeout` passes.
     pub async fn wait_for_work(&self, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, self.work.notified())
@@ -359,6 +366,50 @@ impl UpdateInbox {
 
         applied
     }
+
+    /// **Take every event up to `upto` as one batch**, and hand them to one applier.
+    ///
+    /// The single-writer rule is the same as [`UpdateInbox::apply_upto`], but the unit of work is the **client's run**
+    /// rather than one notification. The writer applies all document text under one session write, then updates the
+    /// affected files' index impact; readers never apply a content event themselves.
+    pub async fn apply_batch_upto<F, Fut>(&self, upto: u64, apply: F) -> usize
+    where
+        F: FnOnce(Vec<UpdateEvent>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _applying = self.applying.lock().await;
+        let mut events = Vec::new();
+        let mut last_seq = 0;
+        loop {
+            let next = {
+                let mut pending = self.pending.lock().await;
+                match pending.front() {
+                    Some(queued) if queued.seq <= upto => pending.pop_front(),
+                    _ => None,
+                }
+            };
+            let Some(queued) = next else {
+                break;
+            };
+            last_seq = queued.last_seq;
+            if queued.event.changes_analysis() {
+                self.started_change.send_replace(queued.last_seq);
+            }
+            events.push(queued.event);
+        }
+        if events.is_empty() {
+            return 0;
+        }
+        let count = events.len();
+        let started = std::time::Instant::now();
+        apply(events).await;
+        self.applied.send_replace(last_seq);
+        let took = started.elapsed().as_millis();
+        if took > 50 {
+            log::debug!("apply_batch_upto: {count} event(s) took {took} ms");
+        }
+        count
+    }
 }
 
 /// **Apply the client's pending notifications up to `upto`** — the whole of what a request waits for.
@@ -373,6 +424,101 @@ pub async fn catch_up_upto(snapshot: &ServerContextSnapshot, upto: u64) {
     if took > 50 {
         log::debug!("catch_up_upto: waited {took} ms for events through {upto}");
     }
+}
+
+/// **Apply a client run as one writer step.** Document text is applied under **one** session write, in the queue's
+/// order; the affected files' index impact is started after that write, off the request barrier. Everything else goes
+/// through [`process`], which is the non-content path.
+async fn process_batch(snapshot: &ServerContextSnapshot, events: Vec<UpdateEvent>) {
+    let mut texts: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+    for event in events {
+        match event {
+            UpdateEvent::Changed(params) => {
+                let uri = params.text_document.uri.clone();
+                let Some(path) = util::uri_to_file_path(&uri) else {
+                    continue;
+                };
+                let changed = {
+                    let mut manager = snapshot.workspace_manager().lock().await;
+                    manager.change_file(&uri, params.text_document.version, &params.content_changes)
+                };
+                match changed {
+                    Ok(text) => texts.push((path, text)),
+                    Err(error) => {
+                        log::warn!("cannot apply document change for {}: {error}", uri.as_str())
+                    }
+                }
+            }
+            UpdateEvent::Saved(params) => {
+                let Some(text) = params.text else {
+                    continue;
+                };
+                let uri = params.text_document.uri.clone();
+                let Some(path) = util::uri_to_file_path(&uri) else {
+                    continue;
+                };
+                let replaced = {
+                    let mut manager = snapshot.workspace_manager().lock().await;
+                    manager.replace_open_text(&uri, text.clone())
+                };
+                if let Err(error) = replaced {
+                    log::warn!("cannot apply saved text for {}: {error}", uri.as_str());
+                    continue;
+                }
+                texts.push((path, text));
+            }
+            // Ordering boundaries: an open/close/other event is applied in sequence, not after a later change.
+            other => {
+                apply_text_batch(snapshot, std::mem::take(&mut texts)).await;
+                process(snapshot, other).await;
+            }
+        }
+    }
+    apply_text_batch(snapshot, texts).await;
+}
+
+/// Apply one client run's document text under a single session write, then prepare its reading.
+async fn apply_text_batch(
+    snapshot: &ServerContextSnapshot,
+    texts: Vec<(std::path::PathBuf, String)>,
+) {
+    if texts.is_empty() {
+        return;
+    }
+    let changed: Vec<std::path::PathBuf> = texts.iter().map(|(path, _)| path.clone()).collect();
+    let changed_for_the_write = texts;
+    let started = std::time::Instant::now();
+    snapshot
+        .analysis()
+        .update_session("apply client content", move |session| {
+            for (path, text) in changed_for_the_write {
+                session.did_open_as(&path, &text, None);
+            }
+            for path in &changed {
+                let phase = std::time::Instant::now();
+                session.catch_up(path);
+                let caught = phase.elapsed();
+                let phase = std::time::Instant::now();
+                session.cook(path);
+                log::info!(
+                    "writer phase: {} catch_up {:?}, cook {:?}",
+                    path.display(),
+                    caught,
+                    phase.elapsed()
+                );
+            }
+        })
+        .await;
+    log::info!(
+        "writer phase: one content batch took {:?}",
+        started.elapsed()
+    );
+    snapshot.analysis().wake();
+    snapshot
+        .diagnostics()
+        .schedule_open_files(snapshot.clone())
+        .await;
 }
 
 /// Apply one event: the whole of what a notification does to the analysis.
@@ -414,8 +560,8 @@ pub fn spawn_update_queue(inner: Arc<ServerContextInner>) {
             let worker_snapshot = &snapshot;
             let applied = snapshot
                 .inbox()
-                .apply_upto(u64::MAX, |event| async move {
-                    process(worker_snapshot, event).await
+                .apply_batch_upto(u64::MAX, |events| async move {
+                    process_batch(worker_snapshot, events).await
                 })
                 .await;
             if applied == 0 {

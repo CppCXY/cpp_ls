@@ -39,9 +39,6 @@ pub async fn on_folding_range(
     let uri = params.text_document.uri;
 
     // Read in first, under the write lock: folding needs the file's text, and a file nobody has read has none.
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

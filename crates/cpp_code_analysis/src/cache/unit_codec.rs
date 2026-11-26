@@ -28,6 +28,14 @@
 //! 20 bytes here, and a `serde`-derived format would spend more per field and version itself in a way this crate
 //! cannot control.
 
+use crate::CookedDiagnostic;
+use crate::CookedFile;
+use crate::FileSummary;
+use crate::IndexedUnit;
+use crate::ModuleReading;
+use crate::SummaryGuards;
+use crate::SummaryKey;
+use crate::summary_codec;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -380,7 +388,7 @@ const INDEX_MAGIC: [u8; 4] = *b"UIDX";
 /// Each file's facts go through [`crate::summary_codec`] — the same encoder a summary uses, with the fields a
 /// `CookedFile` does not carry (includes, guards, module readings) left empty rather than invented: those are the
 /// per-file pass's output, and a unit read does not produce them.
-pub fn encode_indexed_unit(unit: &crate::IndexedUnit) -> Vec<u8> {
+pub fn encode_indexed_unit(unit: &IndexedUnit) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(64 + unit.files.len() * 512);
     out.extend_from_slice(&INDEX_MAGIC);
     put_u32(&mut out, UNIT_CODEC_VERSION);
@@ -390,7 +398,7 @@ pub fn encode_indexed_unit(unit: &crate::IndexedUnit) -> Vec<u8> {
         put_path(&mut out, path);
         put_bytes(
             &mut out,
-            &crate::summary_codec::encode(&as_a_summary(path, cooked)),
+            &summary_codec::encode(&as_a_summary(path, cooked)),
         );
         put_u32(&mut out, cooked.unplaced as u32);
         put_u32(&mut out, cooked.diagnostics.len() as u32);
@@ -414,7 +422,7 @@ pub fn encode_indexed_unit(unit: &crate::IndexedUnit) -> Vec<u8> {
     out
 }
 
-pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeError> {
+pub fn decode_indexed_unit(bytes: &[u8]) -> Result<IndexedUnit, DecodeError> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != INDEX_MAGIC {
         return Err(DecodeError::NotAUnit);
@@ -424,23 +432,23 @@ pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeErr
     }
 
     let file_count = reader.count(MAX_FILES)?;
-    let mut files: Vec<(PathBuf, crate::CookedFile)> = Vec::with_capacity(file_count);
+    let mut files: Vec<(PathBuf, CookedFile)> = Vec::with_capacity(file_count);
     for _ in 0..file_count {
         let path = reader.path()?;
-        let summary = crate::summary_codec::decode(&reader.bytes(MAX_TEXT)?)
-            .map_err(|_| DecodeError::Truncated)?;
+        let summary =
+            summary_codec::decode(&reader.bytes(MAX_TEXT)?).map_err(|_| DecodeError::Truncated)?;
         let unplaced = reader.u32()? as usize;
         let diagnostic_count = reader.count(MAX_SPANS)?;
-        let mut diagnostics: Vec<crate::CookedDiagnostic> = Vec::with_capacity(diagnostic_count);
+        let mut diagnostics: Vec<CookedDiagnostic> = Vec::with_capacity(diagnostic_count);
         for _ in 0..diagnostic_count {
             let range = SourceRange::new(reader.u32()? as usize, reader.u32()? as usize);
             let message =
                 String::from_utf8(reader.bytes(MAX_TEXT)?).map_err(|_| DecodeError::Truncated)?;
-            diagnostics.push(crate::CookedDiagnostic { range, message });
+            diagnostics.push(CookedDiagnostic { range, message });
         }
         files.push((
             path,
-            crate::CookedFile {
+            CookedFile {
                 declarations: summary.declarations,
                 macros: summary.macros,
                 diagnostics,
@@ -461,7 +469,7 @@ pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeErr
     let braces = reader.u32()? as i64;
     let errors = reader.u32()? as usize;
 
-    Ok(crate::IndexedUnit {
+    Ok(IndexedUnit {
         files,
         unplaced,
         tokens,
@@ -475,33 +483,36 @@ pub fn decode_indexed_unit(bytes: &[u8]) -> Result<crate::IndexedUnit, DecodeErr
 
 /// The fields a `FileSummary` needs and a `CookedFile` does not have, filled with the empty answer — see
 /// [`encode_indexed_unit`].
-fn as_a_summary(path: &Path, cooked: &crate::CookedFile) -> crate::FileSummary {
-    crate::FileSummary {
+fn as_a_summary(path: &Path, cooked: &CookedFile) -> FileSummary {
+    FileSummary {
         path: path.to_path_buf(),
-        key: crate::SummaryKey::new(0, 0),
+        key: SummaryKey::new(0, 0),
         declarations: cooked.declarations.clone(),
         macros: cooked.macros.clone(),
         includes: Vec::new(),
-        guards: crate::SummaryGuards::default(),
+        guards: SummaryGuards::default(),
         macro_readings: Vec::new(),
         use_filter: Vec::new(),
-        modules: crate::ModuleReading::default(),
+        modules: ModuleReading::default(),
     }
 }
 
 #[cfg(test)]
 mod index_tests {
     use super::*;
+    use crate::CookedDiagnostic;
+    use crate::CookedFile;
+    use crate::IndexedUnit;
 
     #[test]
     fn an_indexed_unit_survives_a_round_trip() {
-        let unit = crate::IndexedUnit {
+        let unit = IndexedUnit {
             files: vec![(
                 PathBuf::from("/p/a.h"),
-                crate::CookedFile {
+                CookedFile {
                     declarations: Vec::new(),
                     macros: Vec::new(),
-                    diagnostics: vec![crate::CookedDiagnostic {
+                    diagnostics: vec![CookedDiagnostic {
                         range: SourceRange::new(3, 4),
                         message: "missing ;".to_string(),
                     }],

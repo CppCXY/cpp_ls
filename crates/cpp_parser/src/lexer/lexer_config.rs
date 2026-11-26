@@ -1,3 +1,4 @@
+use crate::features;
 use crate::features::LanguageConfig;
 use crate::kind::CppLanguageLevel;
 
@@ -10,7 +11,7 @@ pub struct LexerConfig {
     /// Target standard. Gates features that are not in older standards (raw strings in C++11,
     /// digit separators in C++14, `<=>` in C++20).
     pub language_level: CppLanguageLevel,
-    /// **The syntax this lexer accepts**, as a set of standards and vendors — see [`crate::features`].
+    /// **The syntax this lexer accepts**, as a set of standards and vendors — see [`features`].
     ///
     /// `language_level` is kept for the callers that still take one; this is the field the lexer's own branches read, and
     /// [`LexerConfig::new`] derives it so a caller that has not migrated gets the level's meaning rather than nothing.
@@ -64,7 +65,7 @@ impl LexerConfig {
             // See the field: every mainstream compiler accepts it in its default mode, and a corpus
             // that *uses* it is the argument. The strict reading is `with_dollar_in_identifier(false)`.
             dollar_in_identifier: true,
-            string_prefixes: language.support(crate::features::Feature::RawStrings),
+            string_prefixes: language.support(features::Feature::RawStrings),
         }
     }
 
@@ -84,13 +85,12 @@ impl LexerConfig {
         // refuse it whatever its old `language_level` says — the conflation `features` exists to remove. The first
         // version of this function kept the level test *beside* the feature test, and a `Cpp23` level with a C
         // configuration answered "yes"; one authority or none.
-        self.string_prefixes && self.language.support(crate::features::Feature::RawStrings)
+        self.string_prefixes && self.language.support(features::Feature::RawStrings)
     }
 
     /// Are digit separators (`1'000'000`) available at this language level?
     pub fn supports_digit_separators(&self) -> bool {
-        self.language
-            .support(crate::features::Feature::DigitSeparators)
+        self.language.support(features::Feature::DigitSeparators)
     }
 }
 impl Default for LexerConfig {

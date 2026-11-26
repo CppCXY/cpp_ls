@@ -64,6 +64,7 @@
 //! An empty popup is still the symptom to watch for. The fix for it is the hot set and the per-file reads, **never a
 //! global wait**.
 
+use crate::util;
 /// **How many files one pull request may index** — the bound that was missing, and the 102 seconds it cost.
 ///
 /// [`Session::index_everything`] loops until the queue is **empty**, so a caller that asks for it asks for the whole
@@ -155,6 +156,20 @@ pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 /// to bound it.
 pub const QUERY_BUDGET: Duration = Duration::from_millis(50);
 
+/// The identifier ending at `offset`, or the empty string when the cursor is not after one.
+fn identifier_before(text: &str, offset: usize) -> String {
+    let before = &text[..offset.min(text.len())];
+    let mut start = before.len();
+    for (at, character) in before.char_indices().rev() {
+        if character.is_alphanumeric() || character == '_' {
+            start = at;
+        } else {
+            break;
+        }
+    }
+    before[start..].to_string()
+}
+
 impl AnalysisState {
     pub fn new() -> Self {
         let documents = OpenDocuments::new();
@@ -168,6 +183,16 @@ impl AnalysisState {
             worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
         }
+    }
+
+    /// **Persist a few quiet cooked readings**, without taking the analysis write lock. Called by a delayed
+    /// background task; the method itself runs under the read side only.
+    pub async fn persist_cooked(&self) {
+        let _ = self
+            .run_blocking("persist cooked readings", |session| {
+                Some(session.persist_cooked(Duration::from_secs(2)))
+            })
+            .await;
     }
 
     /// Read a file in and hold it, so that the read-only queries can see it.
@@ -192,6 +217,102 @@ impl AnalysisState {
             log::warn!("prepare {} took {:?}", path.display(), whole.elapsed());
         }
         answer
+    }
+
+    /// **The completion path's form of [`AnalysisState::prepare`]** — an open buffer is already in the provider
+    /// chain, so asking the session to load it is a read lock taken for a fact this state can answer itself.
+    ///
+    /// That read lock is not free while the pump holds the analysis for a program read: measured on neovim's
+    /// `channel.c` (release server), a one-line `didChange` followed by six completions spent **1609 ms in one
+    /// `prepare`** and the request it belonged to took **1857 ms**; the other five, which found the session free,
+    /// were 93–708 ms. The file is open (`OpenDocuments` holds its text), so `load`/`want_cooked_reading` have
+    /// nothing to do; the completion's own `catch_up` still rebuilds the summary the edit dropped.
+    pub async fn prepare_for_completion(&self, path: &std::path::Path) -> bool {
+        if self.files.overlay.is_open(path) {
+            return true;
+        }
+        self.prepare(path).await
+    }
+
+    /// **A completion whose semantics were read from the current buffer's rendering**, in the file's coordinates.
+    ///
+    /// The editable view is taken for the position and the replace range; the rendering is built for the same text
+    /// and answers the names, types and members. Returned as an owned [`cpp_code_analysis::CompletionSet`] because a
+    /// [`cpp_code_analysis::FileView`] is not `Send` and must not cross into a blocking query. `None` when either
+    /// view is unavailable; the caller still has the file's own reading.
+    pub async fn completion_from_a_rendering(
+        &self,
+        path: &std::path::Path,
+        position: lsp_types::Position,
+    ) -> Option<cpp_code_analysis::CompletionSet> {
+        let path = path.to_path_buf();
+        self.run_blocking("a completion's reading", move |session| {
+            let editable = session.view_of_the_file(&path)?;
+            let offset = util::file_offset_at_position(&editable, position)?;
+            let typed = identifier_before(&editable.source, offset.get());
+            let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
+                !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
+            };
+            let Some(rendered) = session.view(&path) else {
+                // **No rendering is a temporary state, and it is stated as one.** The file's own text, parsed with
+                // whatever environment is known for it, is offered and marked incomplete so the client asks again —
+                // the writer cooks this file on every edit, so the next request has the compiler's reading.
+                let mut incomplete = session.completions(&editable, offset);
+                incomplete.incomplete = true;
+                return Some(incomplete);
+            };
+            let mut found = session.completions(&rendered, offset);
+            // **The rendering wins whenever it answers, even if the file's own text also has a match.**
+            //
+            // This used to hand `raw` back as soon as the *file's* reading contained one item starting with the
+            // typed prefix — and a C file parsed without its macros has hundreds of names from the index, so `i`
+            // answered 803 items whose first were `int64_t_cmp`, `if`, `include` and **not the local `ids`** the
+            // reader was typing at. The rendering is the reading that has locals, members and macro-declared names;
+            // the file's own text is the fallback for a prefix only it can answer.
+            let rendering_answers = has_the_prefix(&found);
+            // **Do not build the raw list when the rendering can answer.** Measured through the real server on
+            // neovim's `channel.c`: the raw list cost 100–115 ms and the rendered list 116–135 ms, and the rendered
+            // one returned 1000 items while raw returned 2 — both were computed on every keystroke, and the raw
+            // answer was then thrown away. It is only needed when the rendered list is empty or misses the typed
+            // prefix; in that case it is still the fallback this branch documents.
+            if !rendering_answers && (!typed.is_empty() || found.items.is_empty()) {
+                let raw = session.completions(&editable, offset);
+                if has_the_prefix(&raw) || found.items.is_empty() {
+                    return Some(raw);
+                }
+            }
+            // **An empty replace range is the cursor itself, and mapping it can move it.** `file_offset_of` asks
+            // where an offset *starts*; at a token boundary an empty range in a rendering whose line breaks are gone
+            // comes back at the start of the **next** file line. Measured at `ids.` in neovim's `channel.c`: the
+            // members were found, but every item's edit replaced line 1086 column 0 instead of line 1085 column 6,
+            // and the client discarded the list. The editable offset is already the answer for an empty range.
+            if found.replace.start_offset == found.replace.end_offset() {
+                found.replace = cpp_parser::SourceRange::new(offset.get(), 0);
+            } else {
+                let start = rendered.file_offset_of(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        found.replace.start_offset,
+                    ),
+                );
+                // **The end of a range maps with `file_offset_of_end`.** `file_offset_of` answers where an offset
+                // *starts*, so the end of a name that is the last token of a line came back as the first character
+                // of the next line — measured as a completion item whose edit replaced `HWND__` and the newline
+                // after it.
+                let end = rendered.file_offset_of_end(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        found.replace.end_offset(),
+                    ),
+                );
+                if let (Some(start), Some(end)) = (start, end) {
+                    found.replace = cpp_parser::SourceRange::new(
+                        start.get(),
+                        end.get().saturating_sub(start.get()),
+                    );
+                }
+            }
+            Some(found)
+        })
+        .await
     }
 
     async fn prepare_inner(&self, path: &std::path::Path) -> bool {
@@ -718,7 +839,7 @@ impl AnalysisState {
     /// completion's own query is slow": with the writes in good order the first five completions after `didOpen`
     /// still took 60–1677 ms, and every millisecond of it was in this function's `ran` — the query's own work over an
     /// index that was still filling.
-    pub async fn run_blocking<R, F>(&self, label: &'static str, f: F) -> Option<R>
+    pub async fn run_blocking<R, F>(&self, _label: &'static str, f: F) -> Option<R>
     where
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
@@ -726,8 +847,6 @@ impl AnalysisState {
         let started = std::time::Instant::now();
         let permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
         let waited_for_a_permit = started.elapsed().as_millis() as u64;
-        let traced = crate::probes::query();
-
         let inner = self.inner.clone();
         let gate = self.gate.clone().read_owned().await;
         let waited_for_the_gate = started.elapsed().as_millis() as u64;
@@ -739,11 +858,7 @@ impl AnalysisState {
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let waited_for_the_session = locked.elapsed().as_millis() as u64;
-            if traced {
-                eprintln!(
-                    "[query] {label}: permit {waited_for_a_permit} ms, gate {waited_for_the_gate} ms, session {waited_for_the_session} ms",
-                );
-            }
+
             // The gate is released before the query runs: it orders an update against the queries already in
             // flight, and holding it for the whole query would make every notification queue behind every read.
             drop(gate);
@@ -751,13 +866,8 @@ impl AnalysisState {
             // `?` cannot be used here — the closure answers with the timings as well — so `None` is threaded by hand:
             // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
             // whether the session was missing or the query declined.
-            if traced {
-                eprintln!("[query] {label}: compute starts");
-            }
+
             let answer = session.as_ref().and_then(f);
-            if traced {
-                eprintln!("[query] {label}: compute done in {} ms", ran.elapsed().as_millis());
-            }
 
             (
                 waited_for_the_session,
@@ -1052,6 +1162,7 @@ impl Default for AnalysisState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers;
     use cpp_code_analysis::CompilerConfig;
 
     /// **Diagnostics for a file nobody has indexed are still an answer.**
@@ -1115,10 +1226,7 @@ mod tests {
         );
         let diagnostics = state
             .with_snapshot(|session| {
-                crate::handlers::diagnostic::diagnose_file(
-                    session,
-                    std::path::Path::new("/p/main.cpp"),
-                )
+                handlers::diagnostic::diagnose_file(session, std::path::Path::new("/p/main.cpp"))
             })
             .flatten()
             .expect("a file whose text the client is holding has an answer")

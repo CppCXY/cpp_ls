@@ -1,6 +1,7 @@
 //! **Cooked** — what a cooked reading answers: declarations a macro unlocks, headers a request names
 
 use crate::file::paths::MemoryFiles;
+use crate::session;
 use crate::symbol::Known;
 use std::path::Path;
 
@@ -578,9 +579,7 @@ pub(crate) fn a_program_is_read_when_the_reader_stops_editing() {
     );
 
     // **And the clock is the gate**: a second after the last keystroke, the next drain reads one program.
-    std::thread::sleep(
-        crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(100),
-    );
+    std::thread::sleep(session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(100));
     session.advance(1);
 
     assert!(
@@ -643,11 +642,10 @@ pub(crate) fn a_program_of_any_size_is_read() {
 
     session.did_open("/p/main.cpp", main);
     session.index_everything();
-    session.pretend_a_pause(
-        crate::session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1),
-    );
+    session
+        .pretend_a_pause(session::UNTIL_A_UNIT_MAY_BE_READ + std::time::Duration::from_millis(1));
 
-    let root = crate::session::queue_key(Path::new("/p/main.cpp"));
+    let root = session::queue_key(Path::new("/p/main.cpp"));
     match session.the_program_to_read() {
         // The drain has not reached it yet: the schedule still owes this program, whatever its closure weighs.
         Some(next) => assert_eq!(next.as_path(), Path::new("/p/main.cpp")),
@@ -674,6 +672,10 @@ pub(crate) fn a_cook_writes_its_rendering_to_the_disk() {
     session.did_open("/p/a.cpp", source);
     session.index_everything();
     session.cook("/p/a.cpp").expect("the file cooks");
+    // **The commit marks the record and the quiet pass writes it** — see `Session::persist_cooked`: a write inside
+    // the commit is what made a program read hold the writer for seconds. `index_everything` already ran that pass
+    // for the file it cooked, so this may find the record and answer from it; either way the record is on the disk.
+    let _ = session.persist_cooked(std::time::Duration::ZERO);
 
     let (cooked, rendered) = session
         .store

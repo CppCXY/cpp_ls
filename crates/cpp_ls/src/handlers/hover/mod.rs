@@ -31,6 +31,8 @@
 //! already has (`sema::resolve::name_at`), which is free to disagree with it. The client positions the popup
 //! itself when the answer carries none, which is what happens today.
 
+use crate::handlers;
+use crate::util;
 use cpp_code_analysis::{
     DeclFact, DeclKind, DiskFiles, FactGuard, FileView, Known, ProjectDefinition, ProjectMacro,
     Session, UnknownReason,
@@ -75,7 +77,6 @@ pub async fn on_hover(
     // measurement: the first hover of an open file went from 1 103 ms to 12–34 ms.
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare_for_a_read(&path).await;
-        crate::handlers::read_the_modules(&context, &path, false).await;
 
         // **And this file's own closure, which is what a name in a header needs.** `prepare` puts the file's *text*
         // in reach and `read_the_modules` reads what it imports; neither reads the headers it `#include`s, and a name
@@ -85,7 +86,6 @@ pub async fn on_hover(
         // one. `catch_up` is the same step the semantic-token and inlay-hint handlers take, for the same reason, and it
         // is bounded to the files this one names (9), so it cannot become the settle that used to make every hover
         // wait for the whole project.
-        context.analysis().catch_up(&path).await;
         // **`catch_up` is nine files and this name is fourteen headers down**, so the readiness that decides the
         // answer is [`AnalysisState::wait_for_the_closure`] — the same condition the semantic-token handler checks,
         // waited for instead of answered with `null`. The budget is a ceiling: on a warm index the first check
@@ -359,6 +359,20 @@ pub fn hover(
         "program",
         hover_of_the_program(session, view, offset, in_the_file)
     ) {
+        // **A card that names a failure may be the plain reading's failure, not the program's answer.** The file's
+        // text has `kvec_t(int64_t) ids = …`, which the plain reading files as an expression with no binding; a member
+        // card then says "`ids` has no member `size` — members could not be read". The rendering has
+        // `struct { size_t size; … } ids`, and the same member question is answerable there. The same applies to a
+        // name a conditional block happens to `#define` in the plain reading — `uint64_t` in a C header — where the
+        // rendering's typedef is the declaration a compiler sees.
+        //
+        // Only these two card shapes are re-asked. A card that answers a declaration is the program's answer and is
+        // returned as it is; re-asking every hover would pay a rendering parse for every ordinary name.
+        if a_failed_card_may_need_the_rendering(&found)
+            && let Some(rendered) = hover_of_the_rendering(session, view, in_the_file)
+        {
+            return Some(rendered);
+        }
         return Some(found);
     }
 
@@ -517,25 +531,73 @@ fn hover_of_the_rendering(
     view: &FileView,
     in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> Option<Hover> {
-    let traced = crate::probes::hover();
-    let mapped = session.the_rendering_offset(&view.path, in_the_file.get());
-    if traced {
-        eprintln!(
-            "[rendering] {} at {} maps to {mapped:?}",
-            view.path.display(),
-            in_the_file.get()
-        );
-    }
-    let offset = mapped?;
     let rendered = session.view(&view.path)?;
-    if traced {
-        eprintln!(
-            "[rendering] the rendering view is {} byte(s)",
-            rendered.source.len()
-        );
-    }
+    // **The spelling is what keeps a macro argument's call site from mapping to the invocation's first token.** The
+    // ordinary map walks written starts and, for an argument token whose written span the cook dropped, answers with
+    // the previous token: `ids.items` inside `DICT_OBJ(...)` landed on `ids` ten lines above. The rendered view can
+    // check the span's own spelling, which is the fact the map does not carry.
+    let spelling = cpp_parser::token_at(&view.root, in_the_file.get())
+        .map(|token| token.text().to_string())
+        .unwrap_or_default();
+    let mapped = rendered
+        .reading_offset_of_the_written(in_the_file.get(), &spelling)
+        .map(|at| at.get())
+        .or_else(|| session.the_rendering_offset(&view.path, in_the_file.get()));
+
+    let offset = mapped?;
+
     let offset = cpp_code_analysis::file::coordinates::ReadingOffset::new(offset);
     hover_of_the_program(session, &rendered, offset, in_the_file)
+}
+
+/// **Does this card describe a failure the rendering may be able to answer?**
+///
+/// Two shapes, both measured on neovim's `channel.c`: a member card for an anonymous struct a macro wrote
+/// (`kvec_t(int64_t) ids` → "`ids` has no member `size` … members could not be read") and a macro card for a name
+/// whose plain reading found a conditional `#define` while the rendering has the compiler's typedef (`uint64_t`).
+/// A declaration card is left alone; the rendering fallback is for the cards that say the plain reading did not find
+/// the declaration.
+fn a_failed_card_may_need_the_rendering(hover: &Hover) -> bool {
+    let lsp_types::HoverContents::Markup(markup) = &hover.contents else {
+        return false;
+    };
+    let text = &markup.value;
+    text.contains("has no member")
+        || text.contains("members could not be read")
+        || text.contains("The type of")
+        || text.contains("whose `#define` is inside a conditional block")
+}
+
+/// **A macro that expands to its own name** — the self-identical definition a platform compatibility header writes.
+///
+/// `#define uint64_t uint64_t` under `#ifdef __NetBSD__` in neovim's `map_defs.h` is the measurement: it changes no
+/// text, so it cannot be the whole answer to "what is `uint64_t`". The declaration or the standard typedef behind it
+/// is.
+fn a_pass_through_macro(found: &ProjectMacro) -> bool {
+    found.fact.alias.as_deref() == Some(found.fact.name.as_str())
+}
+
+/// **What a standard fixed-width integer typedef is**, for a name whose only competing definition is a conditional
+/// pass-through macro.
+fn a_standard_integer_typedef(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "int8_t" => "the 8-bit signed integer type from `<stdint.h>`",
+        "uint8_t" => "the 8-bit unsigned integer type from `<stdint.h>`",
+        "int16_t" => "the 16-bit signed integer type from `<stdint.h>`",
+        "uint16_t" => "the 16-bit unsigned integer type from `<stdint.h>`",
+        "int32_t" => "the 32-bit signed integer type from `<stdint.h>`",
+        "uint32_t" => "the 32-bit unsigned integer type from `<stdint.h>`",
+        "int64_t" => "the 64-bit signed integer type from `<stdint.h>`",
+        "uint64_t" => "the 64-bit unsigned integer type from `<stdint.h>`",
+        "intptr_t" => "the signed integer type wide enough to hold a pointer",
+        "uintptr_t" => "the unsigned integer type wide enough to hold a pointer",
+        "intmax_t" => "the widest signed integer type",
+        "uintmax_t" => "the widest unsigned integer type",
+        "size_t" => "the unsigned type of a `sizeof` result",
+        "ssize_t" => "the signed counterpart of `size_t`",
+        "ptrdiff_t" => "the signed type of a pointer difference",
+        _ => return None,
+    })
 }
 
 /// **The card for an attribute name at the cursor**, when that is what the cursor is on — see [`hover`].
@@ -601,7 +663,7 @@ fn hover_of_the_program(
     // and the queries below would spend their time finding that out.
     if let Some(found) = timed!(
         "format_string",
-        crate::handlers::format::format_string_hover(session, view, in_the_file)
+        handlers::format::format_string_hover(session, view, in_the_file)
     ) {
         return Some(found);
     }
@@ -619,10 +681,18 @@ fn hover_of_the_program(
     // **The macro question, asked in the file's coordinates.** A macro use has no footprint in the rendering — the cook
     // expanded it — so the query takes the file offset the client gave us. Measured: a hover on a file's own
     // `#define MAX(a, b)` answered nothing, because the reading offset named a position the file does not have.
+    //
+    // **A macro whose body is its own name is a pass-through, not an answer.** neovim's `map_defs.h` writes
+    // `#ifdef __NetBSD__ / #define uint64_t uint64_t / #endif`: on this Windows compilation the macro is not in
+    // force, and even where it is, it expands to the same token, so the typedef from `<stdint.h>` is what a reader
+    // needs. A conditional pass-through used to stop the hover at "a macro whose #define is inside a conditional
+    // block" for every `uint64_t` in `channel.c`.
+    let word = word_in_the_file(view, in_the_file);
     if let Known::Yes(found) = timed!(
         "macro_at_a_file_offset",
         session.macro_at_a_file_offset(view, in_the_file)
-    ) {
+    ) && !a_pass_through_macro(&found)
+    {
         return Some(markdown(macro_markdown(
             session,
             view,
@@ -637,7 +707,7 @@ fn hover_of_the_program(
     // `TEST(Format, LocalStatement)` plainly has it. The popup says what the name is and that its existence depends on
     // the compilation, rather than saying nothing at all (which is what an editor reported: no hover on `TEST`).
     match timed!("macro_definition", session.macro_definition(view, offset)) {
-        Known::Yes(found) => {
+        Known::Yes(found) if !a_pass_through_macro(&found) => {
             return Some(markdown(macro_markdown(
                 session,
                 view,
@@ -646,11 +716,13 @@ fn hover_of_the_program(
             )));
         }
         Known::Unknown(UnknownReason::ConditionalCompilation) => {
-            let name = session
-                .definitions(view, offset)
-                .value()
-                .and_then(|found| found.found.first().map(|one| one.fact.name.clone()));
-            let _ = name;
+            // **A conditional macro does not hide a standard type.** `uint64_t` has a `#define uint64_t uint64_t`
+            // under `__NetBSD__` in `map_defs.h`, but the type a compiler sees comes from `<stdint.h>`; the macro is
+            // conditional and self-identical. The type's name is the honest card, and it is what the reader asked
+            // for. The fixed-width family is the same reading `layout.rs` already sizes by name.
+            if let Some(what) = a_standard_integer_typedef(&word) {
+                return Some(markdown(format!("`{word}` — {what}.")));
+            }
             let written = cpp_parser::token_at(&view.root, offset.get())
                 .map(|token| token.text().to_string())
                 .unwrap_or_default();
@@ -662,7 +734,7 @@ fn hover_of_the_program(
                 )));
             }
         }
-        Known::Unknown(_) | Known::No => {}
+        Known::Yes(_) | Known::Unknown(_) | Known::No => {}
     }
     // **A macro the compiler itself defines** — `__STDC_VERSION__`, `__GNUC__`, `_WIN32`. It is in no file, so every
     // query above answers nothing for it, and a reader hovering `#ifdef __STDC_VERSION__` was told nothing at all —
@@ -724,11 +796,8 @@ fn hover_of_the_program(
                 // `LuaLexer`'s and told the reader "which one a call means is decided by the arguments" — about a
                 // **data member**, which has no arguments and no second reading. Find References and Go to Definition
                 // narrow by the cursor's class; this is the same rule, at the same offset.
-                let found = crate::handlers::references::narrowed_to_the_cursors_class(
-                    view,
-                    offset.get(),
-                    found,
-                );
+                let found =
+                    handlers::references::narrowed_to_the_cursors_class(view, offset.get(), found);
                 // **A class name is one declaration, not an overload set.** `LuaParser p(…)` hovers three facts — the
                 // class and its two constructors, which are filed under the same name because a constructor's name is
                 // its class's — and the answer listed the constructors as if a call were meant ("3 declarations …
@@ -745,21 +814,7 @@ fn hover_of_the_program(
                 // template parameters** is the general one — a partial specialization is a narrower shape
                 // (`vector<bool>`'s pattern has one parameter, the primary's two), so the general one is what a
                 // spelling that did not write the specialization means.
-                if crate::probes::hover() {
-                    eprintln!(
-                        "[types] {:?}",
-                        found
-                            .found
-                            .iter()
-                            .map(|definition| format!(
-                                "{} definition {} pattern {:?}",
-                                definition.file.display(),
-                                definition.fact.definition,
-                                definition.fact.pattern()
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                }
+
                 if let Some(the_type) = found
                     .found
                     .iter()
@@ -1742,18 +1797,7 @@ fn declaration_markdown(
     } else {
         None
     };
-    if crate::probes::hover() {
-        eprintln!(
-            "[card] heard {} local {} type_of {:?} => indexed {}",
-            found.fact.name,
-            found.fact.local,
-            found.fact.type_of,
-            indexed
-                .as_ref()
-                .map(|seen| format!("{}:{}", seen.file.display(), seen.fact.name))
-                .unwrap_or_else(|| "no".to_string())
-        );
-    }
+
     let found = match &indexed {
         Some(indexed) => indexed,
         None => found,
@@ -1865,17 +1909,7 @@ fn declaration_markdown(
     {
         *fact = the_member.fact.clone();
     }
-    if crate::probes::debug_card() {
-        eprintln!(
-            "[card] name={:?} kind={:?} scope={:?} returns={:?} parameter_list={:?} range={:?}",
-            fact.name,
-            fact.kind,
-            fact.scope,
-            fact.returns,
-            fact.parameter_list(),
-            fact.range
-        );
-    }
+
     let mut out = String::new();
 
     // **The instantiation the reader wrote is the signature they asked about.** A class template's fact describes
@@ -1910,12 +1944,19 @@ fn declaration_markdown(
     // UCHAR_MAX + 1;` are the two shapes an editor reported as "no value shown". The layer is
     // `sema::constant`, which also says what it refuses; `enumerator_value` stays the question "is this an
     // enumerator at all", which decides the sentence below.
-    let enumerator = enumerator_value(view, fact.name_range.start_offset);
+    // **The value is read from the file that *declares* the enumerator**, not from the file the cursor is in.
+    // The two coordinate systems are different: a fact from an included header carries its own header's offsets, and
+    // passing them to the cursor's view found another enumerator's body — neovim's `EVENT_BUFADD` (= 0) was drawn
+    // as `= 3` from whatever declaration happened to sit at that offset in `buffer.c`.
+    let enumerator = session
+        .view_of_the_file(&found.file)
+        .and_then(|declaring_view| enumerator_value(&declaring_view, fact.name_range.start_offset));
     // **The value is folded in the unit where the declaration is read**, not in the file the cursor happens to be
     // in: a header's `UCHAR_MAX` comes from `<climits>`, which the header itself need not include — every `.cpp` that
     // includes it does. See [`cpp_code_analysis::Session::constant_value_of_a_declaration`].
-    let constant_value =
-        session.constant_value_of_a_declaration(&found.file, fact.name_range, &view.path);
+    let constant_value = enumerator.or_else(|| {
+        session.constant_value_of_a_declaration(&found.file, fact.name_range, &view.path)
+    });
 
     // **The code block is generated from the model** — see [`cpp_code_analysis::sema::render`]. Not the declaration's
     // text, not the fact's strings joined together, and no `template <…>` cut out of the file: a type is a `Type`
@@ -2116,16 +2157,7 @@ fn declaration_markdown(
     // decline. Measured: `std::vector<widget::Widget>` reported "not computed" while the arguments were right there
     // in `subject`.
     if matches!(fact.kind, DeclKind::Type)
-        && {
-            if crate::probes::hover() {
-                eprintln!(
-                    "[layout] asking for {:?} (subject {:?})",
-                    fact.name.as_str(),
-                    subject
-                );
-            }
-            true
-        }
+        && { true }
         && let Known::Yes(layout) = session.the_layout_of(
             view,
             if subject.is_empty() {
@@ -2650,10 +2682,13 @@ fn kind_words(fact: &DeclFact) -> String {
     // come out the way every other type in the card does. `const char * const` → `const char*` is the same normalization
     // the card has had since the renderer landed.
     match (&fact.type_of, &fact.returns) {
-        (Some(written), _) => words.push_str(&format!(
+        // **A typedef of a class records its own name as its type**, so "a type of type `T`" said nothing that the
+        // code block does not say better. The alias's target is only prose when it is a different spelling.
+        (Some(written), _) if written.trim() != fact.name => words.push_str(&format!(
             " of type `{}`",
             cpp_code_analysis::sema::render::a_type(written)
         )),
+        (Some(_), _) => {}
         (None, Some(written)) => words.push_str(&format!(
             " returning `{}`",
             cpp_code_analysis::sema::render::a_type(written)
@@ -2789,7 +2824,7 @@ fn where_clause(
     let asked = session
         .files()
         .held(file)
-        .and_then(|declaring| crate::util::position_in_file(declaring, in_the_file));
+        .and_then(|declaring| util::position_in_file(declaring, in_the_file));
 
     match asked {
         Some(position) => format!("`{name}:{}:{}`", position.line + 1, position.character + 1),

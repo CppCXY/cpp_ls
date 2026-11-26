@@ -27,6 +27,8 @@
 //! The body being checked is in this file, and so is its return type. Nothing here looks at another file.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::Known;
+use crate::sema;
 use cpp_parser::CppAstNode;
 
 /// **`return-type-mismatch`** — see the module documentation.
@@ -86,8 +88,7 @@ impl Check for ReturnTypeMismatch {
                         if super::a_literal_zero(expression.syntax()) {
                             continue;
                         }
-                        let crate::Known::Yes((from, _)) = context.type_of(expression.syntax())
-                        else {
+                        let Known::Yes((from, _)) = context.type_of(expression.syntax()) else {
                             // The model could not tell what the expression is: a name from a header nobody read, an
                             // overload set, a deduction. Asking a conversion question about an unknown type is how a
                             // check invents a problem.
@@ -106,10 +107,9 @@ impl Check for ReturnTypeMismatch {
                         // `None` for one), asks the type relation first and the index only for the class question. Only
                         // `Refused` reports, so an unread class stays quiet — which is the rule the module's own note above
                         // is about.
-                        let conversion =
-                            crate::sema::convert::conversion(&from, &declared, |class| {
-                                super::a_class_can_be_built_from(context, class, &from)
-                            });
+                        let conversion = sema::convert::conversion(&from, &declared, |class| {
+                            super::a_class_can_be_built_from(context, class, &from)
+                        });
                         if !conversion.is_refused() {
                             continue;
                         }

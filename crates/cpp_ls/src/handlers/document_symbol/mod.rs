@@ -28,6 +28,7 @@
 //! [`cpp_code_analysis::Session::outline`] falls back to the buffer's own parse: the alternative is a panel that
 //! blinks empty between a keystroke and the next drain.
 
+use crate::util;
 use cpp_code_analysis::{FileView, OutlineSymbol};
 use lsp_types::{
     ClientCapabilities, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, OneOf,
@@ -48,9 +49,6 @@ pub async fn on_document_symbol(
 
     // Read in first, under the write lock: an outline of a file nobody has read would be an empty outline, which is
     // a wrong answer rather than a missing one.
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -370,11 +368,8 @@ fn range_in_file(view: &FileView, range: cpp_parser::SourceRange) -> Option<Rang
 /// file's — see [`range_in_file`].
 fn file_position(text: &str, lines: &cpp_parser::LineIndex, offset: usize) -> Option<Position> {
     let (line, column) = lines.position_of(offset, text)?;
-    let body = crate::util::line_body(text, lines, line)?;
-    Some(Position::new(
-        line as u32,
-        crate::util::utf16_column(body, column),
-    ))
+    let body = util::line_body(text, lines, line)?;
+    Some(Position::new(line as u32, util::utf16_column(body, column)))
 }
 
 pub struct DocumentSymbolCapabilities;

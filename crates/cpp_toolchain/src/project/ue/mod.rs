@@ -47,6 +47,7 @@
 //! where a rule is found by its code and where its tests are. What this module owns is the *answers* those rules read,
 //! so that two rules cannot disagree about which class a `UCLASS()` annotates.
 
+use crate::include;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -126,9 +127,9 @@ impl UnrealSection {
     /// [`CudaSection`]: crate::project::cuda::CudaSection
     pub fn applied_to(
         &self,
-        mut config: crate::include::config::CompilerConfig,
+        mut config: include::config::CompilerConfig,
         root: &Path,
-    ) -> crate::include::config::CompilerConfig {
+    ) -> include::config::CompilerConfig {
         if !self.is_on() {
             return config;
         }
@@ -140,13 +141,13 @@ impl UnrealSection {
         for include in generated_include_directories(root) {
             config
                 .include_paths
-                .push(crate::include::config::IncludePath::system(include));
+                .push(include::config::IncludePath::system(include));
         }
         if let Some(engine) = self.engine_root(root) {
             for include in engine_include_directories(&engine) {
                 config
                     .include_paths
-                    .push(crate::include::config::IncludePath::system(include));
+                    .push(include::config::IncludePath::system(include));
             }
         }
         // **What an engine build defines.** Nothing here overwrites a define the project stated: a compile database
@@ -444,7 +445,7 @@ fn engine_defines() -> Vec<(&'static str, &'static str)> {
 }
 
 /// **Define a macro unless the project already said what it is.**
-fn define_if_absent(config: &mut crate::include::config::CompilerConfig, name: &str, value: &str) {
+fn define_if_absent(config: &mut include::config::CompilerConfig, name: &str, value: &str) {
     let taken = config
         .defines
         .iter()
@@ -458,11 +459,9 @@ fn define_if_absent(config: &mut crate::include::config::CompilerConfig, name: &
     }
     let value = if value.is_empty() { None } else { Some(value) };
     config.defines.push(match value {
-        Some(value) => {
-            crate::include::config::CommandLineMacro::with_value(name.to_string(), value)
-        }
+        Some(value) => include::config::CommandLineMacro::with_value(name.to_string(), value),
         // `-DFOO` is `1`; an **empty** value is a different macro, and this is the only spelling the type has for it.
-        None => crate::include::config::CommandLineMacro::with_value(name.to_string(), ""),
+        None => include::config::CommandLineMacro::with_value(name.to_string(), ""),
     });
 }
 

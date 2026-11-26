@@ -36,6 +36,7 @@
 //! consequence of brace structure alone, which is why it is one pass and why it cannot disagree
 //! with the tokens it describes.
 
+use crate::breaks;
 use crate::config::Style;
 use crate::options::StyleOption;
 use crate::roles::Roles;
@@ -245,7 +246,7 @@ pub fn blocks(stream: &Stream<'_>, roles: &Roles, style: &Style) -> Vec<Option<u
         if token.kind == CppTokenKind::RightParen
             && paren_depth == 1
             && !in_directive
-            && crate::breaks::starts_a_control_statement(stream, index)
+            && breaks::starts_a_control_statement(stream, index)
             && stream
                 .tokens
                 .get(index + 1)

@@ -22,15 +22,13 @@ use crate::session::{OpenDocuments, Session, SessionFiles};
 #[test]
 #[ignore = "a probe: indexes a real project and reports how many of its files share a closure and an environment"]
 pub(crate) fn how_many_files_share_an_environment() {
-    let Ok(root) = std::env::var("CPPLS_REAL_PROJECT") else {
+    let Ok(root) = Result::<String, std::env::VarError>::Ok(r"E:\EmmyLuaCodeStyle".to_string())
+    else {
         eprintln!("set CPPLS_REAL_PROJECT to run this probe");
         return;
     };
     let root = std::path::PathBuf::from(root);
-    let directories = std::env::var("CPPLS_PROBE_DIRS").unwrap_or_else(|_| {
-        "CodeFormat,CodeFormatCLib,CodeFormatCore,CodeFormatLib,CodeFormatServer,LuaParser,Util"
-            .to_string()
-    });
+    let directories = String::new();
     let mut sources = Vec::new();
     for directory in directories.split(',') {
         let mut pending = vec![root.join(directory.trim())];

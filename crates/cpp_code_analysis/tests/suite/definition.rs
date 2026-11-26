@@ -7,7 +7,7 @@
 use cpp_code_analysis::definition::MissingDefinition;
 use cpp_code_analysis::file::coordinates::FileOffset;
 use cpp_code_analysis::{
-    CompilerConfig, FileView, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    CompilerConfig, FileView, Known, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
 
 fn session_of(files: &[(&str, &str)]) -> Session<MemoryFiles> {
@@ -173,4 +173,40 @@ fn the_pure_virtuals_of_a_class_are_listed() {
         ["double Circle::area()\n{\n}"],
         "`draw` is overridden; `area` is not, and its parameters come from `Shape`"
     );
+}
+
+/// **A C enumerator is an ordinary name in the file's enclosing scope**, even when the enum is declared in another
+/// header. `EVENT_BUFADD` in `auevents_enum.generated.h` is `auto_event`'s first member; a `.c` file that includes
+/// `autocmd_defs.h` names it unqualified, and a jump has to find it.
+#[test]
+fn a_c_enumerator_from_an_included_header_is_visible() {
+    let session = session_of(&[
+        (
+            "/p/events.h",
+            "typedef enum auto_event { EVENT_BUFADD = 0, EVENT_BUFCREATE = 1 } event_T;\n",
+        ),
+        (
+            "/p/use.c",
+            "#include \"events.h\"\nint f(void) { return EVENT_BUFADD; }\n",
+        ),
+    ]);
+    let view = session.view("/p/use.c").expect("the caller is cooked");
+    let at = view
+        .written_text()
+        .and_then(|text| text.find("EVENT_BUFADD"))
+        .expect("the fixture names the enumerator");
+    let reading = view
+        .reading_offset_of(FileOffset::new(at))
+        .expect("the name is in the rendering");
+    match session.definition(&view, reading) {
+        Known::Yes(found) => {
+            assert_eq!(found.fact.name, "EVENT_BUFADD");
+            assert!(
+                found.file.ends_with("events.h"),
+                "the enumerator's declaration is the header's: {:?}",
+                found.file
+            );
+        }
+        other => panic!("the enumerator was not found: {other:?}"),
+    }
 }

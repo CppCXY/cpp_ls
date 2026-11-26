@@ -28,6 +28,13 @@
 //! directives, keeping a stack of the regions currently open. The result is the same answer for a fraction of
 //! the work, and it is the reason this module rather than `summary` owns the walk.
 
+use crate::DeclModifiers;
+use crate::Name;
+use crate::cache;
+use crate::scopes;
+use crate::sema;
+use crate::summary;
+use crate::token;
 use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
 
@@ -208,27 +215,7 @@ pub(crate) fn an_unnamed_class_body_named(
     // The **innermost** specifier sequence on the path is the declaration's own, the same reading
     // [`declared_type_of_with`] makes above.
     let mut unnamed = false;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(specifiers) = &shape.specifiers {
             unnamed = a_class_body_without_a_tag(specifiers);
         }
@@ -308,27 +295,7 @@ pub(crate) fn declared_type_of_with(
     // `names_a_parameter` scan: measured on `arm_neon.h`, that was **1.9 ms per `Variable` binding** — 8.4 s of an
     // 8.5 s summary build — while the answer depends only on the offset, not on the shape.
     let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -394,7 +361,7 @@ pub(crate) fn declared_type_of_with(
         _ if the_declarator_holds_the_name => None,
         _ => Some(binding.name.spelled()),
     };
-    let found = crate::sema::types::type_of_declaration_named(
+    let found = sema::types::type_of_declaration_named(
         &specifiers,
         declarator.as_ref(),
         binding.name_range,
@@ -421,7 +388,7 @@ pub(crate) fn declared_type_of_with(
         .filter(|operators| !operators.is_empty())
     {
         Some(operators) => {
-            let base = crate::sema::types::read_specifiers_named(
+            let base = sema::types::read_specifiers_named(
                 &specifiers,
                 spelled.as_deref(),
                 cpp_parser::source_range(specifiers.text_range()),
@@ -447,7 +414,7 @@ pub(crate) fn declared_type_of_with(
 pub(crate) fn declared_modifiers_with(
     shapes: &DeclarationShapes,
     binding: &Binding,
-) -> crate::DeclModifiers {
+) -> DeclModifiers {
     // The declaration's own specifiers and declarator, selected exactly as [`declared_type_of_with`] selects them: the
     // innermost specifier sequence, and the first declarator that reaches the name (the inner one, for a parameter).
     let mut specifiers = None;
@@ -469,7 +436,7 @@ pub(crate) fn declared_modifiers_with(
         }
     });
 
-    let mut found = crate::DeclModifiers::default();
+    let mut found = DeclModifiers::default();
     for node in [specifiers.as_ref(), declarator.as_ref()]
         .into_iter()
         .flatten()
@@ -502,7 +469,7 @@ pub(crate) fn declared_modifiers_with(
     // scope it is the declaration's previous sibling. Recorded as a bit because the checks read it far more often than the tree
     // is walked.
     if is_marked_maybe_unused(specifiers.as_ref(), declarator.as_ref()) {
-        found = found.union(crate::DeclModifiers::MAYBE_UNUSED);
+        found = found.union(DeclModifiers::MAYBE_UNUSED);
     }
 
     // **Is it a definition, and is it pure?** Two questions a *declaration* cannot answer from its own words, so both are
@@ -511,8 +478,8 @@ pub(crate) fn declared_modifiers_with(
     {
         use cpp_parser::CppAstNode;
         if let Some(declarator) = declarator.as_ref() {
-            if found.contains(crate::DeclModifiers::DEFAULTED)
-                || found.contains(crate::DeclModifiers::DELETED)
+            if found.contains(DeclModifiers::DEFAULTED)
+                || found.contains(DeclModifiers::DELETED)
                 || declarator
                     .parent()
                     .and_then(|init| init.parent())
@@ -522,7 +489,7 @@ pub(crate) fn declared_modifiers_with(
                             .any(|child| cpp_parser::CppCompoundStat::can_cast(child.kind().into()))
                     })
             {
-                found = found.union(crate::DeclModifiers::DEFINED);
+                found = found.union(DeclModifiers::DEFINED);
             }
             // **`= 0` is the initializer of a pure virtual, and only of a function**: `int x = 0;` is an ordinary variable,
             // so the parameter list is what says the `0` is a pure specifier rather than a value.
@@ -532,7 +499,7 @@ pub(crate) fn declared_modifiers_with(
                     .and_then(|init| init.children().find_map(cpp_parser::CppInitializer::cast))
                     .is_some_and(is_zero)
             {
-                found = found.union(crate::DeclModifiers::PURE);
+                found = found.union(DeclModifiers::PURE);
             }
         }
     }
@@ -549,23 +516,23 @@ pub(crate) fn declared_modifiers_with(
     //
     // A **destructor** may legally say `virtual`, `override` and `final`, so only the one shape that needs `virtual` to
     // be legal is dropped: `final` on a destructor that writes neither `virtual` nor `override` is the class's.
-    if binding.kind == crate::BindingKind::Constructor {
-        const A_CONSTRUCTOR_CANNOT_SAY: crate::DeclModifiers = crate::DeclModifiers::VIRTUAL
-            .union(crate::DeclModifiers::FINAL)
-            .union(crate::DeclModifiers::OVERRIDE)
-            .union(crate::DeclModifiers::STATIC)
-            .union(crate::DeclModifiers::CONST)
-            .union(crate::DeclModifiers::VOLATILE);
-        found = crate::DeclModifiers::from_bits(found.bits() & !A_CONSTRUCTOR_CANNOT_SAY.bits());
-    } else if crate::cache::summary::is_a_destructor_name(&binding.name.spelled()) {
+    if binding.kind == BindingKind::Constructor {
+        const A_CONSTRUCTOR_CANNOT_SAY: DeclModifiers = DeclModifiers::VIRTUAL
+            .union(DeclModifiers::FINAL)
+            .union(DeclModifiers::OVERRIDE)
+            .union(DeclModifiers::STATIC)
+            .union(DeclModifiers::CONST)
+            .union(DeclModifiers::VOLATILE);
+        found = DeclModifiers::from_bits(found.bits() & !A_CONSTRUCTOR_CANNOT_SAY.bits());
+    } else if cache::summary::is_a_destructor_name(&binding.name.spelled()) {
         // A destructor writes `final` **after its parameter list** — `~D() final` — so the word can only be its own
         // when it is in the destructor's declarator. Anywhere else it is the class's, which is the leak this mask is
         // for. The declarator is re-read rather than the bits inspected, because after the union there is no telling
         // where a bit came from.
         let its_own = declarator.as_ref().map(modifiers_in).unwrap_or_default();
-        found = crate::DeclModifiers::from_bits(
-            (found.bits() & !crate::DeclModifiers::FINAL.bits())
-                | (its_own.bits() & crate::DeclModifiers::FINAL.bits()),
+        found = DeclModifiers::from_bits(
+            (found.bits() & !DeclModifiers::FINAL.bits())
+                | (its_own.bits() & DeclModifiers::FINAL.bits()),
         );
     }
 
@@ -583,9 +550,9 @@ pub(crate) fn declared_modifiers_with(
 /// The parameter list's own **range** is the boundary: everything the declarator writes after it is its suffix, and the
 /// qualifiers are token **kinds** rather than spellings. The version this replaces walked the tokens with an "after the
 /// parameters" flag and matched `token.text()` against `"const"` — the same three answers, read from the tree's own shape.
-fn function_suffix_in(declarator: &CppSyntaxNode) -> crate::DeclModifiers {
+fn function_suffix_in(declarator: &CppSyntaxNode) -> DeclModifiers {
     use cpp_parser::{CppAstNode, CppDeclarator, CppTokenKind};
-    let mut found = crate::DeclModifiers::default();
+    let mut found = DeclModifiers::default();
     let Some(declarator_node) = CppDeclarator::cast(declarator.clone()) else {
         return found;
     };
@@ -601,10 +568,10 @@ fn function_suffix_in(declarator: &CppSyntaxNode) -> crate::DeclModifiers {
             continue;
         }
         match CppTokenKind::from(token.kind()) {
-            CppTokenKind::ConstKeyword => found = found.union(crate::DeclModifiers::CONST),
-            CppTokenKind::VolatileKeyword => found = found.union(crate::DeclModifiers::VOLATILE),
-            CppTokenKind::Ampersand => found = found.union(crate::DeclModifiers::LVALUE_REFERENCE),
-            CppTokenKind::LogicalAnd => found = found.union(crate::DeclModifiers::RVALUE_REFERENCE),
+            CppTokenKind::ConstKeyword => found = found.union(DeclModifiers::CONST),
+            CppTokenKind::VolatileKeyword => found = found.union(DeclModifiers::VOLATILE),
+            CppTokenKind::Ampersand => found = found.union(DeclModifiers::LVALUE_REFERENCE),
+            CppTokenKind::LogicalAnd => found = found.union(DeclModifiers::RVALUE_REFERENCE),
             _ => {}
         }
     }
@@ -708,9 +675,9 @@ fn is_a_function_declarator(declarator: &CppSyntaxNode) -> bool {
 /// Tokens rather than a text search: `override` and `final` arrive as identifiers, `delete`/`default` as their
 /// keywords, `...` as an ellipsis, and an attribute carries its word as an identifier too. The comparison is against a
 /// token's own text, which is the spelling the lexer produced, not a slice of the file that could match a comment.
-fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
+fn modifiers_in(node: &CppSyntaxNode) -> DeclModifiers {
     use cpp_parser::CppAstNode;
-    let mut found = crate::DeclModifiers::default();
+    let mut found = DeclModifiers::default();
     // **Bodies are not the declaration's own words.** A class's specifier sequence *contains its body*, so a
     // descendant scan answered "this class is `virtual`" because a member function was — measured by
     // `the_virt_specifiers_are_bits`. The walk stops at a `ClassBody` or a `CompoundStat` and keeps everything else:
@@ -721,19 +688,19 @@ fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
             if let Some(token) = element.as_token().cloned() {
                 let word = token.text();
                 let bit = match word {
-                    "virtual" => Some(crate::DeclModifiers::VIRTUAL),
-                    "override" => Some(crate::DeclModifiers::OVERRIDE),
-                    "final" => Some(crate::DeclModifiers::FINAL),
-                    "constexpr" => Some(crate::DeclModifiers::CONSTEXPR),
-                    "consteval" => Some(crate::DeclModifiers::CONSTEVAL),
-                    "constinit" => Some(crate::DeclModifiers::CONSTINIT),
-                    "static" => Some(crate::DeclModifiers::STATIC),
-                    "inline" => Some(crate::DeclModifiers::INLINE),
-                    "explicit" => Some(crate::DeclModifiers::EXPLICIT),
-                    "maybe_unused" => Some(crate::DeclModifiers::MAYBE_UNUSED),
-                    "nodiscard" => Some(crate::DeclModifiers::NODISCARD),
-                    "delete" => Some(crate::DeclModifiers::DELETED),
-                    "default" => Some(crate::DeclModifiers::DEFAULTED),
+                    "virtual" => Some(DeclModifiers::VIRTUAL),
+                    "override" => Some(DeclModifiers::OVERRIDE),
+                    "final" => Some(DeclModifiers::FINAL),
+                    "constexpr" => Some(DeclModifiers::CONSTEXPR),
+                    "consteval" => Some(DeclModifiers::CONSTEVAL),
+                    "constinit" => Some(DeclModifiers::CONSTINIT),
+                    "static" => Some(DeclModifiers::STATIC),
+                    "inline" => Some(DeclModifiers::INLINE),
+                    "explicit" => Some(DeclModifiers::EXPLICIT),
+                    "maybe_unused" => Some(DeclModifiers::MAYBE_UNUSED),
+                    "nodiscard" => Some(DeclModifiers::NODISCARD),
+                    "delete" => Some(DeclModifiers::DELETED),
+                    "default" => Some(DeclModifiers::DEFAULTED),
                     _ => None,
                 };
                 if let Some(bit) = bit {
@@ -745,7 +712,7 @@ fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
                     && cpp_parser::CppTokenKind::from(token.kind())
                         == cpp_parser::CppTokenKind::Ellipsis
                 {
-                    found = found.union(crate::DeclModifiers::VARIADIC);
+                    found = found.union(DeclModifiers::VARIADIC);
                 }
                 continue;
             }
@@ -757,6 +724,10 @@ fn modifiers_in(node: &CppSyntaxNode) -> crate::DeclModifiers {
             // pack expansion in an expression.
             if cpp_parser::CppClassBody::can_cast(child.kind().into())
                 || cpp_parser::CppCompoundStat::can_cast(child.kind().into())
+                || matches!(
+                    cpp_parser::CppSyntaxKind::from(child.kind()),
+                    cpp_parser::CppSyntaxKind::OldStyleParameterList
+                )
             {
                 continue;
             }
@@ -928,7 +899,7 @@ impl DeclarationShapes {
             })
             .map(|(_, list, parsed)| {
                 parsed.get_or_init(|| {
-                    std::sync::Arc::new(crate::sema::types::template_parameters_with_defaults(list))
+                    std::sync::Arc::new(sema::types::template_parameters_with_defaults(list))
                 })
             })
     }
@@ -1087,14 +1058,6 @@ impl DeclarationShapes {
             // [`Shape::pattern`].
             let pattern = match kind {
                 CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef => {
-                    if crate::probes::inference() {
-                        eprintln!(
-                            "[shape] class node {:?} at {:?}: text {:?}",
-                            kind,
-                            node.text_range(),
-                            node.text().to_string().lines().next().unwrap_or("")
-                        );
-                    }
                     written_class_pattern(&node)
                 }
                 _ => None,
@@ -1428,27 +1391,7 @@ pub(crate) fn declared_alias_target_with(
     // copied out rather than borrowed: the visitor is handed a reference valid only for its own call, which is the
     // shape of the walk (see [`DeclarationShapes::on_the_path`]).
     let mut declaration = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if matches!(
             shape.kind,
             CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
@@ -1487,7 +1430,8 @@ pub(crate) fn declared_alias_target_with(
     // list with `unlisted ["{inta;intb;}"]` while its two members sat under the scope `Object`, and as the
     // **21 539 of 40 000** refusals in neovim's member questions. C declares almost every struct this way, so the
     // shape is the common one rather than a corner.
-    if let Some(named) = the_class_a_typedef_body_names(specifiers, &binding.name.text()) {
+    if let Some(named) = the_class_a_typedef_body_names(specifiers, binding.name.spelled().as_ref())
+    {
         return Some(named);
     }
 
@@ -1607,7 +1551,7 @@ fn the_operators_around_the_name(
                 usize::from(range.end()).saturating_sub(start),
             );
             if from <= to && to <= text.len() {
-                let parameters = crate::sema::types::read_parameters(&child);
+                let parameters = sema::types::read_parameters(&child);
                 let spelled = parameters
                     .iter()
                     .map(|parameter| parameter.to_string())
@@ -1703,10 +1647,10 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
 pub fn deduced_returns_of_substituted(
     root: &CppSyntaxNode,
     binding: Binding,
-    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    substitutions: &sema::types::TypeSubstitutions<'_>,
     // **The types the call passed**, in order — what a *pack* stands for. A fold expression widens all of them
     // (`sum_of(1, 2.5)` is a `double`), and a pack has no single substitution to read that from.
-    argument_types: &[crate::sema::types::Type],
+    argument_types: &[sema::types::Type],
 ) -> Option<String> {
     if binding.kind != BindingKind::Function {
         return None;
@@ -1744,7 +1688,7 @@ pub fn deduced_returns_of_substituted(
 fn a_branch_that_is_taken(
     expression: &cpp_parser::CppExpr,
     body: &cpp_parser::CppCompoundStat,
-    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    substitutions: &sema::types::TypeSubstitutions<'_>,
 ) -> bool {
     use cpp_parser::{CppAstNode, CppIfStat};
     // **The `if constexpr` statements that enclose this return**, innermost first — an ancestor walk. Asking the body for all of
@@ -1809,7 +1753,7 @@ fn constexpr_condition_of(statement: &cpp_parser::CppIfStat) -> Option<String> {
 /// ```
 fn evaluate_a_trait(
     condition: &str,
-    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    substitutions: &sema::types::TypeSubstitutions<'_>,
 ) -> Option<bool> {
     let condition = condition.trim();
 
@@ -1879,7 +1823,7 @@ fn evaluate_a_trait(
 /// A spelling with `decay_t<…>` applied and the template parameters substituted — see [`evaluate_a_trait`].
 fn substituted_spelling(
     written: &str,
-    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+    substitutions: &sema::types::TypeSubstitutions<'_>,
 ) -> String {
     let mut text = written.trim();
     while let Some(inner) = text
@@ -1976,12 +1920,21 @@ pub(crate) fn freed_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> u6
     mask
 }
 
+/// **Does this text spell anything that releases memory?** — the cheap filter in front of [`fill_the_frees`].
+///
+/// The sweep walks the whole rendering, so a file that cannot free anything skips it. The spellings are the ones
+/// [`scan_unconditional_statements`] recognises: `free`, `delete`, `std::destroy_at`. `free` alone was the first
+/// version, and it made a file whose only release is `delete p;` silent about the function that frees its parameter.
+fn names_a_release(rendered: &str) -> bool {
+    rendered.contains("free") || rendered.contains("delete") || rendered.contains("destroy_at")
+}
+
 /// **Fill [`DeclFact::frees`](crate::DeclFact::frees) for every function of one file**, in a single walk.
 ///
 /// The map is built once — every declaration that has a body, keyed by the offset its name starts at — and then each
 /// fact is answered from it. The alternative, asked per fact, is a walk of the whole rendering per declaration, which
 /// on a file that includes two standard headers is minutes rather than milliseconds.
-fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
+fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [DeclFact]) {
     if facts.is_empty() {
         return;
     }
@@ -1992,7 +1945,7 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
     // `the_parameter_names` is the allocation in it: one `Vec` and one `String` per parameter, per declaration.
     let wanted: std::collections::HashSet<usize> = facts
         .iter()
-        .filter(|fact| fact.kind == crate::DeclKind::Function)
+        .filter(|fact| fact.kind == DeclKind::Function)
         .map(|fact| fact.name_range.start_offset)
         .collect();
     let mut bodies: std::collections::HashMap<usize, (CppSyntaxNode, Vec<String>)> =
@@ -2017,7 +1970,7 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
     }
 
     for fact in facts {
-        if fact.kind != crate::DeclKind::Function {
+        if fact.kind != DeclKind::Function {
             continue;
         }
         let Some((body, parameters)) = bodies.get(&fact.name_range.start_offset) else {
@@ -2055,11 +2008,7 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [crate::DeclFact]) {
 /// a `Vec` for an answer no `ReflectionFact` may ever need.
 /// The next change: store the annotation's **byte range** and split it only when a fact actually matches, which is
 /// behaviour-preserving and removes the allocation for the pairs nothing reads.
-fn fill_the_reflection(
-    root: &cpp_parser::CppSyntaxNode,
-    written: &str,
-    facts: &mut [crate::DeclFact],
-) {
+fn fill_the_reflection(root: &cpp_parser::CppSyntaxNode, written: &str, facts: &mut [DeclFact]) {
     // **The annotation is remembered as the two borrowed pieces**, not as a `ReflectionFact`. `the_annotation_before`
     // accepts *any* macro call that ends just before a declaration, so most entries are pairs no fact ever reads —
     // and a `Vec<String>` of specifiers for each of those was 11.3 M allocations of a read's 143 M. The split now
@@ -2087,7 +2036,7 @@ fn fill_the_reflection(
             continue;
         }
         if let Some((macro_name, arguments)) = annotations.get(&fact.name_range.start_offset) {
-            fact.detail_mut().reflection = Some(crate::summary::ReflectionFact {
+            fact.detail_mut().reflection = Some(summary::ReflectionFact {
                 macro_name: (*macro_name).to_string(),
                 specifiers: the_specifiers(arguments),
             });
@@ -2451,7 +2400,7 @@ fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNo
 /// parameter written with another word and nothing in the call says what it stands for.
 pub fn a_lambdas_return_type(
     lambda: &CppSyntaxNode,
-    argument_types: &[crate::sema::types::Type],
+    argument_types: &[sema::types::Type],
 ) -> Option<String> {
     use cpp_parser::{CppAstNode, CppLambdaExpr};
     // **The lambda's own body and parameters**, and nothing else: a lambda has no name, so the caller resolves the variable
@@ -2467,7 +2416,7 @@ pub fn a_lambdas_return_type(
     if receives_a_placeholder && placeholder_types.is_empty() {
         return None;
     }
-    let substitutions = crate::sema::types::TypeSubstitutions::new(&[], argument_types);
+    let substitutions = sema::types::TypeSubstitutions::new(&[], argument_types);
     let mut agreed: Option<String> = None;
     for statement in the_returns_of(&body, lambda.syntax()) {
         let Some(expression) = statement.get_expr() else {
@@ -2504,8 +2453,8 @@ pub fn a_lambdas_return_type(
 /// what a `return` of the name then means is the value's type.
 fn the_auto_parameters_with_their_arguments(
     parameters: &[cpp_parser::CppParam],
-    argument_types: &[crate::sema::types::Type],
-) -> Vec<(String, crate::sema::types::Type)> {
+    argument_types: &[sema::types::Type],
+) -> Vec<(String, sema::types::Type)> {
     parameters
         .iter()
         .enumerate()
@@ -2554,7 +2503,7 @@ fn is_a_literal_zero(expression: &cpp_parser::CppExpr) -> bool {
 /// lambda with no `auto` parameters uses.
 fn type_with_the_auto_parameters(
     expression: &cpp_parser::CppExpr,
-    paired: &[(String, crate::sema::types::Type)],
+    paired: &[(String, sema::types::Type)],
 ) -> Option<String> {
     use cpp_parser::{CppAstNode, CppExpr};
     match expression {
@@ -2657,7 +2606,7 @@ fn returned_expressions_in(body: &cpp_parser::CppCompoundStat) -> Vec<cpp_parser
 /// because that is what decides the type of a sum. A non-arithmetic operand answers `None`: `Widget + Widget` is an
 /// `operator+` this layer would have to find, and answering `Widget` for a user-defined sum is the kind of confidence that
 /// produces wrong types.
-pub(crate) fn the_widest_of(types: &[crate::sema::types::Type]) -> Option<String> {
+pub(crate) fn the_widest_of(types: &[sema::types::Type]) -> Option<String> {
     let mut widest: Option<(u8, String)> = None;
     for a_type in types {
         let spelling = a_type.to_string();
@@ -2735,8 +2684,8 @@ fn a_data_member_type(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -
 fn type_a_return_states_with(
     expression: &cpp_parser::CppExpr,
     declaration: &CppSyntaxNode,
-    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
-    argument_types: &[crate::sema::types::Type],
+    substitutions: &sema::types::TypeSubstitutions<'_>,
+    argument_types: &[sema::types::Type],
 ) -> Option<String> {
     use cpp_parser::{CppAstNode, CppExpr};
     match expression {
@@ -2926,7 +2875,7 @@ fn a_captures_type(expression: &CppSyntaxNode) -> Option<String> {
     type_a_return_states_with(
         &initializer,
         enclosing.syntax(),
-        &crate::sema::types::TypeSubstitutions::new(&[], &[]),
+        &sema::types::TypeSubstitutions::new(&[], &[]),
         &[],
     )
 }
@@ -3033,7 +2982,7 @@ pub(crate) fn the_returns_the_class_has_to_resolve(
 /// the language's (an unqualified name in a member's return type is looked up in the class first), asked of the tree
 /// instead of the scope table because this reader is handed the file's tree.
 fn an_operator_return_is_usable(root: &CppSyntaxNode, binding: &Binding, spelling: &str) -> bool {
-    fn means_the_same_everywhere(kind: &crate::sema::types::Type) -> bool {
+    fn means_the_same_everywhere(kind: &sema::types::Type) -> bool {
         use crate::sema::types::Type;
         match kind {
             Type::Builtin { .. } => true,
@@ -3048,10 +2997,10 @@ fn an_operator_return_is_usable(root: &CppSyntaxNode, binding: &Binding, spellin
         }
     }
 
-    if means_the_same_everywhere(&crate::sema::types::parse_type_spelling(spelling)) {
+    if means_the_same_everywhere(&sema::types::parse_type_spelling(spelling)) {
         return true;
     }
-    let Some(head) = crate::sema::types::parse_type_spelling(spelling)
+    let Some(head) = sema::types::parse_type_spelling(spelling)
         .class_name()
         .map(str::to_string)
     else {
@@ -3135,7 +3084,7 @@ pub(crate) fn declared_returns_of_with(
     // The rule is the **spelling**, not the kind: the walker classifies `operator bool` as an operator, and a
     // conversion operator is the one operator whose name carries a space and a type (`operator[]` and `operator+` do
     // not match this pattern, and their return type is a real specifier).
-    let spelled = binding.name.text();
+    let spelled = binding.name.spelled();
     if let Some(target) = spelled.trim().strip_prefix("operator ").map(str::trim)
         && !target.is_empty()
     {
@@ -3156,27 +3105,7 @@ pub(crate) fn declared_returns_of_with(
     let mut specifiers = None;
     let mut trailing = None;
     let mut declarator = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
@@ -3328,13 +3257,13 @@ pub(crate) fn declared_returns_of_with(
     // `std::size_t LuaSource::GetLine(std::size_t offset)` recorded `returns: Some("LuaSource::GetLine")`, and a hover
     // showed that as the function's answer where the file wrote `std::size_t`. See
     // [`crate::sema::types::type_of_declaration_named`].
-    let declared = binding.name.text();
+    let declared = binding.name.spelled();
     let spelling = if specifiers.text().is_empty() {
         String::new()
     } else {
-        crate::sema::types::read_specifiers_named(
+        sema::types::read_specifiers_named(
             &specifiers,
-            Some(declared.as_str()),
+            Some(declared.as_ref()),
             cpp_parser::source_range(specifiers.text_range()),
         )
         .to_string()
@@ -3602,7 +3531,7 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
     let declarator =
         cpp_parser::typed_ancestors::<cpp_parser::CppDeclarator>(&token.parent()?).next()?;
 
-    crate::sema::call_syntax::parameter_list_text(declarator.syntax())
+    sema::call_syntax::parameter_list_text(declarator.syntax())
 }
 
 /// **The parameter list as the file spells it, read from the shape table** — `"(int a, int b)"`.
@@ -3644,7 +3573,7 @@ pub(crate) fn declared_parameters_with(
         }
     });
 
-    crate::sema::call_syntax::parameter_list_text(&found?)
+    sema::call_syntax::parameter_list_text(&found?)
 }
 
 /// Is the **name this declarator declares** the one at `offset`?
@@ -3858,27 +3787,7 @@ pub(crate) fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Bindi
     // [`declared_type_of`] makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut owner = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         // **A class-like definition**: `class`/`struct`/`union` are one typed node, and an enum writes bases too (its
         // underlying type).
         if cpp_parser::CppClassDef::can_cast(shape.kind) || shape.kind == CppSyntaxKind::EnumDef {
@@ -3978,7 +3887,7 @@ fn fact_for(
     // its own class. `definition("std::vector")` then found the class **and** its destructor and reported
     // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (
     // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
-    let name = binding.name.text();
+    let spelled = binding.name.spelled();
     // **A qualified declarator name declares into the scope it names.**
     //
     // `void Name::printf(int i) { }` is a declaration **of `Name`'s `printf`**, not a file-scope name spelled
@@ -3989,13 +3898,14 @@ fn fact_for(
     // enclosing scope would be a name that cannot be used unqualified there), so the split belongs here, where the
     // fact is built. Until the grammar learned the shape, an out-of-class definition reached this point with its name
     // swallowed by the specifier sequence; now the declarator's name *is* the qualified spelling.
-    let (name, scope) = match name.rsplit_once("::") {
+    let (name, scope): (std::borrow::Cow<'_, str>, Option<String>) = match spelled.rsplit_once("::")
+    {
         // A local never carries a qualifier: `S::f` at block scope is a call, not a declaration.
         Some((qualifier, last)) if !local && !qualifier.is_empty() && !last.is_empty() => (
-            last.to_string(),
+            std::borrow::Cow::Owned(last.to_string()),
             Some(qualifier.trim_start_matches("::").to_string()),
         ),
-        _ => (name, scope),
+        _ => (spelled, scope),
     };
 
     // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
@@ -4039,7 +3949,9 @@ fn fact_for(
             // `EmmyLuaCodeStyle`, `e.U.Start.Kind` answered "the type of `e.U` is not known here". The name used is
             // the one the parser already gives the anonymous type's **own members** as their scope —
             // `MarkEvent::U` — which is what makes the member lookup below it work.
-            .or_else(|| an_unnamed_class_body_named(scope.as_deref(), &name, shapes, binding))
+            .or_else(|| {
+                an_unnamed_class_body_named(scope.as_deref(), name.as_ref(), shapes, binding)
+            })
     };
     let returns = {
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
@@ -4159,7 +4071,7 @@ fn fact_for(
         kind: DeclKind::from_binding_kind(binding.kind),
         // **Read off the binding, which is the only layer that knows it** — `DeclKind` folds an enumerator into a
         // variable, and the fact's scope cannot tell them apart for an anonymous enum.
-        enumerator: binding.kind == crate::BindingKind::Enumerator,
+        enumerator: binding.kind == BindingKind::Enumerator,
         // **What the declaration writes** — read from the same shape table as everything above, and stored so that a
         // check asking "does this say `override`" does not search the text for it. See [`crate::DeclModifiers`].
         modifiers: declared_modifiers_with(shapes, binding),
@@ -4171,7 +4083,7 @@ fn fact_for(
         // **What the function frees** is filled by the pass after the facts are built — see
         // [`fill_the_frees`], which needs the whole file to do it in one walk.
         frees: 0,
-        name: name.into(),
+        name: SmolStr::from(name.as_ref()),
         scope: scope.map(SmolStr::from),
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
@@ -4180,7 +4092,7 @@ fn fact_for(
         type_of: type_of.map(SmolStr::from),
         returns: returns.map(SmolStr::from),
         split_by_a_directive,
-        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+        detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
             in_namespace,
             returns_in_the_class,
             bases,
@@ -4306,27 +4218,7 @@ fn class_head_of(declaration: &CppSyntaxNode) -> String {
 /// for its members and the class *further out* is not.
 pub(crate) fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     let mut found = None;
-    let trace = std::env::var_os("CPPLS_TRACE_MODIFIERS").is_some();
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
-        if trace {
-            eprintln!(
-                "[mods] {} at {:?}: shape {:?}..{:?} specifiers {:?} ({:?})",
-                binding.name.spelled(),
-                binding.name_range,
-                shape.at.start_offset,
-                shape.at.end_offset(),
-                shape
-                    .specifiers
-                    .as_ref()
-                    .map(|node| cpp_parser::CppSyntaxKind::from(node.kind())),
-                shape.specifiers.as_ref().map(|node| node
-                    .text()
-                    .to_string()
-                    .chars()
-                    .take(40)
-                    .collect::<String>()),
-            );
-        }
         if matches!(
             shape.kind,
             CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
@@ -4720,7 +4612,7 @@ impl<'a> Declarations<'a> {
         {
             for node in root.descendants() {
                 let kind = CppSyntaxKind::from(node.kind());
-                if !crate::scopes::declaring_kinds().contains(&kind) {
+                if !scopes::declaring_kinds().contains(&kind) {
                     continue;
                 }
 
@@ -4875,7 +4767,6 @@ impl<'a> DeclarationFacts<'a> {
         // the parser keeps as a sibling. One copy per file, not one per declaration.
         let rendered = root.text().to_string();
 
-        let walking = std::time::Instant::now();
         for (index, scope) in scopes.scopes().iter().enumerate() {
             let id = ScopeId(index);
             // **A template parameter list files no declarations, and filing them was expensive in a way that had
@@ -4964,8 +4855,6 @@ impl<'a> DeclarationFacts<'a> {
         // The scope a qualified declaration belongs to is **written in the text**, so the fact is built from the
         // spelling — the class may be declared in a header this file's scope tree has never seen. No binding is added,
         // which keeps the lookup rule the refusal exists for.
-        let walked = walking.elapsed();
-        let qualifying = std::time::Instant::now();
         // **By offset, because the scan this replaces was quadratic in the program.** The loop below used to ask
         // `facts.iter_mut().find(..)` for every qualified declaration — a linear scan of a list a standard-library
         // closure makes tens of thousands of entries long, so the cost was the *product* of the two lists.
@@ -4982,8 +4871,13 @@ impl<'a> DeclarationFacts<'a> {
         for (at, fact) in facts.iter().enumerate() {
             by_offset.entry(fact.name_range.start_offset).or_insert(at);
         }
-        let qualified = qualified_declarations(root);
-        let qualified_count = qualified.len();
+        // **A cheap gate before a full-tree walk.** A file with no `::` has no qualified declaration; the walk
+        // used to run on every file, and on a plain C file it is 13 ms of the fact build for nothing.
+        let qualified = if rendered.contains("::") {
+            qualified_declarations(root)
+        } else {
+            Vec::new()
+        };
         for (binding, scope, parameters) in qualified {
             // **The walker may already have filed this declaration, with no scope.** A definition written in the
             // declarator — `std::vector<LuaTokenError> &LuaLexer::GetErrors() { … }` — is bound by the scope walker as a
@@ -5035,38 +4929,31 @@ impl<'a> DeclarationFacts<'a> {
         // declaration — measured on a folding fixture that includes `<string>` and `<vector>`: the server took longer
         // than a request's thirty-second budget to answer, because every inline function of those headers paid a walk
         // of the whole rendering.
-        let freeing = std::time::Instant::now();
-        fill_the_frees(root, &mut facts);
-        let freed = freeing.elapsed();
+        // Neither sweep can find anything in a file that never spells its marker, and both were paid per file.
+        // **The marker is every spelling that releases memory, not the word `free`.** It was `free` alone, and a file
+        // whose only release is `delete p;` — the C++ spelling of the same act — skipped the sweep and recorded no
+        // function as freeing its parameter, so the call-site half of `use-after-free` was silent for it.
+        if names_a_release(&rendered) {
+            fill_the_frees(root, &mut facts);
+        }
         // **The reflection annotations, from the file text once per file** — `UCLASS(Blueprintable)` and
         // `UPROPERTY(EditAnywhere)` are empty macros, so nothing of them survives into the tree; the specifiers exist
         // only in the text, and a per-declaration read of it would copy the file once per fact.
-        let reflecting = std::time::Instant::now();
-        fill_the_reflection(root, &rendered, &mut facts);
-        let reflected = reflecting.elapsed();
+        if rendered.contains("UCLASS")
+            || rendered.contains("UPROPERTY")
+            || rendered.contains("UFUNCTION")
+        {
+            fill_the_reflection(root, &rendered, &mut facts);
+        }
 
         let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
-        let guarding = std::time::Instant::now();
         assign_guards(&mut targets, preprocessing, &mut guards);
-        let guarded = guarding.elapsed();
 
         // **What the four halves of `build_facts` cost**, in the order they run: the one line that says whether the
         // next optimisation belongs in the scope walk, in `fact_for`, or in the sweeps.
-        if crate::probes::units() {
-            eprintln!(
-                "[unit]     scopes+facts {:>6.1} ms  qualified {:.1} ms ({} declaration(s))  frees {:>6.1} ms  \
-                 reflection {:.1} ms  guards {:.1} ms",
-                walked.as_secs_f64() * 1000.0,
-                qualifying.elapsed().as_secs_f64() * 1000.0,
-                qualified_count,
-                freed.as_secs_f64() * 1000.0,
-                reflected.as_secs_f64() * 1000.0,
-                guarded.as_secs_f64() * 1000.0
-            );
-        }
 
         (facts, guards)
     }
@@ -5159,7 +5046,7 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         // `std::size_t`. Measured with `inspect facts` on `struct Hashed { std::size_t operator()(…) const; };`: four
         // facts, one of them that phantom. A declarator that spells an operator names itself.
         let names_itself = declarator.get_name().is_some()
-            || crate::sema::scopes::spells_an_operator(declarator.syntax());
+            || sema::scopes::spells_an_operator(declarator.syntax());
         let from_the_declarator = declarator
             .child::<CppNameExpr>()
             .filter(CppNameExpr::is_qualified);
@@ -5199,28 +5086,28 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         let has_parameters = declaration.get_param_list().is_some();
         let class = qualifier.rsplit("::").next().unwrap_or(qualifier).trim();
         let kind = if name.starts_with('~') {
-            crate::BindingKind::Destructor
+            BindingKind::Destructor
         } else if name.starts_with("operator") {
-            crate::BindingKind::OperatorFunction
+            BindingKind::OperatorFunction
         } else if name == class {
-            crate::BindingKind::Constructor
+            BindingKind::Constructor
         } else if has_parameters {
-            crate::BindingKind::Function
+            BindingKind::Function
         } else {
-            crate::BindingKind::Variable
+            BindingKind::Variable
         };
 
         found.push((
             Binding {
                 name: if let Some(rest) = name.strip_prefix('~') {
-                    crate::Name::destructor(rest)
+                    Name::destructor(rest)
                 } else if let Some(symbol) = name.strip_prefix("operator") {
-                    crate::Name::operator(symbol.trim())
+                    Name::operator(symbol.trim())
                 } else {
-                    crate::Name::identifier(name)
+                    Name::identifier(name)
                 },
                 kind,
-                range: crate::scopes::without_trailing_trivia(declaration.syntax()),
+                range: scopes::without_trailing_trivia(declaration.syntax()),
                 name_range,
                 scope: ScopeId(0),
                 origin: None,
@@ -5245,9 +5132,9 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
             },
             // **The parameter list, taken from the declaration's own header** — the walker's declarator has no name for this
             // shape, so a fact read through it carried `parameter_list: None` and a signature had no fallback label.
-            declaration.get_param_list().map(|list| {
-                crate::sema::call_syntax::tidy_list_text(&list.syntax().text().to_string()).0
-            }),
+            declaration
+                .get_param_list()
+                .map(|list| sema::call_syntax::tidy_list_text(&list.syntax().text().to_string()).0),
         ));
     }
 
@@ -5557,10 +5444,10 @@ fn conditional_branch(directive: &Directive, range: &SourceRange) -> GuardBranch
 /// A **token pattern** rather than a parsed condition, on purpose: these four spellings are the whole of what the
 /// rule needs, and running the condition parser over every `#if` in every file to look for them would be work no
 /// answer uses. A condition that is anything else is `Other`, which is the answer that makes no claim.
-fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
-    let significant: Vec<&crate::token::Token> = tokens
+fn named_condition(tokens: &[token::Token]) -> BranchCondition {
+    let significant: Vec<&token::Token> = tokens
         .iter()
-        .filter(|token| !crate::token::is_trivia(token.kind))
+        .filter(|token| !token::is_trivia(token.kind))
         .collect();
     let rest = without_outer_parentheses(&significant);
 
@@ -5611,9 +5498,7 @@ fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
 }
 
 /// Strip parentheses that wrap the whole condition, so that `#if (!defined(N))` reads like `#if !defined(N)`.
-fn without_outer_parentheses<'a>(
-    tokens: &'a [&'a crate::token::Token],
-) -> &'a [&'a crate::token::Token] {
+fn without_outer_parentheses<'a>(tokens: &'a [&'a token::Token]) -> &'a [&'a token::Token] {
     let mut rest = tokens;
 
     while rest.len() >= 2
@@ -5954,8 +5839,10 @@ pub fn split_by_a_directive_with(shapes: &DeclarationShapes, binding: &Binding) 
 #[cfg(test)]
 mod tests {
     use super::{build_facts, by_name, template_parameters_for};
+    use crate::NoMacroBodies;
     use crate::preprocess::preprocess;
     use crate::sema::scopes::build_scopes;
+    use crate::summary;
     use crate::summary::DeclFact;
     use crate::summary::{DeclKind, FactGuard};
     use cpp_parser::{CppParser, ParserConfig};
@@ -6021,7 +5908,7 @@ mod tests {
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        let scopes = build_scopes(&root, &crate::NoMacroBodies);
+        let scopes = build_scopes(&root, &NoMacroBodies);
         let (facts, _) = build_facts(
             &scopes,
             &preprocess(source, tree.get_tokens()),
@@ -6433,13 +6320,13 @@ int Box<int>::Inner::deep = 0;
         );
     }
 
-    fn facts(source: &str) -> (Vec<crate::summary::DeclFact>, crate::summary::SummaryGuards) {
+    fn facts(source: &str) -> (Vec<summary::DeclFact>, summary::SummaryGuards) {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
         build_facts(
-            &build_scopes(&root, &crate::NoMacroBodies),
+            &build_scopes(&root, &NoMacroBodies),
             &preprocess(source, tree.get_tokens()),
             &root,
             &[],
@@ -6518,7 +6405,7 @@ public:
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
     fn facts_of_a_broken_file(
         source: &str,
-    ) -> (Vec<crate::summary::DeclFact>, Vec<cpp_parser::SourceRange>) {
+    ) -> (Vec<summary::DeclFact>, Vec<cpp_parser::SourceRange>) {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_ne!(
             tree.get_errors(),
@@ -6535,7 +6422,7 @@ public:
 
         (
             build_facts(
-                &build_scopes(&root, &crate::NoMacroBodies),
+                &build_scopes(&root, &NoMacroBodies),
                 &preprocess(source, tree.get_tokens()),
                 &root,
                 &errors,

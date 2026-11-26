@@ -17,6 +17,9 @@
 //! file's own text.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 pub struct UseOverride;
 
@@ -29,7 +32,7 @@ impl Check for UseOverride {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Type && !fact.bases().is_empty())
+            .filter(|fact| fact.kind == DeclKind::Type && !fact.bases().is_empty())
             .map(|fact| (fact.name.to_string(), fact.bases().to_vec()))
             .collect();
 
@@ -47,13 +50,12 @@ impl Check for UseOverride {
             // named one member and underlined another (four on `classes.cpp` of the C++ corpus), and then from the
             // file's text, which was right but did the same work at every check. The bits are recorded once, by the
             // summary, from the tokens — see [`crate::DeclModifiers`].
-            let members: Vec<(String, crate::DeclModifiers, cpp_parser::SourceRange)> = context
+            let members: Vec<(String, DeclModifiers, cpp_parser::SourceRange)> = context
                 .summary
                 .declarations
                 .iter()
                 .filter(|fact| {
-                    fact.kind == crate::DeclKind::Function
-                        && fact.scope.as_deref() == Some(class.as_str())
+                    fact.kind == DeclKind::Function && fact.scope.as_deref() == Some(class.as_str())
                 })
                 .map(|fact| (fact.name.to_string(), fact.modifiers, fact.name_range))
                 .collect();
@@ -63,8 +65,8 @@ impl Check for UseOverride {
                 // the first version's bug. What matters is that it says neither `override` nor `final`: `contains`
                 // asks for **every** bit it is given, so the two are asked separately —
                 // `contains(OVERRIDE | FINAL)` would mean "says both".
-                if modifiers.contains(crate::DeclModifiers::OVERRIDE)
-                    || modifiers.contains(crate::DeclModifiers::FINAL)
+                if modifiers.contains(DeclModifiers::OVERRIDE)
+                    || modifiers.contains(DeclModifiers::FINAL)
                 {
                     continue;
                 }
@@ -74,7 +76,7 @@ impl Check for UseOverride {
                 for base in &bases {
                     if !base_members.contains_key(base) {
                         let names = match context.model.members_of(base) {
-                            crate::Known::Yes(list) => list
+                            Known::Yes(list) => list
                                 .members
                                 .iter()
                                 .map(|member| member.fact.name.to_string())

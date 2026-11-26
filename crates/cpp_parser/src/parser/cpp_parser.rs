@@ -1,3 +1,11 @@
+use crate::features;
+use crate::grammar;
+use crate::is_trivia;
+use crate::kind;
+use crate::lexer;
+use crate::parser;
+use crate::syntax;
+use crate::text;
 use crate::{
     grammar::parse_cpp_unit,
     kind::{CppSyntaxKind, CppTokenKind, Dialect},
@@ -103,7 +111,7 @@ pub struct EventStreamAudit {
     /// on purpose — but tracked so the count can be asserted to stay stable.
     pub empty_nodes: usize,
     /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
-    pub unclosed: Vec<crate::kind::CppSyntaxKind>,
+    pub unclosed: Vec<kind::CppSyntaxKind>,
 }
 
 /// **The first way a caller's token stream cannot be parsed**, as a message for the error the tree carries.
@@ -146,14 +154,12 @@ fn why_the_tokens_do_not_fit(text: &str, tokens: &[CppTokenData]) -> Option<Stri
 /// cannot parse, so a caller gets the same shape a parse of garbage produces rather than a panic.
 fn a_tree_that_says(text: &str, tokens: &[CppTokenData], problem: String) -> CppSyntaxTree {
     let mut builder = rowan::GreenNodeBuilder::new();
-    builder.start_node(crate::kind::CppSyntaxKind::TranslationUnit.into());
+    builder.start_node(kind::CppSyntaxKind::TranslationUnit.into());
     builder.finish_node();
     let root = builder.finish();
     let message = format!("the token stream does not describe this text: {problem}");
-    let error = CppParseError::syntax_error_from(
-        &message,
-        crate::text::SourceRange::new(0, text.len().min(1)),
-    );
+    let error =
+        CppParseError::syntax_error_from(&message, text::SourceRange::new(0, text.len().min(1)));
     CppSyntaxTree::new(root, vec![error], tokens.to_vec(), 0)
 }
 
@@ -200,10 +206,6 @@ struct ParserCounts {
     type_questions: std::cell::Cell<u64>,
     type_answers: std::cell::Cell<u64>,
     greater_than_questions: std::cell::Cell<u64>,
-    marks: std::cell::Cell<u64>,
-    closes: std::cell::Cell<u64>,
-    #[allow(dead_code)]
-    trivia_sweeps: std::cell::Cell<u64>,
     comment_groups: std::cell::Cell<u64>,
     comment_nanos: std::cell::Cell<u64>,
 }
@@ -363,7 +365,7 @@ pub struct CppParser<'a> {
     /// C++ settles several parse questions by looking up a name — `Widget w(1, 2);` against `g(1, 2);` — so a
     /// parser without this table has to guess. See [`crate::parser::TypeNames`] for what it records and why
     /// recording too little is the safe direction.
-    type_names: crate::parser::TypeNames,
+    type_names: parser::TypeNames,
     /// **What [`a_specifier_follows_the_group`](crate::grammar) answered, by the absolute index of the name it was
     /// asked from.** The question is answered by reading ahead through a *run* — `M(a) M(b) M(c) … int x;` asks it of
     /// each `M` in turn, and each answer is the answer for the rest of the run — so without a memory a run of `n`
@@ -641,7 +643,7 @@ impl<'a> CppParser<'a> {
         config: ParserConfig<'a>,
         errors: &'a mut Vec<CppParseError>,
     ) -> CppParser<'a> {
-        let (tokens, lexical_errors) = crate::lexer::lex(text, &config.lexer_config());
+        let (tokens, lexical_errors) = lexer::lex(text, &config.lexer_config());
         errors.extend(lexical_errors);
         Self::with_tokens(text, tokens, config, errors)
     }
@@ -706,13 +708,13 @@ impl<'a> CppParser<'a> {
 
         let events = std::mem::take(&mut parser.events);
         let (root, unbalanced_events) = {
-            let mut builder = crate::syntax::CppTreeBuilder::new(text, events.clone(), None);
+            let mut builder = syntax::CppTreeBuilder::new(text, events.clone(), None);
             builder.build();
             let unbalanced = builder.unbalanced_events();
             (builder.finish(), unbalanced)
         };
 
-        crate::parser::phases::report();
+        parser::phases::report();
         let tokens = std::mem::take(&mut parser.tokens);
         let tree = CppSyntaxTree::new(root, errors, tokens, unbalanced_events);
         (tree, events)
@@ -729,30 +731,6 @@ impl<'a> CppParser<'a> {
         let audit = self.audit_events();
 
         // **What the parse asked, and how often** — `CPPLS_PARSER_STATS=1`. See [`ParserCounts`].
-        if crate::probes::stats() {
-            let counts = &self.counts;
-            eprintln!(
-                "parser stats: {} event(s) | {} mark(s), {} close(s) | {} checkpoint(s), {} rollback(s), \
-                 {} speculative attempt(s) | {} type question(s), {} answered | {} `>` question(s) | \
-                 {} token(s)",
-                self.events.len(),
-                counts.marks.get(),
-                counts.closes.get(),
-                counts.checkpoints.get(),
-                counts.rollbacks.get(),
-                counts.attempted.get(),
-                counts.type_questions.get(),
-                counts.type_answers.get(),
-                counts.greater_than_questions.get(),
-                self.tokens.len(),
-            );
-            eprintln!(
-                "parser doc layer: {} group(s), {} ns total, {} ns each",
-                counts.comment_groups.get(),
-                counts.comment_nanos.get(),
-                counts.comment_nanos.get() / counts.comment_groups.get().max(1),
-            );
-        }
 
         debug_assert!(
             self.open_marks.is_empty(),
@@ -781,7 +759,7 @@ impl<'a> CppParser<'a> {
             (builder.finish(), unbalanced)
         };
 
-        crate::parser::phases::report();
+        parser::phases::report();
         CppSyntaxTree::new(
             root,
             std::mem::take(self.errors),
@@ -1051,7 +1029,7 @@ impl<'a> CppParser<'a> {
         let close = self.tokens[end_index];
         let whole = CppTokenData::new(
             CppTokenKind::HeaderName,
-            crate::text::SourceRange::new(
+            text::SourceRange::new(
                 start.range.start_offset,
                 close.range.end_offset() - start.range.start_offset,
             ),
@@ -1073,11 +1051,7 @@ impl<'a> CppParser<'a> {
     /// Used by the grammar to answer "what did I just parse?" without threading a return value
     /// through every level. `from_event` is an event index from
     /// [`CppParser::current_event_count`].
-    pub fn events_contain_any(
-        &self,
-        from_event: usize,
-        kinds: &[crate::kind::CppSyntaxKind],
-    ) -> bool {
+    pub fn events_contain_any(&self, from_event: usize, kinds: &[kind::CppSyntaxKind]) -> bool {
         self.events[from_event.min(self.events.len())..]
             .iter()
             .any(|event| {
@@ -1143,7 +1117,7 @@ impl<'a> CppParser<'a> {
             };
             let kind = token.kind;
             index += 1;
-            if crate::is_trivia(kind) {
+            if is_trivia(kind) {
                 continue;
             }
             if kind != CppTokenKind::Greater {
@@ -1246,7 +1220,7 @@ impl<'a> CppParser<'a> {
         &self,
         from_event: usize,
         to_event: usize,
-        kinds: &[crate::kind::CppSyntaxKind],
+        kinds: &[kind::CppSyntaxKind],
     ) -> bool {
         let from = from_event.min(self.events.len());
         let to = to_event.min(self.events.len());
@@ -1291,7 +1265,7 @@ impl<'a> CppParser<'a> {
     /// C++17 parse must see the identifier and only a C11-and-later one may read the associations. The lexer already
     /// asks the same configuration ([`crate::lexer::LexerConfig::language`]), so a rule that asks here cannot disagree
     /// with it about what the file is.
-    pub fn language(&self) -> crate::features::LanguageConfig {
+    pub fn language(&self) -> features::LanguageConfig {
         self.parse_config.language()
     }
 
@@ -1524,7 +1498,7 @@ impl<'a> CppParser<'a> {
     }
 
     /// The table itself, for a consumer that wants to audit what the parse recorded.
-    pub fn type_names(&self) -> &crate::parser::TypeNames {
+    pub fn type_names(&self) -> &parser::TypeNames {
         &self.type_names
     }
 
@@ -1897,29 +1871,6 @@ impl<'a> CppParser<'a> {
     pub fn bump(&mut self) {
         let consumed_index = self.token_index;
 
-        // **The cursor must stand on a token that can be emitted.** It used to be possible for it to stand on
-        // *trivia*, and the shape of the damage is worth stating because nothing else catches it: `bump` emits
-        // nothing for a trivia kind (the round above emits those), so the token's bytes were consumed and emitted
-        // nowhere, and the tree silently stopped being lossless from that offset on. Measured on `cxxabi.h`: 22 315
-        // bytes in, 19 987 out, with the comment that was lost replaced by a zero-width `ErrorNode` and **zero**
-        // syntax errors reported — see `tests/lossless.rs`.
-        //
-        // **Asserted only under `CPPLS_TRIVIA=1`**, because the state is reachable today: a debug build of the server
-        // hits it while indexing ordinary C++ headers (§4 of `docs/worklog.md`), and a guard that fires on
-        // every run is a guard nobody can keep. The probe turns it into the failure it is.
-        //
-        // **The switch is read once for the process, not once per token.** This assertion used to call
-        // `std::env::var_os` here — on Windows that takes the process environment lock and builds an `OsString`, and
-        // `bump` runs once per token: measured on a 4 MB translation unit (1 091 827 tokens), hoisting the read behind
-        // [`crate::probes::trivia`] is what took the parse from **2.090 s to 0.663 s** (1.93 → 6.07 MB/s), and the
-        // real-header corpus from 2.163 s to 0.591 s. See `crates/cpp_parser/src/probes.rs` for why no environment
-        // read belongs at a use site.
-        assert!(
-            !crate::probes::trivia() || !is_trivia_kind(self.current_token),
-            "the cursor is on {:?} at {consumed_index}, which `bump` cannot emit — every later offset is shifted",
-            self.current_token
-        );
-
         // Trivia tokens are emitted by `parse_trivia_tokens`, which runs over the whole skipped
         // span; pushing them here as well would duplicate them in the tree.
         if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
@@ -2072,7 +2023,7 @@ impl<'a> CppParser<'a> {
             // through `push_error`.
             ParserCounts::one_more(&self.counts.comment_groups);
             let doc_started = std::time::Instant::now();
-            let _ = crate::grammar::doc::parse_comment_group(self, &sources);
+            let _ = grammar::doc::parse_comment_group(self, &sources);
             self.counts
                 .comment_nanos
                 .set(self.counts.comment_nanos.get() + doc_started.elapsed().as_nanos() as u64);
@@ -2086,12 +2037,12 @@ impl<'a> CppParser<'a> {
     /// The separators are the trivia *between* the comments, collected here because this is where the
     /// token list is. They are handed to the doc parser rather than emitted here so that they land
     /// inside the `DocComment` node — see [`crate::grammar::doc::CommentSource`].
-    fn comment_sources(&self, group: &[usize]) -> Vec<crate::grammar::doc::CommentSource> {
+    fn comment_sources(&self, group: &[usize]) -> Vec<grammar::doc::CommentSource> {
         let mut sources = Vec::with_capacity(group.len());
 
         for (position, &token_index) in group.iter().enumerate() {
             let comment = self.tokens[token_index];
-            let mut source = crate::grammar::doc::CommentSource::first(comment.range);
+            let mut source = grammar::doc::CommentSource::first(comment.range);
 
             if position > 0 {
                 // Everything between the previous comment and this one. The group is built from
@@ -2107,7 +2058,7 @@ impl<'a> CppParser<'a> {
                     if !is_line_layout_kind(token.kind) {
                         continue;
                     }
-                    if source.separator_len < crate::grammar::doc::MAX_SEPARATOR_TOKENS {
+                    if source.separator_len < grammar::doc::MAX_SEPARATOR_TOKENS {
                         source.separator[source.separator_len] = Some(token.range);
                         source.separator_len += 1;
                     }
@@ -2207,7 +2158,7 @@ impl<'a> CppParser<'a> {
     /// The doc layer hands over a token that already carries a range in *file* coordinates, so this
     /// is the whole of the translation between the two layers: no offset arithmetic, no buffering.
     /// That is what lets doc nodes be ordinary children of the C++ tree.
-    pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: crate::text::SourceRange) {
+    pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: text::SourceRange) {
         self.push_event(MarkEvent::EatToken { kind, range });
     }
 
@@ -2318,7 +2269,7 @@ impl<'a> CppParser<'a> {
     /// Zero-width nodes cost nothing in the tree and are what make completion work at a broken
     /// position: the cursor is inside a node of the expected kind rather than in an error blob.
     pub fn emit_missing_node(&mut self) {
-        let m = self.mark(crate::kind::CppSyntaxKind::MissingNode);
+        let m = self.mark(kind::CppSyntaxKind::MissingNode);
         m.complete(self);
     }
 

@@ -3615,3 +3615,238 @@ Those macros expand to declarations — `PMap(T)` is `Map_##T##_##ptr_t`, a name
 struct fact to lay out. That is the next layer if the card should cover all nine; it needs the preprocessed type, not
 another type spelling in this layer. `file_buffer` at 253 members costs about **1.2 s** of layout on top of its cold
 cook; the 256 budget is where that was measured.
+
+## Stale generated placeholders shadowed 92 declarations
+
+`api_free_luaref` is **declared**, not implicit: neovim generates
+`build/include/lua/executor.h.generated.h:26` with
+
+```c
+DLLEXPORT void api_free_luaref(LuaRef ref);
+```
+
+and `src/nvim/lua/executor.h:55` includes `"lua/executor.h.generated.h"`. `cstr_as_string` is the same shape at
+`build/include/api/private/helpers.h.generated.h:26`. This checkout also contains **92 two-byte
+`build/src/nvim/auto/**/*.generated.h` placeholders** (hex `0D 0A`, from 2026-10-28) and the compile command puts
+`-I build/src/nvim/auto` **before** `-I build/include`. Both the compiler and the analysis therefore resolve the
+includes to the empty placeholders; the real generated declarations are never seen. They were moved to
+`build/stale-auto-20261124`, after which `api_free_luaref` and `cstr_as_string` resolve from `build/include`, and
+`buffer.c`'s former `cstr_as_string` diagnostic is gone.
+
+This tree does **not** compile those translation units: MinGW GCC 15.1 under `-std=gnu99` reports `implicit
+declaration of function` as an **error**, and there is no `buffer_updates.c.obj` in the build. The earlier assumption
+that the build passed through an implicit warning was wrong; the stale placeholders mean a fresh compile fails. A
+clean/regenerated build removes them, so the compiler and the language server both see the generated declarations.
+The cross-translation-unit fallback tried in the previous commit was removed: it hid the stale build artifact and would
+have invented a definition for any undeclared call. A user with this tree should clean `build/src/nvim/auto` and
+regenerate, or ensure the directory does not contain old empty files.
+
+## A C enumerator is visible across files — and reads its own enum's value
+
+`typedef enum auto_event { EVENT_BUFADD = 0, … } event_T;` in `auevents_enum.generated.h` declares ordinary C names:
+`EVENT_BUFADD` is visible in the enclosing scope, not only as `auto_event::EVENT_BUFADD`. The in-scope lookup treated
+`auto_event` as a class and dropped the enumerator, so `buffer.c`'s `EVENT_BUFADD` had no jump. A `.c` caller now keeps
+unscoped enumerators (a C++ `enum class` still hides them). The hover card also counted the value in the **caller's**
+tree at the header's offset, which is how `EVENT_BUFADD = 0` became `= 3`; it now reads the file that declares the
+enumerator, and the card says `EVENT_BUFADD = 0` / "an enumerator of `auto_event`".
+
+## An alias and a variable sharing a name caused a stack overflow
+
+`operator_returns_of` followed the first declaration of a name without asking its kind. For
+`typedef struct proc { … } Proc;` plus a `Proc proc;` variable, it followed `Proc`'s typedef target to `proc`, then
+`proc`'s variable `type_of` (`Proc`) back to `Proc`, forever. Opening neovim's `channel.c` (`proc->status`) killed the
+server's `tokio-rt-worker` in both `undefined-field` and `param-type-check`. Only a `DeclKind::Type` declaration may be
+followed as an alias now; `channel.c` diagnoses with no findings and no overflow.
+## Neovim validation after the stale-header cleanup (2026-11-24)
+
+`sweep` over the 219 translation units the compile database holds, with the parser *shape heuristics removed*:
+
+```text
+findings 226
+unresolved-call-or-receiver 1
+assign-type-check 0
+include-not-found 1
+missing-include 3
+missing-return 1
+braces-around-statements 80, else-after-return 110, macro-parentheses 27,
+simplify-boolean-expr 3
+syntax-error 0
+```
+
+`buffer.c`, `channel.c`, `buffer_updates.c`, `lua/executor.c`, `os/fs.c`, `api/buffer.c`, `eval/funcs.c`,
+`api/vim.c`, `window.c`, `ui.c`, `ex_docmd.c`, `tui.c` and `ex_getln.c` diagnose cleanly through `--cook`. The one
+unresolved is `getsid` in the platform fixture; the three `missing-include` are the per-file sweep measurement below.
+
+### Why `globals.h` works although the parser has not included it
+
+It does not, in C. `globals.h` is included, and the compiler sees a different declaration than the parser's raw
+summary does:
+
+```c
+// src/nvim/api/vim.c:41
+#include "nvim/globals.h"
+
+// src/nvim/globals.h
+#include "nvim/macros_defs.h"      // EXTERN → extern, INIT(...) → nothing
+#include "nvim/input_defs.h"       // typedef … typebuf_T
+EXTERN typebuf_T typebuf INIT( = { NULL, NULL, 0, … });   // extern typebuf_T typebuf = { … };
+```
+
+`EXTERN typebuf_T typebuf INIT(…)` is a declaration **only after the include and the two macro expansions**. The facts
+show the split plainly on a four-file fixture (`macros.h`, `defs.h`, `globals.h`, `main.c`):
+
+```text
+facts typebuf in main.c       []                         the raw summary has not included anything
+define typebuf from main.c    globals.h:3:18  typebuf     the cooked reading has
+cook diagnostics main.c      no findings
+```
+
+So the 128 `unresolved-call-or-receiver` are the **raw-summary lookup** talking: it reads `globals.h` on its own, where
+`EXTERN` is not a specifier and `typebuf_T` is not a type. The project index already has the machinery for the right
+reading (`CookedFile`, `insert_cooked_in_a_program`, `the_reading_for`, `cooked_declarations`); what was missing is
+that the **cook this tool ran was the per-file one**. `Session::cook` renders the requested file alone and
+`index_rendering` files declarations at that file's path — a declaration written in an included header is dropped.
+The unit read does the opposite: `Session::read_the_unit` stitched the closure once and `index_unit_rendering` files
+each declaration under the file that wrote it.
+
+`cpp_inspect`'s `--cook` now performs that unit read (`Session::read_the_unit`, with the per-file cook as the fallback
+for a fixture with no compile command). Measured on the real project after the change:
+
+```text
+define typebuf from api/vim.c   globals.h:575:18  typebuf  variable type `typebuf_T`
+hover typebuf from api/vim.c    `typebuf` — a variable of type `typebuf_T`, declared in globals.h:575:18
+diagnostics api/vim.c           none
+diagnostics window.c            none
+diagnostics ui.c                none
+diagnostics ex_docmd.c          none
+```
+
+**The parser-shape fix tried here was wrong and has been removed.** It made `EXTERN typebuf_T typebuf …` a
+declaration even when no include or macro expansion was in hand — a heuristic that accepts text C would reject, and
+exactly the "works without being included" claim the code must not make. The temporary `FORMAT_VERSION` bump for it is
+gone too (the remaining 62 → 63 is the `nvim_main` modifier fix below). The fix is in the reading the tool asks for,
+not in the grammar.
+
+`sweep` reads one representative unit before its per-file loop, so the header facts above are in the index and the
+128 unresolved entries drop to one. It still cooks each file on its own for that file's declarations, so the three
+`missing-include` entries it reports (`Dict` in `msgpack_rpc/channel.c` and `tui/tui.c`) are the same per-file gap;
+`cpp_inspect --cook diagnostics` on either file answers `none`, because that path performs the file's own unit read.
+
+### An assignment is not the condition of a following conditional
+
+`ex_getln.c:3055` is
+
+```c
+m = cmdline_win ? cmdline_win->w_view_width * cmdline_win->w_view_height : Columns * Rows;
+```
+
+The parser read the `?`'s left operand as a **full expression**, so the tree was `(m = cmdline_win) ? … : …`; the
+assignment's right-hand side was therefore the pointer `cmdline_win`, and `assign-type-check` reported that a
+`win_T*` does not convert to `m`'s `int`. C++ gives the assignment family a **lower** precedence than `?:` — the
+left operand is a logical-or-expression — so the tree is `m = (cmdline_win ? … : …)`.
+
+The condition now starts at precedence 2 (above the assignment family), and `parse_assignment_expr_inner` folds the
+assignment after the conditional, right-associatively, including the `>>=` spelling the lexer leaves as three tokens
+and the braced initializer (`x = {1, 2};`). The parser fixture that had pinned the old nesting was corrected along with
+the grammar; `ex_getln.c` is clean, and `a_pointer_conditioned_ternary_is_not_an_assignment_of_the_condition` pins
+the check.
+
+`nvim_main`'s **false `static`** was a separate, real modifier defect: main.c's `#ifdef MAKE_LIB` branches merge
+`nvim_main` and `main` into one declaration, the `#else` side is an `OldStyleParameterList`, and walking it for
+modifiers found a body-local `static`. The modifier walk now stops at that node; the fact and the hover say `int`, and
+`FORMAT_VERSION` moved 62 → 63 because an old summary holds the wrong bit.
+
+`tui.c`'s two `assign-type-check` findings were the other real false positives: `bool setrgbf = tui->ti.defs[…];`
+assigns a `const char *` to `bool`, a standard scalar conversion. The conversion relation now accepts a pointer (or
+decaying array) into `bool`/`_Bool`, and `tui.c` diagnoses cleanly.
+
+### Hover and completion on the shapes an editor actually meets
+
+Two more defects were reported while using the fixed server on `channel.c`:
+
+* **`ids.size`** — `kvec_t(int64_t) ids = …` is an anonymous struct after the preprocessor, and an expression
+  statement before it. The plain member card said `` `ids` has no member `size` — members could not be read``. That
+  card now re-asks the rendering when the plain reading failed, and it reads `size_t size` from the declaration.
+* **`uint64_t`** — `map_defs.h` has `#ifdef __NetBSD__` / `#define uint64_t uint64_t`; the conditional pass-through
+  was shown as a macro on Windows. A self-identical macro no longer answers for the name, and the standard fixed-width
+  typedefs have their own card (`the 64-bit unsigned integer type from <stdint.h>`).
+* **Completion of a macro** — `kvec` at the start of a declaration completed nothing, because the parser had not seen
+  a declaration yet. Ordinary name completion now adds the file's own and direct includes' macros, so `kvec`,
+  `KV_I` and `KV_INI` keep their candidates.
+
+**Completion latency is measured, not closed.** The server's per-request `prepare`/`catch_up` path and the client's
+renewal of an incomplete list now have a real neovim timing run; the edit stall it found is fixed, and the query's
+own ~90 ms remains below.
+
+### Completion timing on a real neovim file
+
+`latency::measure_neovim_completion_before_and_after_an_edit` is an `#[ignore]`d over-the-wire test against
+`src/nvim/channel.c`; run it with `CPPLS_NEovim_PROJECT=… cargo test --release -p cpp_ls --test suite
+measure_neovim_completion -- --ignored --nocapture`.
+
+The report before the open-file shortcut:
+
+```text
+before edit   322–897 ms (the index was still filling)
+after edit    476 / 708 / 1857 / 762 / 95 / 93 ms
+              the 1857 ms request spent 1609 ms in `prepare` and 157 ms in `modules`
+```
+
+`prepare` took the analysis **read lock** to discover that `channel.c` was open — which `OpenDocuments` already
+answers without a lock. `AnalysisState::prepare_for_completion` now returns `true` for an open buffer, and the
+handler uses it. After the change:
+
+```text
+after edit    91 / 229 / 90 / 110 / 90 / 88 ms   (steady 90–110 ms)
+prepare       0 ms on every request
+```
+
+The remaining first-request cost is the view parse/lock after the edit (up to ~500 ms in one run, 0 once the view
+cache warms), and the completion query itself is still ~85–110 ms on this file. Those are the next two numbers to
+attack; the simple edit no longer restarts a program read, and no request is waiting on `prepare`.
+
+### Macro-declared locals: the two-coordinate rule, enforced
+
+`kvec_t(int64_t) ids = KV_INITIAL_VALUE;` is the sharpest case for the two-coordinate design. The rule is now enforced:
+
+* **Positions, prefixes and replace ranges are the file's.** The handler always takes `view_of_the_file` for the
+  client's line and column.
+* **Bindings, types and members are the current buffer's rendering.** When the file's own completion has no item
+  beginning with the typed word, the handler asks the **cached** rendering of the just-edited text, and maps the
+  replace range back through `FileView::file_offset_of`. It never builds a rendering inside a request: if the edit's
+  rendering has not landed, the ordinary list is returned with `isIncomplete`, and the pump serves the next request.
+
+The measured behaviour on `channel.c`:
+
+```text
+ids.                members: capacity, items, size
+ids (after insert)  lists ids
+KV_                 lists KV_INITIAL_VALUE
+ids.items hover     int64_t* items, in ids
+```
+
+`ids.items` needed a second half: the occurrence is inside `DICT_OBJ(...)`, and its **written span was dropped** when
+the macro argument was substituted into the body. The reverse start-offset map therefore answered with the `ids` of
+the `for` loop ten lines above. `FileView::reading_offset_of_the_written` now prefers the span whose `written` range
+contains the offset, and for a span that kept only `reported` it matches the spelling **and its surrounding context**
+(`ids.` before, `[` after). That is what maps the occurrence the reader is on rather than the first token of the
+invocation.
+
+**Remaining cost, measured:** an ordinary completion still pays the editable view's prefix query once (~90–100 ms on
+this file, and a prefix the file's own list can answer does not ask for a rendering). When the rendering is not
+cached yet, the cross-request answer is `isIncomplete` plus the ordinary list — never a cook under the request lock.
+The current over-the-wire run is:
+
+```text
+before edit   min 101 ms, mean 496 ms, max 1086 ms   (index still filling)
+after edit    min  98 ms, mean 102 ms, max  108 ms
+```
+
+The first request after an insertion may still be the ordinary list until the pump's cook lands; that is the next
+target, not a correctness hole.
+
+`include-not-found` is `<termios.h>` in a test fixture this Windows checkout does not have; `getsid` in
+`test/functional/fixtures/tty-test.c` is in the `#else` of `#ifdef MSWIN` and is reported because the fixture is not
+in the compile database, so no `MSWIN` is known. Those are platform/fixture answers, not parser defects. The three
+`missing-include` findings are the raw-summary class above (`Dict` is declared as `typedef kvec_t(KeyValuePair) Dict;`
+in `api/private/defs.h`, which is included); they need the same cooked-fact path.

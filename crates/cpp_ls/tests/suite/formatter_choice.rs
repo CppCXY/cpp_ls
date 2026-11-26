@@ -339,8 +339,7 @@ fn a_missing_program_falls_back_to_the_built_in_formatter_and_says_so_once() {
 fn the_real_clang_format_answers_and_keeps_a_range_to_its_lines() {
     use cpp_ls::handlers::formatting::formatter::{clang_format_arguments, is_available};
 
-    let configured = std::env::var("CPPLS_CLANG_FORMAT")
-        .ok()
+    let configured = Option::<String>::None
         .or_else(|| is_available("clang-format").then(|| "clang-format".to_string()));
     let Some(configured) = configured else {
         panic!("no clang-format: set CPPLS_CLANG_FORMAT or put one on PATH");

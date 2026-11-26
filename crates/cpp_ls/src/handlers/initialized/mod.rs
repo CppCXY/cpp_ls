@@ -23,6 +23,8 @@
 //! Steps 6 to 8 are what make this a *language server* rather than a query engine: the session is usable the moment
 //! step 4 returns, and everything after it makes the answers better without making the editor wait.
 
+use crate::context;
+use crate::handlers;
 mod client_config;
 
 use std::path::PathBuf;
@@ -72,6 +74,22 @@ const COMMIT_A_SLICE: usize = 4;
 ///
 /// Sixteen is the middle: it spreads the decode over the cores without making one insert a stall a request can feel.
 const COOK_A_SLICE: usize = 16;
+
+/// **How much of a drain one read hold is allowed to do.**
+///
+/// The drain was unbounded — every file the wave left and every environment its slice named — and it runs under the
+/// session's read lock. Measured on neovim's `main.c`: one drain held the lock for **1842 ms**, and the writer's
+/// twenty-millisecond cook queued behind it while every request queued behind the writer. The leftovers go back on
+/// the queues ([`Session::commit_the_drain`] does it) and the next slice takes them.
+const DRAIN_FILES_A_HOLD: usize = 1;
+
+/// How many files' macro environments one read hold builds — see [`DRAIN_FILES_A_HOLD`]. Each is a closure walk, so
+/// the bound is wider than the re-read's and still one slice's worth.
+const DRAIN_ENVIRONMENTS_A_HOLD: usize = 4;
+
+/// **How many stored cook records one read hold decodes** — see [`DRAIN_FILES_A_HOLD`] for why the slice is wider than
+/// the hold. Each record is a file's whole closure's text, measured at ~100 ms, so four is what a request can wait for.
+const COOKS_A_HOLD: usize = 1;
 
 /// Feedback target for adjusting wave size, not a hard end-to-end latency deadline.
 const INDEX_SLICE_MS: u64 = 30;
@@ -127,6 +145,16 @@ pub async fn initialized_handler(
     // the answer the previous registration left.
     register_files_watch(context.clone()).await;
     start_analysis(context.clone()).await;
+
+    // **Debounced persistence, one background writer at a time.** Editing only marks a file; this task wakes after
+    // two seconds and writes at most what has been quiet, under the read side of the analysis.
+    let persistence = context.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            persistence.analysis().persist_cooked().await;
+        }
+    });
 
     Some(())
 }
@@ -195,8 +223,6 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
                     "the native watcher is off: the project's own configuration says \
                      `[workspace] native_watch = false`"
                 );
-            } else if crate::probes::no_watch() {
-                log::info!("the native watcher is off (CPPLS_NO_WATCH)");
             } else if let Err(error) = context
                 .native_watcher()
                 .start(
@@ -237,27 +263,6 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         Some(format!("Indexing {}", root.display())),
     );
 
-    // **A once-a-second account of the two queues**, under the trace only: how many events the client sent and how
-    // many the applier has applied, and what the pump is waiting for. A process that burns a core while both
-    // counters stand still is neither of them.
-    if crate::probes::pump() {
-        let watched = context.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let inbox = (watched.inbox().queued(), watched.inbox().applied());
-                let session = watched
-                    .analysis()
-                    .with_snapshot(|session| (session.pending_work(), session.pending_cooking()));
-                eprintln!(
-                    "[inbox] queued {} applied {} | session {session:?} | {} diagnostic computation(s)",
-                    inbox.0,
-                    inbox.1,
-                    watched.diagnostics().computations()
-                );
-            }
-        });
-    }
     index_in_background(context.clone(), version).await;
     context
         .diagnostics()
@@ -490,6 +495,10 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         // never goes idle: measured once as `index slice: … 2 to cook, 0 left` once a second for as long as a window
         // stayed open, with every diagnostic pull answered 1.4 s late because the pump held the lock it waited for.
         let mut no_progress = 0usize;
+        // **The load is not finished when the queue is empty.** The pump still writes the sharing cache, publishes
+        // the first inactive regions and reads the open file's program; the bar used to end before that work, and the
+        // machine stayed busy with no indicator. These flags keep it on screen until the post-drain work has run.
+        let mut settling_the_load = false;
 
         // **The wave the pump is asking for**, adjusted after every slice (see below). It starts small because the first
         // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
@@ -506,11 +515,28 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         // idle timeout); one that spins shows thousands, which is what the `containers.cpp` report measured.
         let mut rounds = 0u64;
         let rounds_started = std::time::Instant::now();
+        let mut last_applied = context.inbox().applied();
         loop {
             rounds += 1;
 
-            if rounds.is_multiple_of(1000) && crate::probes::pump() {
+            if rounds.is_multiple_of(1000) && false {
                 eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
+            }
+            // **Do not index while the reader is typing.**
+            //
+            // The pump's slices hold the session's read lock for 170–360 ms at a time (a stored record's decode was
+            // 100–350 ms of that; see `read a cook slice`), the writer's `didChange` batch waits for that lock, and
+            // **every request in flight waits for the writer's batch** — that is the barrier. Measured through the
+            // protocol while a reader typed into `channel.c` at 80 ms: the writer waited **0.9–1.1 s** per batch and
+            // completion answered in **1.3–1.6 s**, with a list three seconds stale. The index is not what the reader
+            // needs in those hundred milliseconds; the writer's own cook of the edited file (22 ms) is, and it still
+            // happens. So a pump that sees the client's edits arrive waits for a quiet moment instead of competing.
+            const A_QUIET_MOMENT: std::time::Duration = std::time::Duration::from_millis(120);
+            let applied_now = context.inbox().applied();
+            if applied_now != last_applied {
+                last_applied = applied_now;
+                tokio::time::sleep(A_QUIET_MOMENT).await;
+                continue;
             }
             // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
             // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
@@ -530,7 +556,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .with_snapshot(|session| session.next_open_file_to_read())
                 .flatten();
             if let Some(path) = &open_file
-                && crate::probes::pump()
+                && false
             {
                 eprintln!("[read] next open file to read: {}", path.display());
             }
@@ -590,6 +616,22 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     let started = std::time::Instant::now();
                     let (done, drain) = session.commit_a_wave(prepared, wave);
                     let taken = done.len();
+                    let reused = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Reused)
+                        .count();
+                    let built = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Built)
+                        .count();
+                    let unstored = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Unstored)
+                        .count();
+                    let missing = done
+                        .iter()
+                        .filter(|step| step.outcome == cpp_code_analysis::StepOutcome::Missing)
+                        .count();
                     let held = started.elapsed().as_millis();
 
                     // **All the work, not just the indexing queue.** A session that has read every file still has
@@ -666,9 +708,23 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                         // re-instrumenting.
                         log::info!(
                             "index slice: prepared {prepared_count} in {prepared_in} ms, committed {taken}, write lock \
-                             held {held} ms, {cooking} to cook, {pending_now} left",
-                            cooking = claimed.len()
+                             held {held} ms, {} to cook, {pending_now} left",
+                            claimed.len()
                         );
+                        log::info!(
+                            "index cache: {reused} reused, {built} built, {unstored} unstored, {missing} missing"
+                        );
+                        if built > 0 {
+                            let misses: Vec<String> = done
+                                .iter()
+                                .filter(|step| {
+                                    step.outcome == cpp_code_analysis::StepOutcome::Built
+                                })
+                                .take(5)
+                                .map(|step| step.path.display().to_string())
+                                .collect();
+                            log::info!("index cache misses: {misses:?}");
+                        }
                     }
                     (pending_now, drain, claimed, held, taken)
                 })
@@ -702,71 +758,74 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 asked.len()
             );
             let cooking_began = std::time::Instant::now();
-            let (prepared_drain, stored_cooks, cooks, cooking_revision) = context
+            // **The stored-record decode, in holds of four.**
+            //
+            // This used to be one `run_blocking` for the whole slice — the decode of sixteen records, the gather of
+            // the ones that have none, and the drain — and one lock hold paid for all of it: measured on neovim's
+            // `main.c`, **1549 ms** with the writer's twenty-millisecond cook behind it and every request behind
+            // that. The decode is why the slice is wide (each record is a whole closure's text), so the width stays
+            // and the *hold* is cut: four records, then four more, then the drain.
+            let mut stored_cooks = Vec::new();
+            let mut cooks = Vec::new();
+            for piece in asked.chunks(COOKS_A_HOLD) {
+                let piece = piece.to_vec();
+                let (records, gathered) = context
+                    .analysis()
+                    .run_blocking("read a cook slice", move |session| {
+                        let mut records = Vec::new();
+                        let mut cooks = Vec::new();
+                        for path in &piece {
+                            match session.a_stored_cook_record(path) {
+                                Some(record) => records.push(record),
+                                None => {
+                                    if let Some(cook) = session.gather_a_cook(path) {
+                                        cooks.push(cook);
+                                    }
+                                }
+                            }
+                        }
+                        Some((records, cooks))
+                    })
+                    .await
+                    .unwrap_or_default();
+                // **The decode, off the lock.** A record is the file's whole rendering and decoding one is
+                // 100–350 ms for a header's closure; doing it under the read guard put every request — and the
+                // writer's twenty-millisecond cook — behind it (measured: **1549 ms** for one slice).
+                let stored = tokio::task::block_in_place(|| {
+                    records
+                        .into_iter()
+                        .filter_map(|(path, bytes)| {
+                            match cpp_code_analysis::summary_codec::decode_the_cooked_record(&bytes)
+                            {
+                                Ok((cooked, Some(rendered))) => Some((path, cooked, rendered)),
+                                _ => None,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                });
+                stored_cooks.extend(stored);
+                cooks.extend(gathered);
+            }
+            let prepared = context
                 .analysis()
                 .run_blocking("prepare the drain", move |session| {
                     let revision = session.revision();
-                    // **The disk before the render**, per claimed file: a record with its rendering is a cook this
-                    // slice does not run at all — it is filed straight into the index, and the rendering answers
-                    // `view` immediately.
-                    //
-                    // **In parallel, because decoding a stored record is most of a cold start's drain.** Measured on
-                    // neovim's `ui.c`: the drain's compute was **26.8 s** of a 57 s start, and it was neither the
-                    // re-read pass (0.9 s, traced) nor the environments (`prepare_the_drain`'s own loop, which the
-                    // engine now splits across cores) — it is this loop, which decodes four renderings per slice and
-                    // each one is a whole closure's text. Three or four of them are independent, and the slice is
-                    // the only caller, so the chunks are cut here and the answers are kept in the order asked for.
-                    let decide = |path: &std::path::PathBuf| match session.a_stored_cook(path) {
-                        Some(record) => (Some(record), None),
-                        None => (None, session.gather_a_cook(path)),
-                    };
-                    let cores = std::thread::available_parallelism()
-                        .map(|cores| cores.get())
-                        .unwrap_or(4)
-                        .min(claimed.len().max(1));
-                    let mut stored = Vec::new();
-                    let mut cooks = Vec::new();
-                    if cores <= 1 || claimed.len() < 4 {
-                        for path in &claimed {
-                            let (record, cook) = decide(path);
-                            stored.extend(record);
-                            cooks.extend(cook);
-                        }
-                    } else {
-                        let chunk = claimed.len().div_ceil(cores);
-                        let mut pieces: Vec<(Vec<_>, Vec<_>)> = Vec::new();
-                        std::thread::scope(|scope| {
-                            let mut handles = Vec::with_capacity(cores);
-                            for piece in claimed.chunks(chunk) {
-                                handles.push(scope.spawn(move || {
-                                    let mut stored = Vec::new();
-                                    let mut cooks = Vec::new();
-                                    for path in piece {
-                                        let (record, cook) = decide(path);
-                                        stored.extend(record);
-                                        cooks.extend(cook);
-                                    }
-                                    (stored, cooks)
-                                }));
-                            }
-                            for handle in handles {
-                                pieces.push(handle.join().unwrap_or_default());
-                            }
-                        });
-                        for (records, gathered) in pieces {
-                            stored.extend(records);
-                            cooks.extend(gathered);
-                        }
-                    }
                     Some((
-                        session.prepare_the_drain(drain),
-                        stored,
-                        cooks,
-                        Some(revision),
+                        // **Bounded, because this is one read hold.** Two files to re-read and eight environments
+                        // to render: the rest goes back on the queues and the next slice takes it.
+                        session.prepare_the_drain(
+                            drain,
+                            DRAIN_FILES_A_HOLD,
+                            DRAIN_ENVIRONMENTS_A_HOLD,
+                        ),
+                        revision,
                     ))
                 })
-                .await
-                .unwrap_or_default();
+                .await;
+            let (prepared_drain, cooking_revision) = match prepared {
+                Some((prepared, revision)) => (prepared, Some(revision)),
+                None => (Default::default(), None),
+            };
             let prepared_the_drain = cooking_began.elapsed().as_millis();
             let rendering = std::time::Instant::now();
             let rendered_cooks = context.analysis().render_cooks(cooks).await;
@@ -865,7 +924,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // them. The loop's idle branch is not enough — a slice ends with `continue`, so an iteration that cooked
             // never reaches it — and waiting for one that does would leave a file opened and left alone undimmed.
             if cooked > 0 {
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
             }
 
             // **The pull's answer, computed while nobody is waiting.** A first pull for a new reading is the expensive
@@ -947,18 +1006,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 }
             }
 
-            // **Which table grew**, when the question is a leak rather than a stage: a total that climbs with
-            // `pending 0` and nothing cooked is the report this exists for. The numbers are the session's own
-            // estimates ([`cpp_code_analysis::MemoryReport`]), not the allocator's: the byte counter that used to
-            // print them beside a process-wide total is gone, because an allocator is not the place for a measurement.
-            if crate::probes::memory_tables()
-                && let Some(report) = context
-                    .analysis()
-                    .with_snapshot(|session| session.memory_report())
-            {
-                eprintln!("[tables] {report}");
-            }
-
             if pending > 0 {
                 // **The bar counts the project's files, not the repair of their readings.** `pending` is
                 // `pending_work()`, which since `8e976e1` includes the second pass — so `Load workspace` stayed on
@@ -970,24 +1017,29 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // knows which files exist and can answer questions about them; the second pass makes those answers
                 // better, not available. So the bar follows the queue (`Session::pending`) and the pump keeps
                 // draining everything (`was_pending` still reads `pending_work`).
-                let to_read = match context
+                let (to_read, to_cook, to_reread, to_read_as_a_program) = match context
                     .analysis()
-                    .query_blocking(|session| Some(session.pending()))
+                    .query_blocking(|session| {
+                        Some((
+                            session.pending(),
+                            session.pending_cooking(),
+                            session.re_read_backlog(),
+                            session.pending_units(),
+                        ))
+                    })
                     .await
                 {
-                    crate::context::RequestOutcome::Ready(count) => count,
-                    _ => pending,
+                    context::RequestOutcome::Ready(counts) => counts,
+                    _ => (pending, 0, 0, 0),
                 };
-                // **And the second pass, which the queue count does not see.** `pending` is the count of files the
-                // session still has to *read*; the re-read pass that turns each of them into a compiler's reading is
-                // `pending_work() - pending`, and a bar that only counts the first says "0 files to read" while the
-                // machine is busy — reported from an editor as "the read finished and it is still working, so I
-                // thought it had hung".
-                let still = pending.saturating_sub(to_read);
-                let message = if to_read > 0 {
-                    format!("{to_read} files to read, {still} to re-read")
+                let message = if to_read_as_a_program > 0 {
+                    format!("{to_read} files to read, {to_read_as_a_program} program(s) to read")
+                } else if to_read > 0 {
+                    format!("{to_read} files to read, {to_cook} to cook, {to_reread} to re-read")
                 } else {
-                    format!("re-reading {still} file(s) for the compiler's view")
+                    format!(
+                        "re-reading {to_reread} file(s), cooking {to_cook} file(s) for the compiler's view"
+                    )
                 };
 
                 // **A message per slice is a message per keystroke's worth of work, and that is too many.** Slices are
@@ -1072,28 +1124,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // waiting for it are published — after that the loop waits for the next edit.
             if first_pass {
                 first_pass = false;
-                // **The bar ends here, and that is the whole of what "Load workspace" promises.** It used to be owed
-                // until every translation unit had been read as a program; that pass is gone (`e22fa00` deleted the
-                // background read of the whole project, because clangd does not pay that price and neither should we),
-                // and the flag that carried the promise went with it — **and so did this call**, which left the bar on
-                // screen for ever. Reported from an editor: "cuda工程一直在加载" — a three-file project, `the workspace
-                // is indexed` in the log, and no `end` on the wire.
-                //
-                // The queue has drained and the index can answer questions about the project's files. A program is read
-                // on demand from here (the pump's own `read_a_program`, one per open file), and a bar for that would be
-                // a bar for work the reader did not ask for.
-                context.status_bar().finish_progress_task(
-                    ProgressTask::LoadWorkspace,
-                    Some("the workspace is indexed".to_string()),
-                );
-                // **The one number that bounds how long a request can have been made to wait.** A query and an update
-                // take the same lock, so this is the worst case *by construction*: if a completion felt slow and this
-                // says 12 ms, the wait was inside that completion's own work rather than in the queue behind the
-                // indexer — and if it says 701, the queue is the whole story and no amount of query tuning helps.
-                log::info!(
-                    "the workspace is indexed — the longest an update held the analysis was {} ms",
-                    context.analysis().worst_write_hold()
-                );
+                settling_the_load = true;
+                // **The bar ends after the post-drain work, not before it.** The queue being empty means every file
+                // has been read; it does not mean the pump is done: the sharing cache is saved, the first inactive
+                // regions are published, and the open file's program may still be read. Those are seconds of CPU on
+                // a real project, and ending the indicator first made them look like runaway background work.
 
                 // After the drain, so it holds everything this run learned; the entries carry their
                 // own identity, so a stale file is inert rather than wrong.
@@ -1114,7 +1149,17 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // **The first load's inactive regions**, sent beside the diagnostics it just published: the client
                 // opened its files before the project was read, so nothing had a rendering to answer from at
                 // `didOpen` — and unlike a request, a notification is never asked for again.
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
+
+                // **The lenses, once — not on every edit.** A code lens is a count of files read, so the count
+                // published before this file's closure was ready can be low; one refresh here asks for the settled
+                // number. It is deliberately not repeated after body edits: `workspace/codeLens/refresh` asks the
+                // client to replace its list, and a client is entitled to clear the old virtual lines before asking
+                // again, which is the flicker this removes. The client already asks for its lenses when its text
+                // changes; the handler serves its last list while a summary is rebuilt.
+                if context.lsp_features().supports_refresh_code_lens() {
+                    context.client().refresh_code_lenses();
+                }
             } else if was_pending {
                 // **…and the hints, for the same reason and with a measurement of their own.**
                 //
@@ -1142,18 +1187,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 if context.lsp_features().supports_refresh_semantic_tokens() {
                     context.client().refresh_semantic_tokens();
                 }
-                // **…and the lenses, whose number is a count of files read.** A lens published before this file's
-                // closure was ready says fewer references than there are, and a client keeps that number until its
-                // document changes. The handler withholds the number until the closure is ready; this is what asks
-                // again once it is.
-                if context.lsp_features().supports_refresh_code_lens() {
-                    context.client().refresh_code_lenses();
-                }
                 // **…and the inactive regions, which are a *push* and therefore have no refresh to fall back on.**
                 // A file's dead branches become answerable only when its cook lands (the per-file cook of the file's
                 // own closure), which is after `didOpen` and after every `didChange`; nothing asks a server to repeat
                 // a notification, so this is where the second answer goes out.
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
             }
             let revision = context
                 .analysis()
@@ -1190,10 +1228,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             //
 
             if pending == 0
-                // **An experiment switch**: a whole-program read is the session's largest single piece of work, and
-                // `CPPLS_NO_PROGRAM_READ` is how a run tells its cost from the pump's — the same shape as
-                // `CPPLS_NO_COOKS`.
-                && !crate::probes::no_program_read()
                 && let Some(wait) = context
                     .analysis()
                     .with_snapshot(
@@ -1201,13 +1235,17 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     )
                     .flatten()
             {
-                if crate::probes::pump() {
-                    eprintln!(
-                        "[program] a program read is owed (wait zero: {})",
-                        wait.is_zero()
-                    );
-                }
                 if wait.is_zero() {
+                    // **The program read is the last CPU-heavy part of a first load.** Keep the bar on screen for
+                    // it: on the neovim checkout this is seconds of parsing and a reader has no other signal that it
+                    // is still loading.
+                    if settling_the_load {
+                        context.status_bar().update_progress_task(
+                            ProgressTask::LoadWorkspace,
+                            None,
+                            Some("reading the program for the compiler's view".to_string()),
+                        );
+                    }
                     // **Then breathe.** A project has one program per translation unit, and a pump that read them
                     // back to back would peg a core for minutes after every pause; one idle tick between them is
                     // the same pace the loop uses when it has nothing to do.
@@ -1235,11 +1273,39 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                             context.client().refresh_semantic_tokens();
                         }
                     }
+                    // **The bar retires when no program is still owed**, not when the first one finished: a
+                    // project has one program per open translation unit.
+                    if settling_the_load {
+                        let still_owed = read
+                            && context
+                                .analysis()
+                                .with_snapshot(|session| {
+                                    session.the_wait_before_a_program_may_be_read().is_some()
+                                })
+                                .unwrap_or(false);
+                        if !still_owed {
+                            finish_the_load(&context);
+                            settling_the_load = false;
+                        }
+                    }
                     context.analysis().wait_for_work(IDLE_WAIT).await;
                 } else {
+                    // A deferred program is work for a later idle moment, not work the current load indicator
+                    // should wait for; the reader has stopped typing and the bar can retire.
+                    if settling_the_load {
+                        finish_the_load(&context);
+                        settling_the_load = false;
+                    }
                     context.analysis().wait_for_work(wait).await;
                 }
                 continue;
+            }
+
+            // **The load settles when no program is owed and nothing is pending.** A deferred program (wait > 0)
+            // has its own idle moment; the next edit will schedule it and no progress bar can wait for typing.
+            if settling_the_load {
+                finish_the_load(&context);
+                settling_the_load = false;
             }
 
             // **A timeout is not work.** `wait_for_work` answers whether something was queued while the loop waited;
@@ -1253,6 +1319,18 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             }
         }
     });
+}
+
+/// End the load indicator only once the pump has nothing left that it started — see `settling_the_load`.
+fn finish_the_load(context: &ServerContextSnapshot) {
+    context.status_bar().finish_progress_task(
+        ProgressTask::LoadWorkspace,
+        Some("the workspace is indexed".to_string()),
+    );
+    log::info!(
+        "the workspace is indexed — the longest an update held the analysis was {} ms",
+        context.analysis().worst_write_hold()
+    );
 }
 
 /// The folders the client opened.

@@ -3,7 +3,6 @@ mod kind;
 mod lexer;
 mod parser;
 mod parser_error;
-mod probes;
 mod symbols;
 mod syntax;
 mod text;

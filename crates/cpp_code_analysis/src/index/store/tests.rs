@@ -1,4 +1,12 @@
 use super::SummaryStore;
+use crate::CommandLineMacro;
+use crate::FileIndexer;
+use crate::FileProvider;
+use crate::FileSummary;
+use crate::Known;
+use crate::MAX_INCLUDE_DEPTH;
+use crate::cache;
+use crate::file;
 use crate::file::paths::MemoryFiles;
 use crate::include::config::CompilerConfig;
 use cpp_parser::Dialect;
@@ -140,11 +148,9 @@ fn scanning_the_include_lines_gives_the_includes_the_parse_records() {
             .with_file("/p/c.h", "int c;\n");
     let (mut store, root) = store("include-scan", &files);
     let config = CompilerConfig::default();
-    let source =
-        crate::FileProvider::read(&files, Path::new("/p/a.h")).expect("the fixture is there");
+    let source = FileProvider::read(&files, Path::new("/p/a.h")).expect("the fixture is there");
 
-    let scanned =
-        crate::FileIndexer::new(&files, &config).includes_of(Path::new("/p/a.h"), &source);
+    let scanned = FileIndexer::new(&files, &config).includes_of(Path::new("/p/a.h"), &source);
     let recorded: Vec<std::path::PathBuf> = store
         .get(Path::new("/p/a.h"))
         .expect("reads")
@@ -307,7 +313,7 @@ fn an_edited_file_is_rebuilt_rather_than_reused() {
     assert_eq!(second.stats().unstored, 0, "nothing was declined");
     assert_eq!(
         summary.key.content_hash,
-        crate::cache::content_hash("struct Widget { int a; int b; };\n"),
+        cache::content_hash("struct Widget { int a; int b; };\n"),
         "and the rebuilt summary is keyed by the text it was built from"
     );
 
@@ -340,12 +346,12 @@ fn every_file_gets_a_cache_entry_of_its_own() {
 
     assert_eq!(
         one.key.content_hash,
-        crate::cache::content_hash("struct One { int a; };\n"),
+        cache::content_hash("struct One { int a; };\n"),
         "the summary is keyed by its own text"
     );
     assert_eq!(
         two.key.content_hash,
-        crate::cache::content_hash("struct Two { int b; };\n")
+        cache::content_hash("struct Two { int b; };\n")
     );
     assert_ne!(
         one.key.path_under(store.cache_directory()),
@@ -403,7 +409,7 @@ fn an_identical_configuration_gives_an_identical_key() {
 
     let different = SummaryStore::with_provider(
         "r",
-        CompilerConfig::default().with_define(crate::CommandLineMacro::defined("A")),
+        CompilerConfig::default().with_define(CommandLineMacro::defined("A")),
         files.clone(),
     );
     assert_ne!(
@@ -631,7 +637,7 @@ fn the_same_text_in_two_directories_does_not_share_an_entry() {
 
     // The resolutions, which is what the collision would have got wrong: each file found the header beside
     // itself, and the class it declares is visible from that file and not from the other.
-    let resolution = |summary: &crate::FileSummary| {
+    let resolution = |summary: &FileSummary| {
         summary.includes[0]
             .resolved
             .as_ref()
@@ -643,14 +649,14 @@ fn the_same_text_in_two_directories_does_not_share_an_entry() {
     assert!(
         matches!(
             store.index().definition("Outside", Path::new("/p/a.h")),
-            crate::Known::Yes(_)
+            Known::Yes(_)
         ),
         "`a.h` sees the header beside it"
     );
     assert!(
         matches!(
             store.index().definition("Outside", Path::new("/p/sub/b.h")),
-            crate::Known::Unknown(_)
+            Known::Unknown(_)
         ),
         "and `sub/b.h` does not"
     );
@@ -875,7 +881,7 @@ fn the_whole_store_survives_a_restart_with_its_facts_intact() {
 
     let found = store.index().definition("Widget", Path::new("/p/main.cpp"));
     assert!(
-        matches!(found, crate::Known::Yes(_)),
+        matches!(found, Known::Yes(_)),
         "the class is visible through the include: {found:?}"
     );
 
@@ -891,7 +897,7 @@ fn the_whole_store_survives_a_restart_with_its_facts_intact() {
         .index()
         .definition("Widget", Path::new("/p/main.cpp"));
     assert!(
-        matches!(after, crate::Known::Yes(_)),
+        matches!(after, Known::Yes(_)),
         "and the answer survives the restart: {after:?}"
     );
 
@@ -956,7 +962,7 @@ fn indexing_a_file_indexes_everything_it_includes() {
 
     let found = store.index().definition("Deep", Path::new("/p/main.cpp"));
     assert!(
-        matches!(found, crate::Known::Yes(_)),
+        matches!(found, Known::Yes(_)),
         "and a name two headers down is now visible from the file that includes them: {found:?}"
     );
 
@@ -1237,7 +1243,7 @@ fn the_default_budget_does_not_truncate_a_measured_real_closure() {
         budget.max_files > 359,
         "the default must not truncate the largest real closure anyone has measured: {budget:?}"
     );
-    assert_eq!(budget.max_depth, crate::MAX_INCLUDE_DEPTH);
+    assert_eq!(budget.max_depth, MAX_INCLUDE_DEPTH);
 }
 
 #[test]
@@ -1302,12 +1308,8 @@ fn the_closure_is_the_roots_and_what_they_include() {
     let widget = std::path::PathBuf::from("/p/widget.h");
     let closure = store.the_closure_of(std::slice::from_ref(&widget));
 
-    let has = |path: &str| {
-        closure.contains(&crate::file::paths::normalize_path(
-            Path::new(path),
-            cfg!(windows),
-        ))
-    };
+    let has =
+        |path: &str| closure.contains(&file::paths::normalize_path(Path::new(path), cfg!(windows)));
     assert!(has("/p/widget.h"), "the root is in its own closure");
     assert!(
         has("/p/open.h"),

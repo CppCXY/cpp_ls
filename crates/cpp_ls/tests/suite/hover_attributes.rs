@@ -5,6 +5,7 @@
 //! them. Reported from a CUDA project, where the macros that carry the CUDA annotations are exactly this shape, and the
 //! expected card is the one a compiler's diagnostics print: the attributes above, the specifiers in front of the type.
 
+use crate::common;
 use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
@@ -12,7 +13,7 @@ use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFi
 
 /// The card for the declaration `needle` names, from a one-file project.
 fn the_card(source: &str, needle: &str) -> String {
-    let root: PathBuf = crate::common::a_temp_directory("hover-attributes");
+    let root: PathBuf = common::a_temp_directory("hover-attributes");
     let file = root.join("a.cpp");
     std::fs::write(&file, source).expect("the fixture writes");
 

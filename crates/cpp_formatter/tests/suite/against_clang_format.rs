@@ -36,26 +36,23 @@ struct Compared {
 }
 
 fn corpus() -> Option<PathBuf> {
-    let named = std::env::var_os("CPPLS_FMT_CORPUS")?;
+    let named = Option::<std::ffi::OsString>::None?;
     let root = PathBuf::from(named);
     root.is_dir().then_some(root)
 }
 
 fn clang_format() -> Option<PathBuf> {
-    let named = PathBuf::from(std::env::var_os("CPPLS_CLANG_FORMAT")?);
+    let named = PathBuf::from(Option::<std::ffi::OsString>::None?);
     named.is_file().then_some(named)
 }
 
 fn style() -> String {
-    std::env::var("CPPLS_FMT_STYLE").unwrap_or_else(|_| "LLVM".to_string())
+    "LLVM".to_string()
 }
 
 /// The corpus's source files, in a stable order, bounded by `CPPLS_FMT_LIMIT` (default 200).
 fn sources(root: &Path) -> Vec<PathBuf> {
-    let limit: usize = std::env::var("CPPLS_FMT_LIMIT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(200);
+    let limit: usize = 200;
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {

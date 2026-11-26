@@ -32,6 +32,7 @@
 //! `(int, int)`, and a default argument (`double area(int w = 1)`) must not be repeated in the definition. The
 //! declaration's own [`CppParamList`](cpp_parser::CppParamList) is that text.
 
+use crate::DeclFact;
 use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::{DeclKind, DeclModifiers, FileProvider, FileView, Known, Session};
 
@@ -200,7 +201,7 @@ impl<F: FileProvider + Clone> Session<F> {
 fn signature_of<F: FileProvider + Clone>(
     session: &Session<F>,
     file: &std::path::Path,
-    fact: &crate::DeclFact,
+    fact: &DeclFact,
 ) -> Option<(String, String)> {
     let parameters = match fact.parameter_list().map(str::to_string) {
         Some(parameters) => parameters,

@@ -1,3 +1,4 @@
+use crate::cmd_args;
 use lsp_server::Message;
 use lsp_types::InitializeParams;
 use std::error::Error;
@@ -22,7 +23,7 @@ impl LspServer {
         connection: AsyncConnection,
         params: &InitializeParams,
         init_rx: oneshot::Receiver<()>,
-        cmd_args: &crate::cmd_args::CmdArgs,
+        cmd_args: &cmd_args::CmdArgs,
     ) -> Self {
         // **The language, before anything is parsed.** `initialize.locale` is the client's own setting — VS Code
         // sends `"locale": "zh-cn"` from `--locale`/the display language — and it is applied here because the very
@@ -42,7 +43,7 @@ impl LspServer {
         // the standard semantic token types it knows, so a custom type is never in it even for a client whose theme can
         // draw it.
         let client_id =
-            crate::context::the_effective_client_id(cmd_args.editor.as_ref(), &params.client_info);
+            context::the_effective_client_id(cmd_args.editor.as_ref(), &params.client_info);
         let server_context = context::ServerContext::new(
             connection.connection.clone(),
             params.capabilities.clone(),

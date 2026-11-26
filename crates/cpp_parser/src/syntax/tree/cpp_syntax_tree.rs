@@ -1,3 +1,5 @@
+use crate::kind;
+use crate::parser_error;
 use rowan::GreenNode;
 
 use crate::{
@@ -79,7 +81,7 @@ impl CppSyntaxTree {
     pub fn has_syntax_errors(&self) -> bool {
         self.errors
             .iter()
-            .any(|e| e.kind == crate::parser_error::CppParseErrorKind::SyntaxError)
+            .any(|e| e.kind == parser_error::CppParseErrorKind::SyntaxError)
     }
 
     /// Total byte length of the tree. Used by tests to assert losslessness against the input.
@@ -89,7 +91,7 @@ impl CppSyntaxTree {
 
     /// Root kind, mainly for assertions and for the `finish` sanity check in the tree builder.
     pub fn root_kind(&self) -> CppSyntaxKind {
-        crate::kind::CppKind::from_raw(self.root.kind().0).into()
+        kind::CppKind::from_raw(self.root.kind().0).into()
     }
 
     /// Reconstructs the original text by concatenating every token in the tree, in order.
@@ -110,6 +112,7 @@ impl CppSyntaxTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kind;
 
     #[test]
     fn reconstructed_text_equals_input() {
@@ -117,10 +120,10 @@ mod tests {
             {
                 let mut builder = rowan::GreenNodeBuilder::new();
                 builder.start_node(CppSyntaxKind::TranslationUnit.into());
-                builder.token(crate::kind::CppTokenKind::IntKeyword.into(), "int");
-                builder.token(crate::kind::CppTokenKind::Whitespace.into(), " ");
-                builder.token(crate::kind::CppTokenKind::Identifier.into(), "x");
-                builder.token(crate::kind::CppTokenKind::Semicolon.into(), ";");
+                builder.token(kind::CppTokenKind::IntKeyword.into(), "int");
+                builder.token(kind::CppTokenKind::Whitespace.into(), " ");
+                builder.token(kind::CppTokenKind::Identifier.into(), "x");
+                builder.token(kind::CppTokenKind::Semicolon.into(), ";");
                 builder.finish_node();
                 builder.finish()
             },

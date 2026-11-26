@@ -46,11 +46,6 @@ pub async fn on_document_link(
 ) -> RequestOutcome<Vec<DocumentLink>> {
     let uri = params.text_document.uri;
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The file's own reading, not its rendering.** A rendering has the directives resolved: the `#include`

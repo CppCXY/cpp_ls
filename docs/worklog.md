@@ -1400,3 +1400,148 @@ work started from), Lua 5.5.0's `src/`, and the `test_c` fixtures in `crates/cpp
 where they were taken, in the commits between `557f9553` and `db0e3f18`. They are not repeated here because their
 numbers were about individual rules rather than about a program's whole report; the two projects above are the ones a
 claim about C usability rests on.
+
+## The interactive queries: where the 1.7 s was, and what the three killers were
+
+Measured through the protocol against `E:\neovim` (`channel.c`, 2 406 lines, an index that had settled and three
+seconds of quiet), one request of each kind:
+
+```text
+semanticTokens/full      1337 ms   →  656 ms cold, 32–46 ms warm
+inlayHint                 911 ms   →  55–250 ms
+codeLens                  332 ms   →  102 ms
+documentSymbol              5 ms   →  4 ms
+diagnostic                  3 ms   →  3 ms
+completion                129 ms   →  140 ms
+hover                      25 ms   →  24 ms
+```
+
+### 1. The completion was never answered at all — `-32801`, every request
+
+An editor's request mix is six requests per keystroke; the server cancelled any request still waiting for the write
+barrier as soon as a change started. 80 ms typing against a 300–500 ms barrier means **every** request answered
+`-32801` (`ContentModified`), so the popup never appeared — reported as "I never see the completion list". Two
+changes: interactive requests (completion, hover, signature help, definition) are no longer cancelled by a newer
+edit, and the **refreshable** lists (semantic tokens, inlay hints, code lenses, symbols, diagnostics) are cancelled
+*after the barrier and before they run*, because cancelling a request already inside a blocking query does not stop
+it — measured, a semantic-token request ran **1.42 s** after its cancellation and the writer waited **1.1 s** for the
+lock it held.
+
+### 2. A superseded request used to compute anyway
+
+With cancellation gone, every request computed. A request is now **superseded** by a newer one of the same method
+for the same document (`ServerContext::supersede`), and the older one returns before its handler runs: measured in
+the editor mix, the six superseded requests answer `-32800` in **81 ms** and only the newest computes.
+
+### 3. The completion preferred the *un-preprocessed* text
+
+`completion_from_a_rendering` returned the file's own reading as soon as that reading had **one** item starting with
+the typed prefix — and a C file parsed without its macros has hundreds of index names: `i` answered 803 items whose
+first were `int64_t_cmp`, `if`, `include`, and **not the local `ids`**. The rendering now wins whenever it answers;
+the file's own text is the fallback for a prefix only it can see (`i` → `ids` first).
+
+### 4. The open document's rendering was evicted, and member completion died with it
+
+`ids.` answered `capacity, items, size` a second after the edit and **nothing at all** twenty seconds later: the LRU
+holds eight renderings and a pass over the project's closure fills it. An open document's rendering is now pinned
+outside the budget (`Session::open_renderings`, validated by the text hash): cold and warm both answer three
+members.
+
+### 5. The performance killer: a 276-file macro walk per *candidate*
+
+`certain_declarations` filters every candidate through `a_guard_is_taken` → `visibility_at` → `macros_at`, and
+`macros_at` walks the file's whole include closure (**276 files, 71 ms**) with no memo. `kind_of("data")` paid it
+**54 times** — 1.15 s — and the classification of the whole file was **1.3 ms**. Proven by skipping the walk: the
+same request answered in **83 ms**. The state is now cached per `(file, offset)` with contributor invalidation
+(`ProjectIndex::macro_states_at`), and one entry is evicted rather than the whole map when it is full.
+
+### 6. Inlay hints read and decoded a disk record for an answer they never used
+
+`view_of_the_file` asked `known_rendering_of` whether a rendering existed, only to decide whether to queue a cook —
+and that question falls back to the **stored cooked record**, reading and decoding one (150 ms for `channel.h`,
+`proc.h`, `uv.h`, `typval.h`, on **every** request). It now asks the in-memory table (`a_rendering_is_known_in_memory`):
+inlay hints 904 → **55–250 ms**, and the four 150 ms calls disappeared from the call resolution.
+
+### What is left
+
+The cold semantic-token request is still 656 ms: one macro walk per **distinct guarded header** a name's
+declarations live in (~10 × 70 ms). The structural answer is one walk per query over the file's own translation unit
+— the environment `Session::the_indexed_environment` already builds — and evaluating every candidate's guard against
+it, rather than starting a fresh walk from each header.
+
+
+### The 200-item budget was tried and refused
+
+A one-character completion answered 1 000 items in 126 ms and 200 items in 121 ms — **the payload was not the
+cost** — and the fair round-robin cut dropped `kvec_t` from the `k` list, which is exactly the name a reader typing
+`k` in `channel_all_info` is looking for. The budget stays at 1 000; the cost per item is what has to come down.
+
+### Where the remaining cold 638 ms is
+
+`macros_at` is now cached per `(file, offset)`, so the cold semantic-token request pays **one 70 ms walk per
+distinct guarded header** a name's declarations live in (`wtypes.h`, `objidl.h`, `oleidl.h`, … — nine of them in
+`channel.c`, all walking the same 276-file `windows.h` closure). The next structural step is one walk per query over
+the file's own translation unit, with each candidate's guard evaluated against it, instead of a fresh walk from
+every header — the environment `Session::the_indexed_environment` already builds.
+
+
+### Two fixes for the cold path were tried and refused — and why
+
+**Narrowing the macro state to the condition's names.** A `#ifdef NAME` reads one name; the state it is answered
+from holds sixteen thousand (`wtypes.h` at one offset: 16312 names, 276 files, 65 ms). A walk that keeps only the
+asked names was built (`Marked::retain_names`, a filter in `macro_candidates`, `SummaryGuards::names_its_conditions_test`)
+and it **cannot be sound**: a walk decides *which files it reaches at all* from its own state, so a state narrowed to
+`_WIN64` answers `#ifdef _WIN32` for every include in the closure as "not defined" and skips it. Keeping the state
+incomplete instead turns every include guard into `Unknown`, which marks every nested declaration uncertain and turns
+the guard filter into a no-op — worse in the other direction. Measured while it was in: cold 638 → 517 ms, and 21 of
+the guarded chains still needed the full state anyway (`WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)` is a
+function-like macro call, `_WIN32_WINNT >= 0x0601` reads a value). Reverted.
+
+**Asking the colouring pass's questions in parallel.** Each answer is independent, so the 190 spellings were cut
+across the cores, with the states claim-and-published (`macro_states_walking`) so two threads cannot walk the same
+one. Measured: **no win** (671 ms against 638) — the walks are memory-bound, the duplicate-walk count only fell from
+15 to 9, and the pre-pass asked spellings the token loop never reaches. Reverted, with the claim/publish machinery.
+
+What is left is the real one: **one walk per query over the file's own translation unit**, with each candidate's
+guard evaluated against it. `Session::the_indexed_environment` already builds exactly that environment for the cook
+(184–190 ms for `main.c`), so the work is to thread it to `a_guard_is_taken` rather than start a fresh walk from
+every header a name's declarations live in.
+
+
+## The guard walks are gone: one walk per colouring pass
+
+The 638 ms cold semantic-token request was **twenty-five** macro walks, one per guarded header a name's declarations
+live in (276 files, sixteen thousand names, ~65 ms each). The walk was answering a question it did not have to
+answer alone: the *same* walk from the file being coloured reaches those headers with the state already built.
+
+`ProjectIndex::answer_the_guards(root, questions)` — the colouring pass collects the `(file, region, fact offset)`
+triples its candidates are about to ask (`files_declaring` per spelling, no guard filter), one walk from the file
+answers them all as it passes each condition (`Collecting::Guards`, `GuardWalk::due`), and the verdicts are
+installed on the index under the query's root (`install_answered_guards`, stamped by the index revision) where
+`a_guard_is_taken` reads them instead of walking. A question the walk never reaches falls back to the per-header walk.
+
+Measured on `channel.c`, index settled, one request of each kind:
+
+```text
+                          before   after
+semanticTokens/full        638 ms   107 ms   (then 74, 59 ms)
+inlayHint                  327 ms   115 ms   (then 56, 158 ms)
+codeLens                   101 ms   104 ms
+documentSymbol               4 ms     6 ms
+diagnostic                   3 ms     3 ms
+completion                 127 ms   131 ms
+hover                       26 ms    26 ms
+```
+
+Fifty-six of sixty questions were answered by one walk in **20–26 ms**, and gathering the questions cost 28–55 ms.
+The editor mix now ends at **174 ms** for the completion after a typing burst (it was 1 529 ms before this work), and
+every superseded request in the burst answers `-32800` in 81 ms.
+
+**A thread-local was the first shape of this and it was wrong**: `tests/suite/no_global_state.rs` asserts the crate
+holds no thread-local state, and it caught it. The verdicts live on the index, keyed by the root they were asked
+from and dropped when the index changes — a cache, which is what they are.
+
+**The first request after an edit pays the pump, not the query.** With 0.4 s between the edit and the request the
+same request measured 704–916 ms; with 1.2 s it measured 104–194 ms. That is the write batch re-cooking the file,
+which is the barrier's cost and not this query's — the probe (`target/bench/edit_probe.py`) separates the two.
+

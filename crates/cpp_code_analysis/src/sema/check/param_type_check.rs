@@ -33,6 +33,9 @@
 //! constructor, a template, a type from a header nobody read all answer `Unknown`, and **`Unknown` reports
 //! nothing**. A conversion this layer cannot see is not a conversion the program does not have.
 
+use crate::DeclKind;
+use crate::Known;
+use crate::sema;
 use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -152,19 +155,19 @@ impl Check for ParamTypeCheck {
 /// with no parameter list — a field — is not a candidate: it is not a call.
 fn member_parameter_lists(
     context: &CheckContext<'_>,
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
 ) -> Vec<Vec<String>> {
-    let crate::Known::Yes((a_type, _)) = context.type_of(&access.object) else {
+    let Known::Yes((a_type, _)) = context.type_of(&access.object) else {
         return Vec::new();
     };
-    let crate::Known::Yes(list) = context.model.members_of(&a_type.to_string()) else {
+    let Known::Yes(list) = context.model.members_of(&a_type.to_string()) else {
         return Vec::new();
     };
     list.members
         .iter()
         .filter(|member| member.fact.name == access.member)
         .filter_map(|member| member.fact.parameter_list())
-        .map(|written| crate::sema::overload::parameters_in(written).0)
+        .map(|written| sema::overload::parameters_in(written).0)
         .collect()
 }
 
@@ -191,7 +194,7 @@ fn check_the_arguments(
     };
 
     for (at, argument) in call.get_args().iter().enumerate() {
-        let crate::Known::Yes((from, _)) = context.type_of(argument.syntax()) else {
+        let Known::Yes((from, _)) = context.type_of(argument.syntax()) else {
             continue;
         };
 
@@ -208,7 +211,7 @@ fn check_the_arguments(
             // relation below answers `No` for every such target — it names a type nothing declares — and that refusal
             // is not this layer's to report. `convert::conversion` has the same rule for the class question, in its
             // `Unknown` arm; a `No` never reached it.
-            if crate::sema::convert::names_a_template_parameter_for_a_check(parameter) {
+            if sema::convert::names_a_template_parameter_for_a_check(parameter) {
                 every_candidate_disagrees = false;
                 break;
             }
@@ -219,14 +222,14 @@ fn check_the_arguments(
                 every_candidate_disagrees = false;
                 break;
             }
-            let target = crate::sema::types::parse_type_spelling(parameter);
+            let target = sema::types::parse_type_spelling(parameter);
             match from.convertible_to(&target) {
-                crate::Known::No => {
+                Known::No => {
                     disagreed_with.get_or_insert(parameter);
                 }
                 // `Yes` is fine, and `Unknown` is not this layer's to guess about. Either way **this** candidate
                 // could take the argument, and one that could is enough for silence.
-                crate::Known::Yes(()) => {
+                Known::Yes(()) => {
                     every_candidate_disagrees = false;
                     break;
                 }
@@ -237,8 +240,8 @@ fn check_the_arguments(
                 // **The class case, through the shared facility** — see `sema::convert`. It normalises the spelling (a
                 // `const std::string&` parameter is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a
                 // reference) and asks the index only for the class question, so a class nobody has read stays quiet.
-                crate::Known::Unknown(_) => {
-                    let conversion = crate::sema::convert::conversion(&from, parameter, |class| {
+                Known::Unknown(_) => {
+                    let conversion = sema::convert::conversion(&from, parameter, |class| {
                         super::a_class_can_be_built_from(context, class, &from)
                     });
                     if !conversion.is_refused() {
@@ -318,16 +321,16 @@ fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<
         .summary
         .declarations
         .iter()
-        .filter(|fact| fact.kind == crate::DeclKind::Function && fact.name == name)
+        .filter(|fact| fact.kind == DeclKind::Function && fact.name == name)
         .filter_map(|fact| fact.parameter_list().map(str::to_string))
         .collect();
     if written.is_empty()
-        && let crate::Known::Yes(definitions) = context.index().definitions(name, context.path)
+        && let Known::Yes(definitions) = context.index().definitions(name, context.path)
     {
         written = definitions
             .found
             .iter()
-            .filter(|definition| definition.fact.kind == crate::DeclKind::Function)
+            .filter(|definition| definition.fact.kind == DeclKind::Function)
             .filter_map(|definition| definition.fact.parameter_list().map(str::to_string))
             .collect();
     }
@@ -335,6 +338,6 @@ fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<
     if written.len() != 1 {
         return None;
     }
-    let (parameters, _variadic) = crate::sema::overload::parameters_in(&written[0]);
+    let (parameters, _variadic) = sema::overload::parameters_in(&written[0]);
     Some(parameters)
 }

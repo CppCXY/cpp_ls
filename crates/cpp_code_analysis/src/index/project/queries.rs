@@ -6,6 +6,10 @@
 //! and could not know, which is different from a name that is not declared anywhere.
 
 use super::*;
+use crate::Binding;
+use crate::FileView;
+use crate::ScopeTree;
+use crate::sema;
 
 /// The `#include` whose **directive** covers `offset`, if there is one and it resolved.
 ///
@@ -33,7 +37,7 @@ pub fn header_at(
     // The tree answers *which line*, because only the tree knows where the cursor is; the summary answers *where it
     // points*, because resolution happened when the file was read and re-running the search here would be a second
     // implementation of the resolver.
-    let Some((spelling, name_range)) = crate::sema::resolve::header_name_at(root, offset) else {
+    let Some((spelling, name_range)) = sema::resolve::header_name_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
@@ -117,8 +121,8 @@ pub fn header_at(
 /// the same reason: the failure is not "not here".
 pub fn definition_across_files(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -135,11 +139,11 @@ pub fn definition_across_files(
     // definition's class declares has no bearing on it. Measured: reading it as this class's member turned the correct
     // plural answer (`basic_json::object`) into `NotDeclaredHere` — the class does not declare a member spelled
     // `nlohmann::json::object`.
-    let written = crate::sema::resolve::qualified_name_at(root, offset)
+    let written = sema::resolve::qualified_name_at(root, offset)
         .map(|(written, _)| written)
         .unwrap_or_default();
     let found = if !written.contains("::")
-        && crate::sema::resolve::member_access_at(root, offset).is_none()
+        && sema::resolve::member_access_at(root, offset).is_none()
         && let Some(class) = the_class_a_definition_is_written_for(root, offset)
         && index.scope_names_a_class(&class, path)
         && let Known::Yes(list) = members_of(index, scopes, root, path, &class)
@@ -213,7 +217,7 @@ pub fn definition_across_files(
                     // The spelling the cursor wrote, read back from the tree rather than taken from the list: a reader
                     // asking "which `find` is this" wants the name they pointed at, not the qualified name of whichever
                     // overload happens to sort first.
-                    crate::sema::resolve::qualified_name_at(root, offset)
+                    sema::resolve::qualified_name_at(root, offset)
                         .map(|(written, _)| written)
                         .unwrap_or_default(),
                 ))),
@@ -239,14 +243,14 @@ pub fn definition_across_files(
 /// walk the completion after `.` shows, so a jump and the list a reader was just looking at cannot disagree.
 pub fn member_definitions_across_files(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinitions> {
     let memo = TypeMemo::default();
-    let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
+    let Some(access) = sema::resolve::member_access_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
@@ -256,7 +260,7 @@ pub fn member_definitions_across_files(
 
     let Known::Yes((object_type, _)) = type_of_expression_memoed(
         &memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -267,7 +271,7 @@ pub fn member_definitions_across_files(
     ) else {
         let Known::Unknown(reason) = type_of_expression_memoed(
             &memo,
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -348,12 +352,12 @@ pub fn member_definitions_across_files(
 /// answer and an indexed one agree about what the symbol is *called* — the identity a reference list, a rename and
 /// a code lens all key on.
 fn the_scope_of_the_answer(
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     offset: usize,
-    binding: &crate::Binding,
+    binding: &Binding,
 ) -> Option<String> {
-    crate::sema::resolve::qualified_name_at(root, offset)
+    sema::resolve::qualified_name_at(root, offset)
         .and_then(|(written, _)| {
             written
                 .rsplit_once("::")
@@ -366,8 +370,8 @@ fn the_scope_of_the_answer(
 
 pub fn definitions_across_files(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -384,7 +388,7 @@ pub fn definitions_across_files(
     //   rule ("a wrong location is worse than none") forbids.
     // **Whether the cursor is on a member access**, decided once: the member question below asks it, and the name
     // query needs the same fact for a different reason — see the `NotDeclaredHere` arm at the end.
-    let naming_a_member = crate::sema::resolve::member_access_at(root, offset).is_some();
+    let naming_a_member = sema::resolve::member_access_at(root, offset).is_some();
     if naming_a_member {
         match member_definitions_across_files(index, declaring, scopes, root, path, offset) {
             Known::Yes(found) => return Known::Yes(found),
@@ -400,7 +404,7 @@ pub fn definitions_across_files(
         }
     }
 
-    match crate::sema::resolve::definitions_at(scopes, root, offset) {
+    match sema::resolve::definitions_at(scopes, root, offset) {
         // **An overload set, which the condition in a signature can narrow.** The scope tree keeps both declarations —
         // measured: the translation unit holds `describe` twice — while the *singular* query takes the first and stops,
         // so `describe(1.5)` answered the `enable_if<is_integral<T>>` overload because it is written first. See
@@ -627,16 +631,16 @@ pub(crate) fn the_concept_definition(
 /// `describe(1.5)` binds `T = double`), which is the one deduction this needs and the one it can do exactly.
 pub(crate) fn the_overload_a_call_names(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
-    candidates: &[crate::Binding],
-) -> Option<crate::Binding> {
+    candidates: &[Binding],
+) -> Option<Binding> {
     // **The call the cursor's name is the callee of.** A name that is not called has no arguments, so there is nothing to
     // decide a condition against and the set stands as it is.
-    let name = crate::sema::resolve::expression_at(root, offset)?;
+    let name = sema::resolve::expression_at(root, offset)?;
     let call = name.ancestors().find(|node| {
         cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
     })?;
@@ -692,15 +696,16 @@ pub(crate) fn the_overload_a_call_names(
                     == cpp_parser::CppSyntaxKind::RequiresClause
             })
             .map(|node| node.text().to_string())
-            .and_then(|text| crate::sema::constraint::a_requires_clause(&text).map(str::to_string));
-        let condition_owned = requires_clause.as_deref().map(str::to_string).or_else(|| {
-            crate::sema::constraint::the_condition_of(&declaration).map(str::to_string)
-        });
+            .and_then(|text| sema::constraint::a_requires_clause(&text).map(str::to_string));
+        let condition_owned = requires_clause
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| sema::constraint::the_condition_of(&declaration).map(str::to_string));
         // **A constraint written as a *concept*'s name** — `template <integral T>` — holds no expression to evaluate, so
         // the concept's own definition is found and its right-hand side evaluated with the same bindings. Measured: a
         // pair of overloads gated by `integral`/`floating` stayed an unresolved set and the call answered the first.
         let condition_owned = condition_owned.or_else(|| {
-            let name = crate::sema::constraint::a_concept_name(&declaration)?;
+            let name = sema::constraint::a_concept_name(&declaration)?;
             the_concept_definition(root, &name)
         });
         let Some(condition) = condition_owned.as_deref() else {
@@ -717,7 +722,7 @@ pub(crate) fn the_overload_a_call_names(
         // **A concept the condition names is expanded and decided**, recursively: `signed_integral<T>` is
         // `integral<T> && is_signed_v<T>`, and `integral<T>` is another concept. Without this, a composed concept answered
         // "cannot tell" and both candidates stayed — measured, `describe(1.5)` resolved to the `signed_integral` overload.
-        let verdict = crate::sema::constraint::satisfies_with(condition, &bound, &mut |name| {
+        let verdict = sema::constraint::satisfies_with(condition, &bound, &mut |name| {
             the_concept_definition(root, name).and_then(|body| {
                 the_concept_parameters(root, name).map(|parameter| (parameter, body))
             })
@@ -857,7 +862,7 @@ pub fn macro_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectMacro> {
-    match crate::sema::resolve::name_at(root, offset) {
+    match sema::resolve::name_at(root, offset) {
         Some((name, _)) => index.macro_definition(&name, path, offset),
         None => Known::Unknown(UnknownReason::UnparsableName),
     }

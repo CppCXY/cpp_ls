@@ -29,6 +29,7 @@
 //! Because it loads `clui.dll` from a `2052\` (or `1033\`) directory beside itself, and a copy without it fails
 //! with `C1510` — measured, exit 4. The path found here is the path used.
 
+use crate::include;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -492,7 +493,7 @@ pub fn predefined_macros_with(
         return None;
     }
 
-    let mut macros = crate::include::toolchain::parse_builtin_macros(&output.stdout);
+    let mut macros = include::toolchain::parse_builtin_macros(&output.stdout);
     // Measured: the table comes out in hash order, so two runs of the same compiler would otherwise produce two
     // orders — and a configuration that differs between two runs is one whose comparisons mean nothing.
     macros.sort_by(|one, two| one.name.cmp(&two.name));

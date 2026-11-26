@@ -80,7 +80,7 @@ pub mod session;
 //
 // The direction is one-way by construction, and that is the point of the crate: the preprocessor may not ask the
 // index what a name means.
-pub use cpp_toolchain::{include, preprocess, probes, project};
+pub use cpp_toolchain::{include, preprocess, project};
 
 // **The layers hold the files; the root holds the names.** Everything that used to be a top-level module is a
 // layer's now — a cached reading is `cache::…`, the effect a file has on the macro table is `index::…`, a feature a

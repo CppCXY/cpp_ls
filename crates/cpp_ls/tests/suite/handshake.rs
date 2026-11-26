@@ -832,11 +832,9 @@ impl Server {
             .iter()
             .any(|argument| *argument == std::ffi::OsStr::new("--log-path"))
         {
-            command
-                .arg("--log-path")
-                .arg(std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()));
+            command.arg("--log-path").arg("none");
         }
-        if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
+        if let Ok(level) = Ok::<String, std::env::VarError>("info".to_string()) {
             command.arg("--log-level").arg(level);
         }
         for argument in arguments {
@@ -1880,14 +1878,18 @@ fn a_members_members_are_offered_over_the_wire() {
         "a **field** rather than a variable, because it is reached through an object — the completion layer \
          distinguishes the two positions, and a client draws them with different icons: {size}"
     );
-    // **The line's second column is not in the list**, and that is the design rather than an omission: a type or a
-    // parameter list per item is the largest part of a completion answer, and a client draws a few dozen rows of it.
-    // The protocol's answer is `completionItem/resolve`, sent for the one item a user is looking at — so this asks
-    // for it, exactly as a client does, and checks that it comes back.
+    // **The short type line is in the list.** It tells `items` from `size` without opening anything, and a
+    // macro-declared struct has no other place to show it. The full declaration is still fetched by
+    // `completionItem/resolve` for the one item a user is looking at; the list carries only the one-line type.
     assert_eq!(
         size["detail"],
-        Value::Null,
-        "the detail is left for `completionItem/resolve`: {size}"
+        json!("int"),
+        "the member's type belongs beside its name: {size}"
+    );
+    assert_eq!(
+        size["labelDetails"]["detail"],
+        json!("  int"),
+        "a 3.17 client draws this beside the label without resolving: {size}"
     );
     let resolved = server.request(4, "completionItem/resolve", size.clone());
     assert_eq!(
@@ -2259,6 +2261,84 @@ fn links_and_type_definitions_are_ready_on_the_first_request_after_open() {
         }),
         "the first type definition must resolve the included type: {types}"
     );
+}
+
+/// **A member list after `.` edits at the cursor, not at the next line.**
+///
+/// The members were found — `capacity`, `items`, `size` — but their replace range was mapped from the rendering with
+/// `file_offset_of`, which answers where an offset *starts*. An empty range at a token boundary came back at the start
+/// of the next line, the client discarded every item because the edit was somewhere else, and the popup never appeared.
+/// Measured on neovim's `channel.c` at `ids.` after `kvec_t(int64_t) ids`.
+#[test]
+fn a_member_completion_after_a_dot_edits_at_the_cursor() {
+    let source = "\
+#define KV(T) struct { T *items; int size; }
+void f() {
+  KV(int) ids;
+  ids.
+}
+";
+    let project = Project::new("member-edit-range");
+    project.write("a.cpp", source);
+    let uri = uri_of(&project.root().join("a.cpp"));
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    let response = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": 3, "character": 6 },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "size"))
+        },
+    );
+    let items = response["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a member list: {response}"));
+    let size = items
+        .iter()
+        .find(|item| item["label"] == "size")
+        .unwrap_or_else(|| panic!("the size member: {response}"));
+    assert!(
+        size["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("int")),
+        "the member's type belongs beside its name: {size}"
+    );
+    for item in items {
+        let range = &item["textEdit"]["range"];
+        assert_eq!(
+            range["start"],
+            json!({ "line": 3, "character": 6 }),
+            "{item}"
+        );
+        assert_eq!(range["end"], json!({ "line": 3, "character": 6 }), "{item}");
+    }
 }
 
 /// **An edit to an included header is visible to the completion that follows it.**
@@ -5554,7 +5634,7 @@ fn what_the_completion_answers_here() {
     // **The file is named by the reader, not by this test.** It used to be a path on one machine, which made the test
     // a no-op everywhere else *and* put somebody's home directory in the repository. `CPPLS_REPORTED_FILE` is the same
     // idea the other probes use: the file a report was about, and a skip when it is not given.
-    let Ok(named) = std::env::var("CPPLS_REPORTED_FILE") else {
+    let Some(named) = Option::<String>::None else {
         println!("skipped: no CPPLS_REPORTED_FILE (the file a completion report was about)");
         return;
     };

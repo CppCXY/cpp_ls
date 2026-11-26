@@ -1,3 +1,4 @@
+use crate::cmd_args;
 use lsp_types::ClientInfo;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -41,15 +42,15 @@ impl ClientId {
 /// chosen and another where a *command* is chosen — a VS Code lens command and a Neovim semantic-token list from the same
 /// session (`docs/worklog.md` P2-2).
 pub fn the_effective_client_id(
-    editor: Option<&crate::cmd_args::Editor>,
+    editor: Option<&cmd_args::Editor>,
     client_info: &Option<ClientInfo>,
 ) -> ClientId {
     match editor {
         // Editor is Copy at its call sites through the value form; a shared reference is matched rather than
         // copied so the signature can take &Editor without requiring Copy here.
-        Some(crate::cmd_args::Editor::Vscode) => ClientId::VSCode,
-        Some(crate::cmd_args::Editor::Intellij) => ClientId::Intellij,
-        Some(crate::cmd_args::Editor::Neovim) => ClientId::Neovim,
+        Some(cmd_args::Editor::Vscode) => ClientId::VSCode,
+        Some(cmd_args::Editor::Intellij) => ClientId::Intellij,
+        Some(cmd_args::Editor::Neovim) => ClientId::Neovim,
         None => get_client_id(client_info),
     }
 }

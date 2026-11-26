@@ -33,6 +33,7 @@
 //! * [`traits`] — the `__is_*` family: what each one asks, and which of them the written arguments decide.
 //! * [`transforms`] — the builtins that *are* a type rather than a question about one.
 
+use crate::sema;
 pub mod traits;
 pub mod transforms;
 
@@ -48,7 +49,7 @@ pub enum Answer {
     /// A `bool` whose value is not decided: the type is `bool` and the question is left open.
     UndecidedBoolean,
     /// A builtin that produces a type: `__decay(x)` is `int` for an `int&`.
-    Type(crate::sema::types::Type),
+    Type(sema::types::Type),
     /// A name this layer knows is a builtin and will not answer for.
     Unmodelled,
 }

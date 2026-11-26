@@ -4,6 +4,7 @@
 //! here is testing the composition against the same facts every query sees, not against a hand-built summary that
 //! could agree with a broken fold.
 
+use crate::NoMacros;
 use std::path::Path;
 
 use crate::cache::env::{Composed, Env, Skeleton, compose};
@@ -48,7 +49,7 @@ fn composed(session: &Session<MemoryFiles>, root: &str) -> Composed {
         &skeleton,
         &guards,
         &Env::empty(),
-        &crate::NoMacros,
+        &NoMacros,
         &mut |target| {
             let summary = session.index().summary(target)?;
             let text = session.text(target)?;

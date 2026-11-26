@@ -32,6 +32,9 @@
 //!
 //! A function's body is in the file being checked, so this is a question about one file by construction.
 
+use crate::DeclKind;
+use crate::Known;
+use crate::sema;
 use cpp_parser::{CppAstNode, CppStat};
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -126,12 +129,12 @@ fn the_promise_of_a_name(context: &CheckContext<'_>, spelling: &str, depth: usiz
     if spelled.is_empty() || depth > 3 {
         return Promise::NotKnown;
     }
-    let crate::Known::Yes(known) = context.index().definition(spelled, context.path) else {
+    let Known::Yes(known) = context.index().definition(spelled, context.path) else {
         return Promise::NotKnown;
     };
     let fact = &known.fact;
     // A class, a struct, an enum — something with a size, which is a value.
-    if fact.kind != crate::DeclKind::Type {
+    if fact.kind != DeclKind::Type {
         return Promise::AValue;
     }
     match fact.type_of.as_deref().map(str::trim) {
@@ -142,7 +145,7 @@ fn the_promise_of_a_name(context: &CheckContext<'_>, spelling: &str, depth: usiz
         Some(target)
             if target.contains('*')
                 || target.contains('&')
-                || crate::sema::layout::a_builtin_in_memory(target).is_some() =>
+                || sema::layout::a_builtin_in_memory(target).is_some() =>
         {
             Promise::AValue
         }

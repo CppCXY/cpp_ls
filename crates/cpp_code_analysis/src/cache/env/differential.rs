@@ -27,6 +27,9 @@
 //! the probe: `EmmyLuaCodeStyle`, roots named by `CPPLS_PROBE_DIRS`, and the first `CPPLS_PROBE_ROOTS` `.cpp` files
 //! walked.
 
+use crate::MacroValues;
+use crate::cache;
+use crate::file;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -196,7 +199,7 @@ fn compare_file(
 fn composition<F: FileProvider + Clone>(
     session: &Session<F>,
     root: &Path,
-    seed: &dyn crate::MacroValues,
+    seed: &dyn MacroValues,
     known: &[PathBuf],
 ) -> UnitComposition {
     // **A resolver for the includes the summary could not resolve**, from the paths the walk reached: a spelling
@@ -407,14 +410,8 @@ fn a_macro_from_an_earlier_include_is_visible_to_a_later_one() {
 #[test]
 #[ignore = "a probe: walks a real project and compares instead of asserting"]
 fn the_fold_and_the_walk_agree_on_a_real_project() {
-    let root = PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
-    );
-    let directories: Vec<String> = std::env::var("CPPLS_PROBE_DIRS")
-        .unwrap_or_else(|_| {
-            "CodeFormat,CodeFormatCLib,CodeFormatCore,CodeFormatLib,CodeFormatServer,LuaParser,Util"
-                .to_string()
-        })
+    let root = PathBuf::from(r"E:\EmmyLuaCodeStyle".to_string());
+    let directories: Vec<String> = String::new()
         .split(',')
         .map(|directory| directory.trim().to_string())
         .collect();
@@ -440,14 +437,14 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
 
     let mut session = Session::open(
         root.clone(),
-        SessionFiles::new(OpenDocuments::new(), crate::file::paths::DiskFiles),
+        SessionFiles::new(OpenDocuments::new(), file::paths::DiskFiles),
         WatchFilter::new(&root),
     );
     session.add_project_files(sources.clone());
     session.index_everything();
 
     let seed_names = seed_names_of(&session);
-    let roots: usize = std::env::var("CPPLS_PROBE_ROOTS")
+    let roots: usize = Result::<String, std::env::VarError>::Ok("100".to_string())
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(3);
@@ -623,7 +620,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
         let mut classes: Vec<(String, usize)> = classes.into_iter().collect();
         classes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         println!("  unknown classes: {classes:?}");
-        let over = crate::cache::env::Over::new(Env::empty(), session.index().macros());
+        let over = cache::env::Over::new(Env::empty(), session.index().macros());
         let bit_in_fold = composition.files.iter().find(|file| {
             let name = file.path.to_string_lossy().to_lowercase();
             name.ends_with("/bit") && !name.ends_with("/orbit")
@@ -704,7 +701,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             session.index().macros().is_defined("__cplusplus"),
             session.index().macros().get("__cplusplus").is_some(),
             session.index().macros().is_incomplete(),
-            crate::MacroValues::lookup(&over, "__cplusplus")
+            MacroValues::lookup(&over, "__cplusplus")
         );
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());

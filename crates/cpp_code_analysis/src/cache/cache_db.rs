@@ -30,6 +30,12 @@
 //! database and the next run rebuilds it. That is the property that makes a single file safe: there is nothing to
 //! recover, only something to recompute.
 
+use crate::FileSummary;
+use crate::IndexedUnit;
+use crate::RenderedUnit;
+use crate::cache;
+use crate::summary_codec;
+use crate::unit_codec;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -684,7 +690,7 @@ impl CacheDb {
     /// **One translation unit's rendering**, by the key `Session::render_the_unit` computes over the closure — see
     /// [`crate::unit_codec`]. Stored compressed like the rest: the record is about 20 bytes per token of a program,
     /// and a real one is 14 MB before zstd.
-    pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
+    pub fn unit(&self, key: u64) -> Result<Option<RenderedUnit>> {
         let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let units = read.open_table(UNITS)?;
@@ -692,12 +698,12 @@ impl CacheDb {
             return Ok(None);
         };
         let bytes = decompress(value.value())?;
-        Ok(crate::unit_codec::decode(&bytes).ok())
+        Ok(unit_codec::decode(&bytes).ok())
     }
 
-    pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
+    pub fn put_unit(&self, key: u64, unit: &RenderedUnit) -> Result<()> {
         let _timed = Timed::write();
-        let packed = compress(&crate::unit_codec::encode(unit));
+        let packed = compress(&unit_codec::encode(unit));
         let write = self.database.begin_write()?;
         {
             let mut units = write.open_table(UNITS)?;
@@ -751,7 +757,7 @@ impl CacheDb {
     ///
     /// This is the half of a unit read that costs the most (the sweep is ≈3.8 s of a 4.4 s read) and the half that is
     /// a pure function of the text, so it is the one worth keeping.
-    pub fn indexed_unit(&self, program: u64) -> Result<Option<crate::IndexedUnit>> {
+    pub fn indexed_unit(&self, program: u64) -> Result<Option<IndexedUnit>> {
         let _timed = Timed::read();
         let read = self.database.begin_read()?;
         let table = read.open_table(UNIT_INDICES)?;
@@ -759,12 +765,12 @@ impl CacheDb {
             return Ok(None);
         };
         let bytes = decompress(value.value())?;
-        Ok(crate::unit_codec::decode_indexed_unit(&bytes).ok())
+        Ok(unit_codec::decode_indexed_unit(&bytes).ok())
     }
 
-    pub fn put_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) -> Result<()> {
+    pub fn put_indexed_unit(&self, program: u64, unit: &IndexedUnit) -> Result<()> {
         let _timed = Timed::write();
-        let packed = compress(&crate::unit_codec::encode_indexed_unit(unit));
+        let packed = compress(&unit_codec::encode_indexed_unit(unit));
         let write = self.database.begin_write()?;
         {
             let mut table = write.open_table(UNIT_INDICES)?;
@@ -1073,7 +1079,7 @@ impl SummaryCache {
     /// still a summary this process must answer with: a query for a file the pump has just read would otherwise
     /// re-parse it — and the store's own tests are exactly that question asked with two stores, where the answer was
     /// twenty failures until the buffer became readable.
-    pub fn summary(&self, key: crate::cache::SummaryKey) -> Option<crate::FileSummary> {
+    pub fn summary(&self, key: cache::SummaryKey) -> Option<FileSummary> {
         // **The environment is part of the key, and it was not.** A reading refined under one environment and one
         // taken from the file's own text are two different answers (`_STD` is `::std::` under one and a plain name
         // under the other); with `env: 0` the second overwrote the first, which is why the second pass could not store
@@ -1095,7 +1101,7 @@ impl SummaryCache {
             Some(bytes) => bytes,
             None => self.database.summary(cache_key).ok().flatten()?,
         };
-        match crate::summary_codec::decode(&bytes) {
+        match summary_codec::decode(&bytes) {
             Ok(summary) => Some(summary),
             Err(error) => {
                 log::debug!("a stored summary could not be decoded: {error}");
@@ -1105,8 +1111,8 @@ impl SummaryCache {
     }
 
     /// Buffer a summary, and commit the batch when it is full.
-    pub fn put(&self, key: crate::cache::SummaryKey, summary: &crate::FileSummary) {
-        let bytes = crate::summary_codec::encode(summary);
+    pub fn put(&self, key: cache::SummaryKey, summary: &FileSummary) {
+        let bytes = summary_codec::encode(summary);
         let cache_key = CacheKey {
             content: key.content_hash,
             config: key.context_hash,
@@ -1170,7 +1176,7 @@ impl SummaryCache {
     }
 
     /// **A unit rendering, by its closure key** — see [`CacheDb::unit`].
-    pub fn unit(&self, key: u64) -> Result<Option<crate::RenderedUnit>> {
+    pub fn unit(&self, key: u64) -> Result<Option<RenderedUnit>> {
         self.database.unit(key)
     }
 
@@ -1193,16 +1199,16 @@ impl SummaryCache {
         self.database.contributions()
     }
 
-    pub fn put_unit(&self, key: u64, unit: &crate::RenderedUnit) -> Result<()> {
+    pub fn put_unit(&self, key: u64, unit: &RenderedUnit) -> Result<()> {
         self.database.put_unit(key, unit)
     }
 
     /// **A unit's facts, by its program hash** — see [`CacheDb::indexed_unit`].
-    pub fn indexed_unit(&self, program: u64) -> Result<Option<crate::IndexedUnit>> {
+    pub fn indexed_unit(&self, program: u64) -> Result<Option<IndexedUnit>> {
         self.database.indexed_unit(program)
     }
 
-    pub fn put_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) -> Result<()> {
+    pub fn put_indexed_unit(&self, program: u64, unit: &IndexedUnit) -> Result<()> {
         self.database.put_indexed_unit(program, unit)
     }
 

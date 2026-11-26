@@ -4,6 +4,8 @@
 //! shows: an editor sees half-written `if`s and unclosed blocks constantly, so every accessor here
 //! returns `Option` and nothing asserts structure.
 
+use crate::CppTokenKind;
+use crate::is_trivia;
 use crate::{
     CppSyntaxNode,
     kind::CppSyntaxKind,
@@ -255,15 +257,15 @@ impl CppForStat {
         let mut after_the_first = false;
         for element in self.syntax().children_with_tokens() {
             if let Some(token) = element.as_token() {
-                let kind = crate::CppTokenKind::from(token.kind());
-                if kind == crate::CppTokenKind::Semicolon {
+                let kind = CppTokenKind::from(token.kind());
+                if kind == CppTokenKind::Semicolon {
                     if after_the_first {
                         return false;
                     }
                     after_the_first = true;
                     continue;
                 }
-                if after_the_first && !crate::is_trivia(kind) {
+                if after_the_first && !is_trivia(kind) {
                     return true;
                 }
             } else if after_the_first {

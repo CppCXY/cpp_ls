@@ -32,7 +32,7 @@ async fn a_cancelled_request_answers_without_waiting_for_its_work() {
     );
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     context
-        .task(1.into(), 0, move |_| async move {
+        .task(1.into(), 0, false, None, move |_| async move {
             entered_tx.send(()).unwrap();
             std::future::pending::<RequestOutcome<u32>>().await
         })
@@ -46,8 +46,16 @@ async fn a_cancelled_request_answers_without_waiting_for_its_work() {
     );
 }
 
+/// **A newer edit does not cancel a request that has already asked.** — the reason a completion is visible at all
+/// while a reader types.
+///
+/// The previous version of this test asserted the opposite (`ContentModified`), and the rule it encoded cost the
+/// feature: a client typing at 80 ms against a barrier that takes 300–500 ms had *every* request answered `-32801`,
+/// so the completion popup never appeared (`docs/worklog.md`). The answer is still about text the client sent — the
+/// barrier guarantees that — and a newer version of the same answer is the client's business, which is what
+/// `$/cancelRequest` is for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_request_is_not_answered_from_a_later_document_version() {
+async fn a_change_that_starts_does_not_cancel_a_request_that_has_asked() {
     let (server, client) = Connection::memory();
     let context = ServerContext::new(
         Arc::new(server),
@@ -56,10 +64,12 @@ async fn a_request_is_not_answered_from_a_later_document_version() {
         None,
     );
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     context
-        .task(2.into(), 0, move |_| async move {
+        .task(2.into(), 0, false, None, move |_| async move {
             entered_tx.send(()).unwrap();
-            std::future::pending::<RequestOutcome<u32>>().await
+            let _ = release_rx.await;
+            RequestOutcome::Ready(7u32)
         })
         .await;
     entered_rx.await.unwrap();
@@ -77,9 +87,10 @@ async fn a_request_is_not_answered_from_a_later_document_version() {
             }],
         }))
         .await;
+    release_tx.send(()).unwrap();
     let response = response(&client).await;
     assert_eq!(
-        response.response_result.unwrap_err().code,
-        lsp_server::ErrorCode::ContentModified as i32
+        response.response_result.expect("the request answers"),
+        serde_json::json!(7)
     );
 }

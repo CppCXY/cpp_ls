@@ -53,6 +53,10 @@
 //!   and a declaration in *this* file is already the scope tree's business, so it is not counted twice (the two
 //!   coordinate systems, the rendering's and the file's, are not comparable offset by offset).
 
+use crate::Known;
+use crate::ScopeKind;
+use crate::UnknownReason;
+use crate::index;
 use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -202,7 +206,7 @@ fn an_argument_may_take_part_in_adl(
     call_expression.get_args().iter().any(|argument| {
         !matches!(
             context.type_of(argument.syntax()),
-            crate::Known::Yes((type_of, _)) if is_a_builtin_spelling(&type_of.to_string())
+            Known::Yes((type_of, _)) if is_a_builtin_spelling(&type_of.to_string())
         )
     })
 }
@@ -330,7 +334,7 @@ fn in_a_lambda(context: &CheckContext<'_>, at: usize) -> bool {
             .model
             .scopes()
             .scope(*id)
-            .is_some_and(|data| data.kind == crate::ScopeKind::Lambda)
+            .is_some_and(|data| data.kind == ScopeKind::Lambda)
     })
 }
 
@@ -350,8 +354,7 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
             };
             // A class body is a *complete-class context*: everything it declares is visible everywhere inside it,
             // including a member written after the function that uses it. Every other scope is read top to bottom.
-            let from_anywhere =
-                matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum);
+            let from_anywhere = matches!(data.kind, ScopeKind::Class | ScopeKind::Enum);
             for binding in &data.bindings {
                 if binding.name.identifier_text() != Some(name) {
                     continue;
@@ -372,8 +375,8 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
     //
     // Asked with the **qualified** spelling, which is what keeps a bare name from reaching a class: only the class the
     // cursor is actually inside is offered here.
-    if let Some(class) = crate::index::project::class_of_the_enclosing_definition(scopes, at)
-        && let crate::Known::Yes(found) = context
+    if let Some(class) = index::project::class_of_the_enclosing_definition(scopes, at)
+        && let Known::Yes(found) = context
             .model
             .index()
             .definitions_in_scope(&format!("{class}::{name}"), context.path)
@@ -386,7 +389,7 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
     // is the scope tree's answer above, in the rendering's coordinates — the index records the file's own offsets,
     // and the two are not comparable one by one once a directive has been expanded.
     match context.model.index().definitions(name, context.path) {
-        crate::Known::Yes(found) => found
+        Known::Yes(found) => found
             .found
             .iter()
             .any(|declaration| declaration.file != context.path),
@@ -394,8 +397,8 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
         // claim absence unless it was asked and found nothing. Every other reason is a name this layer cannot speak
         // about: ambiguous (declared twice), behind an unread include, in a module the project does not contain —
         // all of them are silence rather than a finding.
-        crate::Known::Unknown(crate::UnknownReason::NotDeclaredHere(_)) => false,
-        crate::Known::Unknown(_) => true,
-        crate::Known::No => false,
+        Known::Unknown(UnknownReason::NotDeclaredHere(_)) => false,
+        Known::Unknown(_) => true,
+        Known::No => false,
     }
 }

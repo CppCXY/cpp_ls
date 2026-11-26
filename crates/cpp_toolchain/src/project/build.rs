@@ -24,6 +24,8 @@
 //! database can be inside — `.git`, the cache directory, and directories that are themselves a checkout
 //! (`node_modules`).
 
+use crate::CACHE_DIRECTORY;
+use crate::include;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -58,7 +60,7 @@ pub const MAX_DEPTH: usize = 3;
 pub const MAX_DIRECTORIES: usize = 2000;
 
 /// Directory names a compile database is never inside.
-const NEVER_SEARCHED: &[&str] = &[".git", crate::CACHE_DIRECTORY, "node_modules"];
+const NEVER_SEARCHED: &[&str] = &[".git", CACHE_DIRECTORY, "node_modules"];
 
 /// A compile database, and how it was found.
 ///
@@ -177,7 +179,7 @@ fn read_database(files: &impl FileProvider, path: &Path) -> Option<CompileComman
     // everything below (response files, the working directory, `command_for`) is shared.
     let mut database = match path.file_name().and_then(|name| name.to_str()) {
         Some(name) if name.starts_with("build_database") => {
-            crate::include::config::parse_build_database(&json)
+            include::config::parse_build_database(&json)
         }
         _ => parse_compile_commands(&json),
     };
@@ -193,7 +195,7 @@ fn read_database(files: &impl FileProvider, path: &Path) -> Option<CompileComman
     // remember. The working directory is the entry's own, which is what a compiler resolves a relative `@` against.
     for command in &mut database.commands {
         let directory = command.directory.clone();
-        command.arguments = crate::include::config::expand_response_files(
+        command.arguments = include::config::expand_response_files(
             &command.arguments,
             directory.as_deref(),
             &mut |named| files.read(named),
@@ -289,7 +291,9 @@ fn search_for_database(root: &Path) -> (Vec<PathBuf>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DiskFiles;
     use crate::MemoryFiles;
+    use crate::file;
 
     #[test]
     fn a_database_in_a_build_directory_is_found_and_the_root_wins_when_it_has_one() {
@@ -320,13 +324,13 @@ mod tests {
         )
         .expect("the fixture writes");
 
-        let (found, problems) = find_database(&crate::DiskFiles, &root, None);
+        let (found, problems) = find_database(&DiskFiles, &root, None);
         assert!(problems.is_empty(), "{problems:?}");
         let found = found.expect("a database is found");
         assert_eq!(found.origin, DatabaseOrigin::BuildDirectory);
         assert_eq!(found.commands.len(), 1);
         assert!(
-            crate::file::paths::normalize_path(&found.path, cfg!(windows))
+            file::paths::normalize_path(&found.path, cfg!(windows))
                 .ends_with("cmake-build-debug/compile_commands.json"),
             "the shallower of the two, and the lexicographically first: {}",
             found.path.display()
@@ -335,7 +339,7 @@ mod tests {
         // And the root's own database wins over both.
         std::fs::write(root.join("compile_commands.json"), entry("/p/root.cpp"))
             .expect("the fixture writes");
-        let (found, _) = find_database(&crate::DiskFiles, &root, None);
+        let (found, _) = find_database(&DiskFiles, &root, None);
         let found = found.expect("a database is found");
         assert_eq!(found.origin, DatabaseOrigin::Root);
 
@@ -405,7 +409,7 @@ mod tests {
         std::fs::write(root.join("build/build_database.json"), database)
             .expect("the fixture writes");
 
-        let (found, problems) = find_database(&crate::DiskFiles, &root, None);
+        let (found, problems) = find_database(&DiskFiles, &root, None);
         assert!(problems.is_empty(), "{problems:?}");
         let found = found.expect("the build database is found");
         assert_eq!(found.origin, DatabaseOrigin::BuildDirectory);
@@ -449,10 +453,10 @@ mod tests {
             "[\n  {\"directory\": \"/p\", \"file\": \"/p/a.cpp\", \"arguments\": [\"g++\", \"-c\", \"/p/a.cpp\"]}\n]\n",
         )
         .expect("the fixture writes");
-        let (found, _) = find_database(&crate::DiskFiles, &root, None);
+        let (found, _) = find_database(&DiskFiles, &root, None);
         let found = found.expect("a database is found");
         assert!(
-            crate::file::paths::normalize_path(&found.path, cfg!(windows))
+            file::paths::normalize_path(&found.path, cfg!(windows))
                 .ends_with("compile_commands.json"),
             "the compile database wins: {}",
             found.path.display()

@@ -5,6 +5,7 @@
 //! standard places on module units are represented, because an editor has to parse files that are
 //! still being written.
 
+use crate::syntax;
 use crate::{
     CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
@@ -248,7 +249,7 @@ impl CppPreprocessorDirective {
         self.syntax()
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .filter(|token| !crate::syntax::node::traits::is_trivia(token.kind().into()))
+            .filter(|token| !syntax::node::traits::is_trivia(token.kind().into()))
             .nth(1)
             .map(|token| token.text().to_string())
     }
@@ -283,7 +284,7 @@ impl CppPreprocessorDirective {
             .syntax()
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .filter(|token| !crate::syntax::node::traits::is_trivia(token.kind().into()))
+            .filter(|token| !syntax::node::traits::is_trivia(token.kind().into()))
         {
             if !seen_hash {
                 seen_hash = true;

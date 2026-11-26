@@ -3,6 +3,21 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::*;
+use crate::CompletionSet;
+use crate::DeclFact;
+use crate::HeaderTarget;
+use crate::MacroKind;
+use crate::ReferenceBudget;
+use crate::SymbolReferences;
+use crate::SymbolToFind;
+use crate::completion;
+use crate::file;
+use crate::header_at;
+use crate::index;
+use crate::paths;
+use crate::preprocess;
+use crate::sema;
+use crate::session;
 
 /// **A specifier written before a declaration but kept outside its node** — see
 /// [`Session::the_attributes_before_a_declaration`].
@@ -185,14 +200,10 @@ impl<F: FileProvider + Clone> Session<F> {
             // the asking side of the rendering contract — on a miss it records the file and answers `None`, and the
             // pump renders it. Nothing here guesses: the files are the index's own facts about the qualifier.
             let needed = self.files_a_qualified_name_needs(qualifier, &view.path);
-            if crate::probes::cooking() {
-                eprintln!("[ask] {qualifier}: needed {needed:?}");
-            }
+
             for file in needed.into_iter().take(8) {
                 let cooked = self.store.index().cooked_declarations(&file).is_some();
-                if crate::probes::cooking() {
-                    eprintln!("[ask] {} cooked {cooked}", file.display());
-                }
+
                 if !cooked {
                     // **The cooked reading is what is missing**, not the rendering: `view` asks only when no
                     // rendering is cached, and the rendering outlives the declarations it produced (they are what the
@@ -250,12 +261,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// to nothing here or to a declaration this file does not write: a constness nobody can see must not become
     /// `false`, which is what a caller filtering a list would read it as.
     pub fn the_object_is_const(&self, view: &FileView, offset: usize) -> Option<bool> {
-        let Known::Yes(binding) =
-            crate::sema::resolve::definition_at(&view.scopes, &view.root, offset)
+        let Known::Yes(binding) = sema::resolve::definition_at(&view.scopes, &view.root, offset)
         else {
             return None;
         };
-        let shapes = crate::sema::declarations::DeclarationShapes::of(&view.root);
+        let shapes = sema::declarations::DeclarationShapes::of(&view.root);
         let specifiers = shapes.specifiers_at(binding.name_range.start_offset)?;
         let written = specifiers.text().to_string();
         Some(
@@ -364,12 +374,12 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         view: &FileView,
         offset: ReadingOffset,
-        budget: crate::ReferenceBudget,
-    ) -> Known<crate::SymbolReferences> {
+        budget: ReferenceBudget,
+    ) -> Known<SymbolReferences> {
         let Known::Yes(found) = self.definitions(view, offset) else {
             // **Which name the cursor is on**, for the refusal's message: a caller that gets `NotDeclaredHere("")`
             // learns nothing, and the name is what a person would look up next.
-            let written = crate::sema::resolve::name_position_at(&view.root, offset.get())
+            let written = sema::resolve::name_position_at(&view.root, offset.get())
                 .map(|name| name.written.clone())
                 .unwrap_or_default();
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)));
@@ -382,14 +392,9 @@ impl<F: FileProvider + Clone> Session<F> {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
         };
 
-        let symbol = crate::SymbolToFind::of(&first.fact, first.file.clone());
+        let symbol = SymbolToFind::of(&first.fact, first.file.clone());
 
-        crate::index::references::symbol_references(
-            self.store.index(),
-            &self.files,
-            &symbol,
-            budget,
-        )
+        index::references::symbol_references(self.store.index(), &self.files, &symbol, budget)
     }
 
     /// **The references of a declaration the caller already holds** — no offset, and so no coordinate to convert.
@@ -401,17 +406,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// rendering offset.
     pub fn symbol_references_of(
         &self,
-        fact: &crate::DeclFact,
+        fact: &DeclFact,
         file: std::path::PathBuf,
-        budget: crate::ReferenceBudget,
-    ) -> Known<crate::SymbolReferences> {
-        let symbol = crate::SymbolToFind::of(fact, file);
-        crate::index::references::symbol_references(
-            self.store.index(),
-            &self.files,
-            &symbol,
-            budget,
-        )
+        budget: ReferenceBudget,
+    ) -> Known<SymbolReferences> {
+        let symbol = SymbolToFind::of(fact, file);
+        index::references::symbol_references(self.store.index(), &self.files, &symbol, budget)
     }
 
     /// Which `#define` or `#undef` settles the macro name at `offset`.
@@ -426,7 +426,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_at_a_file_offset(
         &self,
         view: &FileView,
-        offset: crate::file::coordinates::FileOffset,
+        offset: file::coordinates::FileOffset,
     ) -> Known<ProjectMacro> {
         // **The file's own text, from whichever view this is** — a handler may hold the *plain* view, whose root is the
         // file's own text, and asking only for `written_text()` made every macro question in the editor answer "no
@@ -533,8 +533,8 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         written: &str,
         range: cpp_parser::SourceRange,
-    ) -> crate::CompletionSet {
-        let mut items: Vec<crate::completion::CompletionItem> = Vec::new();
+    ) -> CompletionSet {
+        let mut items: Vec<completion::CompletionItem> = Vec::new();
 
         for (name, unit) in self.module_names() {
             if !written.is_empty()
@@ -544,12 +544,12 @@ impl<F: FileProvider + Clone> Session<F> {
             {
                 continue;
             }
-            items.push(crate::completion::CompletionItem {
+            items.push(completion::CompletionItem {
                 label: name.clone(),
                 insert: name.clone(),
                 snippet: false,
                 // A module name is a scope name, which is the kind a theme draws a qualified-name root with.
-                kind: crate::completion::ItemKind::Namespace,
+                kind: completion::ItemKind::Namespace,
                 detail: Some(format!("module {}", unit.display())),
                 identity: None,
                 filter: None,
@@ -560,7 +560,7 @@ impl<F: FileProvider + Clone> Session<F> {
             });
         }
 
-        crate::CompletionSet {
+        CompletionSet {
             scope: String::new(),
             prefix: written.to_string(),
             replace: range,
@@ -579,7 +579,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// written in terms of the ones `<climits>` brings in.
     pub fn constant_value_at(&self, view: &FileView, offset: ReadingOffset) -> Option<i64> {
         let path = view.path.clone();
-        crate::sema::constant::value_at(view, offset.get(), &|name| {
+        sema::constant::value_at(view, offset.get(), &|name| {
             self.macro_body_at(&path, offset.get(), name)
         })
     }
@@ -623,7 +623,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // the declaration's line in *that* file, and the answer is `None` rather than a guess in that case only when
         // the two definitions disagree — see [`Session::macro_body_at`].
         let at = self.text(&unit).map(|text| text.len()).unwrap_or(0);
-        crate::sema::constant::value_at(&view, name_range.start_offset, &|name| {
+        sema::constant::value_at(&view, name_range.start_offset, &|name| {
             self.macro_body_at(&unit, at, name)
         })
     }
@@ -659,7 +659,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **One macro candidate's replacement list, as text** — `0xff` for `UCHAR_MAX`.
     pub(crate) fn the_macro_body(
         &self,
-        candidate: &crate::index::project::MacroCandidate,
+        candidate: &index::project::MacroCandidate,
     ) -> Option<String> {
         let fact = candidate.fact();
         if fact.function_like {
@@ -699,7 +699,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `path` is the file the question is about, because the standard is per file.
     pub fn predefined_macro(&self, name: &str, path: &std::path::Path) -> Option<String> {
         let language = self.config_for(path).language_for(path);
-        if let Some(value) = crate::session::the_standards_own_macro(name, &language) {
+        if let Some(value) = session::the_standards_own_macro(name, &language) {
             return Some(value);
         }
 
@@ -734,13 +734,13 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn the_expansion_of_a_macro(
         &self,
         view: &FileView,
-        offset: crate::file::coordinates::FileOffset,
+        offset: file::coordinates::FileOffset,
     ) -> Option<String> {
         let Known::Yes(found) = self.macro_at_a_file_offset(view, offset) else {
             return None;
         };
         let fact = &found.fact;
-        if fact.kind != crate::MacroKind::Definition {
+        if fact.kind != MacroKind::Definition {
             return None;
         }
         let written = view.the_written_text()?;
@@ -781,7 +781,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 break;
             }
             match defined.kind {
-                crate::MacroKind::Definition => {
+                MacroKind::Definition => {
                     let Some(body_range) = defined.body_range else {
                         continue;
                     };
@@ -798,14 +798,14 @@ impl<F: FileProvider + Clone> Session<F> {
                             .unwrap_or("()")
                     });
                     source.push_str("#define ");
-                    source.push_str(&crate::preprocess::cooked::definition_text(
+                    source.push_str(&preprocess::cooked::definition_text(
                         &defined.name,
                         parameters,
                         body.trim(),
                     ));
                     source.push('\n');
                 }
-                crate::MacroKind::Undefinition => {
+                MacroKind::Undefinition => {
                     source.push_str("#undef ");
                     source.push_str(&defined.name);
                     source.push('\n');
@@ -833,23 +833,23 @@ impl<F: FileProvider + Clone> Session<F> {
         // digits in this file) is not yet in force at offset 0. Measured on Lua 5.5.0's `lcode.c:1933`,
         // `cast_byte(~PF_VAHID)`: the card said "a macro whose value is `1`" and "Expands to `PF_VAHID`" — the name,
         // because the binding from `lobject.h` sat past the synthetic source's end.
-        let environment = self.store.the_indexed_environment(&view.path)?;
-        let seed = crate::preprocess::macros::MacroTable::from_marked(self.store.index().macros());
+        let environment = self.store.an_environment_of(&view.path)?;
+        let seed = preprocess::macros::MacroTable::from_marked(self.store.index().macros());
         let configuration = {
             let mut parsed = self
                 .parsed_definitions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            crate::preprocess::cooked::configuration_from_environment_as_of(
-                &environment,
+            preprocess::cooked::configuration_from_environment_as_of(
+                &*environment,
                 offset.get(),
                 true,
                 &mut parsed,
             )
         };
-        let start_state = crate::preprocess::cooked::Over::new(&configuration.table, &seed);
+        let start_state = preprocess::cooked::Over::new(&configuration.table, &seed);
         let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
-        let rendered = crate::preprocess::cooked::cook_with_file(
+        let rendered = preprocess::cooked::cook_with_file(
             &source,
             &tokens,
             &start_state,
@@ -940,9 +940,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .then(|| {
                     self.the_expansion_of_a_macro(
                         &view,
-                        crate::file::coordinates::FileOffset::new(usize::from(
-                            node.text_range().start(),
-                        )),
+                        file::coordinates::FileOffset::new(usize::from(node.text_range().start())),
                     )
                 })
                 .flatten()
@@ -1015,8 +1013,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// partition belongs to the file's own module.
     pub fn module_imports_of(&self, view: &FileView) -> Vec<ModuleImport> {
         let mut imports: Vec<ModuleImport> = Vec::new();
-        let directory =
-            crate::paths::parent_normalized(&view.path, self.files.is_case_insensitive());
+        let directory = paths::parent_normalized(&view.path, self.files.is_case_insensitive());
         let mut interner = PathInterner::new(self.files.is_case_insensitive());
         let mut scanner: Option<ModuleScanner<'_, OverlayFiles<OpenDocuments, F>>> = None;
         // **A partition is named against the module its unit declares.** `export import :area;` names
@@ -1100,14 +1097,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// rendering parses. This query therefore takes a `FileOffset` and parses the written text, exactly as
     /// `Session::documentation` does for comments, `Session::selection_chain` for selections and
     /// `Session::folding_ranges` for folds.
-    pub fn header_at(&self, view: &FileView, offset: FileOffset) -> Known<crate::HeaderTarget> {
+    pub fn header_at(&self, view: &FileView, offset: FileOffset) -> Known<HeaderTarget> {
         let index = self.store.index();
         let Some(written) = view.written_text() else {
             // No rendering: this view *is* a parse of the file's own text, so its offsets are already the file's.
-            return crate::header_at(index, &view.root, &view.path, offset.get());
+            return header_at(index, &view.root, &view.path, offset.get());
         };
         let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
-        crate::header_at(index, &tree.get_red_root(), &view.path, offset.get())
+        header_at(index, &tree.get_red_root(), &view.path, offset.get())
     }
 
     /// Everywhere the macro name written at `offset` is used, across the project — the query a rename starts from.
@@ -1134,8 +1131,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // `name_at_including_directives` rather than `name_at`: the place a user asks this question is the name
         // itself, and half the time that name is written in a `#define` — which is tokens in a directive, not a
         // name node the scope walker sees.
-        let Some((name, _)) =
-            crate::sema::resolve::name_at_including_directives(&view.root, offset.get())
+        let Some((name, _)) = sema::resolve::name_at_including_directives(&view.root, offset.get())
         else {
             return Known::Unknown(UnknownReason::UnparsableName);
         };
@@ -1187,7 +1183,7 @@ fn presumed_position(written: &str, at: usize) -> (usize, Option<std::path::Path
                 .bytes()
                 .filter(|byte| *byte == b'\n')
                 .count();
-            crate::preprocess::cooked::a_line_directive_changes(
+            preprocess::cooked::a_line_directive_changes(
                 tokens,
                 directive_line,
                 &mut line_base,

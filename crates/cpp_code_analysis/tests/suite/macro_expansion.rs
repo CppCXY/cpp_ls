@@ -181,3 +181,22 @@ void f() {
         "and the name the directive states is the one the card reports"
     );
 }
+
+/// **A statement's semicolon stays on its block's line.** `TEXTLOCK_WRAP`'s body writes `code;`, and neovim calls it
+/// with a braced block, so the expansion is `{ … };` — the formatter used to put the `;` alone on the next line.
+#[test]
+fn a_block_argument_keeps_its_semicolon_on_the_brace() {
+    let source = "\
+#define WRAP(code) do { code; } while (0)
+void f(void) { WRAP({ g(); }); }
+";
+    let expansion = expanded(source, "WRAP({");
+    assert!(
+        !expansion.lines().any(|line| line.trim() == ";"),
+        "the semicolon is on a line of its own: {expansion}"
+    );
+    assert!(
+        expansion.contains("};"),
+        "the block's brace and `;` are together: {expansion}"
+    );
+}

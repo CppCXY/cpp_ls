@@ -2,6 +2,7 @@ use super::{
     CachedCommands, Dialect, Environment, Output, a_cuda_toolchain, decode, encode,
     parse_search_list, parse_version, search_list_flags,
 };
+use crate::include;
 
 /// **A CUDA toolchain is recognised from its macros or its name, and that reaches the parser's switch.**
 ///
@@ -733,7 +734,7 @@ fn discovery_walks_from_the_environment_to_the_answer() {
         super::BuildStatement::default(),
         Path::new("/p/main.cpp"),
         &environment(),
-        &crate::include::msvc::WindowsLayout::default(),
+        &include::msvc::WindowsLayout::default(),
     )
     .expect("the compiler is on the path and answers");
 
@@ -778,7 +779,7 @@ fn a_project_that_states_no_standard_is_asked_for_the_newest() {
         super::BuildStatement::default(),
         Path::new("/p/main.cpp"),
         &environment(),
-        &crate::include::msvc::WindowsLayout::default(),
+        &include::msvc::WindowsLayout::default(),
     )
     .expect("the compiler answers");
 
@@ -787,7 +788,7 @@ fn a_project_that_states_no_standard_is_asked_for_the_newest() {
     // …and it reaches the configuration, where a condition's answer is decided.
     let config = toolchain.config(&CompilerConfig::new());
     assert_eq!(config.standard.as_deref(), Some("c++23"));
-    let stated = crate::include::config::predefined_macros_of(&config);
+    let stated = include::config::predefined_macros_of(&config);
     assert!(
         stated
             .iter()
@@ -819,7 +820,7 @@ fn a_standard_the_project_states_is_not_replaced_by_the_assumption() {
         from_database(&commands),
         Path::new("/p/main.cpp"),
         &environment(),
-        &crate::include::msvc::WindowsLayout::default(),
+        &include::msvc::WindowsLayout::default(),
     )
     .expect("the compiler answers");
 
@@ -857,7 +858,7 @@ fn a_compiler_the_database_names_is_asked_before_the_environment_is() {
         from_database(&commands),
         Path::new("/p/main.cpp"),
         &environment,
-        &crate::include::msvc::WindowsLayout::default(),
+        &include::msvc::WindowsLayout::default(),
     )
     .expect("the database's compiler answers");
 
@@ -893,7 +894,7 @@ fn a_machine_with_no_compiler_still_has_the_systems_headers_and_no_macros() {
         super::BuildStatement::default(),
         Path::new("/p/main.cpp"),
         &environment,
-        &crate::include::msvc::WindowsLayout::default(),
+        &include::msvc::WindowsLayout::default(),
     );
 
     // A machine with no standard library installed anywhere conventional has no guess at all — which is the

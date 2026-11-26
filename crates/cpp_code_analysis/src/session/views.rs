@@ -5,6 +5,9 @@
 //! macros expanded, directives resolved.
 
 use super::*;
+use crate::cache;
+use crate::preprocess;
+use crate::summary;
 
 /// **The regions of a file this configuration does not compile**, with the one fact a caller that paints them must
 /// respect — the answer to "may I paint these?" in one value.
@@ -129,23 +132,8 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(|| requested.to_path_buf());
         // **A miss is otherwise indistinguishable from "never cooked"**, which is what made a file that *had* been
         // cooked answer `None` for every query about it. See `CPPLS_TRACE_VIEW`.
-        if crate::probes::view() {
-            eprintln!(
-                "view: asked {:?} key {:?} summary {} held {}",
-                requested,
-                key,
-                self.store.index().summary(requested).is_some(),
-                self.vfs.held(&key).is_some()
-            );
-        }
+
         let file = self.vfs.held(&key)?;
-        if crate::probes::view() {
-            eprintln!(
-                "view: file.path {:?} hash {:?}",
-                file.path,
-                crate::cache::content_hash(&file.text)
-            );
-        }
 
         // **The rendering, or a request for it — never the file's own tokens.**
         //
@@ -183,9 +171,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     environment: None,
                 };
                 if let Some(held) = self.a_view_already_parsed(&key) {
-                    if crate::probes::view() {
-                        eprintln!("view: {} came from the cache", file.path.display());
-                    }
                     return Some(held);
                 }
                 let view = FileView::parse_rendering_in(file, &rendered, &config.config);
@@ -193,18 +178,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 Some(view)
             }
             None => {
-                if crate::probes::cooking() {
-                    // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
-                    // write and a read that disagree about either half are a miss that looks exactly like "this file
-                    // was never cooked". The count says whether the cache has anything at all.
-                    eprintln!(
-                        "view: no rendering for {} | hash {} | {} entr(ies) cached | open {}",
-                        file.path.display(),
-                        crate::cache::content_hash(&file.text),
-                        self.renderings.lock().map(|known| known.len()).unwrap_or(0),
-                        file.open
-                    );
-                }
                 self.ask_for_a_rendering(&file.path, &file.text);
                 None
             }
@@ -265,7 +238,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // wants it read — `Session::view`'s contract for a file nobody has indexed. It is only *remembered* when the
         // cook can be served; otherwise a later query, after the index has read it, must be free to ask again.
         if self.store.index().summary(path).is_some() {
-            let key = (path.to_path_buf(), crate::cache::content_hash(text));
+            let key = (path.to_path_buf(), cache::content_hash(text));
             let first = self
                 .renderings_asked
                 .lock()
@@ -292,10 +265,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// (`advance` moves it into the cook queue and cooks it).
     pub fn ask_for_the_cooked_reading(&self, path: &Path) {
         if let Ok(mut work) = self.macro_work.lock() {
-            let queued = work.want(path);
-            if crate::probes::cooking() {
-                eprintln!("[ask] queued {queued}: {}", path.display());
-            }
+            let _queued = work.want(path);
         }
     }
 
@@ -318,17 +288,9 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(requested)
             .map(|summary| summary.path.clone())
             .unwrap_or_else(|| requested.to_path_buf());
-        let traced = crate::probes::hover();
         let file = self.vfs.held(&key)?;
         let rendered = self.known_rendering_of(&file.path, &file.text);
-        if traced {
-            let renderings = self.renderings.lock().map(|known| known.len()).unwrap_or(0);
-            eprintln!(
-                "[map] held {:?}, rendering known {}, {renderings} cached",
-                file.path,
-                rendered.is_some()
-            );
-        }
+
         let rendered = rendered?;
         rendered.the_rendering_offset_of(in_the_file)
     }
@@ -365,9 +327,6 @@ impl<F: FileProvider + Clone> Session<F> {
     /// read it as "no such file" — [`Session::is_indexed`] and [`Session::pending_cooking`] are how those are told
     /// apart.
     pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        // **Held the way the VFS holds it, and asked for it the same way.** The VFS normalizes a path on the way in
-        // and on the way out, so a lookup by a caller's spelling finds the file; the *queue* is keyed the same, so
-        // the request below names the file the session will actually cook.
         let requested = path.as_ref();
         let file = self.vfs.held(requested)?;
         // Queue it **only if there is nothing to read yet** — the rule `view` states, and the reason this one used to
@@ -376,7 +335,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // (`crates/cpp_ls/tests/loop_probe.rs`): ten diagnostics pulls caused **five** cooks, the same two headers
         // each time (`types.h`, `stl_vector.h`), each a render and a parse — and raising the cache from 8 to 64
         // entries changed the count **not at all**, which is what named the cause: the ask, not the eviction.
-        if self.known_rendering_of(&file.path, &file.text).is_none() {
+        // **Is a rendering in memory?** — and deliberately not "is one *known*": `known_rendering_of` falls back to
+        // the disk record, and reading and decoding one is **150 ms** for a header whose closure is large. This call
+        // only decides whether to *ask* for a rendering; the view below is parsed from the file's own text either
+        // way, so the disk was read for an answer nothing here uses. Measured on `channel.c`: four headers at
+        // 152–162 ms each, on **every** inlay-hint request (`channel.h`, `proc.h`, `uv.h`, `typval.h`).
+        if !self.a_rendering_is_known_in_memory(&file.path, &file.text) {
             self.ask_for_a_rendering(&file.path, &file.text);
         }
 
@@ -450,13 +414,41 @@ impl<F: FileProvider + Clone> Session<F> {
         ))
     }
 
+    /// **Whether a rendering for this text is in memory**, without consulting the disk — see
+    /// [`Session::view_of_the_file`], which wants to know only whether to ask for one.
+    pub(crate) fn a_rendering_is_known_in_memory(&self, path: &Path, text: &str) -> bool {
+        let text_hash = cache::content_hash(text);
+        if let Ok(open) = self.open_renderings.lock()
+            && let Some((hash, _)) = open.get(&queue_key(path))
+            && *hash == text_hash
+        {
+            return true;
+        }
+        self.renderings
+            .lock()
+            .ok()
+            .and_then(|mut known| known.get(&a_rendering_key(path, text_hash)).map(|_| ()))
+            .is_some()
+    }
+
     /// The rendering for `text`, **if it is already read** — a hash and a lookup, and nothing else.
     pub(crate) fn known_rendering_of(
         &self,
         path: &Path,
         text: &str,
-    ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
-        let key = a_rendering_key(path, crate::cache::content_hash(text));
+    ) -> Option<std::sync::Arc<preprocess::cooked::RenderedCooked>> {
+        let text_hash = cache::content_hash(text);
+        // **The open document's own rendering first, and it is not in the budget** — see
+        // [`Session::open_renderings`]: the LRU is filled by a pass over the closure, and the file the reader is
+        // editing is the one rendering that must survive it. Measured: after twenty seconds of indexing, `ids.`
+        // answered 0 members because the rendering had been evicted.
+        if let Ok(open) = self.open_renderings.lock()
+            && let Some((hash, rendered)) = open.get(&queue_key(path))
+            && *hash == text_hash
+        {
+            return Some(rendered.clone());
+        }
+        let key = a_rendering_key(path, text_hash);
         if let Some(found) = self.renderings.lock().ok()?.get(&key).cloned() {
             return Some(found);
         }
@@ -498,8 +490,19 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text_hash: u64,
-        rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+        rendered: std::sync::Arc<preprocess::cooked::RenderedCooked>,
     ) {
+        // **An open document is pinned outside the budget** — see [`Session::open_renderings`]: the LRU is filled by
+        // a pass over the closure, and evicting the rendering of the file being edited is what made member
+        // completion answer with nothing on a warm index.
+        if self.documents.is_open(path)
+            && let Ok(mut open) = self.open_renderings.lock()
+        {
+            open.insert(
+                queue_key(path),
+                (text_hash, std::sync::Arc::clone(&rendered)),
+            );
+        }
         let weight = rendered.weight();
         if let Ok(mut known) = self.renderings.lock() {
             known.insert(a_rendering_key(path, text_hash), rendered, weight);
@@ -554,7 +557,7 @@ impl<F: FileProvider + Clone> Session<F> {
         path: &Path,
         text: &str,
     ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
-        let key = (path.to_path_buf(), crate::cache::content_hash(text));
+        let key = (path.to_path_buf(), cache::content_hash(text));
         self.macro_environments.lock().ok()?.get(&key).cloned()
     }
 
@@ -575,9 +578,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let summary = self.store.index().summary(path)?;
         let (closure, by_key) = self.closure_with_text(path);
-        let mut definitions = crate::summary::MacroDefinitions::default();
+        let mut definitions = summary::MacroDefinitions::default();
 
-        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+        let evidence = summary::macros_from_the_closure_with_bodies(
             summary,
             |wanted| {
                 let key = normalize_path(wanted, cfg!(windows));
@@ -598,7 +601,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let weight = cpp_parser::MacroFacts::len(made.as_ref());
         if let Ok(mut known) = self.macro_environments.lock() {
             known.insert(
-                (path.to_path_buf(), crate::cache::content_hash(text)),
+                (path.to_path_buf(), cache::content_hash(text)),
                 made.clone(),
                 weight,
             );

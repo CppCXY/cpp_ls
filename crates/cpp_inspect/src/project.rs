@@ -232,6 +232,17 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
         warm_the_closure(&mut session, &file);
         session.want_cooked_reading(&file);
         session.catch_up(&file);
+        // **A file's own cooked reading does not contain its headers.** `Session::cook` renders the file alone and
+        // files the facts at that file's path, so a declaration written in `globals.h` — `EXTERN typebuf_T typebuf`
+        // — exists in no per-file reading. The unit read is the one that stitches the closure in include order and
+        // files each declaration under the file that wrote it ([`Session::read_the_unit`]); the server's pump
+        // already reads units this way, and this tool has to ask for the same reading to answer the same question.
+        // A fixture with no compile command has no unit, so the per-file cook remains the fallback.
+        // **The per-file cook stays, after the unit read.** The unit read files the header declarations the question
+        // needs, and the per-file cook gives the requested file its own cooked reading — the one `Session::view` and
+        // `diagnostics` answer from. A unit whose root produced no per-file record (a file without a timeline, a
+        // read that stopped early) would otherwise leave this tool with "no reading to diagnose".
+        let _ = session.read_the_unit(&file);
         let _ = session.cook(&file);
     }
     let cooked = cooked.elapsed();

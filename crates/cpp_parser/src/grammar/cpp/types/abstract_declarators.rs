@@ -3,6 +3,7 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::features;
 
 /// Parse the part of a declarator that has no name: pointers, references and cv-qualifiers.
 ///
@@ -519,7 +520,7 @@ pub(crate) fn eat_cv_qualifiers(p: &mut CppParser) {
         // or GNU's dialect — a strict C++ file has an ordinary identifier called `restrict`, and says so.
         if p.current_token() == CppTokenKind::Identifier
             && p.current_token_text() == "restrict"
-            && p.language().support(crate::features::Feature::Restrict)
+            && p.language().support(features::Feature::Restrict)
         {
             let m = p.mark(CppSyntaxKind::RestrictQual);
             p.bump();
@@ -532,7 +533,7 @@ pub(crate) fn eat_cv_qualifiers(p: &mut CppParser) {
         // about the type or the name.
         if p.current_token() == CppTokenKind::Identifier
             && p.current_token_text() == "_Atomic"
-            && p.language().support(crate::features::Feature::Atomic)
+            && p.language().support(features::Feature::Atomic)
         {
             p.bump();
             continue;

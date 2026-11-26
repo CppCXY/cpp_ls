@@ -41,6 +41,8 @@
 //! the declaration reached the tree through a macro.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
 
 /// **`contract-on-virtual-function` / `contract-on-defaulted-function`** — see the module documentation.
 pub struct ContractPlacement;
@@ -97,14 +99,14 @@ impl Check for ContractPlacement {
         // identifier the tree just gave us.
         let declarations: Vec<(
             String,
-            crate::DeclModifiers,
+            DeclModifiers,
             cpp_parser::SourceRange,
             Option<String>,
         )> = context
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Function)
+            .filter(|fact| fact.kind == DeclKind::Function)
             .map(|fact| {
                 (
                     fact.name.to_string(),
@@ -124,7 +126,7 @@ impl Check for ContractPlacement {
                 continue;
             };
 
-            if modifiers.contains(crate::DeclModifiers::VIRTUAL) {
+            if modifiers.contains(DeclModifiers::VIRTUAL) {
                 context.add(
                     DiagnosticCode::ContractOnVirtualFunction,
                     *name_range,
@@ -134,7 +136,7 @@ impl Check for ContractPlacement {
                 continue;
             }
 
-            if !modifiers.contains(crate::DeclModifiers::DEFAULTED) {
+            if !modifiers.contains(DeclModifiers::DEFAULTED) {
                 continue;
             }
 

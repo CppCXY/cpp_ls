@@ -41,6 +41,8 @@
 //! being edited while the project is still being read shows no colours until the drain finishes; the alternative
 //! costs a client that shows the wrong ones.
 
+use crate::context;
+use crate::handlers;
 use cpp_code_analysis::semantic::{Name, NameKind};
 
 use cpp_code_analysis::{FileView, VfsFile};
@@ -335,7 +337,7 @@ pub fn encode(
     // **Last, and that is the whole ordering rule.** Every piece is inside a string literal, where no name, keyword
     // or command lives, so the order does not matter for correctness — it matters for the day something *does* want
     // to claim a literal, because first claim wins and this is the pass that knows least about the program.
-    crate::handlers::format::draw(&mut builder, formats);
+    handlers::format::draw(&mut builder, formats);
 
     if builder.unplaceable() > 0 {
         log::debug!(
@@ -615,7 +617,7 @@ fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<Seman
 /// which every theme colours, while a client that has no mapping for it would draw nothing at all.
 fn extended_with_the_custom_types(
     drawable: Option<Vec<SemanticTokenType>>,
-    client: crate::context::ClientId,
+    client: context::ClientId,
 ) -> Option<Vec<SemanticTokenType>> {
     // `None` means "the client said nothing" — everything is sent already, custom types included.
     let mut drawable = drawable?;
@@ -662,18 +664,6 @@ pub async fn on_semantic_tokens(
     );
     let multi_line = multi_line_support(&context);
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-
-        // **And then the query, which no longer waits for the project's index to drain.**
-        //
-        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue
-        // was empty — because a name a header declares is classified through the index, and before
-        // that header has been read the name has no classification. The question that matters is
-        // this file's own closure, and `AnalysisState::catch_up` is what reads it.
-        context.analysis().catch_up(&path).await;
-    }
-
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
@@ -697,15 +687,12 @@ pub async fn on_semantic_tokens(
             return None;
         }
 
-        let phase = std::time::Instant::now();
-    let names = session.classified_names(&view);
-    let classified = phase.elapsed().as_millis();
-    let phase = std::time::Instant::now();
+        let names = session.classified_names(&view);
 
         // **The format strings of the file**, read from its own text — and only when a project has not turned every
         // family off, which is the one state in which the pass costs nothing at all.
         let formats = {
-            let Some(config) = crate::handlers::format::config_for(session) else {
+            let Some(config) = handlers::format::config_for(session) else {
                 return Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: encode(held, Some(&view), &names, &drawable, multi_line, &[]) }));
             };
             if config.is_off() {
@@ -715,19 +702,7 @@ pub async fn on_semantic_tokens(
             }
         };
 
-        let formats_for = phase.elapsed().as_millis();
-        let phase = std::time::Instant::now();
         let data = encode(held, Some(&view), &names, &drawable, multi_line, &formats);
-        if cpp_code_analysis::probes::semantic() {
-            eprintln!(
-                "[semantic] {} name(s), {} token(s): classified {} ms | formats {} ms | encoded {} ms",
-                names.len(),
-                data.len() / 5,
-                classified,
-                formats_for,
-                phase.elapsed().as_millis()
-            );
-        }
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
             data,
@@ -774,6 +749,7 @@ impl RegisterCapabilities for SemanticTokenCapabilities {
 
 #[cfg(test)]
 mod tests {
+    use crate::context;
 
     /// **A name in a mem-initialiser is the field it initialises**, not a function.
     ///
@@ -2454,11 +2430,9 @@ void f(int width, double d) {
             lsp_types::SemanticTokenType::REGEXP,
             lsp_types::SemanticTokenType::KEYWORD,
         ];
-        let drawn = extended_with_the_custom_types(
-            Some(standard.clone()),
-            crate::context::ClientId::VSCode,
-        )
-        .expect("a client that named its types keeps a list");
+        let drawn =
+            extended_with_the_custom_types(Some(standard.clone()), context::ClientId::VSCode)
+                .expect("a client that named its types keeps a list");
         for name in [
             "formatSpecifier",
             "formatArgument",
@@ -2475,11 +2449,9 @@ void f(int width, double d) {
 
         // Everyone else keeps exactly what the client sent: their theme has no name for the custom types, and a token
         // nobody can draw is one the [fallback](draw) has to keep painting.
-        let kept = extended_with_the_custom_types(
-            Some(standard.clone()),
-            crate::context::ClientId::Neovim,
-        )
-        .expect("a client that named its types keeps a list");
+        let kept =
+            extended_with_the_custom_types(Some(standard.clone()), context::ClientId::Neovim)
+                .expect("a client that named its types keeps a list");
         assert_eq!(
             kept, standard,
             "no custom type is added for a client whose theme has no name for it"
@@ -2487,7 +2459,7 @@ void f(int width, double d) {
 
         // "Said nothing" is "send everything", which already includes the custom types.
         assert!(
-            extended_with_the_custom_types(None, crate::context::ClientId::VSCode).is_none(),
+            extended_with_the_custom_types(None, context::ClientId::VSCode).is_none(),
             "a client with no capability list gets the whole legend, custom types included"
         );
     }

@@ -54,12 +54,11 @@ pub async fn on_inlay_hint(
 ) -> RequestOutcome<Vec<InlayHint>> {
     let uri = params.text_document.uri;
     let requested = params.range;
-    let started = std::time::Instant::now();
 
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
     if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
+        let _ = path;
 
         // **And this file's own reading, because the wait this replaced was doing that too.**
         //
@@ -72,10 +71,6 @@ pub async fn on_inlay_hint(
         // `catch_up` is that, as a question about **this file**: one parse of it when an edit is waiting, and
         // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
         // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
-        context.analysis().catch_up(&path).await;
-        if cpp_code_analysis::probes::inlay() {
-            eprintln!("[inlay] prepared and caught up in {:?}", started.elapsed());
-        }
     }
 
     // **A hint no longer waits for the project's index to drain.**
@@ -103,7 +98,6 @@ pub async fn on_inlay_hint(
         // view is the file's own tokens. Asking for a rendering here would silently move every hint by however many
         // lines the directives had taken out, which is the mistake the hover handler had.
         let view = session.view_of_the_file(&path)?;
-        let parsed = started.elapsed();
         let held = session.files().held(&view.path)?;
 
         // **Answered from what is known, rather than withheld until everything is.**
@@ -121,29 +115,8 @@ pub async fn on_inlay_hint(
         let visible = visible_range(&view, requested)?;
         // **The two heaviest calls in a request, timed apart.** A report of "inlay hints are slow" cannot say which
         // of them went to the index; this line does, and the view's own parse above is the third number.
-        let hints_started = std::time::Instant::now();
         let hints = session.inlay_hints(&view, visible);
-        let hints_done = hints_started.elapsed();
-        let types_started = std::time::Instant::now();
         let types = session.type_hints(&view, visible);
-        if cpp_code_analysis::probes::inlay() {
-            eprintln!(
-                "[inlay] {} parameter hint(s) in {hints_done:?}, {} type hint(s) in {:?}",
-                hints.len(),
-                types.len(),
-                types_started.elapsed(),
-            );
-        }
-        if cpp_code_analysis::probes::inlay() {
-            eprintln!("[inlay] {} type hint(s)", types.len());
-        }
-        if cpp_code_analysis::probes::inlay() {
-            eprintln!(
-                "[inlay] view {parsed:?}, hints {:?}, {} hint(s)",
-                started.elapsed() - parsed,
-                hints.len()
-            );
-        }
 
         Some(
             hints

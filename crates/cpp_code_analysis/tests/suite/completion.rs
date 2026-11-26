@@ -149,30 +149,6 @@ fn a_local_is_offered_while_it_is_being_typed() {
     let mut session = session_with_the_project();
     let view = cooked_view(&mut session, "/p/a.cpp");
 
-    if std::env::var_os("CPPLS_TRACE_COORDINATES").is_some() {
-        let reading = view
-            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(
-                offset,
-            ))
-            .expect("the cursor is in the rendering");
-        // **The token's own start in each text**, which is the anchor that settles this. The file's cursor sits on
-        // the `_` of `local_variable`; if the rendering's offset for that same cursor lands on the *start* of the
-        // token, then the two rulers differ by more than the whitespace the rendering collapsed — and the number to
-        // compare is the distance from the token's start in each text.
-        let in_file = SOURCE.find("local_variable + w").expect("the use") + 5;
-        let in_rendering = view.source.find("local_variable + w").expect("the use") + 5;
-        eprintln!(
-            "cursor: file {in_file} -> reading {reading} (the same spot is {in_rendering} in the rendering)\n  \
-             the token starts at {} in the file and {} in the rendering\n  \
-             the two cursors differ by {}; the two token starts differ by {}",
-            SOURCE.find("local_variable + w").expect("the use"),
-            view.source.find("local_variable + w").expect("the use"),
-            in_file as i64 - reading.get() as i64,
-            SOURCE.find("local_variable + w").expect("the use") as i64
-                - view.source.find("local_variable + w").expect("the use") as i64
-        );
-    }
-
     let Known::Yes(found) = session.name_completions(
         &view,
         cpp_code_analysis::file::coordinates::FileOffset::new(offset),
@@ -3757,5 +3733,91 @@ struct Thing {
         labels(&found).iter().any(|name| name == "MEMBER"),
         "filtered by the prefix: {:?}",
         labels(&found)
+    );
+}
+
+/// **A macro from a directly included header completes while the declaration is still being typed.**
+///
+/// `kvec` at the start of a declaration is an expression statement to the parser until the `(` arrives, so the
+/// declaration-shaped name query had none of `kvec.h`'s macros: an editor reported "typing `kvec` completes nothing,
+/// but a full `kvec_t(int64_t) ids` does". Macros are names in ordinary code, so the file's own and its direct
+/// includes' macros are offered by the same prefix query, at the same tier as an included name.
+#[test]
+fn a_macro_from_an_included_header_completes_while_a_declaration_is_incomplete() {
+    let header = "\
+#define kvec_t(type) struct { size_t size; type *items; }\n\
+#define KV_INITIAL_VALUE { 0, NULL }\n";
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec\n}\n";
+    let offset = source.rfind("kvec").expect("the fixture") + "kvec".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"kvec_t".to_string()),
+        "the macro's name is what the reader is typing: {labels:?}"
+    );
+
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec_t(int64_t) ids = KV_INI;\n}\n";
+    let offset = source.find("KV_INI").expect("the fixture") + "KV_INI".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"KV_INITIAL_VALUE".to_string()),
+        "a longer prefix keeps the macro: {labels:?}"
+    );
+}
+
+/// The completion labels at `offset`, from a session that has read and cooked the fixture.
+fn completions_in(files: &[(&str, &str)], path: &str, offset: usize) -> Vec<String> {
+    let mut memory = MemoryFiles::new();
+    for (name, text) in files {
+        memory = memory.with_file(*name, *text);
+    }
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files(
+        files
+            .iter()
+            .map(|(name, _)| std::path::PathBuf::from(*name)),
+    );
+    session.want_cooked_reading(std::path::Path::new(path));
+    session.index_everything();
+    let view = session
+        .view(path)
+        .unwrap_or_else(|| panic!("{path} asked for a reading"));
+    session
+        .completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        )
+        .items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect()
+}
+
+#[test]
+fn a_macro_declared_local_is_completed_by_name_from_the_rendering() {
+    let header = "#define kvec_t(type) struct { size_t size; type *items; }\n#define KV_INITIAL_VALUE { 0, 0 }\n";
+    let source = "#include \"kvec.h\"\nvoid f(void) {\n  kvec_t(int64_t) ids = KV_INITIAL_VALUE;\n  ids\n}\n";
+    let offset = source.rfind("ids").expect("the use") + "ids".len();
+    let labels = completions_in(
+        &[("/p/kvec.h", header), ("/p/a.c", source)],
+        "/p/a.c",
+        offset,
+    );
+    assert!(
+        labels.contains(&"ids".to_string()),
+        "the local the macro wrote: {labels:?}"
     );
 }

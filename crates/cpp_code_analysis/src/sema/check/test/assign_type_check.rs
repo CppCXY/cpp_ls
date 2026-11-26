@@ -51,3 +51,42 @@ fn an_assignment_the_file_wrote_is_still_judged() {
         "a string assigned to an int is the assignment half of this rule: {codes:?}"
     );
 }
+
+/// **A pointer converts to `bool`** — a standard scalar conversion in C and C++. `tui.c` declares
+/// `bool setrgbf = tui->ti.defs[kTerm_set_rgb_foreground];`, where the element is `const char *`; reporting it
+/// refused was a false positive on every capability lookup of that shape.
+#[test]
+fn a_pointer_to_bool_is_a_standard_conversion() {
+    let source = "const char *s = \"x\";\nvoid f(void) {\n    bool b = s;\n}\n";
+    let in_c = codes_in(&[("/p/a.c", source)], "/p/a.c");
+    assert!(
+        !in_c.contains(&DiagnosticCode::AssignTypeCheck),
+        "a pointer to `_Bool` is a standard conversion: {in_c:?}"
+    );
+    let in_cpp = codes_in(&[("/p/a.cpp", source)], "/p/a.cpp");
+    assert!(
+        !in_cpp.contains(&DiagnosticCode::AssignTypeCheck),
+        "and the same in C++: {in_cpp:?}"
+    );
+}
+
+/// **An assignment whose right operand is a conditional is not an assignment of the condition.** `m = ptr ? a : b`
+/// is `m = (ptr ? a : b)`; the old parser read `(m = ptr) ? a : b`, so `assign-type-check` asked whether `ptr`'s
+/// pointer type converted to `m`'s `int` — neovim's `ex_getln.c:3055` (`m = cmdline_win ? … : Columns * Rows`) was
+/// reported for a perfectly valid C expression.
+#[test]
+fn a_pointer_conditioned_ternary_is_not_an_assignment_of_the_condition() {
+    let source = "\
+struct win { int width; };\n\
+extern struct win *cmdline_win;\n\
+int f(void) {\n\
+    int m;\n\
+    m = cmdline_win ? 1 * 2 : 3 * 4;\n\
+    return m;\n\
+}\n";
+    let codes = codes_of(source);
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "the conditional's branches are `int`, and `m` is `int`: {codes:?}"
+    );
+}

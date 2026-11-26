@@ -5,6 +5,10 @@
 //! drains it drives are the program read's three phases.
 
 use super::*;
+use crate::FileSummary;
+use crate::TranslationUnit;
+use crate::cache;
+use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// Mark **the files a reader is looking at** for cooking, skipping the ones that already have a reading.
@@ -110,13 +114,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 && can_be_cooked(self, included)
                 && !refused(self, included)
             {
-                if crate::probes::cooking() {
-                    eprintln!(
-                        "want_the_closure_cooked({}): queued {} (not read, cookable, not refused)",
-                        root.display(),
-                        included.display()
-                    );
-                }
                 remember(self, included);
                 self.cooking.want(included);
             }
@@ -444,7 +441,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // **What one batch costs**, under the unit trace. The modules fixture's module read is nine of these and
         // 48–59 s, and no number outside could say which of the nine — or which half of a batch, the wave's closure
         // preparation or the per-file steps — was the seconds.
-        let started = std::time::Instant::now();
 
         for taken in 0..steps {
             let Some((path, priority, depth)) = self.queue.pop() else {
@@ -494,7 +490,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
 
                 let room = (steps * 4).saturating_sub(self.prefetched.len());
-                let prepared_from = std::time::Instant::now();
                 let made = {
                     let queue = &self.queue;
                     let prefetched = &self.prefetched;
@@ -506,14 +501,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         room.min(steps * 2).max(wave.len()),
                     )
                 };
-                if crate::probes::units() {
-                    eprintln!(
-                        "ADVANCE wave of {} file(s) prepared {} in {:?}",
-                        wave.len(),
-                        made.len(),
-                        prepared_from.elapsed(),
-                    );
-                }
+
                 for (path, made) in made {
                     self.remember_a_prepared(path, made);
                 }
@@ -523,16 +511,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // prepared entry, `index_one` builds the summary itself and can hand it the environment. Every other
             // file still takes the wave's answer.
             let ready = self.prefetched.remove(&key);
-            let step_started = std::time::Instant::now();
-            done.push(self.index_one(path, priority, depth, ready));
-            if crate::probes::units() {
-                eprintln!(
-                    "[advance] one step took {} ms ({} of {} step(s))",
-                    step_started.elapsed().as_millis(),
-                    taken + 1,
-                    steps
-                );
-            }
+            done.push(self.index_one(path, priority, depth, ready, true));
         }
 
         // Nothing left to read means nothing left to read *ahead*: what is still here was prepared for a queue that
@@ -550,31 +529,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // through the pump, which had already been given the right slice. Passing nothing is not "passing no
         // environment" — `finish_a_slice` builds the four the pass needs, outside a writer this path never holds.
         let units = Vec::new();
-        if crate::probes::units() {
-            // **Counts, not the names.** A line with sixty-four absolute paths is ~10 KB, and through a redirected
-            // stderr that is a write which can block — inside this function, after `started.elapsed()` was taken, so
-            // the *caller* measures the block and the line itself does not. That is the whole of a "56 s batch" that
-            // this trace reported while the batch's own timer said 7 ms.
-            eprintln!(
-                "ADVANCE steps={} in {:?} done={}",
-                steps,
-                started.elapsed(),
-                done.len()
-            );
-        }
-        let drain = {
-            let finishing = std::time::Instant::now();
-            let drain = self.finish_a_slice(&done, units);
-            if crate::probes::units() {
-                eprintln!(
-                    "ADVANCE finish {} file(s) in {:?} (batch total {:?})",
-                    done.len(),
-                    finishing.elapsed(),
-                    started.elapsed(),
-                );
-            }
-            drain
-        };
+
+        let drain = { self.finish_a_slice(&done, units) };
 
         // **A file this slice read is NOT queued for cooking, and three tests are why.**
         //
@@ -596,17 +552,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
         // call each way. The answer is the same: what `finish_a_slice` planned is worked out and applied.
-        let drain_started = std::time::Instant::now();
-        let prepared = self.prepare_the_drain(drain);
-        let prepared_in = drain_started.elapsed();
-        let committed = self.commit_the_drain(prepared);
-        if crate::probes::units() {
-            eprintln!(
-                "ADVANCE drain prepared {:?}, committed {committed} in {:?}",
-                prepared_in,
-                drain_started.elapsed() - prepared_in,
-            );
-        }
+        let prepared = self.prepare_the_drain(drain, usize::MAX, usize::MAX);
+        let _committed = self.commit_the_drain(prepared);
 
         // **And a slice of the cooking queue, which this path used to leave to two other callers.** `index_everything`
         // and `diagnose_everything` both claim cooks; `advance` — the server's timer callback — did not, so a file a
@@ -624,20 +571,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 // `docs/open-questions.md` names "claimed and dropped": `materials_for` when a file's unit is
                 // provisional or its summary absent, `render_them` when the render declines, `commit_them` when there
                 // is nothing to insert. Without the three numbers a dropped file and a cooked one look the same.
-                let asked = claimed.len();
-                if crate::probes::cooking() {
-                    eprintln!("advance: claiming {claimed:?}");
-                }
+
                 let materials = self.materials_for(claimed);
-                let gathered = materials.len();
                 let rendered = self.render_them(materials);
-                let built = rendered.len();
-                let committed = self.commit_them(rendered).len();
-                if crate::probes::cooking() {
-                    eprintln!(
-                        "advance: claimed {asked}, gathered {gathered}, built {built}, committed {committed}"
-                    );
-                }
+                self.commit_them(rendered);
             }
         }
 
@@ -651,11 +588,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // closure walk, a render of every file in it, a parse of the result and a sweep of every declaration —
         // 8.9 s for `std.ixx` measured on its own (`tests/unit_probe.rs`), and this is where a *batch* pays it.
         if self.is_idle() && self.pending_cooking() == 0 && self.refinements_wanted() == 0 {
-            let reading = std::time::Instant::now();
             self.read_a_program_now();
-            if crate::probes::units() {
-                eprintln!("ADVANCE read_a_program_now in {:?}", reading.elapsed());
-            }
         }
 
         done
@@ -752,7 +685,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **What the cache already refined, before any timeline is built.** A file whose reading was refined under
         // its own closure needs no unit, no render and no parse: the summary goes into the index at commit time. What
         // is left is the honest work, and the timelines are built for that and nothing else.
-        let mut refinements: Vec<crate::FileSummary> = Vec::new();
+        let mut refinements: Vec<FileSummary> = Vec::new();
         for path in &slice {
             // **A miss for this content is permanent, so it is asked once** — see the field.
             let key = self
@@ -830,11 +763,7 @@ impl<F: FileProvider + Clone> Session<F> {
     const READ_AHEAD_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
     /// Put a prepared slice in the read-ahead, remembering when it was made.
-    fn remember_a_prepared(
-        &mut self,
-        path: std::path::PathBuf,
-        made: crate::index::store::Prepared,
-    ) {
+    fn remember_a_prepared(&mut self, path: std::path::PathBuf, made: index::store::Prepared) {
         let key = queue_key(&path);
         if self.prefetched.insert(key.clone(), made).is_none() {
             self.prefetched_order.push_back(key);
@@ -851,7 +780,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut total = self
             .prefetched
             .values()
-            .map(crate::index::store::Prepared::heap_bytes)
+            .map(index::store::Prepared::heap_bytes)
             .sum::<usize>();
         while total > Self::READ_AHEAD_BUDGET_BYTES {
             let Some(newest) = self.prefetched_order.pop_back() else {
@@ -940,7 +869,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 break;
             };
             let ready = self.prefetched.remove(&queue_key(&path));
-            done.push(self.index_one(path, priority, depth, ready));
+            done.push(self.index_one(path, priority, depth, ready, true));
         }
 
         if self.queue.pending() == 0 {
@@ -1042,7 +971,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let path = file.path;
         self.prefetched.remove(&queue_key(&path));
         let rendering = file.prepared.rendering();
-        let step = self.index_one(path.clone(), Priority::Open, 0, Some(file.prepared));
+        let step = self.index_one(path.clone(), Priority::Open, 0, Some(file.prepared), true);
         if step.with_the_environment {
             self.parsed_since_the_last_pass
                 .retain(|queued| queued != &path);
@@ -1090,7 +1019,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn finish_a_slice(
         &mut self,
         done: &[Step],
-        units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+        units: Vec<std::sync::Arc<TranslationUnit>>,
     ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
@@ -1397,7 +1326,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &mut self,
         root: &Path,
         prepared: Option<PreparedUnitReading>,
-        records: Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)>,
+        records: Vec<(cache::cache_db::CacheKey, Vec<u8>)>,
     ) -> Option<UnitReading> {
         let Some(prepared) = prepared else {
             // **A declined read is retried — three times.** The walk can be refused for a reason that heals: a
@@ -1441,45 +1370,65 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// [`Session::commit_the_drain`] applies the answer, and the pair is what lets the pump give a request the lock
     /// back between the two.
-    pub fn prepare_the_drain(&self, drain: Drain) -> PreparedDrain {
+    /// **Apply what a bounded part of the drain planned** — see [`Session::prepare_the_drain`].
+    ///
+    /// `at_most_files` and `at_most_environments` are the bound on **one read hold**: the rest comes back in the
+    /// retry lists and [`Session::commit_the_drain`] puts it back on the queues, so a drain that needs a second of
+    /// work is several holds of fifty milliseconds rather than one hold of a second.
+    pub fn prepare_the_drain(
+        &self,
+        drain: Drain,
+        at_most_files: usize,
+        at_most_environments: usize,
+    ) -> PreparedDrain {
         let Drain {
-            files,
+            mut files,
             units,
-            environments,
+            mut environments,
             revision,
         } = drain;
-        let retry_files = files.clone();
-        let retry_environments = environments.clone();
+        let left_files = if files.len() > at_most_files {
+            files.split_off(at_most_files)
+        } else {
+            Vec::new()
+        };
+        let left_environments = if environments.len() > at_most_environments {
+            environments.split_off(at_most_environments)
+        } else {
+            Vec::new()
+        };
+        // **Everything this drain is about**, before the bound takes its part: a commit that finds the revision moved
+        // owes the whole drain, not the leftovers.
+        let mut owed_files = files.clone();
+        owed_files.extend(left_files.iter().cloned());
+        let mut owed_environments = environments.clone();
+        owed_environments.extend(left_environments.iter().cloned());
         if !revision
             .as_ref()
             .is_some_and(|revision| self.is_current(revision))
         {
+            // **Nothing was applied, so every file is a retry** — the leftovers and the ones this call would have
+            // read, in one list.
+            files.extend(left_files);
+            environments.extend(left_environments);
             return PreparedDrain {
                 revision,
-                retry_files,
-                retry_environments,
+                retry_files: files,
+                retry_environments: environments,
+                owed_files,
+                owed_environments,
                 ..PreparedDrain::default()
             };
         }
-        let tracing = crate::probes::cooking();
-
         // **The two halves are timed apart**, because a start-up regression of **90 %** was found inside this
         // function on a warm cache: 1761 summaries reused from disk in 4 s of real work, and 60 s in twelve calls of
         // this. `prepare_the_re_read` and one environment look the same from outside and have nothing to do with each
         // other — one re-parses four files with their closure's macros in hand, the other renders a file's whole
         // closure — so a single number for the drain names neither.
-        let started = std::time::Instant::now();
         let re_read =
             // **`true`: this caller can walk a timeline**, so the pass renders a file no slice unit covers instead of
             // keeping the raw reading of it. See `SummaryStore::prepare_the_re_read`'s `walk_its_own`.
             (!files.is_empty()).then(|| self.store.prepare_the_re_read(&files, &units, false, true));
-        if tracing && !files.is_empty() {
-            eprintln!(
-                "drain: re-read {} file(s) in {} ms",
-                files.len(),
-                started.elapsed().as_millis()
-            );
-        }
 
         // **Remembered under the text it was read from**, which is what the next `view` looks up. The text is taken
         // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
@@ -1492,7 +1441,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // drain was **25.0 s** of 57 s while `prepare_the_re_read` accounted for 0.9 s of it: the rest is this loop.
         // The chunks keep the caller's order, and both halves run with the same read lock.
         let prepare_environment = |path: PathBuf| {
-            let step = std::time::Instant::now();
             let reading = self.rendering_of(&path)?;
             let text = self.text(&path)?;
             // **And the macro environment for the file's own view** - the other half of what a query asked for here.
@@ -1502,15 +1450,9 @@ impl<F: FileProvider + Clone> Session<F> {
             // not expand. Outside the writer, like the rendering below, and for the same measured reason: building an
             // environment walks the file's whole closure and copies every file's text (103.7 ms on MSVC's headers).
             let _ = self.the_macros_of(&path, &text);
-            if tracing {
-                eprintln!(
-                    "drain: environment for {} in {} ms",
-                    path.display(),
-                    step.elapsed().as_millis()
-                );
-            }
+
             Some((
-                (path, crate::cache::content_hash(&text)),
+                (path, cache::content_hash(&text)),
                 std::sync::Arc::new(reading),
             ))
         };
@@ -1543,8 +1485,40 @@ impl<F: FileProvider + Clone> Session<F> {
             re_read,
             rendered,
             revision,
-            retry_files,
-            retry_environments,
+            retry_files: left_files,
+            retry_environments: left_environments,
+            owed_files,
+            owed_environments,
+        }
+    }
+
+    /// **Put a drain's unread part back on the queues** — what a bounded drain leaves, and what a drain prepared for
+    /// an older revision returns whole.
+    ///
+    /// A file is put back only if it still exists: the point of the retry list is work that has not been done, and a
+    /// file that was deleted between the plan and the commit is work that cannot be done.
+    fn put_the_drain_back(&mut self, files: Vec<PathBuf>, environments: Vec<PathBuf>) {
+        if files.is_empty() && environments.is_empty() {
+            return;
+        }
+        let mut wanted = self
+            .refined_on_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for path in files {
+            if self.files.exists(&path) {
+                wanted.insert(path);
+            }
+        }
+        drop(wanted);
+        let mut work = self
+            .macro_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for path in environments {
+            if self.files.exists(&path) {
+                work.want(&path);
+            }
         }
     }
 
@@ -1560,29 +1534,15 @@ impl<F: FileProvider + Clone> Session<F> {
                 .as_ref()
                 .is_some_and(|revision| Arc::ptr_eq(&self.identity, &revision.session))
             {
-                let mut wanted = self
-                    .refined_on_request
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                for path in prepared.retry_files {
-                    if self.files.exists(&path) {
-                        wanted.insert(path);
-                    }
-                }
-                drop(wanted);
-                let mut work = self
-                    .macro_work
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                for path in prepared.retry_environments {
-                    if self.files.exists(&path) {
-                        work.want(&path);
-                    }
-                }
+                self.put_the_drain_back(prepared.owed_files, prepared.owed_environments);
             }
             log::debug!("discarding a drain prepared for an older session revision");
             return 0;
         }
+        // **The part a bounded drain did not read.** Not a stale drain: the part this call was not allowed to do,
+        // which the next one takes, so that no single read hold is the whole drain.
+        let retry_files = prepared.retry_files.clone();
+        let retry_environments = prepared.retry_environments.clone();
         for (key, rendered) in prepared.rendered {
             // **The key is normalized here too**, because this is the insert a cook's own rendering takes and the
             // lookup normalizes: a drain prepared for a canonicalized spelling would otherwise be found by
@@ -1616,16 +1576,11 @@ impl<F: FileProvider + Clone> Session<F> {
             known.extend(refined.iter().map(|path| queue_key(path)));
         }
         if !waiting.is_empty() && self.pending_work() > 0 {
-            if crate::probes::cooking() {
-                eprintln!(
-                    "re-read: {} file(s) go back on the queue — their closures are still filling",
-                    waiting.len()
-                );
-            }
             for path in waiting {
                 self.queue.again(path, Priority::Rest, 0);
             }
         }
+        self.put_the_drain_back(retry_files, retry_environments);
 
         re_read
     }

@@ -1,6 +1,9 @@
 //! **Types** — the type answers: aliases, members, overloads, enumerators
 
+use crate::UnknownReason;
+use crate::file;
 use crate::file::paths::MemoryFiles;
+use crate::semantic;
 use crate::symbol::Known;
 
 use super::*;
@@ -33,7 +36,7 @@ pub(crate) fn a_private_namespaced_alias_still_resolves_in_a_return_type() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("find(1)").expect("the fixture") + "find".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`t.find(1)` must have a type: {typed:?}");
     };
@@ -68,7 +71,7 @@ pub(crate) fn a_calls_return_type_is_a_qualified_alias_of_its_own_class() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("find(1)").expect("the fixture") + "find".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`t.find(1)` must have a type: {typed:?}");
     };
@@ -104,7 +107,7 @@ pub(crate) fn a_maps_find_reaches_the_element_when_the_comparator_is_written() {
 
     // **The call itself**, which is the element the iterator rule answers: `pair<const int, float>`.
     let at = text.find("find(1)").expect("the fixture") + "find".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`m.find(1)` must have a type: {typed:?}");
     };
@@ -116,7 +119,7 @@ pub(crate) fn a_maps_find_reaches_the_element_when_the_comparator_is_written() {
 
     // **And the member reached through it**: `second` is `float`.
     let second = text.find("->second").expect("the fixture") + "->".len();
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(second));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(second));
     let Known::Yes(found) = found else {
         panic!("`find(1)->second` must resolve: {found:?}");
     };
@@ -155,7 +158,7 @@ pub(crate) fn a_calls_iterator_answer_reaches_the_element_through_a_trait_alias(
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("->second").expect("the fixture") + "->".len();
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(found) = found else {
         panic!("`m.find(1)->second` must resolve: {found:?}");
     };
@@ -200,7 +203,7 @@ pub(crate) fn a_constants_value_is_folded_and_an_enumerators_initialiser_reads_i
 
     let value_at = |written: &str| {
         let at = text.find(written).expect("the fixture");
-        session.constant_value_at(&view, crate::file::coordinates::ReadingOffset::new(at))
+        session.constant_value_at(&view, file::coordinates::ReadingOffset::new(at))
     };
 
     assert_eq!(
@@ -254,8 +257,7 @@ pub(crate) fn a_member_list_is_reached_through_an_alias_written_absolutely() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("s.\n").expect("the fixture") + "s.".len();
-    let completions =
-        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let completions = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     let Known::Yes(completions) = completions else {
         panic!("`s.` must list `basic_string`'s members: {completions:?}");
     };
@@ -298,7 +300,7 @@ pub(crate) fn a_calls_overload_is_the_one_its_arguments_select() {
 
     for (written, expected) in [("auto narrow", "string"), ("auto wide", "wstring")] {
         let at = text.find(written).expect("the fixture") + "auto ".len();
-        let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+        let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
         let Known::Yes(typed) = typed else {
             panic!("`{written} = std::format(…)` must have a type: {typed:?}");
         };
@@ -335,9 +337,9 @@ pub(crate) fn a_name_whose_declarations_disagree_answers_with_the_disagreement()
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("auto x").expect("the fixture") + "auto ".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     match typed {
-        Known::Unknown(crate::UnknownReason::Ambiguous(name)) => assert_eq!(&*name, "f"),
+        Known::Unknown(UnknownReason::Ambiguous(name)) => assert_eq!(&*name, "f"),
         other => panic!("`int f()` and `double f()` agree on no type: {other:?}"),
     }
 }
@@ -367,7 +369,7 @@ pub(crate) fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope(
 
     // The use of `AnotherClass` resolves — and the name it resolves to is the enumerator.
     let at = text.find("= AnotherClass").expect("the fixture") + 2;
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(found) = found else {
         panic!("a bare `AnotherClass` must resolve: {found:?}");
     };
@@ -377,7 +379,7 @@ pub(crate) fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope(
     );
 
     // …and it is classified as an **enum member**, which is what the highlighter draws.
-    let classified: Vec<(String, crate::semantic::NameKind)> = session
+    let classified: Vec<(String, semantic::NameKind)> = session
         .classified_names(&view)
         .into_iter()
         .map(|name| {
@@ -390,13 +392,13 @@ pub(crate) fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope(
             )
         })
         .collect();
-    let kinds: Vec<&crate::semantic::NameKind> = classified
+    let kinds: Vec<&semantic::NameKind> = classified
         .iter()
         .filter(|(spelled, _)| spelled.starts_with("AnotherClass"))
         .map(|(_, kind)| kind)
         .collect();
     assert!(
-        kinds.contains(&&crate::semantic::NameKind::EnumMember),
+        kinds.contains(&&semantic::NameKind::EnumMember),
         "the use is an enum member too, not just the declaration: {classified:?}"
     );
     assert!(
@@ -408,10 +410,7 @@ pub(crate) fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope(
     // `definitions` at the *definition* used to answer `Unknown(UnparsableName)` — the second half of the editor
     // report ("在匿名枚举的定义本身没有 hover 结果") — while hovering the use worked.
     let declaration = text.find("AnotherClass }").expect("the fixture");
-    let found = session.definitions(
-        &view,
-        crate::file::coordinates::ReadingOffset::new(declaration),
-    );
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(declaration));
     let Known::Yes(found) = found else {
         panic!("the declaration of `AnotherClass` must answer: {found:?}");
     };
@@ -419,7 +418,7 @@ pub(crate) fn an_unscoped_enumerations_member_is_visible_in_the_enclosing_scope(
 
     // **`enum class` still hides its enumerators**: `Scoped::Hidden` is the only way to name it.
     let hidden = text.find("= Hidden").expect("the fixture") + 2;
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(hidden));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(hidden));
     assert!(
         !matches!(&found, Known::Yes(found) if found.found[0].fact.name == "Hidden"),
         "a scoped enumeration's member is not visible here: {found:?}"
@@ -453,8 +452,7 @@ pub(crate) fn a_trait_alias_selects_the_specialization_its_arguments_name() {
 
     let written = "h->";
     let at = text.find(written).expect("the fixture") + written.len();
-    let completions =
-        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let completions = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     let Known::Yes(completions) = completions else {
         panic!("`{written}` must reach `Item`: {completions:?}");
     };
@@ -505,7 +503,7 @@ pub(crate) fn an_arrow_through_an_alias_reaches_the_pointee() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("->second").expect("the fixture") + "->".len();
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(found) = found else {
         panic!("`find()->second` must resolve through `pointer`: {found:?}");
     };
@@ -633,7 +631,7 @@ pub(crate) fn a_class_templates_members_are_read_through_the_uses_arguments() {
             .expect("the fixture writes it");
         searched = found_at + written.len();
         let at = found_at + written.len() - expected.0.len();
-        let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+        let found = session.definitions(&view, file::coordinates::ReadingOffset::new(at));
         let Known::Yes(found) = found else {
             panic!("`{written}` must resolve to the element's member: {found:?}");
         };
@@ -697,8 +695,7 @@ pub(crate) fn an_arrow_through_a_member_template_reaches_the_element_type() {
 
     let written = "file->";
     let at = source.find(written).expect("the fixture") + written.len();
-    let completions =
-        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let completions = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     let Known::Yes(completions) = completions else {
         panic!("`{written}` must list the element's members: {completions:?}");
     };
@@ -767,8 +764,7 @@ pub(crate) fn an_arrow_through_a_base_named_by_a_member_alias_in_another_file() 
 
     let written = "file->";
     let at = source.find(written).expect("the fixture") + written.len();
-    let completions =
-        session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let completions = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     let Known::Yes(completions) = completions else {
         panic!("`{written}` must list the element's members: {completions:?}");
     };
@@ -815,7 +811,7 @@ pub(crate) fn a_class_templates_alias_return_is_substituted_too() {
 
     let written = "box[0].value";
     let at = source.find(written).expect("the fixture") + written.len() - "value".len();
-    let found = session.definitions(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let found = session.definitions(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(found) = found else {
         panic!("`{written}` must resolve to the element's member: {found:?}");
     };
@@ -862,7 +858,7 @@ pub(crate) fn an_anonymous_enum_declares_its_enumerators() {
         .iter()
         .find(|name| name.range.start_offset == text.find("LAJF").expect("the fixture"))
         .expect("`LAJF` is a name");
-    assert_eq!(lajf.kind, crate::semantic::NameKind::EnumMember);
+    assert_eq!(lajf.kind, semantic::NameKind::EnumMember);
 }
 /// **An enumerator of an anonymous enum is an enumerator in the file that *uses* it too.**
 ///
@@ -895,7 +891,7 @@ pub(crate) fn an_enumerators_use_in_another_file_is_an_enum_member() {
         .expect("`WILD_FREE` is a name");
     assert_eq!(
         used.kind,
-        crate::semantic::NameKind::EnumMember,
+        semantic::NameKind::EnumMember,
         "the declaration says an enumerator, so the use must too"
     );
 }
@@ -922,7 +918,7 @@ pub(crate) fn a_member_through_an_operator_arrow_is_the_pointees() {
 
     // **The lookup**: `Generate` is `Config`'s, not the handle's.
     let at = text.find("Generate(1)").expect("the fixture") + 1;
-    let found = session.definition(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let found = session.definition(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(found) = found else {
         panic!("`config->Generate` must resolve through `operator->`: {found:?}");
     };
@@ -934,8 +930,7 @@ pub(crate) fn a_member_through_an_operator_arrow_is_the_pointees() {
 
     // **And the list**, after the arrow: the pointee's declarations.
     let after = text.find("config->Generate").expect("the fixture") + "config->".len();
-    let completions =
-        session.member_completions(&view, crate::file::coordinates::FileOffset::new(after));
+    let completions = session.member_completions(&view, file::coordinates::FileOffset::new(after));
     let Known::Yes(completions) = completions else {
         panic!("`config->` must list the pointee's members: {completions:?}");
     };
@@ -975,7 +970,7 @@ pub(crate) fn a_call_of_an_object_deduces_an_auto_returning_operator() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("make_one(1)").expect("the fixture") + "make_one".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`make_one(1)` must have a type: {typed:?}");
     };
@@ -1012,7 +1007,7 @@ pub(crate) fn a_call_of_an_object_in_another_file_deduces_the_operator() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = source.find("make_one(1)").expect("the fixture") + "make_one".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`make_one(1)` must have a type: {typed:?}");
     };
@@ -1059,7 +1054,7 @@ pub(crate) fn an_adaptor_behind_a_namespace_alias_deduces_its_operator() {
 
     let at =
         source.find("std::views::filter(1)").expect("the fixture") + "std::views::filter".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`std::views::filter(1)` must have a type: {typed:?}");
     };
@@ -1094,7 +1089,7 @@ pub(crate) fn an_auto_returning_operator_naming_its_argument_is_deduced() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("make_one(1)").expect("the fixture") + "make_one".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`make_one(1)` must have a type: {typed:?}");
     };
@@ -1132,7 +1127,7 @@ pub(crate) fn an_auto_returning_operator_called_with_a_lambda_still_answers() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("filter([]").expect("the fixture") + "filter".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`filter(lambda)` must answer something: {typed:?}");
     };
@@ -1170,7 +1165,7 @@ pub(crate) fn an_overloaded_adaptor_deduces_the_operator_that_the_arguments_fit(
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("filter([]").expect("the fixture") + "filter".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`filter(lambda)` must answer something: {typed:?}");
     };
@@ -1207,7 +1202,7 @@ pub(crate) fn an_alias_in_the_return_survives_a_lambda_argument() {
     let view = session.view_of_the_file(&path).expect("a view");
 
     let at = text.find("filter([]").expect("the fixture") + "filter".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`filter(lambda)` must answer something: {typed:?}");
     };
@@ -1259,7 +1254,7 @@ pub(crate) fn the_real_adaptor_shape_deduces_the_closure() {
 
     let at =
         source.find("std::views::filter(1)").expect("the fixture") + "std::views::filter".len();
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     let Known::Yes(typed) = typed else {
         panic!("`std::views::filter(1)` must have a type: {typed:?}");
     };

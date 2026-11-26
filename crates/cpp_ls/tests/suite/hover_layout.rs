@@ -3,6 +3,7 @@
 //! The card is the one a reader asks for and no reading answers: `sizeof` gives the first number and nothing in an
 //! editor gives the offsets, which is exactly what rust-analyzer puts on a struct and this server did not.
 
+use crate::common;
 use std::path::PathBuf;
 
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
@@ -12,7 +13,7 @@ use cpp_code_analysis::{
 
 /// The card for the declaration `needle` names, from a one-file project.
 fn the_card(source: &str, needle: &str) -> String {
-    let root: PathBuf = crate::common::a_temp_directory("hover-layout");
+    let root: PathBuf = common::a_temp_directory("hover-layout");
     let file = root.join("a.cpp");
     std::fs::write(&file, source).expect("the fixture writes");
 

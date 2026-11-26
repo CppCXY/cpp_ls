@@ -10,6 +10,7 @@
 //! a template parameter, a dependent type — all of those are `Unknown`, and all of them are silent.
 
 use crate::Known;
+use crate::sema;
 
 /// **What it takes to use a value of one type where another is expected.**
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,6 +31,17 @@ impl Conversion {
     /// **Is this a refusal?** — the one question a check asks of the answer.
     pub fn is_refused(self) -> bool {
         self == Conversion::Refused
+    }
+}
+
+/// **Is this a pointer, through any qualifiers?** — `const char*`, `T* const`, `T*`.
+fn a_pointer(type_of: &sema::types::Type) -> bool {
+    match type_of {
+        sema::types::Type::Pointer { .. } => true,
+        sema::types::Type::Qualified { of, .. } => a_pointer(of),
+        // An array decays to a pointer in an assignment to a scalar; `bool b = array;` is the same conversion.
+        sema::types::Type::Array { .. } => true,
+        _ => false,
     }
 }
 
@@ -54,11 +66,24 @@ pub fn strip_references(parameter: &str) -> &str {
 /// `written` is the **spelling** the declaring file wrote, not a parsed type: the class question needs the name under the
 /// reference, and a pointer is a different question from a reference to the same type.
 pub fn conversion(
-    from: &crate::sema::types::Type,
+    from: &sema::types::Type,
     written: &str,
     answer_the_class_question: impl FnOnce(&str) -> Option<bool>,
 ) -> Conversion {
-    let target = crate::sema::types::parse_type_spelling(written);
+    let target = sema::types::parse_type_spelling(written);
+
+    // **A pointer converts to `bool`/`_Bool`.** The relation is about the classes and arithmetic the type algebra
+    // knows; a scalar-to-bool conversion is a standard conversion in both languages, and `const char *defs[…];
+    // bool has = defs[i];` is ordinary C (neovim's `tui.c`). Reporting it refused was a false positive on every
+    // capability lookup of that shape.
+    if matches!(
+        &target,
+        sema::types::Type::Builtin { spelling }
+            if spelling == "bool" || spelling == "_Bool"
+    ) && a_pointer(from)
+    {
+        return Conversion::Implicit;
+    }
 
     // **The relation first.** It is exact for arithmetic, pointers and plain names, and it is the only half that knows about
     // `const` and references at all.
@@ -69,7 +94,7 @@ pub fn conversion(
     }
 
     // **The class case**, which the relation cannot answer: it lives in the type algebra and never sees a constructor.
-    let bare = crate::sema::types::parse_type_spelling(strip_references(written));
+    let bare = sema::types::parse_type_spelling(strip_references(written));
     let Some(class) = bare.class_name().filter(|class| !class.is_empty()) else {
         return Conversion::Unknown;
     };

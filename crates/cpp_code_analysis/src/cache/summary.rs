@@ -24,6 +24,19 @@
 //! resolved identity. Resolving is a query over this data plus the include graph, and it needs the *environment* the
 //! file was entered with — which is exactly what the summary's key records.
 
+use crate::BindingKind;
+use crate::CookedFile;
+use crate::DirectiveKind;
+use crate::MacroValues;
+use crate::Token;
+use crate::cache;
+use crate::condition;
+use crate::index;
+use crate::macros;
+use crate::paths;
+use crate::preprocess;
+use crate::summary;
+use crate::token;
 use smol_str::SmolStr;
 use std::path::Path;
 
@@ -38,7 +51,7 @@ use crate::macros::MacroDef;
 /// (`C:\Users\…`), an `#include` that resolved through [`crate::IncludeResolver`] is normalized (`c:/users/…`), and a
 /// cache entry is found by the normalized form either way. Comparing raw spellings made the same file two files.
 fn frame_key(path: &std::path::Path) -> String {
-    crate::paths::normalize_path(path, cfg!(windows))
+    paths::normalize_path(path, cfg!(windows))
 }
 
 /// **What a declaration is written with** — the modifiers every reader used to find by searching its text.
@@ -883,10 +896,10 @@ pub type ConditionalBody = (Box<str>, bool, Option<Box<str>>, Box<str>);
 /// must stay separated from the `)` — the same thing `definition_text` spells as a space.
 ///
 /// `None` when the replacement list does not read as a definition, which is the `unreadable` count.
-fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::MacroDef> {
-    let mut tokens: Vec<crate::token::Token> = Vec::new();
+fn definition_written_at(event: &TuEvent, body: &str) -> Option<macros::MacroDef> {
+    let mut tokens: Vec<token::Token> = Vec::new();
     let name_at = cpp_parser::SourceRange::new(event.at, event.name.len());
-    tokens.push(crate::token::Token::new(
+    tokens.push(token::Token::new(
         cpp_parser::CppTokenKind::Identifier,
         &*event.name,
         name_at,
@@ -899,7 +912,7 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::M
     }
 
     let body_range = event.body_range?;
-    tokens.push(crate::token::Token::new(
+    tokens.push(token::Token::new(
         cpp_parser::CppTokenKind::Whitespace,
         " ",
         cpp_parser::SourceRange::new(body_range.start_offset, 0),
@@ -911,8 +924,8 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::M
     let range =
         cpp_parser::SourceRange::new(event.at, body_range.end_offset().saturating_sub(event.at));
 
-    let mut definition = crate::macros::parse_define(&tokens, range)?;
-    definition.written_in = Some(crate::macros::MacroFile::Frame(event.frame));
+    let mut definition = macros::parse_define(&tokens, range)?;
+    definition.written_in = Some(macros::MacroFile::Frame(event.frame));
     Some(definition)
 }
 
@@ -920,12 +933,12 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::M
 ///
 /// The piece is a substring the walk copied, so the shift is exact rather than a guess — see
 /// [`definition_written_at`], which is the only caller.
-fn lex_in_place(text: &str, at: usize) -> Vec<crate::token::Token> {
+fn lex_in_place(text: &str, at: usize) -> Vec<token::Token> {
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
     tokens
         .iter()
         .map(|token| {
-            crate::token::Token::new(
+            token::Token::new(
                 token.kind,
                 &text[token.range.start_offset..token.range.end_offset()],
                 cpp_parser::SourceRange::new(at + token.range.start_offset, token.range.length),
@@ -1078,8 +1091,8 @@ impl IncludeFact {
     /// from the text can name — so a cached summary is a candidate that has to be re-verified against the
     /// filesystem before it is used. That check is only faithful if every field the search reads is here, which is
     /// why [`is_next`](Self::is_next) is stored and not dropped.
-    pub fn as_include(&self) -> crate::preprocess::directive::Include {
-        crate::preprocess::directive::Include {
+    pub fn as_include(&self) -> preprocess::directive::Include {
+        preprocess::directive::Include {
             form: self.form,
             target: Box::from(self.spelling.as_str()),
             is_next: self.is_next,
@@ -1396,8 +1409,7 @@ impl MacroDefinitions {
             if let Some(definition) = definition {
                 bytes += std::mem::size_of::<MacroDef>() + definition.name.len();
                 if let Some(params) = &definition.params {
-                    bytes +=
-                        params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
+                    bytes += params.len() * std::mem::size_of::<preprocess::macros::Parameter>();
                 }
             }
         }
@@ -1534,12 +1546,12 @@ fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
     let mut errors = Vec::new();
     let mut lexer =
         cpp_parser::CppLexer::new(&line, cpp_parser::LexerConfig::default(), &mut errors);
-    let tokens: Vec<crate::token::Token> = lexer
+    let tokens: Vec<token::Token> = lexer
         .tokenize()
         .into_iter()
         .map(|token| {
             let text = &line[token.range.start_offset..token.range.end_offset()];
-            crate::token::Token::new(token.kind, text, token.range)
+            token::Token::new(token.kind, text, token.range)
         })
         .collect();
 
@@ -1548,7 +1560,7 @@ fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
     let mut significant = 0usize;
     let mut from = 0usize;
     for (index, token) in tokens.iter().enumerate() {
-        if crate::token::is_trivia(token.kind) {
+        if token::is_trivia(token.kind) {
             continue;
         }
 
@@ -1559,7 +1571,7 @@ fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
         }
     }
 
-    crate::macros::parse_define(tokens.get(from..)?, fact.range)
+    macros::parse_define(tokens.get(from..)?, fact.range)
 }
 
 /// The table a condition inside the unit is answered against: what the walk has seen, over what the compilation
@@ -1574,8 +1586,8 @@ struct UnitMacros<'a> {
     here: Option<(&'a std::path::Path, usize)>,
 }
 
-impl crate::condition::MacroValues for UnitMacros<'_> {
-    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+impl condition::MacroValues for UnitMacros<'_> {
+    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
         // **What the walk's own evaluator is told about a name.**
         //
         // The cook and the walk decide the same guards through different code, and when they disagree nothing outside
@@ -1587,49 +1599,6 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         // condition of every guard arrives here — so reading the environment per call was a lock of the process on
         // the hottest path in the program. Measured: hoisting that one read took `a_guard_holds` from **271,479 ms**
         // to **192,350 ms**, and dropping the `to_string_lossy` beside it took it to **165,312 ms**.
-        if let Some(wanted) = crate::probes::lookup_name()
-            && wanted == name
-        {
-            let from_state = self.state.definitions.get(name).map(|binding| {
-                // **The shape, not just the name.** A definition whose parameter list or body did not survive the
-                // walk is a definition the expander cannot use: `NAME (x)` stops being a call, and an `#if` that
-                // asks for a *value* gets an identifier with none. Printing only "defined" hid that for several
-                // rounds — the lookup answered `Defined` while the guard still came out `None`.
-                let params = match &binding.definition.params {
-                    None => "object-like".to_string(),
-                    Some(list) => format!(
-                        "fn-like({:?})",
-                        list.iter()
-                            .map(|held| held.name.as_ref())
-                            .collect::<Vec<_>>()
-                    ),
-                };
-                let body: Vec<&str> = binding
-                    .definition
-                    .body
-                    .significant()
-                    .map(|token| token.text())
-                    .collect();
-                format!(
-                    "state(defined_in={} at={} {params} body={:?})",
-                    binding.defined_in.display(),
-                    binding.defined_at,
-                    body.join(" ")
-                )
-            });
-            let from_seed = match self.seed.lookup(name) {
-                crate::condition::Lookup::Defined(_) => "seed:Defined".to_string(),
-                crate::condition::Lookup::DefinedWithoutAValue => {
-                    "seed:DefinedWithoutAValue".to_string()
-                }
-                crate::condition::Lookup::Undefined => "seed:Undefined".to_string(),
-                crate::condition::Lookup::Unanswered => "seed:Unanswered".to_string(),
-            };
-            println!(
-                "cppls-lookup: {name} state={} {from_seed}",
-                from_state.as_deref().unwrap_or("none")
-            );
-        }
 
         if let Some(binding) = self.state.definitions.get(name) {
             // **A definition written below this condition has not happened yet.** An include guard is
@@ -1642,7 +1611,7 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
                 .is_some_and(|(file, at)| &*binding.defined_in == file && binding.defined_at >= at);
 
             if !written_below {
-                return crate::condition::Lookup::Defined(&binding.definition);
+                return condition::Lookup::Defined(&binding.definition);
             }
         }
 
@@ -1657,7 +1626,7 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         // `#ifdef __cpp_lib_print`) existed in no reading at all, and every hover and completion for `std::println`
         // answered nothing. The trace that named it: `state=none seed:Unanswered`.
         match self.seed.lookup(name) {
-            crate::condition::Lookup::Unanswered => crate::condition::Lookup::Undefined,
+            condition::Lookup::Unanswered => condition::Lookup::Undefined,
             other => other,
         }
     }
@@ -1684,7 +1653,7 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
     ///
     /// This is the same mistake as [`crate::preprocess::PositionalMacros`]'s note describes, on the other path: an
     /// implementation sitting one layer below the only caller that asks.
-    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<condition::Value> {
         self.seed.builtin_operator(name, operand)
     }
 }
@@ -1702,7 +1671,7 @@ pub fn macros_from_the_closure_with_bodies<'a>(
     {
         // This path builds no unit (it only collects evidence), so its contributions are never shared: a fresh
         // table per call is the honest owner, and nothing is kept beyond it.
-        let cache = crate::index::walk_cache::WalkCache::new();
+        let cache = index::walk_cache::WalkCache::new();
         walk_the_translation_unit(summary, None, None, look_up, seed, definitions, &cache)
     }
 }
@@ -1728,7 +1697,7 @@ pub fn macros_in_force_before_the_include<'a>(
     definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
     {
-        let cache = crate::index::walk_cache::WalkCache::new();
+        let cache = index::walk_cache::WalkCache::new();
         walk_the_translation_unit(
             includer,
             Some(before),
@@ -1768,7 +1737,7 @@ fn walk_the_translation_unit<'a>(
     mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions_of: &mut MacroDefinitions,
-    cache: &crate::index::walk_cache::WalkCache,
+    cache: &index::walk_cache::WalkCache,
 ) -> ClosureEvidence {
     let mut walked = Walked::default();
     let mut unit = UnitState {
@@ -2077,7 +2046,7 @@ impl TranslationUnit {
         seed: &Marked,
         definitions_of: &mut MacroDefinitions,
         share: bool,
-        cache: &crate::index::walk_cache::WalkCache,
+        cache: &index::walk_cache::WalkCache,
     ) -> Self {
         let mut walked = Walked {
             timeline: Some(TimelineBuilder::default()),
@@ -2228,7 +2197,7 @@ impl TranslationUnit {
         // this table cheap to build and is why the cache that used to sit in front of it is gone — see
         // [`UnitDefinitions::of`] for the measurement.
         let mut by_event: Vec<
-            Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>,
+            Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>,
         > = (0..self.events.len()).map(|_| None).collect();
         let mut function_like_without_parameters = 0usize;
         let mut without_a_body = 0usize;
@@ -2429,11 +2398,11 @@ impl TranslationUnit {
     /// missing one header still reads the ones below it.
     pub fn cook_the_unit(
         &self,
-        sources: &dyn crate::preprocess::macros::UnitSources,
+        sources: &dyn preprocess::macros::UnitSources,
         definitions: &UnitDefinitions,
-        seed: Option<&crate::macros::MacroTable>,
+        seed: Option<&macros::MacroTable>,
         use_in_force_bodies: bool,
-        search: Option<&dyn crate::preprocess::cooked::HeaderSearch>,
+        search: Option<&dyn preprocess::cooked::HeaderSearch>,
     ) -> RenderedUnit {
         self.cook_the_unit_with_features(
             sources,
@@ -2448,11 +2417,11 @@ impl TranslationUnit {
     /// [`TranslationUnit::cook_the_unit`] with a **compiler probe** for `__has_builtin` and its siblings.
     pub fn cook_the_unit_with_features(
         &self,
-        sources: &dyn crate::preprocess::macros::UnitSources,
+        sources: &dyn preprocess::macros::UnitSources,
         definitions: &UnitDefinitions,
-        seed: Option<&crate::macros::MacroTable>,
+        seed: Option<&macros::MacroTable>,
         use_in_force_bodies: bool,
-        search: Option<&dyn crate::preprocess::cooked::HeaderSearch>,
+        search: Option<&dyn preprocess::cooked::HeaderSearch>,
         features: Option<&dyn cpp_toolchain::FeatureProbe>,
     ) -> RenderedUnit {
         let mut out = RenderedUnit {
@@ -2488,22 +2457,12 @@ impl TranslationUnit {
                 }
                 children
             },
-            state: crate::preprocess::cooked::CookingState::default(),
+            state: preprocess::cooked::CookingState::default(),
         };
 
         // **The frame tree**, when the unit trace is on: what the renderer will walk, in the order it walks it. A
         // disagreement with cl.exe's `#line` sequence is a disagreement about include order, and this is our half of
         // that comparison — `cl /E` on the same interface unit is the other, and it costs 0.4 s.
-        if crate::probes::units() && !self.frames.is_empty() {
-            for (index, frame) in self.frames.iter().enumerate() {
-                eprintln!(
-                    "[frame] {index:3} {} parent {:?} at {}",
-                    frame.file.file_name().unwrap_or_default().to_string_lossy(),
-                    frame.parent,
-                    frame.from_in_parent
-                );
-            }
-        }
 
         if !self.frames.is_empty() {
             cook.stitch(0, &mut out);
@@ -2519,13 +2478,13 @@ impl TranslationUnit {
 /// alternative is the same list at every call, which is how a recursion ends up disagreeing with itself.
 struct UnitCook<'unit> {
     unit: &'unit TranslationUnit,
-    sources: &'unit dyn crate::preprocess::macros::UnitSources,
+    sources: &'unit dyn preprocess::macros::UnitSources,
     definitions: &'unit UnitDefinitions<'unit>,
-    seed: Option<&'unit crate::macros::MacroTable>,
+    seed: Option<&'unit macros::MacroTable>,
     use_in_force_bodies: bool,
     /// **What `__has_include` is answered from** — the include search, or `None` when the caller has none and the
     /// operator must answer `Unknown` rather than guess. See [`crate::preprocess::cooked::HeaderSearch`].
-    search: Option<&'unit dyn crate::preprocess::cooked::HeaderSearch>,
+    search: Option<&'unit dyn preprocess::cooked::HeaderSearch>,
     /// **What `__has_builtin` and its siblings are answered from**, when the session has a compiler. `None` leaves
     /// them `Unknown`, which is the state every cook without a toolchain is in.
     features: Option<&'unit dyn cpp_toolchain::FeatureProbe>,
@@ -2533,7 +2492,7 @@ struct UnitCook<'unit> {
     children: Vec<Vec<u32>>,
     /// **The macros the cook has executed so far** — one table for the whole program, in the order the text wrote
     /// them. See [`crate::preprocess::cooked::CookingState`]: a preprocessor has one table, not a view per file.
-    state: crate::preprocess::cooked::CookingState,
+    state: preprocess::cooked::CookingState,
 }
 
 impl UnitCook<'_> {
@@ -2571,7 +2530,7 @@ impl UnitCook<'_> {
         // — a change of state, not of policy. The view is a local because the renderer borrows it: it is two words,
         // and `FileMacros` reads it through the trait rather than owning it.
         let frame_view = unit.environment_at(frame);
-        let initial = crate::preprocess::cooked::FileMacros::new(
+        let initial = preprocess::cooked::FileMacros::new(
             &frame_view,
             definitions,
             seed,
@@ -2602,7 +2561,7 @@ impl UnitCook<'_> {
                 .position(|token| token.range.start_offset >= at)
                 .unwrap_or(tokens.len())
                 .max(from);
-            let cook = crate::preprocess::cooked::cook_with_search_and_state_and_features(
+            let cook = preprocess::cooked::cook_with_search_and_state_and_features(
                 text,
                 &tokens[from..boundary],
                 &initial,
@@ -2617,7 +2576,7 @@ impl UnitCook<'_> {
             self.stitch(child, out);
             from = boundary;
         }
-        let cook = crate::preprocess::cooked::cook_with_search_and_state_and_features(
+        let cook = preprocess::cooked::cook_with_search_and_state_and_features(
             text,
             &tokens[from..],
             &initial,
@@ -2661,7 +2620,7 @@ impl UnitCook<'_> {
     fn emit(
         &self,
         frame: u32,
-        cook: &crate::preprocess::cooked::CookedStream,
+        cook: &preprocess::cooked::CookedStream,
         out: &mut RenderedUnit,
     ) -> i64 {
         // **What this file said**, in its own coordinates: a `#error` in a branch nobody compiles is not said, and the
@@ -2669,7 +2628,7 @@ impl UnitCook<'_> {
         for (kind, message, at) in &cook.messages {
             out.messages.push(UnitMessage {
                 file: self.unit.frames[frame as usize].file.clone(),
-                fatal: matches!(kind, crate::DirectiveKind::Error),
+                fatal: matches!(kind, DirectiveKind::Error),
                 message: message.clone(),
                 at: *at,
             });
@@ -2690,7 +2649,7 @@ impl UnitCook<'_> {
             // [`RenderedUnit::push`]); for what the cook produced, the expander's own answer — its ranges are the call
             // site's, so every token of one expansion would answer "not adjacent" and be spelled apart.
             let space_before = match token.origin {
-                crate::preprocess::expand::Origin::Source => None,
+                preprocess::expand::Origin::Source => None,
                 _ => Some(token.space_before),
             };
             while lines.next_if(|line| line.end <= index).is_some() {}
@@ -2719,7 +2678,7 @@ pub struct UnitDefinitions<'unit> {
     unit: &'unit TranslationUnit,
     /// Parallel to `TranslationUnit::events`: the definition a fact becomes as a `#define` line, or `None` when that
     /// fact is not one this reader can put back together.
-    by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>>,
+    by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>>,
     /// Definitions whose parameter list the evidence does not carry — a function-like macro that cannot be
     /// substituted into, so it is not in the table. Counted for the unit; see [`TranslationUnit::definitions`].
     pub function_like_without_parameters: usize,
@@ -2738,15 +2697,15 @@ impl UnitDefinitions<'_> {
         let mut bytes = std::mem::size_of::<UnitDefinitions<'_>>()
             + self.by_event.capacity()
                 * std::mem::size_of::<
-                    Option<std::sync::OnceLock<Option<std::sync::Arc<crate::macros::MacroDef>>>>,
+                    Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>,
                 >();
         for definition in self.by_event.iter().flatten().filter_map(|cell| cell.get()) {
             let Some(definition) = definition else {
                 continue;
             };
-            bytes += std::mem::size_of::<crate::macros::MacroDef>() + definition.name.len();
+            bytes += std::mem::size_of::<macros::MacroDef>() + definition.name.len();
             if let Some(params) = &definition.params {
-                bytes += params.len() * std::mem::size_of::<crate::preprocess::macros::Parameter>();
+                bytes += params.len() * std::mem::size_of::<preprocess::macros::Parameter>();
             }
         }
         bytes
@@ -2757,7 +2716,7 @@ impl UnitDefinitions<'_> {
     /// The body is lexed here rather than when the unit was prepared: on `import std;` the table holds tens of thousands
     /// of definitions and the cook meets a fraction of them, so the eager version lexed replacement lists nothing would
     /// ever expand. A slot remembers its answer — including "this one does not read" — so a second ask costs nothing.
-    pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
+    pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<macros::MacroDef>> {
         let cell = self.by_event.get(index as usize)?.as_ref()?;
         cell.get_or_init(|| {
             let event = self.unit.events.get(index as usize)?;
@@ -3254,7 +3213,7 @@ impl<'unit> MacroView<'unit> {
                 bytes.push(0);
             }
         }
-        crate::cache::fnv1a64(&bytes)
+        cache::fnv1a64(&bytes)
     }
 }
 
@@ -3787,7 +3746,7 @@ impl RenderedUnit {
                 // `int__attribute__((__cdecl__)) abs(int _X);`.
                 Some(space) => {
                     !space
-                        && !crate::preprocess::cooked::joining_would_merge(
+                        && !preprocess::cooked::joining_would_merge(
                             &mut self.join,
                             &self.previous_spelling,
                             text,
@@ -3943,7 +3902,7 @@ struct Walked<'a> {
     /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
     entries: Vec<(usize, &'a MacroFact, &'a str)>,
     /// **The state changes this walk made, in order** — what a contribution replays instead of re-deciding.
-    changes: Vec<crate::index::walk_cache::StateChange>,
+    changes: Vec<index::walk_cache::StateChange>,
     /// **How many guarded facts each frame wrote**, by frame id.
     ///
     /// `facts_in_force` is derivable from the events (every event is an in-force fact), but `conditional_facts` counts
@@ -4059,10 +4018,7 @@ struct Bases {
 fn guard_name_of(file: &FileSummary, region: u32) -> Option<&str> {
     let conditional = file.guards.conditionals.get(region as usize)?;
     let first = conditional.branches.first()?;
-    if !matches!(
-        first.kind,
-        crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef
-    ) {
+    if !matches!(first.kind, DirectiveKind::Ifdef | DirectiveKind::Ifndef) {
         return None;
     }
 
@@ -4088,7 +4044,7 @@ fn walk_one_file<'a>(
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
     share: bool,
-    cache: &crate::index::walk_cache::WalkCache,
+    cache: &index::walk_cache::WalkCache,
 ) -> Option<u64> {
     // **A preprocessor re-reads an included file every time it is included, and the file's own text is what makes
     // the repeat contribute nothing.** The `#ifndef X / #define X` idiom is a *condition in the file*, evaluated like
@@ -4107,22 +4063,11 @@ fn walk_one_file<'a>(
     // nesting depth** — a cycle of unguarded headers is the one shape the file's own rule cannot end. GCC's
     // `#include` nesting limit is 200, and this is that number.
     if walked.spliced.contains(path) {
-        if crate::probes::splice() {
-            eprintln!("leave early (already spliced): {}", path.display());
-        }
         return None;
     }
 
     let already_read = !seen.insert(path);
-    if crate::probes::splice() {
-        eprintln!(
-            "enter: {} | already seen {}, depth {depth}, spliced {}, timeline {}",
-            path.display(),
-            already_read,
-            walked.spliced.contains(path),
-            walked.timeline.is_some(),
-        );
-    }
+
     if depth >= MAX_INCLUDE_DEPTH {
         walked.includes_skipped += 1;
         return None;
@@ -4163,7 +4108,7 @@ fn walk_one_file<'a>(
     }
 
     let defined_in_force = |name: &str| unit.definitions.contains_key(name);
-    crate::index::walk_census::entered(path, source, defined_in_force);
+    index::walk_census::entered(path, source, defined_in_force);
 
     // **The sharing key, and the splice** — §4.3. The key is the file and the *projection*: the
     // values of the names its conditions read, measured at 37× reuse. Contributions are kept honest
@@ -4182,21 +4127,21 @@ fn walk_one_file<'a>(
     // `look_up(child)` answered `None` inside a growing closure, the child contributed nothing, and
     // a later complete unit hit that contribution and lost the subtree under it.
     let sharing = (share && walked.timeline.is_some()).then(|| {
-        crate::index::walk_cache::key(
+        index::walk_cache::key(
             path,
             // **The file's own contents, as a fingerprint.** The invalidation clock covers a summary being dropped, but
             // a header can be rewritten underneath a unit that still holds it; a key without the contents went stale
             // and `a_completion_sees_a_change_to_an_included_header` caught it. The fingerprint is O(1) in the file's
             // size, and the contribution's own subtree is covered by the clock.
-            crate::index::walk_census::hash(source.as_bytes()),
-            crate::index::walk_census::projection_digest(path, source, defined_in_force),
+            index::walk_census::hash(source.as_bytes()),
+            index::walk_census::projection_digest(path, source, defined_in_force),
         )
     });
     if let Some(key) = sharing
         && cache.lookup(key).is_some()
         && !walked.spliced.contains(path)
     {
-        crate::index::walk_census::a_splice();
+        index::walk_census::a_splice();
         if splice_a_contribution(
             key,
             from_offset,
@@ -4250,7 +4195,7 @@ fn walk_one_file<'a>(
     // which is what the generation covers, and only a change to the set in force can make it stale.
     // **Three answers per region**, not two: see the note where it is read. The memo has to hold the third one too,
     // or a region nobody can decide would be remembered as dead on its second fact.
-    let mut decided: rustc_hash::FxHashMap<(u32, u32), crate::preprocess::guard::Visibility> =
+    let mut decided: rustc_hash::FxHashMap<(u32, u32), preprocess::guard::Visibility> =
         Default::default();
     // The generation every answer in `decided` was worked out at. The memo lives *between two changes to the set in
     // force* and nowhere longer, which is what the clearing below says in one line.
@@ -4271,7 +4216,7 @@ fn walk_one_file<'a>(
         if next_is_a_macro {
             let fact = macros.next().expect("peeked just above");
             let (in_force, visibility) = if matches!(fact.guard, FactGuard::Unconditional) {
-                (true, crate::preprocess::guard::Visibility::Active)
+                (true, preprocess::guard::Visibility::Active)
             } else {
                 walked.conditional_facts += 1;
                 if let Some(at) = frame.map(|frame| frame as usize) {
@@ -4285,13 +4230,13 @@ fn walk_one_file<'a>(
                 let branch = match fact.guard {
                     // `regions` and `conditionals` are two views of the same list, indexed by the same region number
                     // — see `SummaryGuards` — so the branch is one lookup away, and it needs no macro.
-                    crate::summary::FactGuard::Region(region) => file
+                    summary::FactGuard::Region(region) => file
                         .guards
                         .conditionals
                         .get(region as usize)
                         .and_then(|conditional| conditional.branch_at(fact.range.start_offset))
                         .map(|branch| (region, branch as u32)),
-                    crate::summary::FactGuard::Unconditional => None,
+                    summary::FactGuard::Unconditional => None,
                 };
 
                 // **Anything the set in force has changed since the last fact makes every answer suspect** — a
@@ -4313,12 +4258,10 @@ fn walk_one_file<'a>(
                     Some(answer) => answer,
                     None => {
                         let answer =
-                            crate::index::environment::a_guard_visibility(file, fact, |at| {
-                                UnitMacros {
-                                    seed,
-                                    state: unit,
-                                    here: Some((path, at)),
-                                }
+                            index::environment::a_guard_visibility(file, fact, |at| UnitMacros {
+                                seed,
+                                state: unit,
+                                here: Some((path, at)),
                             });
                         if let Some(key) = branch {
                             decided.insert(key, answer);
@@ -4326,7 +4269,7 @@ fn walk_one_file<'a>(
                         answer
                     }
                 };
-                let taken = visibility == crate::preprocess::guard::Visibility::Active;
+                let taken = visibility == preprocess::guard::Visibility::Active;
                 if taken {
                     walked.facts_in_force += 1;
                 }
@@ -4338,7 +4281,7 @@ fn walk_one_file<'a>(
                     // **A branch the compiler does not read.** Recorded before the skip, because the file's own
                     // summary kept this `#define` and a consumer would otherwise decide the region again with a
                     // different environment. See [`RenderedUnit::dead_macros`].
-                    crate::preprocess::guard::Visibility::Inactive => {
+                    preprocess::guard::Visibility::Inactive => {
                         walked
                             .dead_macros
                             .entry(path.to_path_buf())
@@ -4349,13 +4292,13 @@ fn walk_one_file<'a>(
                     // compiler takes one branch or the other, so the name is defined afterwards either way, and
                     // dropping it is what left `_MEMBER_CALL_CV_REF_NOEXCEPT` undefined in `import std;`. An `#undef`
                     // is **not** executed: taking a name away on a guess is the error in the other direction.
-                    crate::preprocess::guard::Visibility::Unknown if fact.kind.is_definition() => {
+                    preprocess::guard::Visibility::Unknown if fact.kind.is_definition() => {
                         if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
                             unit.define(&fact.name, definition, path, fact.range.start_offset);
                         }
                     }
-                    crate::preprocess::guard::Visibility::Unknown => {}
-                    crate::preprocess::guard::Visibility::Active => {}
+                    preprocess::guard::Visibility::Unknown => {}
+                    preprocess::guard::Visibility::Active => {}
                 }
                 continue;
             }
@@ -4367,7 +4310,7 @@ fn walk_one_file<'a>(
                 if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
                     walked
                         .changes
-                        .push(crate::index::walk_cache::StateChange::Defined {
+                        .push(index::walk_cache::StateChange::Defined {
                             name: Box::from(&*fact.name),
                             definition: definition.clone(),
                             file: path.to_path_buf(),
@@ -4384,7 +4327,7 @@ fn walk_one_file<'a>(
             } else {
                 walked
                     .changes
-                    .push(crate::index::walk_cache::StateChange::Undefined {
+                    .push(index::walk_cache::StateChange::Undefined {
                         name: Box::from(&*fact.name),
                         file: path.to_path_buf(),
                         at: fact.range.start_offset,
@@ -4462,7 +4405,7 @@ fn walk_one_file<'a>(
         // Taken under its own timer: one per include per visit, and `Walk` was measured at 78 s with nothing inside
         // it accounted for.
         let include_is_in_force = {
-            crate::index::environment::a_guard_holds(
+            index::environment::a_guard_holds(
                 file,
                 include.guard,
                 include.range.start_offset,
@@ -4535,11 +4478,11 @@ fn walk_one_file<'a>(
     if let (true, Some(bases), Some(frame), Some(timeline)) =
         (resolvable, bases, frame, walked.timeline.as_ref())
     {
-        let mut contribution = crate::index::walk_cache::Contribution {
+        let mut contribution = index::walk_cache::Contribution {
             file: path.to_path_buf(),
             visit_once: file.guards.visit_once,
             edges,
-            ..crate::index::walk_cache::Contribution::default()
+            ..index::walk_cache::Contribution::default()
         };
 
         for event in timeline.events[bases.events..]
@@ -4554,7 +4497,7 @@ fn walk_one_file<'a>(
             {
                 contribution
                     .bodies
-                    .push(crate::index::walk_cache::ConditionalBody {
+                    .push(index::walk_cache::ConditionalBody {
                         name: carried.name.to_string().into_boxed_str(),
                         function_like: carried.function_like.unwrap_or(false),
                         parameters: carried
@@ -4584,7 +4527,7 @@ fn walk_one_file<'a>(
             .copied()
             .unwrap_or(0);
 
-        crate::index::walk_census::a_fresh_walk();
+        index::walk_census::a_fresh_walk();
 
         cache.store(bases.key, contribution);
 
@@ -4611,7 +4554,7 @@ fn splice_a_contribution<'a>(
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
     depth: usize,
-    cache: &crate::index::walk_cache::WalkCache,
+    cache: &index::walk_cache::WalkCache,
 ) -> bool {
     /// A guard against a contribution graph that somehow points into itself. A unit's include graph is a DAG, and this
     /// is a cheap bound rather than an argument about it.
@@ -4630,7 +4573,7 @@ fn splice_a_contribution<'a>(
     let frame = timeline.frames.len() as u32;
     let event_base = timeline.events.len() as u32;
     let (built, events) =
-        crate::index::walk_cache::rebased(&contribution, frame, event_base, parent, from_in_parent);
+        index::walk_cache::rebased(&contribution, frame, event_base, parent, from_in_parent);
     let file = built.file.clone();
     timeline.entered.entry(frame_key(&file)).or_insert(frame);
     timeline.frames.push(built);
@@ -4683,15 +4626,13 @@ fn splice_a_contribution<'a>(
             .is_some_and(|change| change.at() == next)
         {
             match &contribution.changes[next_change] {
-                crate::index::walk_cache::StateChange::Defined {
+                index::walk_cache::StateChange::Defined {
                     name,
                     definition,
                     file,
                     at,
                 } => unit.define(name, definition.clone(), file, *at),
-                crate::index::walk_cache::StateChange::Undefined { name, .. } => {
-                    unit.undefine(name)
-                }
+                index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
             }
             next_change += 1;
         }
@@ -4749,13 +4690,13 @@ fn splice_a_contribution<'a>(
 
     for change in &contribution.changes {
         match change {
-            crate::index::walk_cache::StateChange::Defined {
+            index::walk_cache::StateChange::Defined {
                 name,
                 definition,
                 file,
                 at,
             } => unit.define(name, definition.clone(), file, *at),
-            crate::index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
+            index::walk_cache::StateChange::Undefined { name, .. } => unit.undefine(name),
         }
     }
 
@@ -4796,15 +4737,7 @@ fn splice_a_contribution<'a>(
     if let Some(timeline) = walked.timeline.as_mut() {
         timeline.leave(frame);
     }
-    if crate::probes::splice() {
-        eprintln!(
-            "splice: {} | {} changes, {} edges, {} events",
-            file.display(),
-            contribution.changes.len(),
-            contribution.edges.len(),
-            contribution.events.len(),
-        );
-    }
+
     walked.spliced.insert(file);
 
     true
@@ -4936,14 +4869,14 @@ pub struct ConditionalRegion {
     /// asked about: a file whose `#if`s nobody evaluates should pay nothing for this.
     ///
     /// **Not part of equality** — it is derived from `branches`, which is.
-    pub decoded: std::sync::OnceLock<Vec<crate::Branch>>,
+    pub decoded: std::sync::OnceLock<Vec<Branch>>,
 }
 
 /// One branch of a conditional: what it asks, and the body it guards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardBranch {
     /// Which directive wrote it: `#if`, `#ifdef`, `#ifndef`, `#elif` or `#else`.
-    pub kind: crate::DirectiveKind,
+    pub kind: DirectiveKind,
     /// The condition as **text to evaluate**: the expression's tokens for `#if`/`#elif` (`__cplusplus >=
     /// 201703L`), the name for `#ifdef`/`#ifndef` (`_WIN32`), and `None` for `#else`, which has no condition and
     /// holds when nothing before it did.
@@ -5096,7 +5029,7 @@ impl SummaryGuards {
     ///
     /// `Some(true)` when there is no guard or its opener holds, `Some(false)` when the opener does not, `None` when
     /// the opener cannot be decided from the table.
-    pub fn own_guard_holds<M: crate::MacroValues>(&self, macros: &M) -> Option<bool> {
+    pub fn own_guard_holds<M: MacroValues>(&self, macros: &M) -> Option<bool> {
         let Some(own) = self.own_guard else {
             return Some(true);
         };
@@ -5128,7 +5061,7 @@ impl SummaryGuards {
     /// only when every one of them is taken is it `Active`. A table that cannot speak about a name answers
     /// [`Lookup::Unanswered`](crate::Lookup), which the evaluator turns into `Unknown` — so a condition this
     /// index has no evidence about costs an answer, never a wrong one.
-    pub fn visibility_of<M: crate::MacroValues>(
+    pub fn visibility_of<M: MacroValues>(
         &self,
         guard: FactGuard,
         offset: usize,
@@ -5196,7 +5129,7 @@ impl ConditionalRegion {
     pub fn exhaustive(&self) -> bool {
         self.branches
             .iter()
-            .any(|branch| branch.kind == crate::DirectiveKind::Else)
+            .any(|branch| branch.kind == DirectiveKind::Else)
     }
 
     /// Does this region's body hold `offset`?
@@ -5217,7 +5150,7 @@ impl GuardBranch {
         // `Branch::new` starts the two caches empty: this reads a branch back out of a cached summary, which stores
         // the condition's *text*, so there is nothing parsed yet to carry over.
         match self.kind {
-            crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef => {
+            DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
                 Branch::new(self.kind, Vec::new(), self.condition.clone(), self.range)
             }
             _ => Branch::new(self.kind, self.tokens(), None, self.range),
@@ -5234,7 +5167,7 @@ impl GuardBranch {
     /// in the right place. A text that does not lex at all is not an error: the evaluator reads what it can, and
     /// a condition that cannot be read is `Unknown` rather than wrong — the same answer the guard layer gives for
     /// a condition it cannot parse.
-    fn tokens(&self) -> Vec<crate::Token> {
+    fn tokens(&self) -> Vec<Token> {
         let Some(text) = self.condition.as_deref() else {
             return Vec::new();
         };
@@ -5249,7 +5182,7 @@ impl GuardBranch {
             .into_iter()
             .filter(|token| !cpp_parser::is_trivia(token.kind))
             .map(|token| {
-                crate::Token::new(
+                Token::new(
                     token.kind,
                     text.get(token.range.start_offset..token.range.end_offset())
                         .unwrap_or_default(),
@@ -5594,7 +5527,7 @@ impl FileSummary {
     /// say how much of a reading it could use — see [`MapReport`].
     pub fn map_into_the_file(
         &mut self,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
     ) -> MapReport {
         let mut report = MapReport::default();
         let place = |range: cpp_parser::SourceRange, report: &mut MapReport| match rendered
@@ -5683,7 +5616,7 @@ pub struct MapReport {
 #[derive(Debug, Default, Clone)]
 pub struct IndexedUnit {
     /// Each file's share, in the order the unit's frames hold them — which is include order.
-    pub files: Vec<(std::path::PathBuf, crate::CookedFile)>,
+    pub files: Vec<(std::path::PathBuf, CookedFile)>,
     /// Facts and errors that could not be placed in any file.
     pub unplaced: usize,
     /// How many tokens the unit's stream has.
@@ -5807,7 +5740,7 @@ pub struct IndexedRendering {
     ///
     /// Keeping it costs one `Arc` clone: the renderer already holds the text in an `Arc`, so this is a pointer and
     /// not a copy of a header. It is what makes "the reading exists" and "the reading is available" the same state.
-    pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+    pub rendered: std::sync::Arc<preprocess::cooked::RenderedCooked>,
     /// How the mapping went: ranges placed, ranges that landed nowhere.
     pub mapped: MapReport,
     /// The parse errors of the rendering, placed in the file.
@@ -5826,7 +5759,7 @@ impl DeclKind {
     /// stores "what kind of thing is written here" and has to keep that answer readable by consumers written before
     /// the finer kinds existed. Two questions, two vocabularies — the same reason `IncludeForm` is re-used rather
     /// than re-declared.
-    pub fn from_binding_kind(kind: crate::BindingKind) -> DeclKind {
+    pub fn from_binding_kind(kind: BindingKind) -> DeclKind {
         use crate::BindingKind as B;
         match kind {
             B::Class | B::Enum | B::Alias | B::Typedef | B::TemplateParameter => DeclKind::Type,
@@ -5875,7 +5808,7 @@ impl cpp_toolchain::preprocess::cooked::MacroEnvironment for MacroView<'_> {
 /// Lazy on both sides: the table lexes a replacement list the first time a rendering meets it, and a slot nobody asks
 /// for is never read. `of` is the reader; this trait is the door the renderer is allowed to knock on.
 impl cpp_toolchain::preprocess::cooked::UnitDefinitionsView for UnitDefinitions<'_> {
-    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
+    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<macros::MacroDef>> {
         self.of(index)
     }
 }

@@ -46,6 +46,10 @@
 //! member (`this->p` — the identity is the object, not the field), double frees, and container invalidation. Each is a
 //! rule of its own, and the last one belongs to a check that is off by default.
 
+use crate::DeclKind;
+use crate::Known;
+use crate::ScopeKind;
+use crate::sema;
 use std::collections::BTreeSet;
 
 use cpp_parser::CppAstNode;
@@ -298,8 +302,8 @@ fn apply_effects(
 /// has the header inlined.
 fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) -> Option<u64> {
     if let Some(offset) = the_last_identifier_offset(callee)
-        && let crate::Known::Yes(binding) =
-            crate::sema::resolve::definition_at(context.scopes(), context.tree(), offset)
+        && let Known::Yes(binding) =
+            sema::resolve::definition_at(context.scopes(), context.tree(), offset)
     {
         let name = binding.name.text();
         let scope = context.scopes().qualified_name_of(binding.scope);
@@ -307,7 +311,7 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
         if let Some(fact) = context.summary.declarations.iter().find(|fact| {
             fact.name == name
                 && fact.scope.as_deref() == scope.as_deref()
-                && fact.kind == crate::DeclKind::Function
+                && fact.kind == DeclKind::Function
         }) {
             return Some(u64::from(fact.frees));
         }
@@ -315,7 +319,7 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
             Some(scope) if !scope.is_empty() => format!("{scope}::{name}"),
             _ => name,
         };
-        if let crate::Known::Yes(found) = context.index().definition(&spelling, context.path) {
+        if let Known::Yes(found) = context.index().definition(&spelling, context.path) {
             return Some(u64::from(found.fact.frees));
         }
     }
@@ -326,7 +330,7 @@ fn the_frees_of(context: &CheckContext<'_>, callee: &cpp_parser::CppSyntaxNode) 
     }
     let name = super::callee_name_of(&cpp_parser::CppExpr::cast(callee.clone())?)?;
     match context.index().definition(&name, context.path) {
-        crate::Known::Yes(found) => Some(u64::from(found.fact.frees)),
+        Known::Yes(found) => Some(u64::from(found.fact.frees)),
         _ => None,
     }
 }
@@ -346,15 +350,15 @@ fn the_variable(
         }
         Some(cpp_parser::CppExpr::NameExpr(_)) => {
             let offset = the_last_identifier_offset(&expression)?;
-            let crate::Known::Yes(binding) =
-                crate::sema::resolve::definition_at(context.scopes(), context.tree(), offset)
+            let Known::Yes(binding) =
+                sema::resolve::definition_at(context.scopes(), context.tree(), offset)
             else {
                 return None;
             };
             let scope = context.scopes().scope(binding.scope)?;
             if !matches!(
                 scope.kind,
-                crate::ScopeKind::Function | crate::ScopeKind::Block | crate::ScopeKind::Lambda
+                ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda
             ) {
                 return None;
             }

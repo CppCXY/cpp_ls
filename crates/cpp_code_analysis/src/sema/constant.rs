@@ -14,6 +14,8 @@
 //! variable (followed through its own initialiser, with a depth bound), or an object-like macro — this file's own, or
 //! any the caller can read out of the includes. Everything else is `None`: a floating-point constant, a `sizeof`, a
 //! function call, a name nobody can value. That direction is deliberate — a wrong number is worse than none.
+use crate::FileView;
+use crate::preprocess;
 use cpp_parser::CppAstNode;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
@@ -27,7 +29,7 @@ const MAX_DEPTH: usize = 12;
 /// `macro_body` answers for an object-like macro the *caller* can see — the includes' macros are the session's to
 /// read, and keeping that out of this module is what makes the folding testable without a project.
 pub fn value_at(
-    view: &crate::FileView,
+    view: &FileView,
     offset: usize,
     macro_body: &dyn Fn(&str) -> Option<String>,
 ) -> Option<i64> {
@@ -95,7 +97,7 @@ pub fn value_of(written: &str, names: &mut dyn FnMut(&str) -> Option<i64>) -> Op
 
 /// The value of one enumerator: its written initialiser, or one more than the enumerator before it.
 fn an_enumerators_value(
-    view: &crate::FileView,
+    view: &FileView,
     enumerator: &CppSyntaxNode,
     macro_body: &dyn Fn(&str) -> Option<String>,
     depth: usize,
@@ -130,7 +132,7 @@ fn an_enumerators_value(
 
 /// The value of a variable's initialiser — `const int n = 1 << 4;`.
 fn a_declarators_value(
-    view: &crate::FileView,
+    view: &FileView,
     declarator: &CppSyntaxNode,
     macro_body: &dyn Fn(&str) -> Option<String>,
     depth: usize,
@@ -146,7 +148,7 @@ fn a_declarators_value(
 
 /// The value of a name written inside a constant expression.
 fn a_names_value(
-    view: &crate::FileView,
+    view: &FileView,
     name: &str,
     macro_body: &dyn Fn(&str) -> Option<String>,
     depth: usize,
@@ -183,10 +185,10 @@ fn a_names_value(
 }
 
 /// **This file's own object-like macro**, when it writes one with that name — the body is the text after the name.
-fn own_macro_body(view: &crate::FileView, name: &str) -> Option<String> {
-    let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+fn own_macro_body(view: &FileView, name: &str) -> Option<String> {
+    let preprocessing = preprocess(&view.source, view.tree.get_tokens());
     for spanned in &preprocessing.directives {
-        if let crate::preprocess::directive::Directive::Define(define) = &spanned.directive
+        if let preprocess::directive::Directive::Define(define) = &spanned.directive
             && let Some(definition) = &define.macro_def
             && definition.name.as_ref() == name
             && definition

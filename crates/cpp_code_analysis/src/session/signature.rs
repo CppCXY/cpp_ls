@@ -27,6 +27,8 @@
 //!
 //! [`Ambiguous`]: crate::UnknownReason::Ambiguous
 
+use crate::DeclKind;
+use crate::sema;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -178,7 +180,7 @@ where
                 // right, unlike parsing the file's own text at a *rendering* offset, which would name the wrong
                 // declaration in any file with a macro above it.
                 if let Some(parameters) = &candidate.parameters {
-                    let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
+                    let (tidy, _) = sema::call_syntax::tidy_list_text(parameters);
                     signatures.push(CallSignature {
                         label: format!("{spelling}{tidy}"),
                         parameters: Vec::new(),
@@ -242,7 +244,7 @@ where
         if sources.is_empty()
             && let Some(parameters) = &candidate.parameters
         {
-            let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
+            let (tidy, _) = sema::call_syntax::tidy_list_text(parameters);
             signatures.push(CallSignature {
                 label: format!("{spelling}{tidy}"),
                 parameters: Vec::new(),
@@ -277,7 +279,7 @@ where
                 })
                 .collect();
 
-            let (tidy, moved) = crate::sema::call_syntax::tidy_list_text(list_text);
+            let (tidy, moved) = sema::call_syntax::tidy_list_text(list_text);
             let list_start = spelling.len();
             let label = format!("{spelling}{tidy}");
             let parameters: Vec<(Range<usize>, String)> = raw
@@ -294,9 +296,9 @@ where
             // from the text before the declaration, which is a heuristic and is stated as one below.
             let plain: Vec<String> = parameters
                 .iter()
-                .map(|(_, text)| crate::sema::overload::a_type_without_its_name(text))
+                .map(|(_, text)| sema::overload::a_type_without_its_name(text))
                 .collect();
-            let templates = crate::sema::deduction::template_parameters_before(
+            let templates = sema::deduction::template_parameters_before(
                 &declared_in.source,
                 source.name_offset,
             );
@@ -332,7 +334,7 @@ where
     // and each candidate's parameter spellings; what the ranking needs is the arguments' types, which is the one thing
     // a `SemanticModel` is for.
     if signatures.len() > 1 {
-        let model = crate::sema::model::SemanticModel::new(
+        let model = sema::model::SemanticModel::new(
             index,
             &view.root,
             &view.scopes,
@@ -343,36 +345,34 @@ where
         // Every node of this file's own text, traversed once: `inlay::arguments_of` is the crate's answer to "where are
         // this call's arguments", and the `SemanticModel` is what types them.
         let arguments = arguments_of(&call).unwrap_or_default();
-        let types: Vec<crate::Known<String>> = arguments
+        let types: Vec<Known<String>> = arguments
             .iter()
             .map(|argument| match model.type_of(argument) {
-                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
-                crate::Known::No => crate::Known::No,
-                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+                Known::Yes((a_type, _)) => Known::Yes(a_type.to_string()),
+                Known::No => Known::No,
+                Known::Unknown(reason) => Known::Unknown(reason),
             })
             .collect();
         // **Deduce, then substitute, then rank.** A template candidate whose arguments the call fixes is ranked as the
         // function it instantiates; one whose arguments the call does not fix keeps its declared spellings, and the
         // resolver reads those as `Match::Unranked` — which is the quiet direction, and the right one: a template this
         // analysis cannot deduce is a template whose ranking it does not know.
-        let ranked: Vec<crate::sema::overload::Candidate> = signatures
+        let ranked: Vec<sema::overload::Candidate> = signatures
             .iter()
             .enumerate()
             .map(|(at, signature)| {
                 let (plain, templates) = rankable.get(at).cloned().unwrap_or_default();
                 let plain_for_ordering = plain.clone();
-                let parameters = match crate::sema::deduction::deduce(&templates, &plain, &types) {
+                let parameters = match sema::deduction::deduce(&templates, &plain, &types) {
                     Some(arguments) => plain
                         .iter()
                         .map(|spelling| {
-                            crate::sema::types::substituted_spelling(
-                                spelling, &templates, &arguments,
-                            )
+                            sema::types::substituted_spelling(spelling, &templates, &arguments)
                         })
                         .collect(),
                     None => plain,
                 };
-                let candidate = crate::sema::overload::Candidate::new(
+                let candidate = sema::overload::Candidate::new(
                     parameters,
                     signature.label.trim_end().ends_with("...)"),
                     signature.label.clone(),
@@ -380,9 +380,7 @@ where
                 candidate.with_declaration(plain_for_ordering, templates.clone())
             })
             .collect();
-        if let crate::sema::overload::Choice::One(chosen) =
-            crate::sema::overload::choose(&types, &ranked)
-        {
+        if let sema::overload::Choice::One(chosen) = sema::overload::choose(&types, &ranked) {
             let chosen = signatures.remove(chosen);
             signatures.insert(0, chosen);
         }
@@ -775,7 +773,7 @@ fn constructors_in_the_index(
         if declaration.fact.name != class {
             continue;
         }
-        if declaration.fact.kind != crate::DeclKind::Function {
+        if declaration.fact.kind != DeclKind::Function {
             continue;
         }
         let Some(scope) = declaration.fact.scope.as_deref() else {
@@ -787,7 +785,7 @@ fn constructors_in_the_index(
         let Some(parameters) = declaration.fact.parameter_list() else {
             continue;
         };
-        let (tidy, _) = crate::sema::call_syntax::tidy_list_text(parameters);
+        let (tidy, _) = sema::call_syntax::tidy_list_text(parameters);
         constructors.push(CallSignature {
             label: format!("{class}{tidy}"),
             parameters: Vec::new(),

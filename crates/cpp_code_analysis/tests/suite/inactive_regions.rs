@@ -189,6 +189,10 @@ fn a_warm_start_answers_the_spans_the_record_carries() {
     let from_the_render = cold
         .inactive_regions(&path)
         .expect("the cooked file answers");
+    // **The record is written by the quiet pass**, not by the commit — a write inside the commit is what made a
+    // program read hold the writer for seconds (`Session::persist_cooked`). The second session can only read what
+    // this one wrote down.
+    let _ = cold.persist_cooked(std::time::Duration::ZERO);
     drop(cold);
 
     let mut warm = session_at(&root, &[("a.cpp", A_DEAD_BRANCH)]);

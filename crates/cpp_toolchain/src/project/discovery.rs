@@ -31,6 +31,7 @@
 //! this concrete: the analysis falls back to the compiler's own headers, which *works*, and the answer is worse
 //! than it needs to be for a reason the user can fix — so the fix is spelled out here.
 
+use crate::ToolchainSource;
 use std::path::{Path, PathBuf};
 
 use crate::file::paths::FileProvider;
@@ -143,14 +144,11 @@ impl ProjectDiscovery {
     /// These are the two sources that rank above `CXX`: what a person wrote in `.cppls.toml`, and what the build
     /// actually ran. A source that names nothing is not in the list, and a name that turns out not to exist on this
     /// machine is skipped by the discovery and reported there.
-    pub fn named_compilers(&self) -> Vec<(PathBuf, crate::ToolchainSource)> {
+    pub fn named_compilers(&self) -> Vec<(PathBuf, ToolchainSource)> {
         let mut named = Vec::new();
 
         if let Some(compiler) = self.config.config.compile.named_compiler() {
-            named.push((
-                PathBuf::from(compiler),
-                crate::ToolchainSource::Configuration,
-            ));
+            named.push((PathBuf::from(compiler), ToolchainSource::Configuration));
         }
 
         if let Some(database) = &self.database
@@ -160,10 +158,7 @@ impl ProjectDiscovery {
                 .first()
                 .and_then(|command| command.arguments.first())
         {
-            named.push((
-                PathBuf::from(program),
-                crate::ToolchainSource::CompileDatabase,
-            ));
+            named.push((PathBuf::from(program), ToolchainSource::CompileDatabase));
         }
 
         named
@@ -262,7 +257,9 @@ pub fn discover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DiskFiles;
     use crate::MemoryFiles;
+    use crate::ToolchainSource;
 
     #[test]
     fn the_files_flags_win_and_nothing_else_is_consulted() {
@@ -332,7 +329,7 @@ mod tests {
             );
 
         let found = discover(&files, Path::new("/p"), None);
-        let sources: Vec<crate::ToolchainSource> = found
+        let sources: Vec<ToolchainSource> = found
             .named_compilers()
             .into_iter()
             .map(|(_, source)| source)
@@ -341,8 +338,8 @@ mod tests {
         assert_eq!(
             sources,
             [
-                crate::ToolchainSource::Configuration,
-                crate::ToolchainSource::CompileDatabase,
+                ToolchainSource::Configuration,
+                ToolchainSource::CompileDatabase,
             ],
             "the order the discovery follows, and the labels it reports"
         );
@@ -362,7 +359,7 @@ mod tests {
         )
         .expect("the fixture writes");
 
-        let found = discover(&crate::DiskFiles, &root, None);
+        let found = discover(&DiskFiles, &root, None);
 
         assert_eq!(
             found.database.as_ref().map(|database| database.origin),

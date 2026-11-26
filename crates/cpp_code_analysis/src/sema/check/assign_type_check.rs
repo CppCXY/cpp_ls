@@ -41,6 +41,9 @@
 //! documentation records what that cost: **6 430 ms over twenty MSVC headers, where the other checks together cost
 //! 396 ms**, 94% of the layer, paid per keystroke. One walk is what makes this version linear in the file.
 
+use crate::DeclKind;
+use crate::Known;
+use crate::sema;
 use std::collections::HashMap;
 
 use cpp_parser::CppAstNode;
@@ -77,7 +80,7 @@ impl Check for AssignTypeCheck {
         // does not want that declaration judged.
         let mut declared: HashMap<&str, Option<&str>> = HashMap::new();
         for fact in &context.summary.declarations {
-            if fact.kind != crate::DeclKind::Variable {
+            if fact.kind != DeclKind::Variable {
                 continue;
             }
             let Some(written) = fact.type_of.as_deref() else {
@@ -270,7 +273,7 @@ impl Check for AssignTypeCheck {
 /// as "`config` is initialised with a value that does not convert to `auto&`", which is a claim about a type that is
 /// not the type.
 fn is_a_deduced_auto(written: &str) -> bool {
-    crate::sema::types::is_a_deduced_type(written)
+    sema::types::is_a_deduced_type(written)
 }
 
 /// **One place a value enters an object whose type is written down**, reported when it does not convert.
@@ -294,8 +297,8 @@ fn report_if_it_does_not_convert(
         return;
     }
     let known_from = context.type_of(expression);
-    let target = crate::sema::types::parse_type_spelling(written);
-    let crate::Known::Yes((from, _)) = known_from else {
+    let target = sema::types::parse_type_spelling(written);
+    let Known::Yes((from, _)) = known_from else {
         return;
     };
     // **One facility, shared with `param-type-check`** — `sema::convert` normalises the spelling (a `const std::string&`
@@ -305,9 +308,9 @@ fn report_if_it_does_not_convert(
     if context.a_string_literal_in_a_char_pointer_position(expression, written) {
         return;
     }
-    if crate::sema::convert::conversion(&from, written, |class| {
+    if sema::convert::conversion(&from, written, |class| {
         super::a_class_can_be_built_from(context, class, &from)
-    }) == crate::sema::convert::Conversion::Refused
+    }) == sema::convert::Conversion::Refused
     {
         report(context, expression, name, how, written);
         return;

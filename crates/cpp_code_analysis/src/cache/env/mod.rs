@@ -32,6 +32,10 @@
 //! with an unknown seed gets a table that is too confident, which is why [`Env::empty`] is documented as "nothing is
 //! defined and nothing is missing" rather than as a neutral default.
 
+use crate::Value;
+use crate::cache;
+use crate::macros;
+use crate::token;
 use std::sync::Arc;
 
 use crate::cache::summary::MacroFact;
@@ -85,7 +89,7 @@ pub struct Definition {
     /// #if A decidable, and a body that is not a lone integer literal leaves this None and the answer
     /// `DefinedWithoutAValue`. Built here rather than on every question because the value is a property of the
     /// definition: macro_value reads it once and keeps it.
-    evaluable: Option<Box<crate::macros::MacroDef>>,
+    evaluable: Option<Box<macros::MacroDef>>,
     /// **The one name the body *is***, when the body is exactly one identifier --- `#define A B`'s B. The
     /// evaluator follows an alias through a body of tokens; an environment has the text and not the tokens, so it
     /// follows the name instead, which is the same hop when the body is one name.
@@ -154,7 +158,7 @@ impl Definition {
     }
 
     /// **The definition a condition evaluator can read a value from**, when the summary carried one.
-    pub(crate) fn evaluable(&self) -> Option<&crate::macros::MacroDef> {
+    pub(crate) fn evaluable(&self) -> Option<&macros::MacroDef> {
         self.evaluable.as_deref()
     }
 
@@ -188,7 +192,7 @@ fn hash_definition(name: &str, function_like: bool, body: Option<&str>) -> u64 {
         None => bytes.push(2),
     }
     bytes.push(u8::from(function_like));
-    crate::cache::fnv1a64(&bytes)
+    cache::fnv1a64(&bytes)
 }
 
 /// **An environment**: a persistent chain of changes, plus the id of the chain.
@@ -282,7 +286,7 @@ impl Env {
             bytes.extend_from_slice(&name.to_le_bytes());
             bytes.extend_from_slice(&change.to_le_bytes());
         }
-        let id = EnvId(crate::cache::fnv1a64(&bytes));
+        let id = EnvId(cache::fnv1a64(&bytes));
         Env {
             frame: Some(Arc::new(Frame {
                 parent: self.frame.clone(),
@@ -425,7 +429,7 @@ impl MacroValues for Over<'_> {
         }
     }
 
-    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::Value> {
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<Value> {
         self.seed.builtin_operator(name, operand)
     }
 }
@@ -462,7 +466,7 @@ impl Change {
 }
 
 fn hash_name(name: &str) -> u64 {
-    crate::cache::fnv1a64(name.as_bytes())
+    cache::fnv1a64(name.as_bytes())
 }
 
 /// **The definition a condition evaluator can expand**, built from the facts a summary keeps.
@@ -477,11 +481,7 @@ fn hash_name(name: &str) -> u64 {
 /// A macro with no body and no parameters (`#define FLAG`) has nothing to evaluate and stays
 /// `Lookup::DefinedWithoutAValue` — answering `Defined` there would hand the evaluator an empty token list and a
 /// syntax error where the standard says `0`.
-fn build_macro_def(
-    fact: &MacroFact,
-    text: &str,
-    body: Option<&str>,
-) -> Option<crate::macros::MacroDef> {
+fn build_macro_def(fact: &MacroFact, text: &str, body: Option<&str>) -> Option<macros::MacroDef> {
     if body.is_none() && !fact.function_like {
         return None;
     }
@@ -500,7 +500,7 @@ fn build_macro_def(
         .value
         .as_deref()
         .and_then(|value| value.trim().parse::<i128>().ok());
-    let tokens: Vec<crate::token::Token> = if value.is_some() {
+    let tokens: Vec<token::Token> = if value.is_some() {
         Vec::new()
     } else {
         let (lexed, _) = cpp_parser::lex(body_text, &cpp_parser::LexerConfig::default());
@@ -510,14 +510,14 @@ fn build_macro_def(
                 let piece = body_text
                     .get(data.range.start_offset..data.range.end_offset())
                     .unwrap_or("");
-                crate::token::Token::new(data.kind, piece, data.range)
+                token::Token::new(data.kind, piece, data.range)
             })
             .collect()
     };
-    let definition = crate::macros::MacroDef {
+    let definition = macros::MacroDef {
         name: Box::from(fact.name.as_str()),
         params,
-        body: crate::macros::MacroBody {
+        body: macros::MacroBody {
             tokens,
             stringize: Vec::new(),
             paste: Vec::new(),
@@ -538,7 +538,7 @@ fn build_macro_def(
 /// Text rather than a parsed list because that is what the summary leaves behind: it records that the macro *is*
 /// function-like and where its body starts, and the bytes between are the parameters. A variadic tail becomes
 /// `__VA_ARGS__`, which is the spelling a body uses for it.
-fn parameters_in(list: &str) -> Vec<crate::macros::Parameter> {
+fn parameters_in(list: &str) -> Vec<macros::Parameter> {
     let inner = list.trim();
     let inner = inner.strip_prefix('(').unwrap_or(inner);
     let inner = inner.strip_suffix(')').unwrap_or(inner);
@@ -550,14 +550,14 @@ fn parameters_in(list: &str) -> Vec<crate::macros::Parameter> {
         .map(|part| {
             let part = part.trim();
             if part == "..." {
-                crate::macros::Parameter {
+                macros::Parameter {
                     name: Box::from("__VA_ARGS__"),
-                    kind: crate::macros::ParameterKind::Variadic,
+                    kind: macros::ParameterKind::Variadic,
                 }
             } else {
-                crate::macros::Parameter {
+                macros::Parameter {
                     name: Box::from(part),
-                    kind: crate::macros::ParameterKind::Ordinary,
+                    kind: macros::ParameterKind::Ordinary,
                 }
             }
         })

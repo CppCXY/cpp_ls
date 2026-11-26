@@ -23,6 +23,7 @@
 //! is right" — see the note on `DeclFact::pattern`.
 
 use super::{Answer, Builtin, Kind};
+use crate::sema;
 
 /// **Which question a trait asks.** One variant per question this layer can tell apart, because two intrinsics that
 /// ask the same thing must be decided by the same rule — MSVC spells the same question both `__is_pointer` and
@@ -261,8 +262,8 @@ fn same(arguments: &[String]) -> Option<bool> {
     };
 
     let (left_type, right_type) = (
-        crate::sema::types::parse_type_spelling(left),
-        crate::sema::types::parse_type_spelling(right),
+        sema::types::parse_type_spelling(left),
+        sema::types::parse_type_spelling(right),
     );
     if left_type == right_type {
         return Some(true);
@@ -282,14 +283,14 @@ fn same(arguments: &[String]) -> Option<bool> {
 /// **The shape of one written argument.**
 fn shape(written: &str) -> Shape<'_> {
     let written = written.trim();
-    match crate::sema::types::parse_type_spelling(written) {
-        crate::sema::types::Type::Pointer { .. } => Shape::Pointer,
-        crate::sema::types::Type::Reference { rvalue, .. } => Shape::Reference { rvalue },
-        crate::sema::types::Type::Array { extent, .. } => Shape::Array(extent.is_some()),
-        crate::sema::types::Type::Function { .. } => Shape::Function,
+    match sema::types::parse_type_spelling(written) {
+        sema::types::Type::Pointer { .. } => Shape::Pointer,
+        sema::types::Type::Reference { rvalue, .. } => Shape::Reference { rvalue },
+        sema::types::Type::Array { extent, .. } => Shape::Array(extent.is_some()),
+        sema::types::Type::Function { .. } => Shape::Function,
         // The name a builtin was written with, read back off the spelling rather than off the parsed type: the
         // parsed type of `void` carries the same word, and this keeps the two spellings' agreement obvious.
-        crate::sema::types::Type::Builtin { .. } => Shape::Builtin(written),
+        sema::types::Type::Builtin { .. } => Shape::Builtin(written),
         _ => Shape::Open,
     }
 }

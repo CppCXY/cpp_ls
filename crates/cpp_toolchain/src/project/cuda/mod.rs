@@ -32,6 +32,7 @@
 //! The rules that judge CUDA code are checks like any other and live in `sema::check`; this
 //! module owns the configuration and the discovery, so that the grammar's CUDA flag has one source.
 
+use crate::include;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -98,9 +99,9 @@ impl CudaSection {
     /// include path would one day be added without the switch.
     pub fn applied_to(
         &self,
-        mut config: crate::include::config::CompilerConfig,
+        mut config: include::config::CompilerConfig,
         root: &std::path::Path,
-    ) -> crate::include::config::CompilerConfig {
+    ) -> include::config::CompilerConfig {
         if self.enable {
             config = config.with_cuda(true);
         }
@@ -144,7 +145,7 @@ impl CudaSection {
                 if relative == "include" || directory.is_dir() {
                     config
                         .include_paths
-                        .push(crate::include::config::IncludePath::system(directory));
+                        .push(include::config::IncludePath::system(directory));
                 }
             }
         }
@@ -156,7 +157,7 @@ impl CudaSection {
             };
             config
                 .include_paths
-                .push(crate::include::config::IncludePath::system(directory));
+                .push(include::config::IncludePath::system(directory));
         }
         config.extra_args.extend(self.args.iter().cloned());
         config

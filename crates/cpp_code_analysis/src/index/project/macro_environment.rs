@@ -3,6 +3,10 @@
 //!
 //! Moved here from `project/mod.rs` without a change.
 
+use crate::Binding;
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::DeclModifiers;
 use smol_str::SmolStr;
 
 use super::*;
@@ -457,18 +461,13 @@ impl ProjectDefinition {
     ///
     /// [`Binding`]: crate::Binding
     /// [`ScopeTree::declares_a_local`]: crate::ScopeTree::declares_a_local
-    pub fn from_binding(
-        path: &Path,
-        binding: crate::Binding,
-        scope: Option<String>,
-        local: bool,
-    ) -> Self {
+    pub fn from_binding(path: &Path, binding: Binding, scope: Option<String>, local: bool) -> Self {
         ProjectDefinition {
             file: path.to_path_buf(),
             fact: DeclFact {
-                enumerator: binding.kind == crate::BindingKind::Enumerator,
+                enumerator: binding.kind == BindingKind::Enumerator,
                 // The same bits the index fills — see `DeclModifiers`.
-                modifiers: crate::DeclModifiers::default(),
+                modifiers: DeclModifiers::default(),
                 // The effects belong to the summary the index writes, and this answer is a *place to jump to*: a
                 // caller that wants `frees` asks the fact, which is the same rule `in_namespace` below follows.
                 frees: 0,
@@ -479,7 +478,7 @@ impl ProjectDefinition {
                 // `None` for the same reason `type_of` below is: this answer is a **place to jump to**, built
                 // from a binding, and the namespaces around a body are a fact about the file's text that lives in
                 // its summary. See [`DeclFact::in_namespace`].
-                kind: crate::DeclKind::from_binding_kind(binding.kind),
+                kind: DeclKind::from_binding_kind(binding.kind),
                 // Unknown here, and harmlessly so: this answer is a **place to jump to**, never a candidate a member
                 // query picks between definitions. See [`DeclFact::definition`].
                 definition: false,

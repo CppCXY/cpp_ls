@@ -36,6 +36,9 @@
 //! Two declarations of a name are an **overload set** and are skipped: which overload's constraint applies is
 //! overload resolution, and a check that guessed would be reporting on a declaration the call may not use.
 
+use crate::DeclKind;
+use crate::Known;
+use crate::sema;
 use cpp_parser::{CppAstNode, CppCallExpr};
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -79,14 +82,13 @@ impl Check for ConceptNotSatisfied {
                 else {
                     continue;
                 };
-                let crate::Known::Yes((passed, _)) = context.type_of(argument.syntax()) else {
+                let Known::Yes((passed, _)) = context.type_of(argument.syntax()) else {
                     continue;
                 };
                 // **A template parameter is not a type this can judge.** `_Tp&&` is whatever the caller instantiates,
                 // so every concept answers "not known" rather than "not satisfied": measured on libstdc++'s
                 // `<compare>`, `_Tp&&` was reported as not satisfying `std::floating_point`.
-                if crate::sema::convert::names_a_template_parameter_for_a_check(&passed.to_string())
-                {
+                if sema::convert::names_a_template_parameter_for_a_check(&passed.to_string()) {
                     continue;
                 }
                 if concept.is_satisfied_by(&passed, context) != Some(false) {
@@ -235,18 +237,18 @@ impl Concept {
     /// check quiet, and `None` is what every type the analysis cannot work out answers.
     fn is_satisfied_by(
         &self,
-        passed: &crate::sema::types::Type,
+        passed: &sema::types::Type,
         context: &CheckContext<'_>,
     ) -> Option<bool> {
         match self {
             Concept::Integral => Some(is_an_integer(passed)),
             Concept::FloatingPoint => Some(is_a_floating_point(passed)),
             Concept::SameAs(declared) => {
-                let declared = crate::sema::types::parse_type_spelling(declared);
+                let declared = sema::types::parse_type_spelling(declared);
                 match passed.convertible_to(&declared) {
-                    crate::Known::No => Some(false),
-                    crate::Known::Yes(()) => Some(passed.to_string() == declared.to_string()),
-                    crate::Known::Unknown(_) => None,
+                    Known::No => Some(false),
+                    Known::Yes(()) => Some(passed.to_string() == declared.to_string()),
+                    Known::Unknown(_) => None,
                 }
             }
             Concept::DerivedFrom(base) => derives_from(context, passed, base),
@@ -257,23 +259,23 @@ impl Concept {
                 // answered "not an object" for any spelling that happened to carry an `&` (a `decltype(x) &`, a template
                 // argument named one) and "an object" for an array, which is not copyable either way.
                 match passed {
-                    crate::sema::types::Type::Reference { .. } => Some(false),
+                    sema::types::Type::Reference { .. } => Some(false),
                     // An array and a function are not object types either, and this layer cannot decide them: saying
                     // nothing is the direction every arm here takes when it would be guessing.
-                    crate::sema::types::Type::Array { .. } => None,
+                    sema::types::Type::Array { .. } => None,
                     _ => Some(true),
                 }
             }
             Concept::ConvertibleTo(target) => {
-                let target = crate::sema::types::parse_type_spelling(target);
+                let target = sema::types::parse_type_spelling(target);
                 match passed.convertible_to(&target) {
                     // The class case goes through the shared facility, exactly as `param-type-check` asks it — a
                     // class nobody has read answers `Unknown` there and stays quiet here.
-                    crate::Known::No => Some(false),
-                    crate::Known::Yes(()) => Some(true),
-                    crate::Known::Unknown(_) => Some(!matches!(
-                        crate::sema::convert::conversion(passed, &target.to_string(), |_| None),
-                        crate::sema::convert::Conversion::Refused
+                    Known::No => Some(false),
+                    Known::Yes(()) => Some(true),
+                    Known::Unknown(_) => Some(!matches!(
+                        sema::convert::conversion(passed, &target.to_string(), |_| None),
+                        sema::convert::Conversion::Refused
                     )),
                 }
             }
@@ -287,12 +289,10 @@ impl Concept {
 /// The **tree's own reading**, not a scan for `*` and `&`: `Type` has a variant for each of those, and asking the
 /// string whether it contains an asterisk is a second reader of the same fact — one that disagrees with the first
 /// the day a type is spelled `decltype(p)` or `int (*)(int)`.
-fn plain_type_spelling(passed: &crate::sema::types::Type) -> Option<String> {
+fn plain_type_spelling(passed: &sema::types::Type) -> Option<String> {
     match passed {
-        crate::sema::types::Type::Builtin { spelling } => Some(spelling.clone()),
-        crate::sema::types::Type::Named { name, arguments } if arguments.is_empty() => {
-            Some(name.clone())
-        }
+        sema::types::Type::Builtin { spelling } => Some(spelling.clone()),
+        sema::types::Type::Named { name, arguments } if arguments.is_empty() => Some(name.clone()),
         _ => None,
     }
 }
@@ -302,7 +302,7 @@ fn plain_type_spelling(passed: &crate::sema::types::Type) -> Option<String> {
 /// `std::integral` is true for the builtin integer types and their standard spellings, and false for a pointer, a
 /// reference, an enumeration and a class — which is what this answers, from the type's own shape and then from the
 /// names the standard gives the same types (`size_t`, `int64_t`).
-fn is_an_integer(passed: &crate::sema::types::Type) -> bool {
+fn is_an_integer(passed: &sema::types::Type) -> bool {
     let Some(spelling) = plain_type_spelling(passed) else {
         return false;
     };
@@ -355,7 +355,7 @@ fn is_an_integer(passed: &crate::sema::types::Type) -> bool {
     )
 }
 
-fn is_a_floating_point(passed: &crate::sema::types::Type) -> bool {
+fn is_a_floating_point(passed: &sema::types::Type) -> bool {
     let Some(spelling) = plain_type_spelling(passed) else {
         return false;
     };
@@ -388,7 +388,7 @@ fn split_at_top_level_commas(text: &str) -> Vec<String> {
 /// pointer a definite `false` without asking anything.
 fn derives_from(
     context: &CheckContext<'_>,
-    derived: &crate::sema::types::Type,
+    derived: &sema::types::Type,
     base: &str,
 ) -> Option<bool> {
     use crate::sema::types::Type;
@@ -422,7 +422,7 @@ fn derives_from(
         let mut found = None;
         let mut declarations = 0;
         for visible in &declared {
-            if visible.fact.kind != crate::DeclKind::Type {
+            if visible.fact.kind != DeclKind::Type {
                 continue;
             }
             declarations += 1;

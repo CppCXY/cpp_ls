@@ -96,3 +96,21 @@ fn an_arrow_with_no_typed_pointee_is_silent() {
         "the pointee cannot be typed, so the member is not judged",
     );
 }
+
+/// **A typedef whose tag spells the same name in lowercase, beside a variable of that name, does not cycle.**
+/// `typedef struct proc { … } Proc;` with a global `Proc proc;` used to make the alias lookup follow the *variable*
+/// (`proc`: `type_of = Proc`) back to the typedef (`Proc`: `type_of = proc`) forever — neovim's `channel.c` opened
+/// `proc->status` and the language server died with a stack overflow. Only a `Type` declaration may be an alias.
+#[test]
+fn an_alias_and_a_variable_that_share_a_name_do_not_cycle() {
+    let codes = codes_of(
+        "typedef struct proc { int status; } Proc;\n\
+         extern Proc proc;\n\
+         void g(Proc *p) { int x = p->status; }\n",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::UndefinedField,
+        "`status` is `proc`'s member through the `Proc` typedef",
+    );
+}

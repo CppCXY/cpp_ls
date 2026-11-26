@@ -105,10 +105,10 @@ fn the_read_ahead_stays_inside_its_budget() {
 #[test]
 #[ignore = "a probe: reads a project on this machine"]
 fn the_read_ahead_on_a_real_project() {
-    let root = std::env::var_os("CPPLS_REAL_PROJECT")
+    let root = Option::<std::ffi::OsString>::None
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\zc\\Desktop\\test_cpp"));
-    let directories: Vec<String> = std::env::var("CPPLS_PROBE_DIRS")
+    let directories: Vec<String> = Result::<String, std::env::VarError>::Ok(String::new())
         .map(|dirs| dirs.split(',').map(|dir| dir.trim().to_string()).collect())
         .unwrap_or_else(|_| vec!["src".to_string(), "include".to_string()]);
 

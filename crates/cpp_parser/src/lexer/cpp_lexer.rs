@@ -1,3 +1,5 @@
+use crate::features;
+use crate::text;
 use crate::{kind::CppTokenKind, parser_error::CppParseError, text::Reader};
 
 use super::{
@@ -76,7 +78,7 @@ impl<'a> CppLexer<'a> {
 
         // One byte per part, and the parts are contiguous by construction: the lexer only produces these three
         // after consuming exactly these characters.
-        let part = |at: usize, kind| CppTokenData::new(kind, crate::text::SourceRange::new(at, 1));
+        let part = |at: usize, kind| CppTokenData::new(kind, text::SourceRange::new(at, 1));
 
         match kind {
             CppTokenKind::RightShift => {
@@ -100,7 +102,7 @@ impl<'a> CppLexer<'a> {
     /// **Is this standard-gated keyword a keyword here?** — `consteval` is one from C++20 and an ordinary identifier
     /// before it, and a project that used the name for a variable is entitled to keep doing so. The guard, not the level,
     /// is what decides: a C configuration answers differently from a C++ one, which the old enum could not express.
-    fn accepts(&self, feature: crate::features::Feature) -> bool {
+    fn accepts(&self, feature: features::Feature) -> bool {
         self.lexer_config.language().support(feature)
     }
 
@@ -109,7 +111,7 @@ impl<'a> CppLexer<'a> {
     /// `Some(Family::C)` and not "not C++": a header with no `-std=` of its own is read by whichever language includes
     /// it, and answering `true` for an unknown would turn every C++ keyword into a name in every header.
     fn is_c(&self) -> bool {
-        self.lexer_config.language().family() == Some(crate::features::Family::C)
+        self.lexer_config.language().family() == Some(features::Family::C)
     }
 
     fn name_to_kind(&self, name: &str) -> CppTokenKind {
@@ -179,17 +181,17 @@ impl<'a> CppLexer<'a> {
             "while" => CppTokenKind::WhileKeyword,
 
             // C++11 and later keywords
-            "alignas" if self.accepts(crate::features::Feature::AlignasCpp) => {
+            "alignas" if self.accepts(features::Feature::AlignasCpp) => {
                 CppTokenKind::AlignasKeyword
             }
             "alignof" | "__alignof__" => CppTokenKind::AlignofKeyword,
-            "constexpr" if self.accepts(crate::features::Feature::Constexpr) => {
+            "constexpr" if self.accepts(features::Feature::Constexpr) => {
                 CppTokenKind::ConstexprKeyword
             }
-            "consteval" if self.accepts(crate::features::Feature::Consteval) => {
+            "consteval" if self.accepts(features::Feature::Consteval) => {
                 CppTokenKind::ConstevalKeyword
             }
-            "constinit" if self.accepts(crate::features::Feature::Constinit) => {
+            "constinit" if self.accepts(features::Feature::Constinit) => {
                 CppTokenKind::ConstinitKeyword
             }
             "decltype" => CppTokenKind::DecltypeKeyword,
@@ -216,7 +218,7 @@ impl<'a> CppLexer<'a> {
                 if self
                     .lexer_config
                     .language()
-                    .support(crate::features::Feature::Typeof) =>
+                    .support(features::Feature::Typeof) =>
             {
                 CppTokenKind::DecltypeKeyword
             }
@@ -236,12 +238,10 @@ impl<'a> CppLexer<'a> {
             "register" => CppTokenKind::RegisterKeyword,
             "namespace" => CppTokenKind::NamespaceKeyword,
             "noexcept" => CppTokenKind::NoexceptKeyword,
-            "nullptr" if self.accepts(crate::features::Feature::Nullptr) => {
-                CppTokenKind::NullptrKeyword
-            }
+            "nullptr" if self.accepts(features::Feature::Nullptr) => CppTokenKind::NullptrKeyword,
             "static_assert"
-                if self.accepts(crate::features::Feature::StaticAssert)
-                    || self.accepts(crate::features::Feature::StaticAssertC) =>
+                if self.accepts(features::Feature::StaticAssert)
+                    || self.accepts(features::Feature::StaticAssertC) =>
             {
                 CppTokenKind::StaticAssertKeyword
             }
@@ -250,11 +250,11 @@ impl<'a> CppLexer<'a> {
             // program — `int contract_assert = 1;` failed to parse, and the error node swallowed the declarations after
             // it. `pre` and `post` are *not* here: they are context-sensitive and stay identifiers. See
             // `docs/worklog.md` P1-3.
-            "contract_assert" if self.accepts(crate::features::Feature::ContractAssert) => {
+            "contract_assert" if self.accepts(features::Feature::ContractAssert) => {
                 CppTokenKind::ContractAssertKeyword
             }
             "template" => CppTokenKind::TemplateKeyword,
-            "thread_local" if self.accepts(crate::features::Feature::ThreadLocal) => {
+            "thread_local" if self.accepts(features::Feature::ThreadLocal) => {
                 CppTokenKind::ThreadLocalKeyword
             }
 
@@ -263,13 +263,13 @@ impl<'a> CppLexer<'a> {
             // reads them as keywords in the positions the standard gives them a meaning, and as ordinary names
             // everywhere else — so the lexer hands them over as identifiers and the grammar decides. See
             // [`crate::grammar::cpp::is_contextual_keyword`].
-            "co_await" if self.accepts(crate::features::Feature::Coroutines) => {
+            "co_await" if self.accepts(features::Feature::Coroutines) => {
                 CppTokenKind::CoAwaitKeyword
             }
-            "co_return" if self.accepts(crate::features::Feature::Coroutines) => {
+            "co_return" if self.accepts(features::Feature::Coroutines) => {
                 CppTokenKind::CoReturnKeyword
             }
-            "co_yield" if self.accepts(crate::features::Feature::Coroutines) => {
+            "co_yield" if self.accepts(features::Feature::Coroutines) => {
                 CppTokenKind::CoYieldKeyword
             }
 
@@ -443,7 +443,7 @@ impl<'a> CppLexer<'a> {
                         // (two tokens, and then a parse error at the >). Reading them as one token in every mode is
                         // what docs/worklog.md P1-2 lists first among the ungated vendor spellings.
                         if self.reader.current_char() == '>'
-                            && self.accepts(crate::features::Feature::ThreeWayComparison)
+                            && self.accepts(features::Feature::ThreeWayComparison)
                         {
                             self.reader.bump();
                             CppTokenKind::Spaceship
@@ -1095,7 +1095,7 @@ impl<'a> CppLexer<'a> {
                     if !self
                         .lexer_config
                         .language()
-                        .support(crate::features::Feature::BinaryLiterals)
+                        .support(features::Feature::BinaryLiterals)
                     {
                         self.errors.push(CppParseError::syntax_error_from(
                             &t!("binary literals require C++14"),
@@ -1355,10 +1355,7 @@ impl<'a> CppLexer<'a> {
 ///
 /// The `>>`, `>=` and `>>=` split that [`CppLexer::push`] performs is applied here too, because the answer is about the
 /// **first token of the stream**, and for those three that is a one-byte `>`.
-pub fn lex_first(
-    text: &str,
-    config: &LexerConfig,
-) -> Option<(CppTokenKind, crate::text::SourceRange)> {
+pub fn lex_first(text: &str, config: &LexerConfig) -> Option<(CppTokenKind, text::SourceRange)> {
     let mut errors = Vec::new();
     let mut lexer = CppLexer::new(text, *config, &mut errors);
     let kind = lexer.lex();
@@ -1371,7 +1368,7 @@ pub fn lex_first(
         CppTokenKind::RightShift | CppTokenKind::GreaterEqual | CppTokenKind::RightShiftAssign => {
             Some((
                 CppTokenKind::Greater,
-                crate::text::SourceRange::new(range.start_offset, 1),
+                text::SourceRange::new(range.start_offset, 1),
             ))
         }
         other => Some((other, range)),

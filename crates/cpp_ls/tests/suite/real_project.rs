@@ -37,17 +37,15 @@ use serde_json::{Value, json};
 /// The project to open, and the file to open in it. Defaulted to the one this was written for, so that the command
 /// above works with no environment at all; `CPPLS_REAL_PROJECT` overrides the directory.
 fn project() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("CPPLS_REAL_PROJECT").unwrap_or_else(|_| r"E:\EmmyLuaCodeStyle".to_string()),
-    )
+    std::path::PathBuf::from(r"E:\EmmyLuaCodeStyle".to_string())
 }
 
 /// The file whose completion is timed — the one a person would have open, and the one the project's own source
 /// listing puts first.
 fn entry(project: &std::path::Path) -> std::path::PathBuf {
-    std::env::var("CPPLS_REAL_ENTRY")
+    Option::<String>::None
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             project
                 .join("CodeFormatServer")
                 .join("src")
@@ -74,7 +72,7 @@ impl Server {
             .arg(&log_dir)
             // The five numbers this probe exists for are `debug`, and the default level is `info`.
             .arg("--log-level")
-            .arg(std::env::var("CPPLS_LOG_LEVEL").unwrap_or_else(|_| "debug".to_string()))
+            .arg("debug")
             .current_dir(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

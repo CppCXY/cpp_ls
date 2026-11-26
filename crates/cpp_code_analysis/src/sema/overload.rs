@@ -35,6 +35,7 @@
 //! ranking it as `Exact` would let it win an argument it knows nothing about. So it is its own rank: it neither wins
 //! nor loses, and a candidate that has one can win only by being the sole viable candidate.
 
+use crate::sema;
 use crate::sema::symbol::Known;
 use crate::sema::types::parse_type_spelling;
 
@@ -362,6 +363,7 @@ fn is_a_promotion(from: &str, to: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sema;
 
     fn a_type(spelling: &str) -> Known<String> {
         Known::Yes(spelling.to_string())
@@ -459,9 +461,7 @@ mod tests {
         let candidates = vec![candidate(&["int"]), candidate(&["double"])];
         assert_eq!(
             choose(
-                &[Known::Unknown(
-                    crate::sema::symbol::UnknownReason::DependentName
-                )],
+                &[Known::Unknown(sema::symbol::UnknownReason::DependentName)],
                 &candidates
             ),
             Choice::Ambiguous,
@@ -678,10 +678,10 @@ pub(crate) fn more_specialized(mine: &Candidate, theirs: &Candidate) -> bool {
                 .iter()
                 .zip(&to.declared)
                 .all(|(from_spelling, to_spelling)| {
-                    crate::sema::deduction::deduce(
+                    sema::deduction::deduce(
                         &from.template_parameters,
                         std::slice::from_ref(from_spelling),
-                        &[crate::Known::Yes(to_spelling.clone())],
+                        &[Known::Yes(to_spelling.clone())],
                     )
                     .is_some()
                 })
@@ -763,7 +763,7 @@ fn the_more_specialized_of_two_templates_wins() {
     );
 
     let chosen = choose(
-        &[crate::Known::Yes("int*".to_string())],
+        &[Known::Yes("int*".to_string())],
         &[by_pointer.clone(), by_value.clone()],
     );
     assert_eq!(
@@ -776,7 +776,7 @@ fn the_more_specialized_of_two_templates_wins() {
     assert!(!more_specialized(&by_value, &by_value));
     assert_eq!(
         choose(
-            &[crate::Known::Yes("int*".to_string())],
+            &[Known::Yes("int*".to_string())],
             &[by_value.clone(), by_value.clone()]
         ),
         Choice::Ambiguous

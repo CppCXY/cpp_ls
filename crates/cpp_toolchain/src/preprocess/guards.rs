@@ -21,6 +21,7 @@
 //! visit-once — breaks the case where two headers use the same guard name by accident, which is common when
 //! projects copy each other's headers.
 
+use crate::token;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppSyntaxTree};
 
 use crate::{
@@ -160,7 +161,7 @@ pub fn declares_something_before_tokens(
     tokens.iter().any(|token| {
         let at = token.range.start_offset;
         at < offset
-            && !crate::token::is_trivia(token.kind)
+            && !token::is_trivia(token.kind)
             && !directives
                 .iter()
                 .any(|spanned| spanned.range.start_offset <= at && at < spanned.range.end_offset())

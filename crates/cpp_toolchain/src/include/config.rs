@@ -22,6 +22,8 @@
 //!
 //! [`compile_commands.json`]: https://clang.llvm.org/docs/JSONCompilationDatabase.html
 
+use crate::paths;
+use crate::project;
 use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
@@ -109,14 +111,14 @@ pub struct CompilerConfig {
     ///
     /// Carried on the configuration rather than looked up where it is needed, because the places that need it hold
     /// a configuration and a **file** and nothing else.
-    pub targets: Vec<crate::project::TargetSection>,
+    pub targets: Vec<project::TargetSection>,
 
     /// **The libraries this project's targets may depend on** — `[[library]]` in `.cppls.toml`.
     ///
     /// Carried here for the same reason [`CompilerConfig::targets`] is: [`CompilerConfig::for_file`] is given a
     /// configuration and a file and nothing else, and a target's `depends` is what decides whether a library's include
     /// directories are on that file's search path.
-    pub libraries: Vec<crate::project::LibrarySection>,
+    pub libraries: Vec<project::LibrarySection>,
 
     /// `-I` and `-isystem`, in the order they were given.
     ///
@@ -434,11 +436,7 @@ impl CompilerConfig {
         // that would disagree. Patterns of different targets usually exclude each other (`Server/**` and `Core/**`),
         // and where they do not, the nearer one's directories come first, which is what "nearest first" means for a
         // search path.
-        let mut describing: Vec<(
-            usize,
-            std::cmp::Reverse<usize>,
-            &crate::project::TargetSection,
-        )> = self
+        let mut describing: Vec<(usize, std::cmp::Reverse<usize>, &project::TargetSection)> = self
             .targets
             .iter()
             .enumerate()
@@ -917,7 +915,7 @@ pub fn config_from_arguments(
 pub fn project_config_from_flags(
     flags: &[String],
     working_directory: Option<PathBuf>,
-    section: &crate::project::CompileSection,
+    section: &project::CompileSection,
 ) -> CompilerConfig {
     let mut arguments: Vec<String> = flags
         .iter()
@@ -1364,7 +1362,7 @@ fn normalize_for_comparison(path: &Path, case_insensitive: bool) -> String {
         .map(|character| if character == '\\' { '/' } else { character })
         .collect();
 
-    crate::paths::normalize_path(Path::new(&unified), case_insensitive)
+    paths::normalize_path(Path::new(&unified), case_insensitive)
 }
 
 /// The `{...}` objects directly inside the outermost array.
@@ -1778,13 +1776,14 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
 
 #[cfg(test)]
 mod tests {
+    use crate::config;
     /// **A database that names both `Foo.cpp` and `foo.cpp` means both.** Matching used to fold case before comparing,
     /// so on a case-sensitive filesystem — where the two are different translation units — a request for either could
     /// select the other's command: a plausible wrong compilation rather than a missing one
     /// (`docs/worklog.md` P2-9).
     #[test]
     fn an_exact_case_match_wins_over_a_folded_one() {
-        let database = crate::config::parse_compile_commands(
+        let database = config::parse_compile_commands(
             r#"[
                 {"directory": "/p", "file": "/p/src/Foo.cpp", "arguments": ["clang++", "-DUPPER", "-c", "src/Foo.cpp"]},
                 {"directory": "/p", "file": "/p/src/foo.cpp", "arguments": ["clang++", "-Dlower", "-c", "src/foo.cpp"]}
@@ -1835,7 +1834,7 @@ mod tests {
     /// flags of the source beside it (`docs/worklog.md` P2-8).
     #[test]
     fn a_relative_command_file_is_resolved_against_its_directory() {
-        let database = crate::config::parse_compile_commands(
+        let database = config::parse_compile_commands(
             r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-DFROM_BUILD", "-c", "../src/a.cpp"]}]"#,
         );
 
@@ -1866,7 +1865,7 @@ mod tests {
     /// name it was invoked with; the index needs one identity per file, so the command keeps both.
     #[test]
     fn the_presumed_name_is_the_spelling_the_database_wrote() {
-        let database = crate::config::parse_compile_commands(
+        let database = config::parse_compile_commands(
             r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-c"]}]"#,
         );
         let config = CompilerConfig {

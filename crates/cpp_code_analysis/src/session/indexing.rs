@@ -4,6 +4,10 @@
 //! one, and the two are the same walk called with different budgets.
 
 use super::*;
+use crate::IncludeVisibility;
+use crate::TranslationUnit;
+use crate::file;
+use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **The translation units a pass over these files reads its environments out of** — one walk each, and cached.
@@ -16,7 +20,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn units_for_the_pass(
         &self,
         files: &[PathBuf],
-    ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
+    ) -> Vec<std::sync::Arc<TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the
         // argument was right about coverage and wrong about cost, because the units built here are a **local** vector
@@ -77,7 +81,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The sequential loop is also the one that walks **fewer** timelines: it skips a candidate an earlier unit
         // already covers, which is roughly 541 of 1729 on that project and is exactly what running first gives up.
-        let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
+        let mut units: Vec<std::sync::Arc<TranslationUnit>> = Vec::new();
 
         // **A unit already in memory may cover this file, and then there is nothing to walk.**
         //
@@ -89,7 +93,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The key carries the environment (`SummaryKey::env_hash`), so a summary built from one root's environment is
         // filed under it: reusing a unit can produce a *different* entry, never a wrong one.
-        let held: Vec<std::sync::Arc<crate::TranslationUnit>> = {
+        let held: Vec<std::sync::Arc<TranslationUnit>> = {
             let table = self.held_units();
             table
                 .held
@@ -140,7 +144,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn walk_the_timelines(
         &self,
         roots: Vec<PathBuf>,
-    ) -> Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)> {
+    ) -> Vec<(PathBuf, Option<std::sync::Arc<TranslationUnit>>)> {
         roots
             .into_iter()
             .map(|root| {
@@ -166,18 +170,13 @@ impl<F: FileProvider + Clone> Session<F> {
         path: PathBuf,
         priority: Priority,
         depth: usize,
-        ready: Option<crate::index::store::Prepared>,
+        ready: Option<index::store::Prepared>,
+        // May this read build a translation timeline? An edited open buffer only needs its own summary; a full
+        // closure walk is the difference between a keystroke and a project read.
+        timeline: bool,
     ) -> Step {
         {
-            let loading = std::time::Instant::now();
             self.vfs.load(&path);
-            if crate::probes::units() {
-                eprintln!(
-                    "[step] load {} took {} us",
-                    path.display(),
-                    loading.elapsed().as_micros()
-                );
-            }
         }
         let before = self.store.stats();
 
@@ -208,22 +207,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // and is not worth asserting anything about. See [`HeldUnit`].
         let prepared_with_environment = ready
             .as_ref()
-            .is_some_and(crate::index::store::Prepared::with_environment);
-        let unit = if ready.is_none() {
+            .is_some_and(index::store::Prepared::with_environment);
+        let unit = if ready.is_none() && timeline {
             self.the_timeline_to_read_through(&spelled)
         } else {
             None
         };
-        let timed = std::time::Instant::now();
-        let timeline_ask = std::time::Instant::now();
-        if crate::probes::units() {
-            eprintln!(
-                "[step] timeline question for {} took {} ms (timeline {})",
-                path.display(),
-                timeline_ask.elapsed().as_millis(),
-                unit.is_some()
-            );
-        }
+
         let has_a_timeline = unit
             .as_ref()
             .is_some_and(|unit| unit.environment_of(&spelled).is_some());
@@ -251,16 +241,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 None => self.store.get(&path),
             },
         };
-        if crate::probes::units() {
-            eprintln!(
-                "[step] {} read in {} ms after a {} ms timeline question (timeline {})",
-                path.display(),
-                timed.elapsed().as_millis(),
-                timeline_ask.elapsed().as_millis(),
-                unit.is_some()
-            );
-        }
-        let tail = std::time::Instant::now();
+
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
                 summary
@@ -272,29 +253,12 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_default();
         let after = self.store.stats();
         let outcome = outcome_of(before, after);
-        if crate::probes::units() {
-            eprintln!(
-                "[step] {} includes+stats took {} us ({} include(s))",
-                path.display(),
-                tail.elapsed().as_micros(),
-                includes.len()
-            );
-        }
 
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
         // tenth translation unit includes is not.
-        let queueing = std::time::Instant::now();
-        let include_count = includes.len();
         for include in includes {
             self.queue.add(include, priority, depth + 1);
-        }
-        if crate::probes::units() {
-            eprintln!(
-                "[step] {} queued {include_count} include(s) in {} us",
-                path.display(),
-                queueing.elapsed().as_micros()
-            );
         }
 
         // **And what the disk said while this reading was taken.** One `stat` per file read — the whole cost of the
@@ -303,7 +267,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // looking at, and the client is the authority for it.
         if !self.documents.is_open(&path) {
             let key = queue_key(&path);
-            match crate::file::FileStamp::of(&path) {
+            match file::FileStamp::of(&path) {
                 Some(stamp) => {
                     self.stamps.insert(key, stamp);
                 }
@@ -370,7 +334,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The file a request is about is one the second pass may refine** — see `want_refinement`.
         self.want_refinement(path);
         if self.queue.forget(path) {
-            self.index_one(path.to_path_buf(), Priority::Open, 0, None);
+            self.index_one(path.to_path_buf(), Priority::Open, 0, None, false);
         }
 
         // **A slice of its includes, not all of them, and the difference is a hover's latency.** Reading an include
@@ -397,7 +361,7 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         for include in includes {
             self.queue.forget(&include);
-            self.index_one(include, Priority::Open, 1, None);
+            self.index_one(include, Priority::Open, 1, None, true);
         }
     }
 
@@ -520,7 +484,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .visible_files(path)
             .iter()
             .all(|(file, visibility)| {
-                *visibility != crate::IncludeVisibility::Unconditional
+                *visibility != IncludeVisibility::Unconditional
                     || self.store.index().summary(Path::new(file)).is_some()
             })
     }
@@ -576,12 +540,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
-        let tracing = crate::probes::cooking();
-
         loop {
-            let round_started = std::time::Instant::now();
             let steps = self.advance(64);
-            let advanced = round_started.elapsed();
             // **Every file a batch read names is a file to refine.** This is the review's lever: a request asks
             // (`catch_up`), and a batch caller that just read the whole project asks for the whole project. It was held
             // back while the refined reading was weaker than the raw one; the refinement now files its rendering as the
@@ -650,7 +610,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // round after `index_everything` — measured: `refined true wanted 0 backlog 0 pending 0`. So every
             // dependant of the eager ask is a dependant of *being asked*, and the loop goes.
             let _ = &steps;
-            let refined = round_started.elapsed() - advanced;
             let read = steps.len();
             // **Not asked for here, and the reason is the next defect rather than this call.** Every file this pass
             // reads would be a file to refine, which is what "index everything" sounds like it means — and it makes four
@@ -670,36 +629,14 @@ impl<F: FileProvider + Clone> Session<F> {
             // drop is a file that is **no longer queued and never cooked**, and the loop below reads that state as
             // "nothing left to do": `read == 0 && cooked == 0` ends the work with a cooking backlog still standing.
             // Measured on the completion fixture: `pending 0, cooking 22` on every round, for six rounds.
-            let cook_started = std::time::Instant::now();
             let cooked = {
                 let claimed = self.claim_cooking(COOK_SLICE);
-                if tracing && !claimed.is_empty() {
-                    eprintln!("cooking: claimed {} file(s) {:?}", claimed.len(), claimed);
-                }
+
                 let materials = self.materials_for(claimed);
-                let wanted = materials.len();
                 let rendered = self.render_them(materials);
-                let built = rendered.len();
-                let committed = self.commit_them(rendered).len();
-                if tracing && (built != wanted || committed != built) {
-                    eprintln!(
-                        "cooking: rendered {built} of {wanted} claimed, committed {committed} \
-                         (cooking backlog {})",
-                        self.pending_cooking()
-                    );
-                }
-                committed
+
+                self.commit_them(rendered).len()
             };
-            let cook = cook_started.elapsed();
-            if crate::probes::units() {
-                // **Three timers, each taken where it happened** rather than one derived by subtraction: the round
-                // that appeared to take 56 s had an `advance` of 7 ms and a cook of 1 µs, so the 56 s was in neither
-                // and the derived figure could not say where. The three now print their own walls.
-                eprintln!(
-                    "DRAIN round: advance {advanced:?} ({read} file(s)), refine {refined:?}, cook {cook:?} ({cooked} committed), round total {:?}",
-                    round_started.elapsed(),
-                );
-            }
 
             // **The second pass is work, and this loop used to return while it was owed.**
             // `advance` drains up to [`RE_READ_SLICE`] of the backlog per call, and the backlog is
@@ -715,25 +652,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // slice, and `pending_work` counts it, so the work still happens; what the loop bought
             // was paying for it *before* the session answered anything.
             if read == 0 && cooked == 0 {
-                if tracing {
-                    // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
-                    // the writer used and the key the reader computes are two different keys — which is the one
-                    // failure a count cannot show and the two hashes beside it can.
-                    let cached: Vec<String> = self
-                        .renderings
-                        .lock()
-                        .map(|known| {
-                            known
-                                .keys()
-                                .map(|(path, hash)| format!("{}#{hash}", path.display()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    eprintln!(
-                        "cooking: stopping with read 0, cooked 0, backlog {} | cache {cached:?}",
-                        self.pending_cooking()
-                    );
-                }
                 // **The idle step, and this is the idle.** A session that has just finished indexing is the one
                 // moment when collecting the cache is free of a reader: rows nothing references (a file that changed
                 // while the last run was writing it, a deleted file, a summary from a previous generation) are
@@ -757,6 +675,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 if forgotten > 0 {
                     log::debug!("index: forgot {forgotten} summary(ies) over the byte budget");
                 }
+                // **And the cook records, which the commit only marked.** A session that has just indexed is exactly
+                // the moment the debounce exists for: writing them during the commit made a program read hold the
+                // writer for seconds, and writing them here is one quiet pass at the end. A caller that says "index
+                // everything" gets the records too — that is what a warm start reads.
+                let written = self.persist_cooked(std::time::Duration::ZERO);
+                if written > 0 {
+                    log::debug!("index: wrote {written} cooked record(s)");
+                }
                 return total;
             }
         }
@@ -772,6 +698,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// [`Session::pending_work`].
     pub fn pending(&self) -> usize {
         self.queue.pending()
+    }
+
+    /// **Flush the summary cache's buffered writes.** The cache batches summaries and notes, and a process that
+    /// exits with a batch still in memory loses exactly the work the next start would have reused. The pump calls
+    /// this at the end of a slice, where the writes it just committed are already paid for.
+    pub fn flush_the_summary_cache(&self) {
+        self.store.flush_summaries();
     }
 
     /// **Everything the session has left to do**: the index queue, the cooking backlog, and the second pass.
@@ -941,15 +874,10 @@ impl<F: FileProvider + Clone> Session<F> {
             };
             wanted.remove(&path);
             if self.store.index().summary(&path).is_none() {
-                if crate::probes::cooking() {
-                    eprintln!("refinement ask not yet: {} (no summary)", path.display());
-                }
                 not_yet.push(path);
                 continue;
             }
-            if crate::probes::cooking() {
-                eprintln!("refinement ask taken: {}", path.display());
-            }
+
             if let Some(at) = self
                 .parsed_since_the_last_pass
                 .iter()
@@ -975,10 +903,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// scope. The second pass repairs that, and until it runs, a **check** reading this summary is reading an answer
     /// that is about to change.
     pub fn is_owed_a_re_read(&self, path: &Path) -> bool {
-        let key = crate::file::paths::normalize_path(path, cfg!(windows));
+        let key = file::paths::normalize_path(path, cfg!(windows));
         self.parsed_since_the_last_pass
             .iter()
-            .any(|queued| crate::file::paths::normalize_path(queued, cfg!(windows)) == key)
+            .any(|queued| file::paths::normalize_path(queued, cfg!(windows)) == key)
     }
 
     /// **Does anything this file can see wait for the second pass?** — the closure question behind

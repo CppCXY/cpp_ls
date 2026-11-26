@@ -93,10 +93,6 @@ async fn format_request(
     only: Option<Range>,
     cancel_token: CancellationToken,
 ) -> RequestOutcome<Vec<TextEdit>> {
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-    }
-
     // **The text and the choice, in one snapshot**: both are answers about a file's session, and the formatting itself
     // is not — it happens below, off the snapshot, because a whole-file format is 100 ms of work and a child process
     // is longer than any query thread should be held for.

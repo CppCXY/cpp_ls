@@ -25,6 +25,7 @@
 //! different question with a different table.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::project;
 
 pub struct UeSpecifier;
 
@@ -40,7 +41,7 @@ impl Check for UeSpecifier {
             let Some(reflection) = &fact.reflection() else {
                 continue;
             };
-            let Some(known) = crate::project::ue::known_specifiers(&reflection.macro_name) else {
+            let Some(known) = project::ue::known_specifiers(&reflection.macro_name) else {
                 continue;
             };
             for specifier in &reflection.specifiers {

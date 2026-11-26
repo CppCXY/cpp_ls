@@ -32,6 +32,7 @@
 //! * No template-argument bookkeeping: inside `vector<|` the answer is the names in scope, which is exactly what
 //!   an unqualified name position means, and the closing `>` is the client's business.
 
+use crate::doc;
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, SourceRange};
 
 use crate::sema::resolve::{self, MemberAccess, NamePosition};
@@ -334,7 +335,7 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
     // **A code block is an example of *code*** — `@code` … `@endcode` — so its words are the program's, and the
     // answer there is the name completion a statement gets rather than the prose refusal below. Asked before every
     // other documentation question, because a code block is the innermost scope a cursor in a comment can be in.
-    if crate::doc::inside_a_code_block(&root.text().to_string(), offset) {
+    if doc::inside_a_code_block(&root.text().to_string(), offset) {
         let line_before_cursor = &line[..line.len().min(line.len())];
         let typed = line_before_cursor
             .trim_end()

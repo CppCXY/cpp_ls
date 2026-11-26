@@ -316,6 +316,7 @@ fn collect_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context;
     use notify::event::Flag;
 
     #[test]
@@ -401,10 +402,10 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         let (connection, _client) = Connection::memory();
-        let server = crate::context::ServerContext::new(
+        let server = context::ServerContext::new(
             Arc::new(connection),
             ClientCapabilities::default(),
-            crate::context::ClientId::Other,
+            context::ClientId::Other,
             None,
         );
         let context = server.snapshot();

@@ -30,6 +30,9 @@
 //! that folded it into `true` would grey out the other half. Both are wrong, and both are worse than
 //! saying "I do not know", so the caller gets to decide what to do about it.
 
+use crate::expand;
+use crate::macros;
+use crate::preprocess;
 use cpp_parser::{CppTokenKind, SourceRange};
 
 use crate::token::is_trivia;
@@ -290,7 +293,7 @@ impl MacroValues for NoMacros {
     }
 }
 
-impl MacroValues for crate::macros::MacroTable {
+impl MacroValues for macros::MacroTable {
     fn lookup(&self, name: &str) -> Lookup<'_> {
         self.get(name).map_or(Lookup::Undefined, Lookup::Defined)
     }
@@ -432,14 +435,14 @@ fn expand_a_run_recording(tokens: &[Token], macros: &impl MacroValues) -> (Vec<T
         return (Vec::new(), true);
     }
 
-    let expansion = crate::expand::expand_with_budget(tokens, macros, EXPANSION_BUDGET);
+    let expansion = expand::expand_with_budget(tokens, macros, EXPANSION_BUDGET);
     // **`Origin::Source` for every token is the identity.** An expansion that replaced a call yields tokens whose
     // origin is a macro body, or two tokens joined by `##` — anything but "exactly what was written here". So this
     // one flag covers the whole question without comparing texts.
     let unchanged = expansion
         .tokens
         .iter()
-        .all(|expanded| matches!(expanded.origin, crate::preprocess::expand::Origin::Source));
+        .all(|expanded| matches!(expanded.origin, preprocess::expand::Origin::Source));
     let tokens = expansion
         .tokens
         .into_iter()
@@ -635,7 +638,7 @@ fn macro_value(definition: &MacroDef, macros: &impl MacroValues) -> Value {
         return Value::Known(value);
     }
 
-    let expanded = crate::expand::expand_with_budget(&body, macros, EXPANSION_BUDGET);
+    let expanded = expand::expand_with_budget(&body, macros, EXPANSION_BUDGET);
     let tokens: Vec<Token> = expanded
         .tokens
         .into_iter()

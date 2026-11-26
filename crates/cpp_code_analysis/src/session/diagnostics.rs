@@ -4,6 +4,13 @@
 //! tool both call, and it is the only place that decides which reading a finding's range belongs to.
 
 use super::*;
+use crate::FileSummary;
+use crate::FileView;
+use crate::ImportTarget;
+use crate::ModuleInfo;
+use crate::cache;
+use crate::file;
+use crate::sema;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **What to report about one file, said in the file's own coordinates** — the answer the diagnostics channel
@@ -74,8 +81,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// They are not errors, and `FileDiagnostics` is the *errors* — a type whose severity is fixed at one value
     /// because everything in it is a parse failure. These are information, and merging them would mean a field whose
     /// only two values are "what everything else in the list is" and "this one", which is a field that says nothing.
-    pub fn notes_about_the_modules(&self, view: &crate::FileView) -> Vec<ModuleNote> {
-        let info = crate::ModuleInfo::from_tree(&view.root);
+    pub fn notes_about_the_modules(&self, view: &FileView) -> Vec<ModuleNote> {
+        let info = ModuleInfo::from_tree(&view.root);
         let own_module = info.module_name.clone();
         let mut notes = Vec::new();
 
@@ -191,10 +198,10 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn module_unit_at(
         &self,
         view: &FileView,
-        in_the_file: crate::file::coordinates::FileOffset,
+        in_the_file: file::coordinates::FileOffset,
     ) -> Option<ModuleUnitTarget> {
         let summary = self.store.index().summary(&view.path)?;
-        let info = crate::ModuleInfo::from_tree(&view.root);
+        let info = ModuleInfo::from_tree(&view.root);
         let (position, import) = info.imports.iter().enumerate().find(|(_, import)| {
             let at = in_the_file.get();
             import.range.start_offset <= at && at < import.range.end_offset()
@@ -203,7 +210,7 @@ impl<F: FileProvider + Clone> Session<F> {
         match &import.target {
             // **A partition**: the nth partition import of this file, because that is the order the summary
             // resolved them in. The module it belongs to is the file's own, by the language's own rule.
-            crate::ImportTarget::Partition(name) => {
+            ImportTarget::Partition(name) => {
                 let nth = info.imports[..position]
                     .iter()
                     .filter(|earlier| earlier.target.partition_name().is_some())
@@ -216,7 +223,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 })
             }
             // **A module name**: the interface unit the index knows it by.
-            crate::ImportTarget::Module(name) => {
+            ImportTarget::Module(name) => {
                 let interface = self
                     .store
                     .index()
@@ -230,7 +237,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 })
             }
             // A header unit is a header: `header_at` answers it, and it declares no module.
-            crate::ImportTarget::HeaderUnit { .. } => None,
+            ImportTarget::HeaderUnit { .. } => None,
         }
     }
 
@@ -323,7 +330,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         start,
                         end,
                         message,
-                        code: crate::sema::check::DiagnosticCode::SyntaxError,
+                        code: sema::check::DiagnosticCode::SyntaxError,
                     }],
                     None => cooked
                         .diagnostics
@@ -334,7 +341,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             message: error.message.clone(),
                             // **Every diagnostic carries its rule.** These came from the parser, so the rule is
                             // `syntax-error` — stated here rather than left for the client to guess from the message.
-                            code: crate::sema::check::DiagnosticCode::SyntaxError,
+                            code: sema::check::DiagnosticCode::SyntaxError,
                         })
                         .collect(),
                 },
@@ -364,9 +371,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// rendering is a brace**. A fragment's body begins with the `{` of the initializer its including file opens;
     /// nothing else starts a translation unit that way, and a file that has an `#error` in a branch nobody takes still
     /// starts with a declaration. See the call site for the header this was measured on.
-    pub(crate) fn a_fragment_and_its_message(
-        view: &crate::FileView,
-    ) -> Option<(usize, usize, String)> {
+    pub(crate) fn a_fragment_and_its_message(view: &FileView) -> Option<(usize, usize, String)> {
         let written = view.written_text().unwrap_or(&view.source);
         let (start, end, message) = Self::error_directive_line(written)?;
 
@@ -419,11 +424,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Nothing is parsed here. Every check is answered from the summary the reading already produced, so asking
     /// for diagnostics is not a reason for a parse to happen — it is a reason to read what one produced.
-    pub(crate) fn checks_about(
-        &self,
-        key: &Path,
-        view: &crate::FileView,
-    ) -> Vec<crate::sema::check::Finding> {
+    pub(crate) fn checks_about(&self, key: &Path, view: &FileView) -> Vec<sema::check::Finding> {
         let index = self.store.index();
         let Some(summary) = index.summary(key) else {
             return Vec::new();
@@ -460,7 +461,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // `enable` for one that starts from nothing, `disable` for the single rule that is noise. Unknown names are
         // logged rather than ignored: a rule a user believes is on and that never runs is the failure this
         // mechanism exists to prevent.
-        let config = crate::sema::check::CheckConfig::from_names(
+        let config = sema::check::CheckConfig::from_names(
             &self.project_config().config.diagnostics.enable,
             &self.project_config().config.diagnostics.disable,
         );
@@ -491,7 +492,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .inactive_regions(key)
             .map(|regions| regions.spans)
             .unwrap_or_default();
-        let findings = crate::sema::check::run(crate::sema::check::CheckContext::new(
+        let findings = sema::check::run(sema::check::CheckContext::new(
             key,
             summary,
             model,
@@ -550,7 +551,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// A closure too large to fingerprint answers `None`, and then the revision goes back in: a key that is too
     /// coarse is a slow pull, while one that is too narrow is a wrong finding.
-    pub(crate) fn the_state_of_a_pull(&self, key: &Path, summary: &crate::FileSummary) -> u64 {
+    pub(crate) fn the_state_of_a_pull(&self, key: &Path, summary: &FileSummary) -> u64 {
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(format!("{:?}", summary.key).as_bytes());
         match self.store.the_closure_fingerprint(key) {
@@ -577,7 +578,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .as_ref()
                 .is_some_and(|unreal| unreal.is_on()),
         ));
-        crate::cache::fnv1a64(&bytes)
+        cache::fnv1a64(&bytes)
     }
 
     /// **Answer the pull for the files a reader has open, before it is asked for.**

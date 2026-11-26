@@ -12,6 +12,7 @@
 //! reported at startup rather than silently dropped; the multi-root item is carried below, and the
 //! honest state today is "one folder is analysed, and the log says which".
 
+use crate::util;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -71,7 +72,7 @@ impl std::fmt::Display for DocumentChangeError {
 fn edit_offset(text: &str, index: &LineIndex, position: Position) -> Option<usize> {
     let line = position.line as usize;
     let start = usize::from(index.get_line_offset(line)?);
-    let body = crate::util::line_body(text, index, line)?;
+    let body = util::line_body(text, index, line)?;
     let mut units = 0u32;
     for (offset, character) in body.char_indices() {
         if units == position.character {
@@ -269,11 +270,7 @@ impl WorkspaceState {
             return true;
         }
 
-        if !self
-            .roots
-            .iter()
-            .any(|root| crate::util::is_inside(path, root))
-        {
+        if !self.roots.iter().any(|root| util::is_inside(path, root)) {
             return false;
         }
 

@@ -26,6 +26,10 @@
 //! `CppInitListExpr::{get_constructed_type, get_elements}`. A parameter's `&` is its declarator's (`is_a_reference`), and a
 //! local's `static` is its specifier sequence's (`has_keyword`) — neither is a slice of the source.
 
+use crate::Binding;
+use crate::Known;
+use crate::ScopeKind;
+use crate::sema;
 use cpp_parser::{CppAstNode, CppAstToken, CppExpr, CppTokenKind};
 
 use super::CheckContext;
@@ -144,8 +148,8 @@ pub(crate) fn origin_of(
         CppExpr::NameExpr(name) => {
             let description = name.syntax().text().to_string();
             let offset = usize::from(name.get_last_name_token()?.get_range().start());
-            let crate::Known::Yes(binding) =
-                crate::sema::resolve::definition_at(context.scopes(), context.tree(), offset)
+            let Known::Yes(binding) =
+                sema::resolve::definition_at(context.scopes(), context.tree(), offset)
             else {
                 return Some(unknown(description));
             };
@@ -161,11 +165,11 @@ pub(crate) fn origin_of(
             let before_the_body =
                 binding.name_range.start_offset < usize::from(function_body.text_range().start());
             let origin = match scope.kind {
-                crate::ScopeKind::Class => Origin::Member,
+                ScopeKind::Class => Origin::Member,
                 // **A parameter is bound in the function scope and written before the body begins.** Asked before the
                 // "outside the body" arm, because a parameter *is* outside the body — that ordering made every parameter a
                 // `Global`, which is silent in both rules that read this and hid the by-value case `dangling-field` exists for.
-                crate::ScopeKind::Function if before_the_body => {
+                ScopeKind::Function if before_the_body => {
                     if a_parameter_is_a_reference(context, &binding) {
                         Origin::ReferenceParameter
                     } else {
@@ -323,7 +327,7 @@ pub(crate) fn origin_of(
 /// Asked of the **parameter node** whose span covers the binding (`CppDeclarator::is_a_reference`), not of the source text
 /// before the name: `int (&)[3]` is a reference and a by-value `std::string` is not, and a `&` written in a default argument
 /// belongs to no parameter.
-fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &Binding) -> bool {
     let start = binding.range.start_offset;
     let end = binding.range.end_offset();
     let parameter = context
@@ -351,7 +355,7 @@ fn a_parameter_is_a_reference(context: &CheckContext<'_>, binding: &crate::Bindi
 /// because a parameter's pointer names the caller's bytes rather than a local's.
 ///
 /// The declaration is found the way [`declared_static`] finds it: the innermost declaration containing the name.
-fn the_binding_owns_nothing(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+fn the_binding_owns_nothing(context: &CheckContext<'_>, binding: &Binding) -> bool {
     let name_start = binding.name_range.start_offset;
     let declaration = context
         .own::<cpp_parser::CppDeclaration>()
@@ -380,7 +384,7 @@ fn the_binding_owns_nothing(context: &CheckContext<'_>, binding: &crate::Binding
 /// `const char* p` owns none either: what they name belongs to the caller, so copying one into a view member is not a
 /// borrow of the parameter. Measured on `EmmyLuaCodeStyle`'s `spell::Word`, whose correct
 /// `Word(TextRange range, std::string_view item) : Item(item) {}` was reported as "a parameter that is destroyed".
-fn a_parameter_owns_nothing(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+fn a_parameter_owns_nothing(context: &CheckContext<'_>, binding: &Binding) -> bool {
     let start = binding.range.start_offset;
     let end = binding.range.end_offset();
     let parameter = context
@@ -420,7 +424,7 @@ fn temporary(expression: &cpp_parser::CppSyntaxNode) -> Borrowed {
 
 /// Is the declaration that binds this name written with `static` or `thread_local`? A local with static storage duration
 /// outlives every call, so handing out a reference to it is not a defect.
-fn declared_static(context: &CheckContext<'_>, binding: &crate::Binding) -> bool {
+fn declared_static(context: &CheckContext<'_>, binding: &Binding) -> bool {
     let name_start = binding.name_range.start_offset;
     // **The innermost declaration that contains the name** — the local's own statement, not the function around it.
     let declaration = context

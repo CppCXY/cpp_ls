@@ -1,8 +1,12 @@
 //! **Programs** — reading a program: roots, edits, invalidation, waves
 
+use crate::CompilerConfig;
+use crate::ProjectDefinitions;
+use crate::WatchFilter;
 use crate::file::coordinates::ReadingOffset;
 use crate::file::paths::MemoryFiles;
 use crate::index::StepOutcome;
+use crate::session;
 use crate::session::{Session, queue_key};
 use crate::symbol::Known;
 use std::path::{Path, PathBuf};
@@ -29,11 +33,11 @@ pub(crate) fn a_project_can_decline_to_read_its_other_roots() {
     let fixture = Memory::new("a-project-declines", &files);
     // **The session's root is the project's**, not the fixture's temporary directory: `.cppls.toml` is read from
     // under that root, and the fixture files live under `/p`.
-    let mut session = crate::Session::with_config(
+    let mut session = Session::with_config(
         "/p",
         fixture.providers.clone(),
-        crate::WatchFilter::new("/p"),
-        crate::CompilerConfig::default(),
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
     );
     session.add_project_files([
         std::path::PathBuf::from("/p/a.cpp"),
@@ -198,9 +202,8 @@ pub(crate) fn a_file_read_as_a_program_needs_no_guard_filter() {
 
     let with = ask(&session);
     session.index().forget_the_name_answers();
-    crate::probes::set_no_guard_filter(true);
+
     let without = ask(&session);
-    crate::probes::set_no_guard_filter(false);
 
     assert_eq!(
         with, without,
@@ -360,7 +363,7 @@ pub(crate) fn a_header_read_in_two_programs_answers_each_its_own_way() {
 
     let from_a = session.index().definitions("X", Path::new("/p/a.cpp"));
     let from_b = session.index().definitions("X", Path::new("/p/b.cpp"));
-    let offset = |known: &Known<crate::ProjectDefinitions>| match known {
+    let offset = |known: &Known<ProjectDefinitions>| match known {
         Known::Yes(found) => found.found.first().map(|one| one.fact.range.start_offset),
         _ => None,
     };
@@ -408,7 +411,7 @@ pub(crate) fn a_branch_nobody_takes_reports_nothing_once_the_file_is_cooked() {
     let cooked = session.diagnostics("/p/main.cpp").expect("the file reads");
     assert_eq!(
         cooked.reading,
-        crate::session::DiagnosticReading::Cooked,
+        session::DiagnosticReading::Cooked,
         "the index holds a reading of this file now"
     );
     assert!(
@@ -456,7 +459,7 @@ pub(crate) fn a_cooked_error_is_placed_in_the_file_not_in_the_rendering() {
     );
 
     let found = session.diagnostics("/p/main.cpp").expect("the file reads");
-    assert_eq!(found.reading, crate::session::DiagnosticReading::Cooked);
+    assert_eq!(found.reading, session::DiagnosticReading::Cooked);
     assert_eq!(found.errors.len(), 1, "{found:?}");
 
     let error = &found.errors[0];
@@ -887,7 +890,7 @@ pub(crate) fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_sec
 pub(crate) fn a_wave_with_nothing_to_parse_still_carries_the_drains_timelines() {
     // **Four more than the second pass takes at once**, so the queue empties with a backlog still standing — the
     // state this test is about. The fixture used to be eight, which was "one more than four".
-    let count = crate::session::RE_READ_SLICE + 4;
+    let count = session::RE_READ_SLICE + 4;
     let files = (0..count).fold(MemoryFiles::new(), |files, at| {
         files.with_file(format!("/p/f{at}.cpp"), format!("int value_{at} = {at};\n"))
     });

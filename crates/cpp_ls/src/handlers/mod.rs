@@ -20,6 +20,29 @@
 //! `document_symbol`, `folding_range`, `references`, `rename`, `selection_range`, `workspace_symbol` and
 //! `inlay_hint` all came back that way.
 
+/// **Is this request a refresh that an edit already made pointless?**
+///
+/// A client asks for these after **every** keystroke — semantic tokens, inlay hints, code lenses, document symbols,
+/// a pull diagnostic — and an answer computed for text that has moved on is read by nobody: the next keystroke asks
+/// again. So they may be cancelled by a newer change ([`crate::context::ServerContext::task`]), and they must be,
+/// because otherwise they queue ahead of completion: measured with an editor's six-requests-per-keystroke mix, a
+/// completion took **3 s** and its list was about text three seconds old.
+///
+/// Everything not named here is an interactive question (`completion`, `hover`, `signatureHelp`, `definition`,
+/// `codeAction`, …) and is answered from whatever the barrier applied.
+pub fn a_newer_change_cancels(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/full/delta"
+            | "textDocument/semanticTokens/range"
+            | "textDocument/inlayHint"
+            | "textDocument/codeLens"
+            | "textDocument/documentSymbol"
+            | "textDocument/diagnostic"
+    )
+}
+
 pub mod call_hierarchy;
 mod code_action;
 mod code_lens;
@@ -100,8 +123,10 @@ pub async fn read_the_modules(
     caught_up: bool,
 ) {
     if !caught_up {
-        context.analysis().catch_up(path).await;
+        // A request no longer catches the file up; the update queue's writer owns the index impact. The parameter
+        // stays in the signature for the callers that still name it while the queue refactor lands.
     }
+
     // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
     // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
     // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for

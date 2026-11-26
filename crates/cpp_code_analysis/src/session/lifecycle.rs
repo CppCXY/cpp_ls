@@ -3,6 +3,15 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::*;
+use crate::FileSummary;
+use crate::MacroDefinitions;
+use crate::ParsedDefinitions;
+use crate::completion;
+use crate::cuda_source_extensions;
+use crate::effect;
+use crate::file;
+use crate::index;
+use crate::project;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
@@ -25,7 +34,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // The project's own file is read here too, and by the same code: a session the caller configured still
         // analyses *this* project (`workspace.exclude`, `index.cache_dir`), and the build-system half is skipped
         // because the caller has said what the compilation is.
-        let config_report = crate::project::load_config(&files, &root, None);
+        let config_report = project::load_config(&files, &root, None);
         let filter = apply_project_config(filter, &config_report);
 
         let discovery = ProjectDiscovery {
@@ -75,7 +84,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut extra_extensions = project_config.config.workspace.source_extensions.clone();
         if config.cuda() {
             extra_extensions.extend(
-                crate::cuda_source_extensions()
+                cuda_source_extensions()
                     .iter()
                     .map(|extension| (*extension).to_string()),
             );
@@ -135,7 +144,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // megabytes of headers instead of whitespace.
         let configured = the_compilation_is_known(toolchain.as_ref());
         let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
-            .with_macros(crate::index::environment::compilation_environment(
+            .with_macros(index::environment::compilation_environment(
                 &config,
                 toolchain.as_ref(),
                 configured,
@@ -147,7 +156,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         // The search path, read once. Before the struct literal rather than inside it because it borrows `config`,
         // which the literal moves.
-        let headers = crate::completion::header_index(&config, &root, project.clone());
+        let headers = completion::header_index(&config, &root, project.clone());
 
         let mut session = Session {
             root: root.clone(),
@@ -161,7 +170,7 @@ impl<F: FileProvider + Clone> Session<F> {
             documents,
             store,
             filter,
-            share_contributions: crate::probes::share(),
+            share_contributions: false,
             project_paths: project
                 .iter()
                 .map(|path| (queue_key(path), path.clone()))
@@ -174,7 +183,7 @@ impl<F: FileProvider + Clone> Session<F> {
             refinement_misses: std::sync::Mutex::new(std::collections::HashSet::new()),
             refined_readings: std::sync::Mutex::new(std::collections::HashSet::new()),
             cooking: Cooking::default(),
-            definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
+            definitions: std::sync::Mutex::new(MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
             walked_by_content: std::sync::Mutex::new(cache::cache_lru::Cache::new(
                 MAX_WALKS_BY_CONTENT_ENTRIES,
@@ -192,16 +201,20 @@ impl<F: FileProvider + Clone> Session<F> {
 
             last_edit: std::time::Instant::now(),
             directive_signatures: std::collections::HashMap::new(),
+            cook_persistence: std::sync::Mutex::new(std::collections::HashMap::new()),
+
             prefetched: HashMap::new(),
             prefetched_order: std::collections::VecDeque::new(),
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
-            parsed_definitions: std::sync::Mutex::new(crate::ParsedDefinitions::new()),
+            parsed_definitions: std::sync::Mutex::new(ParsedDefinitions::new()),
+            configurations: std::sync::Mutex::new(HashMap::new()),
             config_for_file: std::sync::Mutex::new(HashMap::new()),
             macro_environments: std::sync::Mutex::new(cache::cache_lru::Cache::macro_environments()),
-            surfaces: std::sync::Mutex::new(crate::effect::Surfaces::new()),
+            surfaces: std::sync::Mutex::new(effect::Surfaces::new()),
             effects: std::sync::Mutex::new(HashMap::new()),
             renderings: std::sync::Mutex::new(cache::cache_lru::Cache::renderings()),
+            open_renderings: std::sync::Mutex::new(HashMap::new()),
             feature_cache: cpp_toolchain::FeatureCache::default(),
             views: std::sync::Mutex::new(cache::cache_lru::Cache::views()),
             rendering_views: std::sync::Mutex::new(cache::cache_lru::Cache::rendering_views()),
@@ -378,7 +391,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **What the file directs, without parsing it** — the reading a timeline walk needs, available *before* a file
     /// is indexed. See [`crate::index::FileIndexer::directive_summary`], and
     /// [`SummaryStore::directive_summary`](crate::SummaryStore::directive_summary) for why the store remembers it.
-    pub fn directive_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+    pub fn directive_summary(&self, path: &Path) -> Option<FileSummary> {
         self.store
             .directive_summary(path)
             .map(|summary| (*summary).clone())
@@ -386,7 +399,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// **Parse one file now, from its own text** — see [`SummaryStore::parsed_summary`]: the raw reading, whatever
     /// the index holds (after a cook it holds the *rendering's* reading).
-    pub fn parsed_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+    pub fn parsed_summary(&self, path: &Path) -> Option<FileSummary> {
         self.store.parsed_summary(path)
     }
 
@@ -447,7 +460,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // whole unit's tree and a buffer view is a page, and a report that added only one of them would
         // understate what a reader with a big file open is paying for.
         let counted = |cache: &std::sync::Mutex<
-            cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+            cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>,
         >| {
             cache
                 .lock()

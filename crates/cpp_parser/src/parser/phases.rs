@@ -35,7 +35,7 @@ struct State {
 
 /// Is the instrument on? Read once; a probe variable set to nothing is off.
 fn on() -> bool {
-    crate::probes::stats()
+    false
 }
 
 /// **Time one run of a phase**, from construction to drop.

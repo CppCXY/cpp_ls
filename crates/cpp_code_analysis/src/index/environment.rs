@@ -28,6 +28,10 @@
 //! first — an unresolved `#include` or an unindexed header is a hole in exactly the reasoning that would make
 //! "not defined" sound.
 
+use crate::condition;
+use crate::include;
+use crate::predefined_macros_of;
+use crate::preprocess;
 use std::path::Path;
 
 use crate::ProjectIndex;
@@ -296,7 +300,7 @@ pub fn observe_a_macro_fact(state: &mut Marked, fact: &MacroFact) {
 /// from a body.
 pub fn compilation_environment(
     config: &CompilerConfig,
-    toolchain: Option<&crate::include::toolchain::Toolchain>,
+    toolchain: Option<&include::toolchain::Toolchain>,
     configured: bool,
 ) -> Marked {
     let mut marked = Marked::default();
@@ -314,7 +318,7 @@ pub fn compilation_environment(
     //
     // The derived table keeps its job as the **fallback**: a toolchain that could not be asked has no macros, and
     // then the configuration's standard is all anybody knows about `__cplusplus`.
-    for definition in crate::predefined_macros_of(config) {
+    for definition in predefined_macros_of(config) {
         marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
     }
 
@@ -376,7 +380,7 @@ pub fn fact_in_force(seed: &Marked, file: &FileSummary, fact: &MacroFact) -> boo
 /// written: `#ifndef NAME` whose body then writes `#define NAME` is the shape that makes the difference. A table
 /// that answers [`Lookup::Unanswered`](crate::Lookup) for a name makes the whole guard `Unknown`, and `Unknown`
 /// keeps the fact out — this can lose evidence, never invent it.
-pub fn a_guard_is_in_force<M: crate::MacroValues>(
+pub fn a_guard_is_in_force<M: MacroValues>(
     file: &FileSummary,
     fact: &MacroFact,
     macros_at: impl Fn(usize) -> M,
@@ -402,11 +406,11 @@ impl<'a> KnownMacros<'a> {
     }
 }
 
-impl crate::condition::MacroValues for KnownMacros<'_> {
-    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+impl condition::MacroValues for KnownMacros<'_> {
+    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
         match self.facts.kind_of(name, self.offset) {
-            Some(_) => crate::condition::Lookup::DefinedWithoutAValue,
-            None => crate::condition::Lookup::Undefined,
+            Some(_) => condition::Lookup::DefinedWithoutAValue,
+            None => condition::Lookup::Undefined,
         }
     }
 }
@@ -427,7 +431,7 @@ pub use cpp_toolchain::preprocess::environment::a_branch_is_taken;
 ///
 /// `guard` and `offset` rather than a fact because the two kinds of fact carry them in the same shape and nothing
 /// else is needed: a guard is a region, and the offset is where the fact stands in its file.
-pub fn a_guard_holds<M: crate::MacroValues>(
+pub fn a_guard_holds<M: MacroValues>(
     file: &FileSummary,
     guard: FactGuard,
     offset: usize,
@@ -450,20 +454,20 @@ pub fn a_guard_holds<M: crate::MacroValues>(
 /// on `import std;`: `<xstddef>` defines `_MEMBER_CALL_CV_REF_NOEXCEPT` in **both** branches of
 /// `#ifdef __cpp_noexcept_function_type` and no file `#undef`s it, yet the walk never fed it, and `<xtr1common>` usages
 /// were left as text in the rendering.
-pub fn a_guard_visibility<M: crate::MacroValues>(
+pub fn a_guard_visibility<M: MacroValues>(
     file: &FileSummary,
     fact: &MacroFact,
     macros_at: impl Fn(usize) -> M,
-) -> crate::preprocess::guard::Visibility {
+) -> preprocess::guard::Visibility {
     if matches!(fact.guard, FactGuard::Unconditional) {
-        return crate::preprocess::guard::Visibility::Active;
+        return preprocess::guard::Visibility::Active;
     }
     file.guards
         .visibility_of(fact.guard, fact.range.start_offset, &macros_at)
 }
 
 /// [`a_guard_holds`] without a counter — see the note there.
-fn a_guard_holds_measured<M: crate::MacroValues>(
+fn a_guard_holds_measured<M: MacroValues>(
     file: &FileSummary,
     guard: FactGuard,
     offset: usize,
@@ -502,6 +506,10 @@ pub fn visibility_at(
         return Visibility::Unknown;
     };
 
+    // **The full state is what an include decision needs** — see the note on `macros_at_only`, which this was
+    // tried with and which cannot work: a walk decides *which files it even reaches* from its own state, and a
+    // state narrowed to one question's names answers `#ifdef GUARD` for every include in the closure as
+    // "not defined". Kept as the measured record rather than re-learned.
     summary.guards.visibility_of(guard, offset, |condition_at| {
         MacrosHere::from_summary(index.macros_at(path, condition_at), summary, condition_at)
     })
@@ -510,8 +518,10 @@ pub fn visibility_at(
 #[cfg(test)]
 mod tests {
     use super::visibility_at;
+    use crate::Marked;
     use crate::cache::SummaryKey;
     use crate::guard::Visibility;
+    use crate::index;
     use crate::index::ProjectIndex;
     use crate::summary::{FactGuard, SummaryGuards};
     use std::path::Path;
@@ -530,9 +540,9 @@ mod tests {
     /// The same, told whether the environment is the whole of what the compilation defines.
     fn index_of_with(source: &str, defines: &[&str], complete: bool) -> ProjectIndex {
         let path = Path::new("/p/widget.h");
-        let summary = crate::index::summarize(path, source, SummaryKey::new(0, 0));
+        let summary = index::summarize(path, source, SummaryKey::new(0, 0));
 
-        let mut macros = crate::Marked::default();
+        let mut macros = Marked::default();
         for name in defines {
             macros.define_on_the_command_line(name, None);
         }
@@ -588,7 +598,7 @@ mod tests {
         // because this layer can lose evidence but must not invent it.
         let source = "#if FOO\n#define X 1\n#endif\n#if BAR\n#define Y 2\n#endif\n";
         let path = Path::new("/p/widget.h");
-        let summary = crate::index::summarize(path, source, SummaryKey::new(0, 0));
+        let summary = index::summarize(path, source, SummaryKey::new(0, 0));
 
         let fact = |name: &str| {
             summary
@@ -598,7 +608,7 @@ mod tests {
                 .expect("the fixture defines it")
         };
 
-        let mut seed = crate::Marked::default();
+        let mut seed = Marked::default();
         seed.define_on_the_command_line("FOO", Some("1"));
 
         assert!(
@@ -613,9 +623,9 @@ mod tests {
         // Outside every `#if` there is nothing to ask — and the fast path is what keeps a closure's tens of
         // thousands of unconditional facts from costing an evaluation each.
         let source = "#define Z 3\n";
-        let summary = crate::index::summarize(path, source, SummaryKey::new(0, 0));
+        let summary = index::summarize(path, source, SummaryKey::new(0, 0));
         assert!(
-            super::fact_in_force(&crate::Marked::default(), &summary, &summary.macros[0]),
+            super::fact_in_force(&Marked::default(), &summary, &summary.macros[0]),
             "a `#define` outside every conditional is a fact about the file"
         );
     }

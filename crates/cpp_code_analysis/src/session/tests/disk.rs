@@ -2,8 +2,10 @@
 
 use crate::file::paths::DiskFiles;
 use crate::include::config::CompilerConfig;
+use crate::index;
 use crate::index::StepOutcome;
 use crate::index::watch::WatchFilter;
+use crate::parse_compile_commands;
 use crate::session::{OpenDocuments, Session, SessionFiles};
 use crate::symbol::Known;
 use std::path::PathBuf;
@@ -649,7 +651,7 @@ pub(crate) fn a_header_that_appears_earlier_on_the_path_moves_the_include() {
 
     // The header the search should have found first, created now.
     project.write("first/x.h", "struct X { int from_the_first; };\n");
-    let answer = session.changed([crate::index::watch::FileEvent::created(
+    let answer = session.changed([index::watch::FileEvent::created(
         project.root.join("first/x.h"),
     )]);
     assert!(
@@ -731,6 +733,78 @@ pub(crate) fn a_second_session_does_not_trust_a_stored_include_search() {
         resolved(&second_session).ends_with("first/x.h"),
         "the stored search must not outvote the filesystem: {:?}",
         resolved(&second_session)
+    );
+}
+
+/// **A source file's cached summary is validated with that file's own compilation.**
+///
+/// A compile command may put include directories ahead of the project-wide ones. The parser that wrote the summary
+/// used those (`FileIndexer::scan_includes` asks `CompilerConfig::for_file`), but the cache check used to search with
+/// the project-wide configuration. The summary recorded the source's path and the check found the project-wide one,
+/// declared the resolution moved, and re-parsed the file on every start — the whole warm cache was defeated for every
+/// translation unit that had its own include path.
+#[test]
+pub(crate) fn a_source_file_is_validated_with_its_own_compilation() {
+    use crate::include::config::IncludePath;
+    use std::sync::Arc;
+
+    let project = Project::new("per-file-include");
+    project.write("main.c", "#include \"x.h\"\nX x;\n");
+    project.write("first/x.h", "struct X { int first; };\n");
+    project.write("second/x.h", "struct X { int second; };\n");
+    let root = project.root.to_string_lossy().replace('\\', "/");
+    let database = parse_compile_commands(&format!(
+        "[{{\"directory\": \"{root}\", \"file\": \"{root}/main.c\", \
+          \"arguments\": [\"gcc\", \"-I{root}/first\", \"-c\", \"{root}/main.c\"]}}]"
+    ));
+
+    let mut config = CompilerConfig {
+        root: Some(project.root.clone()),
+        database: Some(Arc::new(database)),
+        ..CompilerConfig::default()
+    };
+    config
+        .include_paths
+        .push(IncludePath::user(project.root.join("second")));
+
+    let main = project.root.join("main.c");
+    let open = || {
+        let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+        let mut session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            config.clone(),
+        );
+        session.add_project_files([main.clone()]);
+        session.index_everything();
+        session
+    };
+
+    let first = open();
+    let resolved = |session: &Session<_>| -> String {
+        session
+            .index()
+            .summary(&main)
+            .and_then(|summary| summary.includes.first().cloned())
+            .and_then(|include| include.resolved)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    };
+    assert!(
+        resolved(&first).ends_with("first/x.h"),
+        "the source's compile command comes first: {:?}",
+        resolved(&first)
+    );
+    first.flush_the_summary_cache();
+    drop(first);
+
+    let second = open();
+    assert_eq!(
+        second.stats().rebuilt,
+        0,
+        "both the source and its header must be cache hits: {:?}",
+        second.stats()
     );
 }
 

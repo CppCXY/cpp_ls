@@ -47,6 +47,10 @@
 //!   parameter. Hints are placed **by position**, so a parameter that has no name breaks the alignment for
 //!   everything after it; see `crate::sema::scopes::parameters_of`.
 
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::index;
+use crate::sema;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -217,7 +221,7 @@ where
                 if !contains(range, at) {
                     continue;
                 }
-                if let Some(label) = crate::sema::declarations::a_lambdas_return_type(&node, &[])
+                if let Some(label) = sema::declarations::a_lambdas_return_type(&node, &[])
                     && is_a_type_spelling(&label)
                 {
                     hints.push(TypeHint {
@@ -353,6 +357,15 @@ where
 
     // Declaring files, parsed once each: a file with twenty calls into it is parsed once, not twenty times.
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
+    // **One shape table for the whole answer.** A `ShapeTable` is a `OnceCell`, and every call passed a **fresh**
+    // one — so the declaration-shape walk of this file was made again for every call that resolved. Measured on
+    // neovim's `channel.c`: `inlayHint` answered 225 hints in **904 ms**; the walk is the cost, and there is one
+    // file. Completion and hover already share one per request; this loop did not.
+    let shapes: sema::declarations::ShapeTable = sema::declarations::ShapeTable::new();
+    // **And one type memo for the whole answer**, for the same reason: `callee_of_a_call` built a fresh `TypeMemo`
+    // per call, so a file whose calls name the same variables (`channel`, `proc`, …) re-resolved every one of them
+    // from scratch. Measured on `channel.c`: four calls at **160 ms each**, on every request.
+    let types = index::project::TypeMemo::default();
 
     for call in call_expressions(&view.root, range) {
         // **A call with nothing to hint cannot produce a hint, and resolving it is the expensive part.**
@@ -375,24 +388,10 @@ where
 
         // **Where a hint's milliseconds go**, when asked. One line per call separates them, and a
         // repeated callee spelling is visible in it.
-        let trace = crate::probes::inlay();
         // **Printed before the resolution, not only after it.** A call that never finishes never reaches the report
         // below — measured: `inlayHint` on `containers.cpp` sat in one call for sixteen seconds and a gigabyte, and the
         // last line the trace had printed was the call *before* it. This line is what names it.
-        if trace {
-            eprintln!(
-                "[inlay] resolving {}",
-                call.text()
-                    .to_string()
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(60)
-                    .collect::<String>()
-            );
-        }
-        let started = std::time::Instant::now();
+
         // **The parameters of the call's declaration** — a function's own, or, when the callee names a **class**, the
         // constructor's. `Widget(3, 4)` is a temporary of `Widget`: the class's scope holds fields, but the class also
         // *declares constructors*, and a constructor declares parameters. Reported from `EmmyLuaCodeStyle`:
@@ -412,7 +411,8 @@ where
         let names =
             constructor_parameter_names(index, view, &call, arguments.len()).or_else(|| {
                 let Known::Yes(callee) = callee_of_a_call(
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &types,
+                    &shapes,
                     index,
                     &mut |_: &Path| None,
                     &view.scopes,
@@ -424,7 +424,6 @@ where
                     // wrong parameter is a wrong answer printed into the code.
                     return a_variables_call();
                 };
-                let resolved = started.elapsed();
 
                 let names = parameter_names_for(view, &callee, &mut declaring, &mut view_of)
                     .or_else(|| {
@@ -436,29 +435,12 @@ where
                             .as_deref()
                             .and_then(parameter_names_from_text)
                     });
-                if trace {
-                    eprintln!(
-                        "[inlay] {} -> {:?}: callee {:?}, names {:?}, {} name(s)",
-                        call.text()
-                            .to_string()
-                            .lines()
-                            .next()
-                            .unwrap_or_default()
-                            .chars()
-                            .take(40)
-                            .collect::<String>(),
-                        callee.file.display(),
-                        resolved,
-                        started.elapsed() - resolved,
-                        names.as_ref().map(Vec::len).unwrap_or(0)
-                    );
-                }
+
                 names.or_else(a_variables_call)
             });
         let Some(names) = names else {
             continue;
         };
-
         // The arguments were read before the callee: they are what decides whether this call is worth resolving.
         for (argument, name) in arguments.iter().zip(names.iter()) {
             // A parameter with no name breaks the alignment for every parameter *after* it rather than shifting
@@ -505,7 +487,7 @@ fn callable_object_parameter_names(
     passed: usize,
 ) -> Option<Vec<Option<String>>> {
     let callee = call.children().next()?;
-    let Known::Yes((type_of, _)) = crate::index::project::type_of_expression(
+    let Known::Yes((type_of, _)) = index::project::type_of_expression(
         index,
         &mut |_: &Path| None,
         &view.scopes,
@@ -520,7 +502,7 @@ fn callable_object_parameter_names(
     // not one. The callable shape is a class, which is what `class_name` says.
     let class = type_of.class_name()?;
     let Known::Yes(list) =
-        crate::index::project::members_of(index, &view.scopes, &view.root, &view.path, class)
+        index::project::members_of(index, &view.scopes, &view.root, &view.path, class)
     else {
         return None;
     };
@@ -568,20 +550,19 @@ fn a_lambdas_parameter_names(
 ) -> Option<Vec<Option<String>>> {
     let callee = call.children().next()?;
     // A member call is its receiver's question (`w.f(…)`), and a qualified name is not a variable of this file.
-    if crate::sema::check::member_access_above(&callee).is_some() {
+    if sema::check::member_access_above(&callee).is_some() {
         return None;
     }
     let at = usize::from(callee.text_range().start());
-    let Known::Yes(binding) = crate::sema::resolve::definition_at(&view.scopes, &view.root, at)
-    else {
+    let Known::Yes(binding) = sema::resolve::definition_at(&view.scopes, &view.root, at) else {
         return None;
     };
-    if binding.kind != crate::BindingKind::Variable {
+    if binding.kind != BindingKind::Variable {
         return None;
     }
     // **The declaration this name is in**, and the lambda its initialiser holds. The declarator is asked for by the
     // binding's own name range, so a declaration of two lambdas on one line answers for the right one.
-    let declarator = crate::sema::types::declarator_declaring(&view.root, binding.name_range)?;
+    let declarator = sema::types::declarator_declaring(&view.root, binding.name_range)?;
     let holder = declarator.parent()?;
     let lambda = cpp_parser::typed_descendants::<cpp_parser::CppLambdaExpr>(&holder).next()?;
     let list = lambda.get_params()?;
@@ -635,7 +616,7 @@ fn constructor_parameter_names(
     for declaration in &found.found {
         let fact = &declaration.fact;
         // A constructor is filed under its class's name, in the class's own scope.
-        if fact.kind != crate::DeclKind::Function || fact.name != name {
+        if fact.kind != DeclKind::Function || fact.name != name {
             continue;
         }
         let Some(scope) = fact.scope.as_deref() else {

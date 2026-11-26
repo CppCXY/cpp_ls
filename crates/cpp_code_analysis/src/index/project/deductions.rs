@@ -5,6 +5,12 @@
 //! a container, and the type an initialiser gives a declaration that named none.
 
 use super::*;
+use crate::Binding;
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::FileView;
+use crate::ScopeTree;
+use crate::sema;
 
 /// **The element type of the range a `for` head binds** — `for (auto x : v)` answers `int` for a `vector<int>`.
 ///
@@ -14,8 +20,8 @@ use super::*;
 pub(crate) fn range_for_element_type(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     named: &NamedDeclaration,
@@ -65,7 +71,7 @@ pub(crate) fn range_for_element_type(
 
     let Known::Yes((container, _)) = type_of_expression_memoed(
         memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -80,7 +86,7 @@ pub(crate) fn range_for_element_type(
     };
 
     Some(match range_element_of(as_a_range(&container)) {
-        Some(element) => Known::Yes(crate::sema::types::parse_type_spelling(&element)),
+        Some(element) => Known::Yes(sema::types::parse_type_spelling(&element)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
 }
@@ -107,8 +113,8 @@ pub(crate) fn range_for_element_type(
 pub(crate) fn element_of_a_range_expression(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
@@ -146,7 +152,7 @@ pub(crate) fn element_of_a_range_expression(
         && a_call_to_a_function(expression).is_none()
         && let Known::Yes((container, file)) = type_of_expression_memoed(
             memo,
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -158,7 +164,7 @@ pub(crate) fn element_of_a_range_expression(
         && let Some(element) = range_element_of(as_a_range(&container))
     {
         return Some(Known::Yes((
-            crate::sema::types::parse_type_spelling(&element),
+            sema::types::parse_type_spelling(&element),
             file,
         )));
     }
@@ -194,12 +200,12 @@ pub(crate) fn element_of_a_range_expression(
         let written = written.trim();
         let name = written.rsplit("::").next().unwrap_or(written);
         if name == "iota" {
-            let arguments = crate::sema::call_syntax::arguments_of(expression).unwrap_or_default();
+            let arguments = sema::call_syntax::arguments_of(expression).unwrap_or_default();
             let first = arguments.first()?;
             return Some(
                 match type_of_expression_memoed(
                     memo,
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &sema::declarations::ShapeTable::new(),
                     index,
                     declaring,
                     scopes,
@@ -215,7 +221,7 @@ pub(crate) fn element_of_a_range_expression(
         }
         // **`std::ranges::subrange(begin, end)`** — the element of the range a `begin()` came from.
         if name == "subrange" {
-            let arguments = crate::sema::call_syntax::arguments_of(expression).unwrap_or_default();
+            let arguments = sema::call_syntax::arguments_of(expression).unwrap_or_default();
             let first = arguments.first()?;
             if let Some(element) = element_of_an_iterator_expression(
                 memo,
@@ -244,11 +250,11 @@ pub(crate) fn element_of_a_range_expression(
 /// declaration of another file, or to one with no initializer answers `None` — the fallback the caller has either way.
 fn the_initializer_a_name_binds(
     expression: &cpp_parser::CppSyntaxNode,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
 ) -> Option<cpp_parser::CppSyntaxNode> {
     let at = end_of_the_written_name(expression);
-    let Known::Yes(binding) = crate::sema::resolve::definition_at(scopes, root, at) else {
+    let Known::Yes(binding) = sema::resolve::definition_at(scopes, root, at) else {
         return None;
     };
     let named = NamedDeclaration::Here(binding);
@@ -280,11 +286,11 @@ fn the_initializer_a_name_binds(
 pub(crate) fn the_element_a_lambda_parameter_receives(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-    binding: &crate::Binding,
+    binding: &Binding,
     written: &str,
     depth: usize,
 ) -> Option<String> {
@@ -354,7 +360,7 @@ pub(crate) fn the_element_a_lambda_parameter_receives(
     if !is_a_standard_callable {
         return None;
     }
-    let arguments = crate::sema::call_syntax::arguments_of(&call)?;
+    let arguments = sema::call_syntax::arguments_of(&call)?;
     let lambda_at = arguments
         .iter()
         .position(|argument| argument.text_range() == lambda.syntax().text_range())?;
@@ -415,7 +421,7 @@ pub(crate) fn adapted_element(
     element: &Known<(Type, PathBuf)>,
     adaptor: &cpp_parser::CppSyntaxNode,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
 ) -> Known<(Type, PathBuf)> {
@@ -440,20 +446,16 @@ pub(crate) fn adapted_element(
             .descendants()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::LambdaExpr);
         let label = lambda.and_then(|lambda| {
-            if let Some(label) = crate::sema::declarations::a_lambdas_return_type(
-                &lambda,
-                std::slice::from_ref(element),
-            ) {
+            if let Some(label) =
+                sema::declarations::a_lambdas_return_type(&lambda, std::slice::from_ref(element))
+            {
                 return Some(label);
             }
             let lambda = cpp_parser::CppLambdaExpr::cast(lambda)?;
             the_member_a_lambdas_return_names(&lambda, element, index, scopes, root, path)
         });
         return match label {
-            Some(label) => Known::Yes((
-                crate::sema::types::parse_type_spelling(&label),
-                file.clone(),
-            )),
+            Some(label) => Known::Yes((sema::types::parse_type_spelling(&label), file.clone())),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(
                 "std::views::transform",
             ))),
@@ -502,7 +504,7 @@ fn the_member_a_lambdas_return_names(
     lambda: &cpp_parser::CppLambdaExpr,
     element: &Type,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
 ) -> Option<String> {
@@ -526,7 +528,7 @@ fn the_member_a_lambdas_return_names(
             continue;
         }
         let expression = statement.get_expr()?;
-        let access = crate::sema::resolve::member_access_of(expression.syntax())?;
+        let access = sema::resolve::member_access_of(expression.syntax())?;
         let object = cpp_parser::CppNameExpr::cast(access.object)?.get_name_text()?;
         let parameter = parameters
             .iter()
@@ -534,7 +536,7 @@ fn the_member_a_lambdas_return_names(
         let spelled = if parameter.is_auto() {
             element.clone()
         } else {
-            crate::sema::types::parse_type_spelling(&parameter.get_type_text())
+            sema::types::parse_type_spelling(&parameter.get_type_text())
         };
         // **The class, not the reference the parameter binds** — `const Item&` and `Item` have the same members.
         let class = as_a_range(&spelled).to_string();
@@ -548,7 +550,7 @@ fn the_member_a_lambdas_return_names(
             return None;
         };
         let member = listed.members.iter().find(|member| {
-            member.fact.name == access.member && member.fact.kind == crate::DeclKind::Variable
+            member.fact.name == access.member && member.fact.kind == DeclKind::Variable
         })?;
         let written = member.fact.type_of.clone()?.to_string();
         match &agreed {
@@ -578,7 +580,7 @@ pub(crate) fn pair_component(element: &Type, position: usize) -> Option<Type> {
 pub(crate) fn strip_a_leading_const(type_of: &Type) -> Type {
     let written = type_of.to_string();
     match written.strip_prefix("const ") {
-        Some(rest) => crate::sema::types::parse_type_spelling(rest),
+        Some(rest) => sema::types::parse_type_spelling(rest),
         None => type_of.clone(),
     }
 }
@@ -586,7 +588,7 @@ pub(crate) fn strip_a_leading_const(type_of: &Type) -> Type {
 /// **The element of the element** — `join`'s rule, for the shapes this layer can read.
 pub(crate) fn element_of_the_element(element: &Type) -> Option<Type> {
     let written = element_of(element, 0)?;
-    Some(crate::sema::types::parse_type_spelling(&written))
+    Some(sema::types::parse_type_spelling(&written))
 }
 
 /// **The element of the range an iterator expression came from** — `numbers.begin()`, `numbers.begin() + 3`.
@@ -596,20 +598,20 @@ pub(crate) fn element_of_the_element(element: &Type) -> Option<Type> {
 pub(crate) fn element_of_an_iterator_expression(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
     depth: usize,
 ) -> Option<Known<(Type, PathBuf)>> {
     // `v.begin()` / `v.end()` — a member call whose object is the range.
-    if let Some(access) = crate::sema::resolve::member_access_of(expression) {
+    if let Some(access) = sema::resolve::member_access_of(expression) {
         let written = access.member.clone();
         if written == "begin" || written.ends_with(".begin") {
             let Known::Yes((container, file)) = type_of_expression_memoed(
                 memo,
-                &crate::sema::declarations::ShapeTable::new(),
+                &sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,
@@ -622,7 +624,7 @@ pub(crate) fn element_of_an_iterator_expression(
             };
             let element = range_element_of(as_a_range(&container))?;
             return Some(Known::Yes((
-                crate::sema::types::parse_type_spelling(&element),
+                sema::types::parse_type_spelling(&element),
                 file,
             )));
         }
@@ -744,8 +746,8 @@ pub(crate) fn range_element_of(container: &Type) -> Option<String> {
 pub(crate) fn initializer_type(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     named: &NamedDeclaration,
@@ -760,7 +762,7 @@ pub(crate) fn initializer_type(
 
     type_of_expression_memoed(
         memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -1129,7 +1131,7 @@ pub(crate) fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
     match fact.kind {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
         // "this declaration declares a class-like type", which is the case a call whose callee is a *type* lands in.
-        crate::DeclKind::Type => Some(Type::named(fact.qualified_name())),
+        DeclKind::Type => Some(Type::named(fact.qualified_name())),
         // **A placeholder is not a return type.** `auto copy_of() const { return value_; }` records `auto` as the spelling
         // the file wrote, and parsing it answers a type *called* `auto` — which reads like an answer and is not one. `None`
         // here is what lets the caller deduce from the body, which is the same thing the same-file arm already does; the
@@ -1182,8 +1184,8 @@ pub(crate) fn written_like_a_macro(word: &str) -> bool {
 pub(crate) fn structured_binding_type(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
@@ -1191,10 +1193,10 @@ pub(crate) fn structured_binding_type(
 ) -> Option<Known<(Type, PathBuf)>> {
     // **The declaration the name resolves to**, and then the pattern it was declared in.
     let at = end_of_the_written_name(expression);
-    let Known::Yes(binding) = crate::sema::resolve::definition_at(scopes, root, at) else {
+    let Known::Yes(binding) = sema::resolve::definition_at(scopes, root, at) else {
         return None;
     };
-    if binding.kind != crate::BindingKind::Variable {
+    if binding.kind != BindingKind::Variable {
         return None;
     }
 
@@ -1227,7 +1229,7 @@ pub(crate) fn structured_binding_type(
     let container = match range_expression_of_the_pattern(&pattern) {
         Some(range) => type_of_expression_memoed(
             memo,
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             declaring,
             scopes,
@@ -1240,7 +1242,7 @@ pub(crate) fn structured_binding_type(
             let initializer = initializer_of_the_pattern(&pattern)?;
             type_of_expression_memoed(
                 memo,
-                &crate::sema::declarations::ShapeTable::new(),
+                &sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,
@@ -1283,14 +1285,12 @@ pub(crate) fn structured_binding_type(
         listed
             .members
             .iter()
-            .find(|member| {
-                member.fact.name == wanted && member.fact.kind == crate::DeclKind::Variable
-            })
+            .find(|member| member.fact.name == wanted && member.fact.kind == DeclKind::Variable)
             .and_then(|member| member.fact.type_of.clone().map(|target| target.to_string()))
     });
 
     Some(match element {
-        Some(element) => Known::Yes((crate::sema::types::parse_type_spelling(&element), file)),
+        Some(element) => Known::Yes((sema::types::parse_type_spelling(&element), file)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
 }

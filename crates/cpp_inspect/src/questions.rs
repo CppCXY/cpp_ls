@@ -5,6 +5,7 @@
 //! the findings, the summary's key, and the syntax tree at a point. Every one of them is a single query on the session
 //! that [`crate::project`] built; nothing is computed here that the analysis does not already answer.
 
+use crate::project;
 use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
 use cpp_code_analysis::{
     DeclFact, DeclKind, DiskFiles, Known, ProjectDefinition, ProjectMember, Session,
@@ -172,16 +173,7 @@ pub fn the_hover(opened: &Opened, place: &Place) -> Result<Answer, String> {
     // **What the analysis answers before the card is rendered** — the probe this question needed: `hover` and
     // `define` disagreed about the same cursor, and the difference had to be seen before `hover_text` composed
     // anything. See `docs/worklog.md`.
-    if std::env::var("CPPLS_TRACE_HOVER").is_ok() {
-        let picked = opened
-            .session
-            .definition(&opened.view, reading_of(&opened.view, at));
-        let all = opened
-            .session
-            .definitions(&opened.view, reading_of(&opened.view, at));
-        eprintln!("[hover] at {at}: picked {picked:?}");
-        eprintln!("[hover] at {at}: all {all:?}");
-    }
+
     let shown = cpp_ls::handlers::hover::hover_text(
         &opened.session,
         &opened.view,
@@ -862,7 +854,7 @@ pub fn the_sweep(
         .session
         .project_files()
         .iter()
-        .filter(|path| crate::project::is_a_source_file(path))
+        .filter(|path| project::is_a_source_file(path))
         .cloned()
         .collect();
     // **And the database's own files.** A session's project list is what the *scan* found; a `compile_commands.json`
@@ -878,7 +870,7 @@ pub fn the_sweep(
                 .commands
                 .iter()
                 .map(|command| command.file.clone())
-                .filter(|file| crate::project::is_a_source_file(file)),
+                .filter(|file| project::is_a_source_file(file)),
         );
         paths.sort();
         paths.dedup();
@@ -896,6 +888,17 @@ pub fn the_sweep(
         });
     }
     paths.sort();
+
+    // **One whole-program reading before the per-file loop, so header declarations exist as facts.** A per-file cook
+    // renders one file and files only its declarations; a header's `EXTERN typebuf_T typebuf INIT(…)` (globals.h) is
+    // then invisible to every file that includes it, which is the raw-summary false positive this sweep used to
+    // report. The unit read is the same path the server's pump takes: it files each declaration under the file that
+    // wrote it. One root is enough for the headers a sweep asks about; a header a different root reads with a
+    // different environment still comes from the per-file cook below.
+    if opened.session.config().is_in_the_database(&opened.file) {
+        project::warm_the_closure(&mut opened.session, &opened.file);
+        let _ = opened.session.read_the_unit(&opened.file);
+    }
 
     for path in &paths {
         // **A file the compilation database does not name is measured against no configuration at all.** libuv's
@@ -919,7 +922,7 @@ pub fn the_sweep(
         // **The whole closure**, the same walk `--cook` takes: `catch_up` reads eight includes, and a file whose
         // second-level headers are missing from the index cooks against a partial closure — measured on libuv's
         // `signal.c`, which this loop reported a syntax error for and a single `diagnostics --cook` reported none.
-        crate::project::warm_the_closure(&mut opened.session, path);
+        project::warm_the_closure(&mut opened.session, path);
         opened.session.want_cooked_reading(path);
         opened.session.catch_up(path);
         let _ = opened.session.cook(path);
@@ -1043,7 +1046,7 @@ pub fn the_rendering(opened: &mut Opened, at: Option<usize>, limit: usize) -> An
     opened.session.catch_up(&opened.file);
     // **The whole closure, sealed into the index** — an `#include` is inlined from the reading the index holds for
     // that file, so an include nobody read contributes nothing. See `warm_the_closure` in `project.rs`.
-    crate::project::warm_the_closure(&mut opened.session, &opened.file.clone());
+    project::warm_the_closure(&mut opened.session, &opened.file.clone());
     let _ = opened.session.cook(&opened.file);
     // **The text the parser reads**, which is the file's *cooked* rendering: the file with every macro expanded and
     // the untaken branches gone. Not `render_the_unit`, which assembles the whole closure into one string for a

@@ -9,3 +9,4 @@
 # change to an access-control list, which is a fact about one machine and not about the project — so they stay
 # on the machine that needed them. The folder is safe to delete once the write failures it describes are gone.
 .dsh-acl-recovery/
+lint/__pycache__/

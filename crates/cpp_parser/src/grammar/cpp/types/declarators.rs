@@ -3,6 +3,7 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::parser;
 
 /// Does the `(` at the cursor open a *parenthesised abstract declarator* rather than a parameter list or a
 /// parenthesized name?
@@ -539,7 +540,7 @@ pub(crate) fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> b
 /// Exposed for the alias rule, which needs it for the same reason the type-id does: `using Arr = int[4];`
 /// writes a type whose array part has nothing enclosing it to attach to.
 pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
-    let _phase = crate::parser::phases::during("declarator-suffixes");
+    let _phase = parser::phases::during("declarator-suffixes");
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
@@ -584,7 +585,7 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
 /// outside a variable declaration's declarator a `[` here is an array bound or a lambda capture, and
 /// reading it as a binding pattern would take those away from the rules that own them.
 pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) -> ParseResult {
-    let _phase = crate::parser::phases::during("declarator");
+    let _phase = parser::phases::during("declarator");
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 

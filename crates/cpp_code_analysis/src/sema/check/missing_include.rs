@@ -65,6 +65,8 @@
 //! inclusion* is the kind a project wants uniformly or not at all, and a reader taught to ignore one squiggle has
 //! turned the channel off; the switch makes that a decision rather than a habit.
 
+use crate::DeclFact;
+use crate::file;
 use std::path::Path;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -201,10 +203,7 @@ fn the_candidate(
         // class's definition) and told the reader to include it. Reported from `EmmyLuaCodeStyle`'s `LuaSyntaxTree.h`,
         // which compiles as written. So a reached declaration of the name means nothing is missing, whatever its kind
         // and wherever the definition lives.
-        if reached.contains(&crate::file::paths::normalize_path(
-            &declaring,
-            cfg!(windows),
-        )) {
+        if reached.contains(&file::paths::normalize_path(&declaring, cfg!(windows))) {
             return None;
         }
         // **A header is a fragment of its includers' order**, and this is the file the missing include would break —
@@ -236,7 +235,7 @@ fn the_candidate(
 /// header. `true` when there is no includer at all, because then nothing makes the name visible in this file — no
 /// include order exists to fix it.
 fn an_includer_misses(context: &CheckContext<'_>, path: &Path, declaring: &Path) -> bool {
-    let declaring = crate::file::paths::normalize_path(declaring, cfg!(windows));
+    let declaring = file::paths::normalize_path(declaring, cfg!(windows));
     let includers = context.index().includers_of(path);
     if includers.is_empty() {
         return true;
@@ -298,7 +297,7 @@ fn is_ours(context: &CheckContext<'_>, file: &Path) -> bool {
 }
 
 /// The type spellings a declaration uses — its own type, and the types in its parameter list.
-fn types_this_declaration_uses(fact: &crate::DeclFact) -> Vec<String> {
+fn types_this_declaration_uses(fact: &DeclFact) -> Vec<String> {
     let mut spellings: Vec<String> = Vec::new();
     if let Some(of) = &fact.type_of {
         spellings.push(of.to_string());

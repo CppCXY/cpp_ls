@@ -44,6 +44,7 @@
 //! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
 //! still draws the title.
 
+use crate::context;
 use cpp_code_analysis::{DeclKind, Known};
 use lsp_types::{
     ClientCapabilities, CodeLens, CodeLensParams, Command, Location, Position, Range,
@@ -63,12 +64,7 @@ pub async fn on_code_lens(
     let uri = params.text_document.uri;
     let client = context.lsp_features().client_id();
 
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
-
-    snapshot_query(context.analysis(), cancel_token, move |session| {
+    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference
         // about the editor rather than about the analysis — so it is answered here, at the edge, before any query is
@@ -78,33 +74,51 @@ pub async fn on_code_lens(
         if session.project_config().config.code_lens.enable == Some(false) {
             return Some(Vec::new());
         }
-        // **Answer from what is known, and let the refresh correct it.** Withholding the list while the index catches up
-        // made every keystroke *clear* the lenses and redraw them seconds later — a redraw is worse than a number that
-        // grows: the editor is told the answer changed, not that it is unknown. `workspace/codeLens/refresh` (sent when
-        // indexing drains) is what asks again, so the number can be low for a moment and then settle, without ever
-        // vanishing.
         let view = session.view_of_the_file(&path)?;
-        Some(lenses_of(session, &view, &uri, client))
+        complete_lenses_of(session, &view, &uri, client)
     })
-    .await
+    .await;
+
+    match answer {
+        // **A partial list is not an answer.** LSP has no "keep what you have": a code-lens response replaces the
+        // client's list. Returning the functions whose counts are known while another is still `Unknown` makes the
+        // visible lines change on every keystroke, and returning an empty list clears them. `ContentModified` says
+        // the request could not be answered for the document as it is; the client keeps what it is showing, and the
+        // refresh after a load is what asks again once the answer exists.
+        RequestOutcome::Missing => {
+            RequestOutcome::Cancelled(context::CancelSource::ContentModified)
+        }
+        other => other,
+    }
 }
 
 /// **One lens per function this file declares or defines**, with the number of places that use it.
 ///
 /// The file's own summary is the list: a `DeclKind::Function` that is not local. A local lambda or a nested helper is
 /// not what a reader counts callers of.
+///
+/// `None` means the question cannot be answered completely yet — no summary, or a declaration whose reference query
+/// is `Unknown` while the index is filling. The wire handler turns that into `ContentModified` rather than sending a
+/// partial list; see [`complete_lenses_of`] and `on_code_lens`.
+#[cfg(test)]
 pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
     uri: &Uri,
     client: ClientId,
 ) -> Vec<CodeLens> {
-    let Some(held) = session.files().held(&view.path) else {
-        return Vec::new();
-    };
-    let Some(summary) = session.index().summary(&view.path) else {
-        return Vec::new();
-    };
+    complete_lenses_of(session, view, uri, client).unwrap_or_default()
+}
+
+/// The complete answer, or `None` when one of its counts is not known yet.
+fn complete_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    uri: &Uri,
+    client: ClientId,
+) -> Option<Vec<CodeLens>> {
+    let held = session.files().held(&view.path)?;
+    let summary = session.index().summary(&view.path)?;
 
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
@@ -151,10 +165,10 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         let Known::Yes(places) =
             super::references::places_of(session, fact, view.path.clone(), false)
         else {
-            // A declaration no query can name — a template parameter, a name from a header nothing read. `Unknown`
-            // is not "no uses": the lens then says nothing about a number rather than `0 references`, which would be
-            // the same false claim the whole-file report was about.
-            continue;
+            // **Unknown is not zero, and it is not a list we may send partially.** The client would replace its
+            // lenses with a list missing this function, then replace them again when the references index catches up.
+            // The handler answers `ContentModified`; the refresh after a load asks once more.
+            return None;
         };
         let locations = locations_of(session, &places);
         let uses = places.len();
@@ -165,7 +179,7 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
             data: None,
         });
     }
-    lenses
+    Some(lenses)
 }
 
 /// The places, as protocol locations — for the files this session holds.
@@ -252,6 +266,8 @@ impl RegisterCapabilities for CodeLensCapabilities {
 
 #[cfg(test)]
 mod tests {
+    use crate::handlers;
+    use crate::util;
     use cpp_code_analysis::{
         CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
     };
@@ -332,7 +348,7 @@ int f() { return grow(1) + grow(2); }
             .find(|fact| fact.name == "grow")
             .expect("the header's declaration")
             .clone();
-        let places = crate::handlers::references::places_of(
+        let places = handlers::references::places_of(
             &session,
             &fact,
             std::path::PathBuf::from("/p/a.h"),
@@ -471,7 +487,7 @@ int use(Format &f, Builder &b) { return f.NameStyleCheck(b, 1); }
 
     /// The name under a lens, from the file's own text — the fixture's text is what the lens ranges are in.
     fn lens_name(view: &cpp_code_analysis::FileView, lens: &CodeLens) -> String {
-        let Some(offset) = crate::util::offset_at_position(view, lens.range.start) else {
+        let Some(offset) = util::offset_at_position(view, lens.range.start) else {
             return String::new();
         };
         let text = &view.source[offset.get().min(view.source.len())..];

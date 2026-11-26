@@ -1,9 +1,12 @@
 //! **Closure** — what is known, and when a closure is ready
 
+use crate::CompletionSet;
+use crate::file;
 use crate::file::coordinates::ReadingOffset;
 use crate::file::paths::MemoryFiles;
 use crate::include::config::{CommandLineMacro, CompilerConfig};
 use crate::include::toolchain::{Toolchain, ToolchainSource};
+use crate::session;
 use crate::symbol::Known;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +21,7 @@ pub(crate) fn the_compilation_is_known_only_when_the_compiler_answered_with_its_
     // of the compiler's own names as "not defined" — `#ifdef _MSC_VER` coming out false *on MSVC* — which is a
     // wrong answer rather than a missing one, the direction this layer must never fail in.
     assert!(
-        !crate::session::the_compilation_is_known(None),
+        !session::the_compilation_is_known(None),
         "no compiler answered, so nothing witnesses the built-ins"
     );
 
@@ -34,7 +37,7 @@ pub(crate) fn the_compilation_is_known_only_when_the_compiler_answered_with_its_
         note: Some("no compiler could be asked".to_string()),
     };
     assert!(
-        !crate::session::the_compilation_is_known(Some(&unasked)),
+        !session::the_compilation_is_known(Some(&unasked)),
         "directories without a macro table are half a toolchain, and the missing half is the built-ins"
     );
 
@@ -44,7 +47,7 @@ pub(crate) fn the_compilation_is_known_only_when_the_compiler_answered_with_its_
         ..unasked
     };
     assert!(
-        crate::session::the_compilation_is_known(Some(&asked)),
+        session::the_compilation_is_known(Some(&asked)),
         "a compiler that answered is the only witness there is to the names no file defines"
     );
 }
@@ -315,14 +318,14 @@ pub(crate) fn cuda_words_are_offered_only_by_a_cuda_project() {
     let path = std::path::PathBuf::from("/p/a.cu");
     let view = session.view_of_the_file(&path).expect("a view");
     let at = text.find("__dev\n").expect("the fixture") + "__dev".len();
-    let labels = |set: &crate::CompletionSet| {
+    let labels = |set: &CompletionSet| {
         set.items
             .iter()
             .map(|item| item.label.clone())
             .collect::<Vec<String>>()
     };
 
-    let cuda = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let cuda = session.completions(&view, file::coordinates::FileOffset::new(at));
     let offered = labels(&cuda);
     assert!(
         offered.iter().any(|label| label == "__device__"),
@@ -335,7 +338,7 @@ pub(crate) fn cuda_words_are_offered_only_by_a_cuda_project() {
     session.did_open("/p/a.cu", text);
     session.index_everything();
     let view = session.view_of_the_file(&path).expect("a view");
-    let cpp = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let cpp = session.completions(&view, file::coordinates::FileOffset::new(at));
     let offered = labels(&cpp);
     assert!(
         !offered.iter().any(|label| label.starts_with("__")),
@@ -356,7 +359,7 @@ pub(crate) fn the_built_in_variables_and_vector_types_complete_too() {
     let path = std::path::PathBuf::from("/p/a.cu");
     let view = session.view_of_the_file(&path).expect("a view");
     let at = text.find("thr\n").expect("the fixture") + "thr".len();
-    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let set = session.completions(&view, file::coordinates::FileOffset::new(at));
     let labels: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
     assert!(
         labels.contains(&"threadIdx"),
@@ -412,7 +415,7 @@ pub(crate) fn an_implementation_unit_sees_its_interface_units_declarations() {
 
     // **`x_` is a member of `Vec2`**, and it is declared in the interface unit alone.
     let at = unit_text.find("x_)").expect("the fixture") + 1;
-    let typed = session.type_at(&view, crate::file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
     assert!(
         matches!(&typed, Known::Yes(found) if found.type_of.contains("double")),
         "`x_` must have the type the interface unit gives it: {typed:?}"
@@ -420,7 +423,7 @@ pub(crate) fn an_implementation_unit_sees_its_interface_units_declarations() {
 
     // **And a member function of the class completes with its members**, not with the headers' macros.
     let at = unit_text.find("sqrt(").expect("the fixture") + "sqrt(".len();
-    let members = session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let members = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     if let Known::Yes(members) = members {
         let names: Vec<&str> = members
             .members
@@ -491,7 +494,7 @@ pub(crate) fn a_modules_includes_define_what_a_later_condition_asks() {
 
     // **The class is what `std::vector` names**, not the re-export in the interface unit.
     let at = consumer_text.find("push_back").expect("the fixture") + 2;
-    let member = session.member_completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let member = session.member_completions(&view, file::coordinates::FileOffset::new(at));
     let Known::Yes(member) = member else {
         panic!("`v.` must be answered: {member:?}");
     };

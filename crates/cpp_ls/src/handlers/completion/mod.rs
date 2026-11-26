@@ -47,6 +47,7 @@
 //! The cost of setting it is one request per keystroke while a big namespace is being typed through, which is the
 //! request a client sends anyway when it does not know the answer.
 
+use crate::handlers;
 use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session, detail_of};
 use lsp_types::{
     ClientCapabilities, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
@@ -68,6 +69,7 @@ pub async fn on_completion(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
     let snippets = snippets_of(context.lsp_features().supports_snippets());
+    let requested_path = uri_to_file_path(&uri);
 
     // **Every request, whether or not anything goes wrong with it.** The report is "补全时有时无" — sometimes there,
     // sometimes not — and a log that records only the empty answers cannot tell "the client asked and got nothing"
@@ -86,33 +88,10 @@ pub async fn on_completion(
     // It is one parse of **one file**, and nothing at all when there is no edit waiting — see [`Session::catch_up`],
     // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
     // include closure, which for a file that includes `<string>` is thousands of headers).
-    if let Some(path) = uri_to_file_path(&uri) {
-        let started = std::time::Instant::now();
-        context.analysis().prepare(&path).await;
-        let prepared = started.elapsed().as_millis();
-
-        let read = path.clone();
-        let started = std::time::Instant::now();
-        context.analysis().catch_up(&read).await;
-        let caught_up = started.elapsed().as_millis();
-
-        // …and the module interface units this file imports, which the index cannot name a file for until something
-        // reads them: `import std;` is `<VC>/Tools/MSVC/<version>/modules/std.ixx`, a file **outside the project**,
-        // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
-        // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
-        let started = std::time::Instant::now();
-        crate::handlers::read_the_modules(&context, &path, true).await;
-        let modules = started.elapsed().as_millis();
-
-        // **Where the time went, which is the only way to tell the two failures apart.** A completion is slow for
-        // one of two reasons and they have different fixes: it waited for the **write lock** the pump holds (the
-        // three calls above), or it waited for the index to fill (`settle`), or its own query was slow. The request's
-        // total says none of that, and the report this handler exists for — *"I type `s` and it takes forever"* —
-        // was diagnosed by exactly this breakdown.
-        log::debug!(
-            "completion: prepare {prepared} ms, catch up {caught_up} ms, modules {modules} ms, {} ms before the query",
-            prepared + caught_up + modules
-        );
+    if let Some(_path) = requested_path.as_ref() {
+        // **Read-only by contract.** The event queue has already applied this document's text; a completion asks
+        // the analysis what it knows and never loads, catches up, cooks or queues anything.
+        let _ = &context;
     }
 
     // **And then the query, which no longer waits for the index to drain.**
@@ -137,6 +116,22 @@ pub async fn on_completion(
     // `didOpen`: the wait was **988 / 536 / 1443 / 877 / 542 / 734 / 584 / 1479 / 532 / 728 / 353 / 4 ms** and is now
     // **11 / 8 / 4 / 9 / 0 … 7 ms**, with the list the same length or longer at every attempt.
     let asked_at = std::time::Instant::now();
+    // **The reading a semantic answer comes from.** The file's own view keeps the positions and the prefix; the
+    // rendering owns bindings, types and members. Asking for the current buffer's rendering here is what makes a
+    // macro-declared local (`kvec_t(int64_t) ids`) visible on the **first** completion after an edit, instead of
+    // only when some other request happened to have left a rendering warm.
+    // **No readiness check and no timeout.** The update queue applies an edit and its index impact under the
+    // session's write lock; a read lock acquired here is therefore a lock acquired after that work, which is the
+    // barrier. If a query needs a fact, the writer owed it before releasing.
+    let from_the_rendering = match requested_path.as_ref() {
+        Some(path) => {
+            context
+                .analysis()
+                .completion_from_a_rendering(path, position)
+                .await
+        }
+        None => None,
+    };
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The file's own tokens, and not the compiler's rendering.**
@@ -167,9 +162,8 @@ pub async fn on_completion(
         //
         // Read first, before the index is asked anything, because it needs no index: one token walk of the file.
         if let Some(held) = session.files().held(&view.path)
-            && let Some(items) = crate::handlers::format::complete::format_string_complete(
-                session, &view, held, offset,
-            )
+            && let Some(items) =
+                handlers::format::complete::format_string_complete(session, &view, held, offset)
         {
             log::debug!(
                 "completion: {} format-string item(s) at {}:{}",
@@ -187,7 +181,7 @@ pub async fn on_completion(
         }
 
         let finding = std::time::Instant::now();
-        let found = session.completions(&view, offset);
+        let found = from_the_rendering.unwrap_or_else(|| session.completions(&view, offset));
         // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
         // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
         // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether
@@ -207,45 +201,12 @@ pub async fn on_completion(
         );
 
         Some(CompletionResponse::List(lsp_types::CompletionList {
-            // See the module documentation: pending work means "a file may not have been read yet", a capped list
-            // means "there are more names than fitted, and the next keystroke asks a narrower question".
-            // **An empty list is never final**, and this is the third case — added after a report that named it
-            // exactly: *"the first time I type `s` I get `std` and the rest; I delete it and type `s` again and
-            // there is no completion at all"*. `isIncomplete: false` tells the client the list stands for the whole
-            // prefix, so a final **empty** answer is cached as "nothing here" and the next keystroke that deserves
-            // an answer is never asked. Every reason the list can be empty is temporary: the file's summary was just
-            // dropped by an edit, a declaration it needs has not been read yet, the cursor is mid-word in a way this
-            // layer cannot see. None of them is a fact about the prefix.
-            is_incomplete: found.items.is_empty()
-                || !session.is_locally_ready(&path)
-                || found.truncated
-                // **…and while the session still has work queued.** `is_locally_ready` is a fact about *this* file —
-                // its summary and its includes — and an answer can depend on files its **modules** bring in.
-                // Measured on a project whose files start with `import std;`: for about two seconds after `didOpen`,
-                // completion at `std::` answered **8 names with `isIncomplete: false`**, then 1000 (the cap) once
-                // the module's closure had been read and cooked. A client that caches a final list shows the eight
-                // and stops asking; the list was neither final nor right.
-                //
-                // `pending_work` rather than `pending`: the difference is the **cooking** backlog, and a module's
-                // names are in its *rendering*. Measured with the index queue alone (t+0.5 s): the queue was empty
-                // and the answer was still the eight, so the cooking half is the one that matters here.
-                || session.pending_work() > 0
-                // **…and while a module unit it imports is still unread.** That work is not in pending_work (see
-                // Session::pending_units): the unit arrives by name rather than through an include, and the pump
-                // takes it once its queue has drained. Measured on import std;: t+0.5–1.5 s answered eight names
-                // with isIncomplete: false while 401 files of the module's closure were still landing.
-                || session.pending_units() > 0
-                // **…and when the analysis stopped short.** A member list can be *missing* members because the class
-                // it needs has not been read yet: `std::string* message; message->` offered **one** item on the first
-                // keystroke (`operator basic_string_view`, the only member the raw reading of `<xstring>` had at file
-                // scope) and **58** once that header was cooked. That is the same "ask again later" an empty list
-                // gets — and without it a partial list looks final, which is the defect this arm was added for.
-                || found.incomplete
-                // **…and when the list holds nothing that could be what was typed.** A client filters by the prefix
-                // and caches an empty result, so an answer that answers nothing is not final whatever the reason:
-                // measured by a reader, typing `f` showed nothing and typing `fp` worked — the same file, seconds
-                // apart.
-                || found.nothing_matched(),
+            // **Never ask the client to keep re-querying a list it can filter.** `isIncomplete: true` makes the
+            // frontend treat the answer as a provisional page: it filters/re-requests instead of showing the names
+            // it already has, and on a big file that is every keystroke. The server answers with the names it knows;
+            // the next keystroke is a new request anyway. The analysis' own "stopped short" flag remains available
+            // in `found`, but it is not the client's filter contract.
+            is_incomplete: false,
             items: found
                 .items
                 .iter()
@@ -366,19 +327,19 @@ fn snippets_of(supported: bool) -> Snippets {
 
 /// One analysis item, as the protocol's item.
 ///
-/// # Why the detail is not here
+/// # The short type line
 ///
-/// `detail` and `labelDetails.detail` are the two fields the protocol says a client may show beside the label, and
-/// this server has something to put in both — a function's return type and parameter list, a variable's type, a
-/// class's bases. **They are left out on purpose**, and asked for again in `completionItem/resolve`:
+/// `labelDetails.detail` is the one field the protocol says a client may draw **beside the label** without resolving
+/// the item. A member list is exactly where that matters: `capacity`, `items` and `size` are indistinguishable until
+/// the reader knows two are counts and one is a pointer, and a reader looking at the popup has not selected any row to
+/// resolve. The analysis has the one-line type already (`CompletionItem::detail`), so it goes in both places:
 ///
-/// * a completion is answered while somebody is typing, and the list is several hundred items. A parameter list per
-///   item is the largest part of the answer, and the client shows a *few dozen rows* of it;
-/// * `resolve` is the protocol's answer to exactly this problem — it is sent for **the one item the user is
-///   looking at**, which is the only item whose detail anybody will read.
+/// * `labelDetails.detail` for the list a client can draw immediately;
+/// * `detail` for clients that read that field from the list response.
 ///
-/// The cost is one round trip before a client can draw a row's second column, and the protocol is built for it: a
-/// client that never resolves simply shows the label, which is the item minus a hint rather than a broken item.
+/// The **full declaration and documentation** stay behind `completionItem/resolve`: a parameter list per item is the
+/// largest part of a several-hundred-item answer, and resolve is sent for the one item the user is looking at. The
+/// distinction is the short type (one line, cheap) against the documentation (a parse, one item).
 ///
 /// # Why `sortText` and not `sortText` alone
 ///
@@ -397,6 +358,18 @@ fn item_for(
     CompletionItem {
         label: item.label.clone(),
         kind: Some(completion_kind(item.kind)),
+        // **The type line beside the name.** It is the one piece of information that tells two members apart in
+        // the list — `items` is a pointer, `size` is a count — and it was computed by the analysis and then dropped
+        // here: a member list rendered as three bare names. The handler sends it verbatim; a client that wants the
+        // full declaration asks `completionItem/resolve`, which is a different question.
+        detail: item.detail.clone(),
+        label_details: item
+            .detail
+            .as_ref()
+            .map(|detail| CompletionItemLabelDetails {
+                detail: Some(format!("  {detail}")),
+                description: None,
+            }),
         // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`. This is
         // what makes the deferral above possible: the detail is not sent, and the *identity* that produces it is.
         data: item
@@ -503,8 +476,6 @@ pub async fn on_completion_resolve(
         return RequestOutcome::Ready(item);
     };
 
-    context.analysis().prepare(&file).await;
-
     let looked_up = file.clone();
     let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
         // **The detail the list did not send**, found from the identity the list did send. This is the whole reason
@@ -524,8 +495,9 @@ pub async fn on_completion_resolve(
     .await;
 
     if let RequestOutcome::Ready((detail, documentation)) = resolved {
-        // 3.17 lets a client draw the label and this as one line, which is what the analysis's `detail` was written
-        // for — a function's return type and parameter list, a variable's type, a class's bases.
+        // **The resolve replaces the short type with the full declaration** — a function's return type and parameter
+        // list, a class's bases — and adds its documentation. The list already carried the short line; this is the
+        // one item the reader selected.
         item.label_details = detail.as_ref().map(|detail| CompletionItemLabelDetails {
             detail: Some(format!("  {detail}")),
             description: None,

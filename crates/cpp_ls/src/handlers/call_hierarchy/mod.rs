@@ -35,6 +35,7 @@
 //! `incomingCalls` is one references query plus the file texts of the callers; nothing is parsed. `outgoingCalls` parses
 //! the file that holds the body once — the same parse a hover would do — and then asks `definitions` per call.
 
+use crate::handlers;
 use cpp_code_analysis::{FileProvider, Known, Session};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -58,10 +59,6 @@ pub async fn on_prepare_call_hierarchy(
     let position = params.text_document_position_params.position;
 
     log::debug!("call hierarchy: prepare asked at {position:?}");
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-        context.analysis().catch_up(&path).await;
-    }
     log::debug!("call hierarchy: prepare returned, asking the session");
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -84,8 +81,6 @@ pub async fn on_incoming_calls(
     let Some(path) = uri_to_file_path(&item.uri) else {
         return RequestOutcome::Missing;
     };
-    context.analysis().prepare(&path).await;
-    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;
@@ -109,8 +104,6 @@ pub async fn on_outgoing_calls(
     let Some(path) = uri_to_file_path(&item.uri) else {
         return RequestOutcome::Missing;
     };
-    context.analysis().prepare(&path).await;
-    context.analysis().catch_up(&path).await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let view = session.view_of_the_file(&path)?;
@@ -191,7 +184,7 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
     name: &str,
 ) -> Vec<CallHierarchyIncomingCall> {
     let _ = name;
-    let references = crate::handlers::references::name_level_offsets(
+    let references = handlers::references::name_level_offsets(
         session,
         view,
         cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),

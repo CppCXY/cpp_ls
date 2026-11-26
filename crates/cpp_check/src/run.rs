@@ -24,7 +24,7 @@ use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
 
 use crate::cli::Level;
-use crate::report::{Report, position_of, relative};
+use crate::report::{Report, position_of};
 
 #[allow(clippy::too_many_arguments)]
 pub fn check_files(
@@ -33,7 +33,7 @@ pub fn check_files(
     min: Level,
     only: Option<&BTreeSet<&'static str>>,
     skipped: Option<&BTreeSet<&'static str>>,
-    tracing: bool,
+    _tracing: bool,
     quiet: bool,
 ) -> Run {
     let mut session = Session::open(
@@ -106,16 +106,7 @@ pub fn check_files(
             continue;
         };
         run.stages.diagnostics += diagnosed.elapsed();
-        if tracing {
-            eprintln!(
-                "  {}  catch_up {:.0}  cook {:.0}  pump {:.0} ({rounds} round(s))  diagnostics {:.0} ms",
-                relative(root, file),
-                catch_up_time.as_secs_f64() * 1000.0,
-                cook_time.as_secs_f64() * 1000.0,
-                pumped.elapsed().as_secs_f64() * 1000.0,
-                diagnosed.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
+
         run.tally.checked += 1;
         run.tally.parse_errors += diagnostics.errors.len();
         if diagnostics.checks_withheld {

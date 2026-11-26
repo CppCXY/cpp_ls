@@ -4,6 +4,13 @@
 //! are collected under a budget and ordered stably rather than sorted into a perfect list.
 
 use super::*;
+use crate::Binding;
+use crate::DeclKind;
+use crate::FileView;
+use crate::ScopeKind;
+use crate::ScopeTree;
+use crate::completion;
+use crate::sema;
 
 /// What a completion at a member access should offer: the type, its members, and where to put the chosen one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +75,8 @@ pub struct MemberCompletions {
 /// * `Unknown(UnparsableName)` — the cursor is not on a member access at all.
 pub fn member_completions_at(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -85,15 +92,13 @@ pub fn member_completions_at(
     //
     // Two readers of one fact is the shape of every bug in this area; the completion layer owns this question, and
     // every consumer of it — this query, `Session::member_completions`, the log line — goes through it.
-    let crate::completion::CompletionContext::Member(access) =
-        crate::completion::context_at(root, offset)
-    else {
+    let completion::CompletionContext::Member(access) = completion::context_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
     let written = match type_of_expression_memoed(
         &memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -145,16 +150,14 @@ pub fn member_completions_at(
         index
             .files_declaring(bare, path)
             .iter()
-            .any(|found| found.fact.kind == crate::DeclKind::Type && found.fact.type_of.is_none())
+            .any(|found| found.fact.kind == DeclKind::Type && found.fact.type_of.is_none())
     };
     let class = match access.arrow {
-        true => crate::completion::the_class_after_the_operator(
-            index, scopes, root, path, &written, true,
-        )
-        .map(|(class, _)| class)
-        .filter(|class| names_a_class(class))
-        .or_else(|| the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None))
-        .unwrap_or(class),
+        true => completion::the_class_after_the_operator(index, scopes, root, path, &written, true)
+            .map(|(class, _)| class)
+            .filter(|class| names_a_class(class))
+            .or_else(|| the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None))
+            .unwrap_or(class),
         false => class,
     };
 
@@ -189,7 +192,7 @@ pub fn member_completions_at(
 /// not on a character boundary (possible in an identifier with non-ASCII letters) falls back to the whole
 /// spelling, which is the safe direction — a filter that matches too much still shows something.
 pub(crate) fn written_before_the_cursor(
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
     offset: usize,
 ) -> String {
     let start = access.member_range.start_offset;
@@ -339,9 +342,9 @@ pub fn names_for_a_doc_comment(
     range: cpp_parser::SourceRange,
 ) -> NameCompletions {
     let names = if scope.is_empty() {
-        declarations_in_scope(index, path, None, written)
+        declarations_in_scope(index, path, None, written, true)
     } else {
-        declarations_in_scope(index, path, Some(scope), written)
+        declarations_in_scope(index, path, Some(scope), written, true)
     };
     NameCompletions {
         scope: scope.to_string(),
@@ -361,21 +364,14 @@ pub fn names_for_a_doc_comment(
 
 pub fn name_completions_at(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
+    let Some(position) = sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
-    let phase = std::time::Instant::now();
-    if crate::probes::completion() {
-        eprintln!(
-            "[completion] the position: scope {:?}, written {:?}",
-            position.scope, position.written
-        );
-    }
 
     // **What is typed decides how much is read**, and the difference is not small. The index half of this query
     // collects every declaration of every file the cursor can see — measured on a real file that includes
@@ -387,7 +383,7 @@ pub fn name_completions_at(
     // line), and a filter that treated "nothing written" as "nothing matches" would empty the list exactly when it
     // is most wanted.
     let names = if position.scope.is_empty() {
-        match visible_names(index, scopes, root, path, offset, &position.written) {
+        match visible_names(index, scopes, root, path, offset, &position.written, true) {
             Known::Yes(names) => names,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
@@ -406,13 +402,6 @@ pub fn name_completions_at(
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     };
-    if crate::probes::completion() {
-        eprintln!(
-            "[completion] the listing took {:?} for {} name(s)",
-            phase.elapsed(),
-            names.len()
-        );
-    }
 
     // **The file's own macros**, which the index half cannot see. A `#define` is a preprocessing fact of *this* file, not a
     // declaration in any scope — measured at four cursors in one file: `MA` offered only `main`, `MAX` offered nothing, and
@@ -494,7 +483,7 @@ pub fn name_completions_at(
             };
             let mut declaration = template.clone();
             declaration.name = name.into();
-            declaration.kind = crate::DeclKind::MacroLike;
+            declaration.kind = DeclKind::MacroLike;
             // Nothing of the template's *declaration* survives: a macro has no type, no return type, no
             // parameters of its own and no bases, and a `#define` is never local.
             declaration.type_of = None;
@@ -544,7 +533,7 @@ pub fn name_completions_at(
 /// asks and the query has several ways to return early.
 pub fn name_completions_traced(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -560,11 +549,12 @@ pub fn name_completions_traced(
 /// function that knows how to list it.
 pub(crate) fn visible_names(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
     written: &str,
+    in_completion: bool,
 ) -> Known<Vec<OfferedName>> {
     let Some(innermost) = scopes.scope_at(offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
@@ -572,7 +562,6 @@ pub(crate) fn visible_names(
 
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
-    let phase = std::time::Instant::now();
 
     // **The class a separated definition belongs to.** `int Source::GetLine(int) { … }` in a `.cpp` declares no scope for
     // `Source` here — the class is in a header — so the scope chain below has no class to offer members from, and a
@@ -589,10 +578,6 @@ pub(crate) fn visible_names(
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
     let in_this_file = normalize(path);
-    if crate::probes::completion() {
-        eprintln!("[completion]   the class tier: {:?}", phase.elapsed());
-    }
-    let chain_phase = std::time::Instant::now();
 
     for (depth, scope) in chain.iter().copied().enumerate() {
         let Some(data) = scopes.scope(scope) else {
@@ -601,13 +586,13 @@ pub(crate) fn visible_names(
 
         // The file scope is the global name space, and it is the one scope whose names other files contribute to
         // as well — every included header is written there. It is listed below, once, rather than here.
-        if data.kind == crate::ScopeKind::TranslationUnit {
+        if data.kind == ScopeKind::TranslationUnit {
             continue;
         }
 
         // A **class** in the chain — the cursor is inside a member function of it — brings its members, bases
         // included: `size` is nameable inside `Widget::g` without a qualifier, and so is anything a base declares.
-        if matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
+        if matches!(data.kind, ScopeKind::Class | ScopeKind::Enum)
             && let Some(class) = scopes.qualification_prefix_of(scope)
         {
             let members = match names_of_a_class(index, scopes, root, path, &class) {
@@ -625,7 +610,7 @@ pub(crate) fn visible_names(
         // at file scope is the implementation's, one inside a function is not).
         let body = matches!(
             data.kind,
-            crate::ScopeKind::Block | crate::ScopeKind::Function | crate::ScopeKind::Lambda
+            ScopeKind::Block | ScopeKind::Function | ScopeKind::Lambda
         );
         names.extend(offered(
             // **In a body, only what is declared above the cursor is in scope.** A *scope* holds every binding
@@ -658,10 +643,7 @@ pub(crate) fn visible_names(
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
-    if crate::probes::completion() {
-        eprintln!("[completion]   the chain: {:?}", chain_phase.elapsed());
-    }
-    let global_phase = std::time::Instant::now();
+
     names.extend(global_offers(
         index,
         scopes,
@@ -669,19 +651,11 @@ pub(crate) fn visible_names(
         path,
         chain.len(),
         written,
+        in_completion,
     ));
-    if crate::probes::completion() {
-        eprintln!(
-            "[completion]   the global tier: {:?}",
-            global_phase.elapsed()
-        );
-    }
 
-    let sort_phase = std::time::Instant::now();
     sort_and_hide(&mut names);
-    if crate::probes::completion() {
-        eprintln!("[completion]   the sort: {:?}", sort_phase.elapsed());
-    }
+
     Known::Yes(names)
 }
 
@@ -692,13 +666,17 @@ pub(crate) fn visible_names(
 /// the file being edited has been saved, so a list that skipped this step offers every global name twice.
 pub(crate) fn global_offers(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     depth: usize,
     written: &str,
+    in_completion: bool,
 ) -> Vec<OfferedName> {
-    let mut names = offered(global_names(index, scopes, root, path, written), depth);
+    let mut names = offered(
+        global_names(index, scopes, root, path, written, in_completion),
+        depth,
+    );
     sort_and_hide(&mut names);
     names
 }
@@ -729,7 +707,7 @@ pub(crate) fn a_spelling_names_a_type(index: &ProjectIndex, spelling: &str, path
     };
     let mut any_type = false;
     for declaration in &found.found {
-        if declaration.fact.kind == crate::DeclKind::Type {
+        if declaration.fact.kind == DeclKind::Type {
             any_type = true;
             continue;
         }
@@ -745,7 +723,7 @@ pub(crate) fn a_spelling_names_a_type(index: &ProjectIndex, spelling: &str, path
 /// The names written directly in one `::`-qualified scope.
 pub(crate) fn names_in_a_scope(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     scope: &str,
@@ -759,7 +737,7 @@ pub(crate) fn names_in_a_scope(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn names_in_a_scope_at(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     scope: &str,
@@ -769,7 +747,7 @@ pub(crate) fn names_in_a_scope_at(
     // The global name space has no spelling of its own: `::` is what the file writes, and `None` is what a
     // declaration at file scope records.
     if scope == "::" {
-        return Known::Yes(global_offers(index, scopes, root, path, 0, written));
+        return Known::Yes(global_offers(index, scopes, root, path, 0, written, true));
     }
 
     // A leading `::` on a longer path — `::ns::Widget` — asks for the *global* one, and the spelling to look up is
@@ -786,7 +764,7 @@ pub(crate) fn names_in_a_scope_at(
     match kind {
         // A class is defined once, so its members come from one place — and the walk over its bases is
         // `members_of`'s job rather than this query's.
-        Some(crate::ScopeKind::Class | crate::ScopeKind::Enum) => {
+        Some(ScopeKind::Class | ScopeKind::Enum) => {
             let members = match names_of_a_class(index, scopes, root, path, spelling) {
                 Known::Yes(members) => members,
                 Known::Unknown(reason) => return Known::Unknown(reason),
@@ -854,84 +832,6 @@ pub(crate) fn names_in_a_scope_at(
             //                                        arm `std::string::` offered **0** items.
             // ```
             let names_a_type = a_spelling_names_a_type(index, spelling, path);
-            if crate::probes::members() {
-                let bare = spelling.rsplit("::").next().unwrap_or(spelling);
-                let facts: Vec<String> = index
-                    .every_fact_named(bare)
-                    .into_iter()
-                    .map(|(file, fact)| {
-                        format!(
-                            "{:?} scope {:?} kind {:?} @ {}",
-                            fact.name,
-                            fact.scope,
-                            fact.kind,
-                            file.file_name().unwrap_or_default().to_string_lossy()
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "    names_in_a_scope({spelling}): in the tree {}, names_a_type {names_a_type}, \
-                     definition {:?} | facts named {bare:?}: {facts:?}",
-                    in_the_tree.is_some(),
-                    match index.definition(spelling, path) {
-                        Known::Yes(found) =>
-                            format!("Yes({} {:?})", found.fact.qualified_name(), found.fact.kind),
-                        Known::Unknown(reason) => format!("Unknown({reason:?})"),
-                        Known::No => "No".to_string(),
-                    }
-                );
-                if spelling == "std::string" {
-                    let xstring = index.summaries_named_like("xstring");
-                    let string = index.summaries_named_like("string");
-                    eprintln!(
-                        "      index: {} summaries, {} distinct names | by_name: string {} basic_string {} \
-                         vector {} | by_scope: std::basic_string {} | files: xstring {} string-ish {}",
-                        index.len(),
-                        index.distinct_names(),
-                        index.name_postings("string"),
-                        index.name_postings("basic_string"),
-                        index.name_postings("vector"),
-                        index.scope_postings("std::basic_string"),
-                        xstring.len(),
-                        string.len(),
-                    );
-                    for path in string.iter().take(6) {
-                        eprintln!("        {}", path.display());
-                    }
-
-                    // **What the summary of `<xstring>` actually says**, which is the question that separates
-                    // "the class was never recorded" from "it was recorded under a name nothing asks for".
-                    // `basic_string` is written at `xstring:2344` as
-                    // `template <class _Elem, class _Traits, class _Alloc> class basic_string`, so a reading that
-                    // dropped it lost it in the *fact builder* rather than in any lookup.
-                    for (path, summary) in index.all_summaries() {
-                        let name = path.to_string_lossy();
-                        if !name.ends_with("xstring") && !name.ends_with("include/string") {
-                            continue;
-                        }
-                        let mut named: Vec<String> = summary
-                            .declarations
-                            .iter()
-                            .filter(|fact| fact.name.contains("basic"))
-                            .map(|fact| {
-                                format!(
-                                    "{:?} kind {:?} scope {:?} local {}",
-                                    fact.name, fact.kind, fact.scope, fact.local
-                                )
-                            })
-                            .collect();
-                        named.sort();
-                        named.dedup();
-                        eprintln!(
-                            "      {} has {} declaration(s); the {} named *basic*: {:?}",
-                            name,
-                            summary.declarations.len(),
-                            named.len(),
-                            named.iter().take(14).collect::<Vec<_>>()
-                        );
-                    }
-                }
-            }
 
             if names_a_type {
                 // **An alias is followed to the class that has the members.** `std::string` is
@@ -941,7 +841,7 @@ pub(crate) fn names_in_a_scope_at(
                 // the library. `resolve_aliases` is the same resolution `members_of` does for a member's own type,
                 // so the two cannot disagree about what the spelling names.
                 let named = resolve_aliases(
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &sema::declarations::ShapeTable::new(),
                     index,
                     scopes,
                     root,
@@ -949,9 +849,7 @@ pub(crate) fn names_in_a_scope_at(
                     spelling,
                 );
                 let named = named.as_ref();
-                if crate::probes::members() {
-                    eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
-                }
+
                 match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),
                     Known::Unknown(reason) => return Known::Unknown(reason),
@@ -970,7 +868,7 @@ pub(crate) fn names_in_a_scope_at(
                     // `std`) and then as written, because which of the two is right depends on the alias's scope.
                     if depth < 4
                         && let Known::Yes(alias) = index.definition(spelling, path)
-                        && alias.fact.kind == crate::DeclKind::Namespace
+                        && alias.fact.kind == DeclKind::Namespace
                         && let Some(target) = alias.fact.type_of.as_deref()
                     {
                         let mut candidates: Vec<String> = Vec::new();
@@ -1016,11 +914,11 @@ pub(crate) fn names_in_a_scope_at(
 /// alias.
 pub(crate) fn the_target_of_a_namespace_alias(
     root: &cpp_parser::CppSyntaxNode,
-    scopes: &crate::ScopeTree,
-    id: crate::sema::symbol::ScopeId,
+    scopes: &ScopeTree,
+    id: sema::symbol::ScopeId,
 ) -> Option<String> {
     let scope = scopes.scope(id)?;
-    if scope.kind != crate::ScopeKind::Namespace {
+    if scope.kind != ScopeKind::Namespace {
         return None;
     }
     let range = scope.range?;
@@ -1043,11 +941,7 @@ pub(crate) fn the_target_of_a_namespace_alias(
 /// **Where an alias's target is looked up from.** The language looks a target up in the scope the alias is declared
 /// in, so `namespace views = ranges::views;` inside `std` names `std::ranges::views`; a target that already resolves
 /// on its own — `namespace fs = std::filesystem;` at file scope — is used as written.
-pub(crate) fn the_target_in_its_own_scope(
-    scopes: &crate::ScopeTree,
-    alias: &str,
-    target: &str,
-) -> String {
+pub(crate) fn the_target_in_its_own_scope(scopes: &ScopeTree, alias: &str, target: &str) -> String {
     let target = target.trim().trim_start_matches("::");
     if let Some(at) = alias.rfind("::") {
         let nearby = format!("{}::{target}", &alias[..at]);
@@ -1175,7 +1069,7 @@ pub(crate) const POPULAR_NAME: usize = 4096;
 pub(crate) fn bindings_of(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-    bindings: &[crate::Binding],
+    bindings: &[Binding],
     scope: Option<&str>,
     local: bool,
 ) -> Vec<Candidate> {
@@ -1194,10 +1088,11 @@ pub(crate) fn bindings_of(
 /// The names written at **file scope**: this buffer's, and every included file's.
 pub(crate) fn global_names(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     written: &str,
+    in_completion: bool,
 ) -> Vec<Candidate> {
     let mut names: Vec<Candidate> = scopes
         .root()
@@ -1213,7 +1108,13 @@ pub(crate) fn global_names(
         name.from = NameProvenance::ThisFile;
     }
 
-    names.extend(declarations_in_scope(index, path, None, written));
+    names.extend(declarations_in_scope(
+        index,
+        path,
+        None,
+        written,
+        in_completion,
+    ));
     names
 }
 
@@ -1229,6 +1130,7 @@ pub(crate) fn declarations_in_scope(
     visible_from: &Path,
     scope: Option<&str>,
     written: &str,
+    in_completion: bool,
 ) -> Vec<Candidate> {
     // **The prefix is applied here, where the names are still borrowed.** Everything below this point is work per
     // declaration — a `DeclFact` clone, a provenance lookup, a `Vec` push — and on a file that includes `<string>`
@@ -1237,38 +1139,83 @@ pub(crate) fn declarations_in_scope(
     // names it drops could not have been offered anyway. See [`crate::sema::resolve::name_position_at`].
     let accepts = |fact: &DeclFact| name_starts_with(fact, written);
 
-    let found = match scope {
-        Some(spelling) => index.declarations_in_where(spelling, visible_from, accepts),
+    match scope {
+        Some(spelling) => index
+            .declarations_in_where(spelling, visible_from, accepts)
+            .into_iter()
+            .map(|declaration| {
+                Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                )
+            })
+            .collect(),
         // **The full walk, and it has to be.** A cheap version of this arm (the `#include` graph plus a prefix over the
         // raw summaries) was measured and reverted: it cost 1.18 s either way — the time is in `bindings_of`'s type
         // inference, not here — and it changed what completion offers, because the walk's answer includes the **cooked**
         // reading's declarations (a name a macro writes) and excludes the branches a condition does not take. Two
         // handshake tests say so: `a_name_only_the_cooked_reading_declares_is_offered_over_the_wire` and
         // `a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines`.
-        None => index.visible_declarations_where(visible_from, |fact| {
-            accepts(fact) && fact.scope.is_none() && !fact.local
-        }),
-    };
-
-    // **Each of the two queries applied its own budget**, and this function must not apply a third: the global
-    // name space is unbounded in size and the tier it produces ranks last ([`MAX_COLLECTED_NAMES`]), while one named
-    // scope holds what it holds ([`MAX_COLLECTED_IN_A_SCOPE`]). A second cut here is what made `std::` offer 175 of
-    // its 2 008 names.
-    found
-        .into_iter()
-        .map(|declaration| {
-            Candidate::new(
-                declaration.file.clone(),
-                declaration.fact.clone(),
-                provenance_of(
-                    index,
-                    visible_from,
-                    declaration.visibility,
-                    &declaration.file,
-                ),
-            )
-        })
-        .collect()
+        None if in_completion => {
+            // **`in_completion` is the prepared snapshot, not a fresh walk of the closure.** The headers' global
+            // names are cloned once per declaration revision; a body edit leaves that revision alone and this is a
+            // prefix filter over the file-order list the old per-request walk would have produced. The root's own
+            // names are read from the current summary, so its offsets are never stale.
+            let snapshot = index.completion_visible_declarations(visible_from);
+            let mut found: Vec<Candidate> = Vec::new();
+            for declaration in snapshot.iter() {
+                if !accepts(&declaration.fact) {
+                    continue;
+                }
+                found.push(Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                ));
+            }
+            if let Some(summary) = index.summary(visible_from) {
+                for fact in &summary.declarations {
+                    if fact.scope.is_none() && !fact.local && accepts(fact) {
+                        found.push(Candidate::new(
+                            summary.path.clone(),
+                            fact.clone(),
+                            NameProvenance::ThisFile,
+                        ));
+                    }
+                }
+            }
+            found
+        }
+        None => index
+            .visible_declarations_where(visible_from, |fact| {
+                accepts(fact) && fact.scope.is_none() && !fact.local
+            })
+            .into_iter()
+            .map(|declaration| {
+                Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Does this declaration's name begin with what is being typed?
@@ -1297,7 +1244,7 @@ pub(crate) fn declarations_in(
     visible_from: &Path,
     written: &str,
 ) -> Vec<Candidate> {
-    declarations_in_scope(index, visible_from, Some(spelling), written)
+    declarations_in_scope(index, visible_from, Some(spelling), written, false)
 }
 
 /// **How near the cursor a file is**, for the ranking: the buffer, a project header beside it, a header the buffer
@@ -1345,7 +1292,7 @@ pub(crate) fn provenance_of(
 /// The members of a class, bases included, as names to offer.
 pub(crate) fn names_of_a_class(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,

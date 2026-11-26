@@ -29,6 +29,9 @@
 //!
 //! The table is process-wide (see [`Contributions`]: it used to be a `thread_local`, which multiplied it by the
 //! size of the index pool) and bounded, because it is a memo: a miss costs one re-walk of one file.
+use crate::cache;
+use crate::index;
+use crate::summary;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -157,8 +160,8 @@ const MAX_CONTRIBUTIONS: usize = 512;
 /// class answering 18 members of one name. This table would have kept replaying that conclusion after the codec was
 /// fixed, because the file's bytes had not moved — the same reason [`crate::cache::a_rendering_key`] folds the reader.
 pub(crate) fn key(file: &std::path::Path, content: u64, projection: u64) -> u64 {
-    let mut hash = crate::index::walk_census::hash(file.to_string_lossy().as_bytes());
-    for part in [content, projection, crate::cache::READING_FINGERPRINT] {
+    let mut hash = index::walk_census::hash(file.to_string_lossy().as_bytes());
+    for part in [content, projection, cache::READING_FINGERPRINT] {
         hash = hash.rotate_left(7) ^ part;
     }
     hash
@@ -233,14 +236,14 @@ impl WalkCache {
         for contribution in table.held.values() {
             bytes += std::mem::size_of::<Contribution>() + contribution.file.as_os_str().len();
             for event in &contribution.events {
-                bytes += std::mem::size_of::<crate::summary::TuEvent>()
+                bytes += std::mem::size_of::<summary::TuEvent>()
                     + event.name.len()
                     + event.body_text.as_ref().map_or(0, |text| text.len())
                     + event.parameters.as_ref().map_or(0, |text| text.len());
             }
             bytes += contribution.changes.len() * std::mem::size_of::<StateChange>();
             bytes += contribution.edges.len() * std::mem::size_of::<(usize, u64)>();
-            bytes += contribution.bodies.len() * std::mem::size_of::<crate::ConditionalBody>();
+            bytes += contribution.bodies.len() * std::mem::size_of::<ConditionalBody>();
             bytes += contribution.dead.len() * std::mem::size_of::<usize>();
         }
         (table.held.len(), bytes)
@@ -255,7 +258,7 @@ impl WalkCache {
         drop(table);
         // The projection memo is invalidated by the same edits, and keeping them together is the only way they
         // cannot disagree about which state of a file they describe.
-        crate::index::walk_census::forget_projections();
+        index::walk_census::forget_projections();
     }
 
     /// **Everything this session holds**, for the codec to write.

@@ -21,6 +21,7 @@
 //! conversion. This file turns that into `CompletionItem`s: the item's kind, the text edit that **replaces** the
 //! character under the cursor, and the filter text.
 
+use crate::util;
 use cpp_code_analysis::VfsFile;
 use cpp_code_analysis::file::coordinates::FileOffset;
 use cpp_code_analysis::format::completions_at;
@@ -89,5 +90,5 @@ fn position_of(file: &VfsFile, offset: usize) -> Option<Position> {
     if offset > file.text.len() {
         return None;
     }
-    crate::util::position_in_file(file, offset)
+    util::position_in_file(file, offset)
 }

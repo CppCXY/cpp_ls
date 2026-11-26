@@ -10,6 +10,7 @@
 //! schema-description language would be more expressive and would also be a second thing to keep in step; the questions
 //! are fifteen and the arguments are a handful of strings and numbers.
 
+use crate::SCHEMA;
 use serde_json::{Value, json};
 
 /// One argument a command takes.
@@ -269,7 +270,7 @@ pub fn the_capabilities() -> Value {
         })
         .collect();
     json!({
-        "schema": crate::SCHEMA,
+        "schema": SCHEMA,
         "protocol": "JSON on stdout. One object per answer: `schema`, `ok`, `command`, `query`, `answer`; on a \
                      failure `ok` is false and `error` carries `code` and `message`. `--text` prints the \
                      human rendering instead.",

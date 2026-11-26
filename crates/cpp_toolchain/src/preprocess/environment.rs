@@ -5,6 +5,8 @@
 //! branch of an `#if` the one that gets compiled" — kept here rather than in the analysis so that the analysis may
 //! depend on it and not the other way round.
 
+use crate::DirectiveKind;
+use crate::preprocess;
 /// **Is this branch the one that gets compiled?** Asked of the compilation's own knowledge, before a file is read.
 ///
 /// `None` when nobody can say — no environment, or a condition whose expression needs a body — which leaves the
@@ -31,16 +33,16 @@
 /// function but of the evidence: a preprocessor that guessed at `#if` would silently delete code a person wrote.
 pub fn a_branch_is_taken(
     is_a_macro: &mut dyn FnMut(&str, usize) -> bool,
-    kind: crate::DirectiveKind,
-    branch: &crate::preprocess::guard::Branch,
+    kind: DirectiveKind,
+    branch: &preprocess::guard::Branch,
     offset: usize,
 ) -> Option<bool> {
     match kind {
-        crate::DirectiveKind::Ifdef => {
+        DirectiveKind::Ifdef => {
             let name = branch.name.as_deref()?;
             Some(is_a_macro(name, offset))
         }
-        crate::DirectiveKind::Ifndef => {
+        DirectiveKind::Ifndef => {
             let name = branch.name.as_deref()?;
             Some(!is_a_macro(name, offset))
         }

@@ -9,7 +9,6 @@ pub mod cmd_args;
 mod context;
 pub mod handlers;
 mod logger;
-pub mod probes;
 mod server;
 mod util;
 

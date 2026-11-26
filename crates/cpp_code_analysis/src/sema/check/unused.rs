@@ -23,6 +23,11 @@
 //! check stay quiet. That is the direction to be wrong in. Measured on MSVC's headers, the narrower rule reported
 //! `__pragma`-heavy declarations whose uses are written inside macros, and the file-wide question does not.
 
+use crate::DeclFact;
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::ScopeKind;
+use crate::file;
 use std::collections::HashMap;
 
 use cpp_parser::CppTokenKind;
@@ -50,7 +55,7 @@ fn declares_a_member(context: &CheckContext<'_>, at: usize) -> bool {
     scopes
         .scope_at(at)
         .and_then(|scope| scopes.scope(scope))
-        .is_some_and(|data| data.kind == crate::ScopeKind::Class)
+        .is_some_and(|data| data.kind == ScopeKind::Class)
 }
 fn is_deliberately_unused(name: &str) -> bool {
     name.starts_with('_')
@@ -66,7 +71,7 @@ fn is_deliberately_unused(name: &str) -> bool {
 ///
 /// The declared type is the evidence and the only evidence: `auto` says nothing about a destructor either, so a local
 /// whose type the fact did not record is left alone.
-fn its_type_cannot_have_a_destructor(fact: &crate::DeclFact) -> bool {
+fn its_type_cannot_have_a_destructor(fact: &DeclFact) -> bool {
     fact.type_of
         .as_deref()
         .is_some_and(super::undefined_name::is_a_builtin_spelling)
@@ -99,7 +104,6 @@ impl Check for Unused {
         // declaration would walk the token stream once per name, which is quadratic in a file the size of a real
         // header. Measured on MSVC's `<vector>`: 20 247 nodes, and the per-declaration form was the whole cost of
         // the layer.
-        let started = std::time::Instant::now();
         let mut written: HashMap<&str, usize> = HashMap::new();
         // **This file's own tokens**, not the rendering's: a token inside an inlined header is another file's
         // spelling, and counting it would make this rule answer about a name in `<string>`. See `CheckContext::own`.
@@ -121,7 +125,6 @@ impl Check for Unused {
         // `kind=Variable type=Some("_CSTD")`, and `xstring`'s `addressof` came out with `type=Some("_STD(_STD,
         // _Right)")`, the parameters inside the type. Four such facts were reported as "declared here and never used"
         // on a corpus that is known good, which is the one measurement this layer has to pass.
-        let counted = started.elapsed().as_millis();
         // **The bodies as ranges, sorted by where they start** — the question "is this offset inside one" is asked
         // once per local, and a file has many of both: measured on a 2 701-line fixture, 1 500 locals against ~300
         // bodies, and the linear scan over the bodies was **22 of this rule's 43 ms loop**. A binary search on the
@@ -139,13 +142,13 @@ impl Check for Unused {
             .filter_map(|body| {
                 let start = context
                     .view
-                    .file_offset_of(crate::file::coordinates::ReadingOffset::new(usize::from(
+                    .file_offset_of(file::coordinates::ReadingOffset::new(usize::from(
                         body.text_range().start(),
                     )))?
                     .get();
                 let end = context
                     .view
-                    .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(usize::from(
+                    .file_offset_of_end(file::coordinates::ReadingOffset::new(usize::from(
                         body.text_range().end(),
                     )))?
                     .get();
@@ -154,15 +157,12 @@ impl Check for Unused {
             .collect();
         bodies.sort_by_key(|body| body.start);
 
-        let walked = started.elapsed().as_millis();
-        let mut locals = 0usize;
         for fact in &context.summary.declarations {
             // **A local variable inside a function body**, which is the only shape this rule claims — see the module
             // documentation for the reasoning behind each condition.
-            if !fact.local || fact.kind != crate::DeclKind::Variable {
+            if !fact.local || fact.kind != DeclKind::Variable {
                 continue;
             }
-            locals += 1;
             // **The comparison happens in the rendering's coordinates**, because the two sides come from different
             // places: `fact.range` is the file's — see `CheckContext::written` — while a body's range is the tree's,
             // which is the rendering. Asking without the crossing is how this guard first went wrong: a fixture whose
@@ -182,7 +182,7 @@ impl Check for Unused {
             // only by the locals that are inside a body, so it is a handful rather than every declaration.
             let Some(at) = context
                 .view
-                .reading_offset_of(crate::file::coordinates::FileOffset::new(at))
+                .reading_offset_of(file::coordinates::FileOffset::new(at))
             else {
                 continue;
             };
@@ -206,7 +206,7 @@ impl Check for Unused {
             // attribute node, so reading it here would be a second reading of the same spelling. Measured on
             // `attributes.cpp` of the C++ corpus, whose only `unused` finding was a variable written
             // `[[maybe_unused]]` three lines above it.
-            if fact.modifiers.contains(crate::DeclModifiers::MAYBE_UNUSED) {
+            if fact.modifiers.contains(DeclModifiers::MAYBE_UNUSED) {
                 continue;
             }
 
@@ -245,16 +245,6 @@ impl Check for Unused {
                     "`%{name}` is declared here and never used",
                     name = fact.name
                 ),
-            );
-        }
-        if crate::probes::diagnostics() {
-            eprintln!(
-                "[unused] {} declaration(s), {} local(s): counted tokens {} ms | bodies {} ms | loop {} ms",
-                context.summary.declarations.len(),
-                locals,
-                counted,
-                walked,
-                started.elapsed().as_millis().saturating_sub(walked)
             );
         }
     }

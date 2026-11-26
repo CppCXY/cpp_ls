@@ -63,6 +63,8 @@
 //! against **recorded** `-E` output —the tests here do exactly that —on a machine with no compiler installed, and
 //! it is what keeps the one part that does touch the world (`examples/align_preprocessor.rs`) to a page.
 
+use crate::RenderedUnit;
+use crate::file;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1336,7 +1338,7 @@ pub fn shared(path: &Path) -> Arc<Path> {
 /// the same answer the streams were built with; a second normalization is how two answers to one question start to
 /// differ.
 pub fn normalized(path: &Path) -> PathBuf {
-    PathBuf::from(crate::file::paths::normalize_path(path, cfg!(windows)))
+    PathBuf::from(file::paths::normalize_path(path, cfg!(windows)))
 }
 
 /// **Where the text of a unit's files comes from**, for turning a rendering into comparable tokens.
@@ -1396,7 +1398,7 @@ impl UnitTexts for std::collections::HashMap<PathBuf, String> {
 /// A file the caller cannot read yields tokens with **no file and no line**, which the classifier reads as "nothing
 /// is known about where this is" rather than as agreement. That case is real: a rendering can name a file that was
 /// reached by the walk and never held.
-pub fn unit_tokens(unit: &crate::RenderedUnit, texts: &dyn UnitTexts) -> Vec<StreamToken> {
+pub fn unit_tokens(unit: &RenderedUnit, texts: &dyn UnitTexts) -> Vec<StreamToken> {
     // Built once per file, in the rendering's own frame order —the order `UnitSpan::file` indexes.
     let held: Vec<Option<HeldFile>> = unit
         .files
@@ -1439,6 +1441,7 @@ struct HeldFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RenderedUnit;
     use cpp_parser::SourceRange;
 
     /// **The spelling an origin is recorded in.** Case is folded on Windows only — two files that differ in
@@ -1986,10 +1989,10 @@ mod tests {
         // Line 1 blank, then `int a;` on 2, `int b;` on 3, `int c;` on 4, `int d;` on 5.
         let text = "\nint a;\nint b;\nint c;\nint d;\n";
 
-        let mut unit = crate::RenderedUnit {
+        let mut unit = RenderedUnit {
             files: vec![PathBuf::from(file)],
             file_lengths: vec![text.len()],
-            ..crate::RenderedUnit::default()
+            ..RenderedUnit::default()
         };
         // The rendering is a flat line of tokens —a different text, with different offsets, on purpose.
         unit.push("int", 0, SourceRange::new(1, 3), None);
@@ -2028,10 +2031,10 @@ mod tests {
     /// "unknown" and a report that points at the wrong line.
     #[test]
     fn a_file_nobody_has_the_text_of_yields_tokens_with_no_position() {
-        let mut unit = crate::RenderedUnit {
+        let mut unit = RenderedUnit {
             files: vec![PathBuf::from("/p/a.h")],
             file_lengths: vec![0],
-            ..crate::RenderedUnit::default()
+            ..RenderedUnit::default()
         };
         unit.push("x", 0, SourceRange::new(0, 1), None);
 

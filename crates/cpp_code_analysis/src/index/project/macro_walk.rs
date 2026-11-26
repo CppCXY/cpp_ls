@@ -5,6 +5,15 @@
 //! decided which branch was taken, and the order the files were included in.
 
 use super::*;
+use crate::CookedDiagnostic;
+use crate::FactGuard;
+use crate::MacroKind;
+use crate::ProjectMember;
+use crate::UnlistedBase;
+use crate::Visibility;
+use crate::cache;
+use crate::index;
+use crate::sema;
 
 /// **What one file contributes to a visibility walk**, as a number — see [`ProjectIndex::the_walks_fingerprint`].
 ///
@@ -27,8 +36,8 @@ pub(crate) fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
         bytes.push(0);
         bytes.push(u8::from(include.is_next));
         bytes.push(match include.guard {
-            crate::FactGuard::Unconditional => 0,
-            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+            FactGuard::Unconditional => 0,
+            FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
         });
     }
     for conditional in &summary.guards.conditionals {
@@ -60,18 +69,170 @@ pub(crate) fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
         }
         bytes.push(0);
         bytes.push(match fact.guard {
-            crate::FactGuard::Unconditional => 0,
-            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+            FactGuard::Unconditional => 0,
+            FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
         });
     }
     // **A module edge is a different kind of edge** and it is read by the same walk's second half — see
     // [`ProjectIndex::visible_files_with_modules`]. Debug is exact enough for a cache key, and a summary almost always
     // has nothing recorded here.
     bytes.extend_from_slice(format!("{:?}", summary.modules).as_bytes());
-    crate::cache::fnv1a64(&bytes)
+    cache::fnv1a64(&bytes)
+}
+
+/// **The declaration part of a summary, stripped of everything a body edit moves.** Offsets, name ranges and
+/// recovery markers change with one typed character; names, scopes, kinds, types, parameters and bases are what a
+/// definition answer or a member list is made of.
+fn declaration_shape(summary: &FileSummary) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    the_walk_inputs_of(summary).hash(&mut hasher);
+    for fact in summary.declarations.iter().filter(|fact| !fact.local) {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            fact.enumerator,
+            fact.name,
+            fact.scope,
+            fact.local,
+            fact.kind,
+            fact.type_of,
+            fact.returns,
+            fact.parameters(),
+            fact.bases(),
+            fact.pattern(),
+            fact.guard
+        )
+        .hash(&mut hasher);
+        format!("{:?}", fact.modifiers).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn cooked_declaration_shape(declarations: &[DeclFact]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for fact in declarations.iter().filter(|fact| !fact.local) {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            fact.enumerator,
+            fact.name,
+            fact.scope,
+            fact.local,
+            fact.kind,
+            fact.type_of,
+            fact.returns,
+            fact.parameters(),
+            fact.bases(),
+            fact.pattern(),
+            fact.guard
+        )
+        .hash(&mut hasher);
+        format!("{:?}", fact.modifiers).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl ProjectIndex {
+    /// **Drop only the declaration answers that actually cite this file.** A body edit hashes to the same
+    /// declaration shape as the text before it, and a class in a header does not stop being a class because a
+    /// character moved in somebody's function body.
+    fn forget_declaration_answers_from(&self, path: &str) {
+        let path = normalize(Path::new(path));
+        if let Ok(mut answers) = self.definition_answers.lock() {
+            answers.retain(|_, answer| match answer {
+                Known::Yes(definitions) => definitions
+                    .found
+                    .iter()
+                    .all(|declaration| normalize(&declaration.file) != path),
+                _ => true,
+            });
+        }
+        if let Ok(mut answers) = self.type_answers.lock() {
+            answers.retain(|_, answer| match answer {
+                Known::Yes((_, file)) => normalize(file) != path,
+                _ => true,
+            });
+        }
+    }
+
+    /// The shape-changing case: a declaration was added, removed or rewritten, so every answer may have moved.
+    fn forget_every_declaration_answer(&self) {
+        if let Ok(mut answers) = self.definition_answers.lock() {
+            answers.clear();
+        }
+        if let Ok(mut answers) = self.type_answers.lock() {
+            answers.clear();
+        }
+    }
+
+    /// Drop the completion snapshots whose closure contains this file — **not the snapshot of the file itself**,
+    /// which excludes its own root facts and is refreshed from the current summary by the query.
+    fn forget_completion_snapshots(&self, path: &str) {
+        let path = normalize(Path::new(path));
+        if let Ok(mut snapshots) = self.completion_names.lock() {
+            snapshots.retain(|root, snapshot| {
+                normalize(Path::new(root)) == path || !snapshot.contributors.contains(&path)
+            });
+        }
+    }
+
+    /// **The `in_completion` view of the global name space**: the headers' file-scope names, cloned once per
+    /// declaration revision in the index's file order — the same order and the same collection budget the old
+    /// per-request walk used. The root's own names are not here: they come from its scope tree and its current
+    /// summary on every query, so a body edit never invalidates this.
+    pub(crate) fn completion_visible_declarations(
+        &self,
+        visible_from: &Path,
+    ) -> std::sync::Arc<Vec<OwnedVisibleDeclaration>> {
+        let root = normalize(visible_from);
+        if let Ok(snapshots) = self.completion_names.lock()
+            && let Some(snapshot) = snapshots.get(&root)
+            && snapshot.revision == self.declaration_revision
+        {
+            return snapshot.names.clone();
+        }
+
+        let found = self.visible_declarations_upto(
+            visible_from,
+            &|fact| fact.scope.is_none() && !fact.local,
+            MAX_COLLECTED_NAMES,
+            Narrow::Nothing,
+        );
+        let mut contributors: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut names: Vec<OwnedVisibleDeclaration> = Vec::new();
+        for declaration in found {
+            let file = normalize(&declaration.file);
+            contributors.insert(file.clone());
+            if file == root {
+                continue;
+            }
+            names.push(OwnedVisibleDeclaration {
+                file: declaration.file,
+                fact: declaration.fact.clone(),
+                visibility: declaration.visibility,
+            });
+        }
+        names.truncate(MAX_COLLECTED_NAMES);
+        let names = std::sync::Arc::new(names);
+        if let Ok(mut snapshots) = self.completion_names.lock() {
+            if snapshots.len() >= 4
+                && !snapshots.contains_key(&root)
+                && let Some(oldest) = snapshots.keys().next().cloned()
+            {
+                snapshots.remove(&oldest);
+            }
+            snapshots.insert(
+                root,
+                CachedCompletionNames {
+                    revision: self.declaration_revision,
+                    names: names.clone(),
+                    contributors,
+                },
+            );
+        }
+        names
+    }
+
     pub fn new() -> Self {
         ProjectIndex {
             // **Incomplete**, so that a name this index has not been told about is `Unknown` rather than "not
@@ -232,13 +393,19 @@ impl ProjectIndex {
         let known_to_the_index =
             self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
         self.invalidate_visibility_answers(path, known_to_the_index);
-        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
-        // class, and nothing computed before it may answer after it.
-        if let Ok(mut answers) = self.type_answers.lock() {
-            answers.clear();
-        }
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
+        // **An edit that leaves the declarations alone keeps the answers about other files.** The old rule was a
+        // global clear on every insert, so one typed character in a function body threw away every class and
+        // definition answer the index had computed — including the headers' — and the next completion walked the
+        // whole closure again. The declaration-shape hash tells the two edits apart: a body edit has the same facts
+        // at new offsets, and only the answers that actually cite this file are dropped.
+        let shape = declaration_shape(&summary);
+        let declarations_changed = self.declaration_shapes.get(&rewritten).copied() != Some(shape);
+        self.declaration_shapes.insert(rewritten.clone(), shape);
+        if declarations_changed {
+            self.declaration_revision = self.declaration_revision.wrapping_add(1);
+            self.forget_every_declaration_answer();
+        } else {
+            self.forget_declaration_answers_from(&rewritten);
         }
         // **The walk memo is dropped per contributor rather than whole** — see [`ProjectIndex::visibility`]. A
         // re-read of a file the index already knew can only change the walks that read it; a file it has never seen
@@ -258,6 +425,7 @@ impl ProjectIndex {
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
         self.forget_guard_answers(path);
+        self.forget_completion_snapshots(&rewritten);
         // …and every macro walk this file was part of, by the rule the visibility memo above states.
         self.forget_macro_walks(path, known_to_the_index);
         let mut summary = summary;
@@ -411,21 +579,16 @@ impl ProjectIndex {
         // rebuilt, and one that never read it answers exactly as before — the correctness rule the old contributor
         // drop implemented, without the cost of dropping entries that could not have changed.
         self.walk_inputs.remove(&path);
-        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
-        // class, and nothing computed before it may answer after it.
-        if let Ok(mut answers) = self.type_answers.lock() {
-            answers.clear();
-        }
-        // **The visibility walks stay** — `walk_inputs` above makes every walk that read the forgotten file a miss by
-        // fingerprint, and one that never read it answers exactly as before. Dropping them here was what made a
-        // keystroke in one file throw away every other file's walk.
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
-        }
+        // **A file that is gone is a declaration change for the answers that cite it, not for every answer.**
+        // The global clear here made a `forget`-then-insert edit — which is every keystroke — throw away every
+        // header's class and definition answer. Keep the answers about files that did not move; the re-insert
+        // compares declaration shapes and decides whether a wider invalidation is needed.
+        self.forget_declaration_answers_from(&path);
 
         // A file that is gone is a contributor that changed: every member list it was made of is dropped.
         self.forget_member_lists(Path::new(&path));
         self.forget_guard_answers(Path::new(&path));
+        self.forget_completion_snapshots(&path);
         // **And every macro walk that read it.** A walk that never did cannot answer differently, which is what keeps
         // a header's answers alive across an edit to the `.c` file that includes it.
         self.forget_macro_walks(Path::new(&path), true);
@@ -526,9 +689,6 @@ impl ProjectIndex {
     /// counted here, at the one place every reader goes through. `CPPLS_TRACE_SUMMARIES=1` turns it
     /// on.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
-        if crate::probes::summaries() {
-            crate::probes::a_summary_was_asked_for(path);
-        }
         self.summaries.get(&normalize(path))
     }
 
@@ -672,9 +832,6 @@ impl ProjectIndex {
                         .any(|(_, prior)| !prior.declarations.is_empty())
                 }))
         {
-            if crate::probes::cooking() {
-                eprintln!("insert: refused an empty reading of {path}");
-            }
             return;
         }
 
@@ -708,36 +865,28 @@ impl ProjectIndex {
         // computations over three keystrokes — and 37/37 once this comparison was in place.
         if changed {
             self.forget_member_lists(Path::new(&path));
+            self.forget_completion_snapshots(&path);
+            // **A re-cook of the same declarations at new offsets is not a declaration change.** A body edit
+            // moves every fact after the edit, so the old full-equality test said "changed" on every keystroke
+            // and the global clear below threw away every header's answers. Compare the semantic shape instead:
+            // same declarations keep the answers about other files, and only this file's own answers go.
+            let shape = cooked_declaration_shape(&reading.declarations);
+            let key = (path.clone(), id);
+            let declarations_changed = self.cooked_shapes.get(&key).copied() != Some(shape);
+            self.cooked_shapes.insert(key, shape);
+            if declarations_changed {
+                self.declaration_revision = self.declaration_revision.wrapping_add(1);
+                self.forget_every_declaration_answer();
+            } else {
+                self.forget_declaration_answers_from(&path);
+            }
         }
-        // **What a cooked reading can change is the declaration answers, and nothing else here.** A walk reads
-        // includes and their conditions — facts of the file's *own text*, which the cooked reading does not rewrite
-        // — so clearing the walk memo for a cook was over-invalidation of the most expensive kind: the second pass
-        // cooks ~1 200 files back to back, and every one of them threw away every closure the queries had built.
-        // Measured: it was the reason a keystroke right after a cold start walked five closures again (33.5 ms).
-        self.definition_answers
-            .lock()
-            .expect("the definition memo is not poisoned")
-            .clear();
-
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
-        let tracing = crate::probes::names()
+        let _tracing = false
             && (path.ends_with("stl_map.h")
                 || path.ends_with("iostream")
                 || path.ends_with("json.hpp"));
-        if tracing {
-            eprintln!(
-                "[names] insert_a_reading {}: sequence {:?} id {id} declarations {} diagnostics {:?}",
-                path,
-                self.sequence.get(&path),
-                reading.declarations.len(),
-                reading
-                    .diagnostics
-                    .iter()
-                    .take(3)
-                    .map(|diagnostic| &diagnostic.message)
-                    .collect::<Vec<_>>()
-            );
-        }
+
         if let Some(&sequence) = self.sequence.get(&path) {
             let previous = self
                 .cooked
@@ -752,12 +901,7 @@ impl ProjectIndex {
         }
 
         // **Filed, in place of whatever that program (or the file itself) read before.**
-        if crate::probes::cooking() {
-            eprintln!(
-                "[cook] inserted {path}, cooked map now {}",
-                self.cooked.len()
-            );
-        }
+
         let readings = self.cooked.entry(path.clone()).or_default();
         match program {
             None => readings.on_its_own = Some(reading),
@@ -848,7 +992,7 @@ impl ProjectIndex {
                         .iter()
                         .map(MacroFact::heap_bytes)
                         .sum::<usize>()
-                    + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
+                    + reading.diagnostics.len() * std::mem::size_of::<CookedDiagnostic>();
             }
         }
         (
@@ -913,12 +1057,12 @@ impl ProjectIndex {
                             .members
                             .iter()
                             .map(|member| {
-                                std::mem::size_of::<crate::ProjectMember>()
+                                std::mem::size_of::<ProjectMember>()
                                     + DeclFact::heap_bytes(&member.fact)
                             })
                             .sum();
                         let unlisted =
-                            held.list.unlisted.len() * std::mem::size_of::<crate::UnlistedBase>();
+                            held.list.unlisted.len() * std::mem::size_of::<UnlistedBase>();
                         members
                             + unlisted
                             + held.contributors.len() * std::mem::size_of::<PathBuf>()
@@ -940,7 +1084,7 @@ impl ProjectIndex {
                     answers.len(),
                     answers.len()
                         * (std::mem::size_of::<(PathBuf, usize, u32)>()
-                            + std::mem::size_of::<crate::Visibility>()),
+                            + std::mem::size_of::<Visibility>()),
                 )
             })
             .unwrap_or_default();
@@ -975,7 +1119,7 @@ impl ProjectIndex {
                     answers.len(),
                     answers.len()
                         * (std::mem::size_of::<(String, u32)>()
-                            + std::mem::size_of::<crate::Visibility>()
+                            + std::mem::size_of::<Visibility>()
                             + 24),
                 )
             })
@@ -1115,11 +1259,11 @@ impl ProjectIndex {
         let path = normalize(path);
         self.forget_member_lists(Path::new(&path));
         self.forget_guard_answers(Path::new(&path));
+        self.forget_completion_snapshots(&path);
         // A cooked reading names things the raw one does not (`_STD_BEGIN` is `namespace std {` to it), so an
         // answer given while it was held can stop being true when it goes — the same rule as `forget`, see there.
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
-        }
+        self.declaration_revision = self.declaration_revision.wrapping_add(1);
+        self.forget_declaration_answers_from(&path);
         self.forget_the_readings_of(&path);
     }
 
@@ -1301,7 +1445,7 @@ impl ProjectIndex {
             let qualified = qualified.to_lowercase();
             // What the fact is called for ordering: its name, or — with none — the last segment of its scope.
             let name = match fact.name.is_empty() {
-                false => crate::index::names::lowercase(&fact.name),
+                false => index::names::lowercase(&fact.name),
                 true => qualified
                     .rsplit("::")
                     .next()
@@ -1758,33 +1902,10 @@ impl ProjectIndex {
         // translation unit this question is asked from** — the reading every file's answer is
         // chosen by.
         let asking = self.the_program_that_read(visible_from);
-        let walk_started = std::time::Instant::now();
-        let asks_before = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed);
-        let nanos_before = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed);
         let (walk, walk_files) = self.the_visible_walk(visible_from);
         let files = walk_files.as_ref();
         let through_an_import = &walk.through_an_import;
-        if crate::probes::visibility() {
-            eprintln!(
-                "[visibility] {} file(s) after the order step, from {}",
-                files.len(),
-                visible_from.display()
-            );
-        }
-        if crate::probes::timing() && walk_started.elapsed().as_micros() >= 500 {
-            let asks = CONDITION_ASKS.load(std::sync::atomic::Ordering::Relaxed) - asks_before;
-            let nanos = CONDITION_NANOS.load(std::sync::atomic::Ordering::Relaxed) - nanos_before;
-            eprintln!(
-                "[visibility] {:>5.1} ms, {} file(s), from {} — {asks} condition(s)/{} ms",
-                walk_started.elapsed().as_secs_f64() * 1000.0,
-                files.len(),
-                visible_from
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| visible_from.display().to_string()),
-                nanos / 1_000_000,
-            );
-        }
+
         // Everything below this line is reading facts out of files that are already known to be visible: the
         // filtering, the `DeclFact` clones, and the cooked-vs-raw deduplication. Timed apart from the walk because
         // the two have nothing in common — the walk is a question about the graph and this is a question about the
@@ -1814,31 +1935,6 @@ impl ProjectIndex {
                 }
             }
         };
-
-        if crate::probes::names()
-            && let Narrow::Named(names) = narrow
-            && names.iter().any(|name| *name == "cout" || *name == "map")
-        {
-            let postings = match &postings {
-                Some(postings) => postings
-                    .iter()
-                    .map(|posting| {
-                        format!(
-                            "file {} id {} index {}",
-                            posting.file,
-                            posting.reading,
-                            posting.index()
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                None => vec!["no narrow".to_string()],
-            };
-            eprintln!(
-                "[names] visible_declarations {:?}: {} posting(s) — {postings:?}",
-                names,
-                postings.len()
-            );
-        }
 
         // One `(file, its candidates)` group at a time, in file order. Without postings a file's candidates are all of
         // its facts, which is what the empty group range stands for.
@@ -2069,7 +2165,7 @@ impl ProjectIndex {
             }
         };
         for path in contributors {
-            eat(crate::cache::fnv1a64(path.as_bytes()));
+            eat(cache::fnv1a64(path.as_bytes()));
             eat(self
                 .walk_inputs
                 .get(path)
@@ -2150,17 +2246,7 @@ impl ProjectIndex {
             .ok()
             .and_then(|walks| walks.get(from).cloned())?;
         let now = self.the_walks_fingerprint(&remembered.contributors);
-        if crate::probes::visibility() {
-            eprintln!(
-                "[visibility]   remembered walk from {from}: {} ({} contributor(s))",
-                if now == remembered.fingerprint {
-                    "hit"
-                } else {
-                    "MISS — an input it was made of changed"
-                },
-                remembered.contributors.len()
-            );
-        }
+
         if now != remembered.fingerprint {
             return None;
         }
@@ -2243,18 +2329,8 @@ impl ProjectIndex {
         // function asks is not a second implementation of the walk — it is the same walk, told to report the files
         // it enters. That is the rule the module keeps being bitten by: one question, one implementation.
         let mut seen = Seen::new(&from);
-        let macros_started = std::time::Instant::now();
         let mut state = self.macros.clone();
-        let macros_cloned = macros_started.elapsed();
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
-        if crate::probes::timing() && macros_started.elapsed().as_micros() >= 300 {
-            eprintln!(
-                "[visibility] the state: macro table cloned in {macros_cloned:?} ({} entry(ies)), \
-                 the translation unit's certain set in {:?}",
-                self.macros.len(),
-                macros_started.elapsed() - macros_cloned
-            );
-        }
 
         self.macro_candidates(
             Path::new(&from),
@@ -2725,21 +2801,13 @@ impl ProjectIndex {
                             None => {
                                 // **What a condition costs, counted** — the probe that says whether a warm walk is
                                 // warm because the memo works or because there was nothing to ask.
-                                let started = std::time::Instant::now();
-                                let answer = crate::index::environment::visibility_at(
+                                let answer = index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
                                     include.guard,
                                     include.range.start_offset,
                                 );
-                                if crate::probes::timing() {
-                                    CONDITION_NANOS.fetch_add(
-                                        started.elapsed().as_nanos() as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    CONDITION_ASKS
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
+
                                 if let Ok(mut answers) = self.visibility_answers.lock() {
                                     answers.insert(key, answer);
                                 }
@@ -2748,7 +2816,7 @@ impl ProjectIndex {
                         };
 
                         match answer {
-                            crate::Visibility::Active => so_far,
+                            Visibility::Active => so_far,
                             // **A condition that was decided, and not taken**: the file is not part of this
                             // translation unit at all, so nothing in it is visible — the edge is dropped rather
                             // than downgraded, and so is everything only reachable through it.
@@ -2762,10 +2830,10 @@ impl ProjectIndex {
                             // **false** for this compilation — were in the visibility list as `Conditional`, and
                             // their names were **8 of every 10 completion items**: 14351 items, 4.5 MB of JSON, for
                             // a cursor in a 78-line file (`zmmintrin.h` 5256, `arm64_neon.h` 2852, `arm_neon.h` 2117).
-                            crate::Visibility::Inactive => continue,
+                            Visibility::Inactive => continue,
                             // A condition nobody can decide: the file may or may not be there, which is exactly what
                             // `Conditional` means to every consumer.
-                            crate::Visibility::Unknown => IncludeVisibility::Conditional,
+                            Visibility::Unknown => IncludeVisibility::Conditional,
                         }
                     }
                 };
@@ -2988,9 +3056,7 @@ impl ProjectIndex {
         // **A measurement switch, not a behaviour**: what a diagnostics pull costs *without* the
         // index lookups — the sibling of `CPPLS_NO_INFERENCE`, and it exists to tell "the engine"
         // from "the index" before either is optimised.
-        if crate::probes::no_index_lookup() {
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
-        }
+
         // **One answer per spelling per pull** — see [`ProjectIndex::definition_answers`]. Measured on
         // `LuaSource.cpp`: 95 of one pull's 99 slow lookups were the same name (`std`), at 0.6–1.3 ms each.
         let key = (name.to_string(), normalize(visible_from));
@@ -3002,18 +3068,8 @@ impl ProjectIndex {
         {
             return known;
         }
-        let started = std::time::Instant::now();
         let answer = self.definitions_inner(name, visible_from);
-        if crate::probes::timing() && started.elapsed().as_micros() >= 200 {
-            eprintln!(
-                "[lookup] {:>5.1} ms  {name}  ({} answer(s))",
-                started.elapsed().as_secs_f64() * 1000.0,
-                match &answer {
-                    Known::Yes(found) => found.found.len(),
-                    _ => 0,
-                }
-            );
-        }
+
         if let Ok(mut memo) = self.definition_answers.lock() {
             if memo.len() >= MAX_DEFINITION_ANSWERS {
                 memo.clear();
@@ -3142,6 +3198,13 @@ impl ProjectIndex {
         // visibility walk per candidate would be paid once per overload rather than once per class.
         let mut decided: Vec<(String, bool)> = Vec::new();
         let mut kept = Vec::with_capacity(found.found.len());
+        // **A C enumeration has no scoped form.** In C the enumerators are ordinary names in the enclosing scope;
+        // the fact's `scope` names the enum only because that is where the declaration is written. Dropping it
+        // because its scope "names a class" is a C++ rule — measured on neovim's `EVENT_BUFADD`, whose `auto_event`
+        // enumerator has no jump from a `.c` file. A C++ `enum class` keeps the scoped exclusion.
+        let c_file = visible_from
+            .extension()
+            .is_some_and(|extension| extension == "c");
 
         for declaration in found.found {
             let Some(scope) = declaration.fact.scope.clone() else {
@@ -3159,7 +3222,7 @@ impl ProjectIndex {
                 }
             };
 
-            if !a_class {
+            if !a_class || (c_file && declaration.fact.enumerator) {
                 kept.push(declaration);
             }
         }
@@ -3409,11 +3472,17 @@ impl ProjectIndex {
         // answers without this step, so the two answers can be compared over the same questions: with a rendering for
         // most files (⑱ makes the rendering the reading) this filter should have almost nothing left to remove, and
         // "almost nothing" is a number this crate's style asks for rather than a claim. See `tests/patch_probe.rs`.
-        if !crate::probes::no_guard_filter() {
-            candidates.retain(|found| {
-                self.a_guard_is_taken(&found.file, found.fact.guard, found.fact.range.start_offset)
-            });
-        }
+        // **The verdicts this query's one walk already produced**, when there are any: the filter then answers from
+        // a map instead of walking the header's closure — see `ProjectIndex::answer_the_guards`.
+        let answered = self.answered_guards_of(visible_from);
+        candidates.retain(|found| {
+            self.a_guard_is_taken(
+                &found.file,
+                found.fact.guard,
+                found.fact.range.start_offset,
+                answered.as_deref(),
+            )
+        });
         // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
         // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
         // nothing else — "one declaration, and two that might be" is not "one declaration".
@@ -3462,13 +3531,8 @@ impl ProjectIndex {
         const ALIAS_DEPTH: usize = 4;
 
         let mut rewritten = name.to_string();
-        let tracing = crate::probes::alias();
-
         for _ in 0..ALIAS_DEPTH {
             let segments: Vec<&str> = rewritten.split("::").collect();
-            if tracing {
-                eprintln!("[alias] trying {rewritten}");
-            }
 
             // The last segment is excluded: it is the name being looked for, and substituting it would be
             // answering a different question from the one the caller asked.
@@ -3479,21 +3543,7 @@ impl ProjectIndex {
                 // synonym is the one that says nothing about where `E` really lives.
                 let mut candidates = self.files_declaring(&prefix, visible_from);
                 candidates.sort_by_key(|found| found.fact.kind == DeclKind::Other);
-                if tracing {
-                    eprintln!(
-                        "[alias] prefix {prefix}: {:?}",
-                        candidates
-                            .iter()
-                            .map(|found| format!(
-                                "{} {:?} scope {:?} type {:?}",
-                                found.fact.name,
-                                found.fact.kind,
-                                found.fact.scope,
-                                found.fact.type_of
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                }
+
                 let alias = candidates.into_iter().next()?;
 
                 // A prefix that names the entity **itself** — an `enum class` reached through a `using`, a class
@@ -3539,8 +3589,7 @@ impl ProjectIndex {
                 if alias.fact.kind != DeclKind::Type {
                     return None;
                 }
-                let target =
-                    crate::sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
+                let target = sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
                 let class = target.class_name()?;
 
                 let qualified = if class.contains("::") {
@@ -3801,19 +3850,46 @@ impl ProjectIndex {
     /// this and a caller asking about thousands of them should use the incremental state
     /// [`ProjectIndex::macro_environment`] builds while it walks.
     pub fn macros_at(&self, path: &Path, offset: usize) -> Marked {
+        // **The question is the offset, so the answer is keyed by it.** Every fact guarded by the same region asks
+        // for the same state — measured on `channel.c`: 18 asks, two distinct offsets, 71 ms each, 1.3 s of a
+        // semantic-token request whose classification was 1.3 ms.
+        let key = (normalize(path), offset);
+        if let Ok(memo) = self.macro_states_at.lock()
+            && let Some(cached) = memo.get(&key)
+        {
+            return cached.state.clone();
+        }
         let mut state = self.macros.clone();
         let certain = self.certainly_in_the_translation_unit(path);
-
+        let mut visited: HashSet<String> = HashSet::new();
         self.macro_candidates(
             path,
             &mut Vec::new(),
             false,
-            &mut HashSet::new(),
+            &mut visited,
             &certain,
             &mut Collecting::Nothing,
             &mut state,
             Some(offset),
         );
+        let contributors: Vec<String> = visited.into_iter().collect();
+        if let Ok(mut memo) = self.macro_states_at.lock() {
+            if memo.len() >= MAX_CACHED_MACRO_STATES
+                && let Some(oldest) = memo.keys().next().cloned()
+            {
+                // **One entry out, not the whole map.** Emptying on overflow threw away the states the colouring
+                // pass had just paid for: the hint pass asks about offsets of its own, and clearing them here made
+                // the next semantic-token request pay the walks again.
+                memo.remove(&oldest);
+            }
+            memo.insert(
+                key,
+                std::sync::Arc::new(CachedMacroState {
+                    contributors,
+                    state: state.clone(),
+                }),
+            );
+        }
 
         state
     }
@@ -4021,8 +4097,14 @@ impl ProjectIndex {
                 break;
             }
 
+            // **A guard question due at or before this point is answered from the state the walk has right
+            // here** — that is the whole of `answer_the_guards`: one walk through the translation unit answers
+            // every `#ifdef` a colouring pass is about to ask, instead of one 276-file walk per header.
+            collecting.due(summary, &path, at, state);
+
             if take_fact {
                 let fact = facts.next().expect("peeked");
+
                 let reach = self.fact_reach(
                     summary,
                     &mut verdicts,
@@ -4122,6 +4204,129 @@ impl ProjectIndex {
         }
     }
 
+    /// **Answer every guard question a query is about to ask, with one walk through the file's translation unit.**
+    ///
+    /// The alternative — and what every request did until this existed — is `visibility_at` per candidate, which
+    /// builds a macro state of the *header's* closure for each question: `channel.c` asks **twenty-five** of them on
+    /// its first colouring pass, each a 276-file walk of sixteen thousand names (65 ms), and the pass answered in
+    /// **638 ms**. One walk from the file being coloured reaches the same headers in the order a compiler would,
+    /// with the state already built, so each question is a lookup at the moment the walk passes its condition.
+    ///
+    /// A question the walk never reaches (a header behind an `#include` this translation unit does not take) is
+    /// left unanswered, and the caller falls back to `visibility_at` for it.
+    pub fn answer_the_guards(
+        &self,
+        root: &Path,
+        questions: &[(String, u32, usize)],
+    ) -> (Vec<Option<Visibility>>, u64, std::sync::Arc<Vec<String>>) {
+        let mut walk = GuardWalk::new();
+        let mut asked: Vec<Option<Vec<(u32, usize)>>> = Vec::with_capacity(questions.len());
+        for (file, region, fact_offset) in questions {
+            let summary = self.summaries.get(&normalize(Path::new(file)));
+            let Some(summary) = summary else {
+                walk.question();
+                asked.push(None);
+                continue;
+            };
+            let question = walk.question();
+            let chain: Vec<(u32, usize)> = summary
+                .guards
+                .conditions_of(*region)
+                .into_iter()
+                .map(|at| (at.region, at.condition_at))
+                .collect();
+            for (condition_region, condition_at) in &chain {
+                walk.ask(
+                    question,
+                    file,
+                    *condition_region,
+                    *condition_at,
+                    *fact_offset,
+                );
+            }
+            asked.push(Some(chain));
+        }
+
+        let certain = self.certainly_in_the_translation_unit(root);
+        let mut state = self.macros.clone();
+        let mut contributors: HashSet<String> = HashSet::new();
+        self.macro_candidates(
+            root,
+            &mut Vec::new(),
+            false,
+            &mut contributors,
+            &certain,
+            &mut Collecting::Guards(&mut walk),
+            &mut state,
+            None,
+        );
+        contributors.insert(normalize(root));
+        let mut contributors: Vec<String> = contributors.into_iter().collect();
+        contributors.sort();
+        let stamp = self.the_walks_fingerprint(&contributors);
+
+        let answers = asked
+            .into_iter()
+            .enumerate()
+            .map(|(question, chain)| {
+                let chain = chain?;
+                let answers = &walk.answers[question];
+                let mut unknown = false;
+                for (region, _) in chain {
+                    match answers.get(&region).copied().flatten() {
+                        Some(true) => {}
+                        Some(false) => return Some(Visibility::Inactive),
+                        None => unknown = true,
+                    }
+                }
+                Some(if unknown {
+                    Visibility::Unknown
+                } else {
+                    Visibility::Active
+                })
+            })
+            .collect();
+        (answers, stamp, std::sync::Arc::new(contributors))
+    }
+
+    /// **Install the verdicts [`ProjectIndex::answer_the_guards`] produced**, so the guard filter finds them
+    /// instead of walking each header's closure again. Keyed by the file the questions were asked from, and
+    /// dropped when the index changes.
+    pub fn install_answered_guards(
+        &self,
+        root: &Path,
+        answers: HashMap<(String, u32, usize), Visibility>,
+        stamp: u64,
+        contributors: std::sync::Arc<Vec<String>>,
+    ) {
+        if answers.is_empty() {
+            return;
+        }
+        if let Ok(mut installed) = self.answered_guards.lock() {
+            // **One entry per open document**, and a stale one is worthless: an entry answers only at the revision
+            // it was made at, which is what lets the answers be reused without being able to be wrong.
+            if installed.len() >= 8
+                && let Some(oldest) = installed.keys().next().cloned()
+            {
+                installed.remove(&oldest);
+            }
+            installed.insert(
+                normalize(root),
+                (stamp, contributors, std::sync::Arc::new(answers)),
+            );
+        }
+    }
+
+    /// The verdicts installed for `root`, when they are still about this revision.
+    fn answered_guards_of(
+        &self,
+        root: &Path,
+    ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), Visibility>>> {
+        let installed = self.answered_guards.lock().ok()?;
+        let (stamp, contributors, answers) = installed.get(&normalize(root))?;
+        (self.the_walks_fingerprint(contributors) == *stamp).then(|| std::sync::Arc::clone(answers))
+    }
+
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
     pub(crate) fn include_visibility(
         &self,
@@ -4186,12 +4391,10 @@ impl ProjectIndex {
                             .guards
                             .region_at(at.region, offset)
                             .and_then(|region| {
-                                region.visibility(
-                                    &crate::index::environment::MacrosHere::from_walk(
-                                        state,
-                                        at.condition_at,
-                                    ),
-                                )
+                                region.visibility(&index::environment::MacrosHere::from_walk(
+                                    state,
+                                    at.condition_at,
+                                ))
                             }),
                     };
 
@@ -4268,7 +4471,91 @@ pub(crate) enum Collecting<'a> {
     /// pays one walk per condition in the closure. Carried this way the state is already in hand when the edge is
     /// crossed, which is what [`crate::index::environment::MacrosHere::from_walk`] exists for.
     Visibility(&'a mut Seen),
+    /// **Guard questions a query is about to ask**, answered from the state the walk has at each condition — see
+    /// [`ProjectIndex::answer_the_guards`].
+    Guards(&'a mut GuardWalk),
     Nothing,
+}
+
+/// The questions one walk answers about `#if` regions, and the verdicts it collected.
+///
+/// A colouring pass asks "is this declaration compiled" once per candidate, and each answer costs a walk of the
+/// header's closure (`macros_at`: 276 files, 65 ms, sixteen thousand names). Every one of those questions can be
+/// answered by **one** walk through the file being coloured, which reaches the same headers — so the questions are
+/// registered here by condition offset, the walk evaluates each as it passes, and the answers are combined into a
+/// [`crate::Visibility`] afterwards by the rule `SummaryGuards::visibility_of` states.
+pub(crate) struct GuardWalk {
+    /// `(file, condition offset)` → the questions waiting on that condition.
+    due: HashMap<(String, usize), Vec<Due>>,
+    /// Per question: the region it tests → whether that region's branch holds.
+    answers: Vec<HashMap<u32, Option<bool>>>,
+}
+
+/// One question waiting on one condition of its chain.
+struct Due {
+    question: usize,
+    region: u32,
+    fact_offset: usize,
+}
+
+impl GuardWalk {
+    fn new() -> Self {
+        GuardWalk {
+            due: HashMap::new(),
+            answers: Vec::new(),
+        }
+    }
+
+    fn question(&mut self) -> usize {
+        self.answers.push(HashMap::new());
+        self.answers.len() - 1
+    }
+
+    fn ask(
+        &mut self,
+        question: usize,
+        file: &str,
+        region: u32,
+        condition_at: usize,
+        fact_offset: usize,
+    ) {
+        self.due
+            .entry((file.to_string(), condition_at))
+            .or_default()
+            .push(Due {
+                question,
+                region,
+                fact_offset,
+            });
+    }
+
+    /// Answer every question whose condition the walk has now passed.
+    fn due(&mut self, summary: &FileSummary, file: &str, at: usize, state: &Marked) {
+        let waiting: Vec<(String, usize)> = self
+            .due
+            .keys()
+            .filter(|(wanted, offset)| wanted == file && *offset < at)
+            .cloned()
+            .collect();
+        for key in waiting {
+            let Some(questions) = self.due.remove(&key) else {
+                continue;
+            };
+            let condition_at = key.1;
+            for due in questions {
+                let holds = summary
+                    .guards
+                    .region_at(due.region, due.fact_offset)
+                    .and_then(|region| {
+                        region.visibility(&index::environment::MacrosHere::from_walk(
+                            state,
+                            condition_at,
+                        ))
+                    });
+                self.answers[due.question].insert(due.region, holds);
+            }
+        }
+    }
 }
 
 /// The files one root can see, and which of them are in view only through an `import`.
@@ -4341,6 +4628,12 @@ impl Seen {
 }
 
 impl Collecting<'_> {
+    /// **A guard question whose condition the walk has just passed** — see [`Collecting::Guards`].
+    pub(crate) fn due(&mut self, summary: &FileSummary, file: &str, at: usize, state: &Marked) {
+        if let Collecting::Guards(walk) = self {
+            walk.due(summary, file, at, state);
+        }
+    }
     /// **One** fact, if the caller is collecting facts about that name — or **every** name, when it is collecting
     /// the environment ([`Collecting::Names`]).
     pub(crate) fn fact(
@@ -4387,6 +4680,7 @@ impl Collecting<'_> {
             Collecting::Name(name, out) => Collecting::Name(name, out),
             Collecting::Names(out) => Collecting::Names(out),
             Collecting::Visibility(seen) => Collecting::Visibility(seen),
+            Collecting::Guards(walk) => Collecting::Guards(walk),
             Collecting::Nothing => Collecting::Nothing,
         }
     }
@@ -4491,12 +4785,10 @@ impl Collecting<'_> {
         }
 
         let asked = summary.guards.region_at(region, offset)?;
-        Some(
-            asked.visibility(&crate::index::environment::MacrosHere::from_walk(
-                state,
-                condition_at,
-            )),
-        )
+        Some(asked.visibility(&index::environment::MacrosHere::from_walk(
+            state,
+            condition_at,
+        )))
     }
 }
 
@@ -4517,8 +4809,8 @@ pub(crate) fn apply_fact(
         // …unless the region settles the name whatever its own condition says, which is the one thing an
         // undecidable branch *can* still say — and it says it about definedness only, never about the value.
         match (fact.settles_the_name, fact.kind) {
-            (true, crate::MacroKind::Definition) => state.define_name(&fact.name),
-            (true, crate::MacroKind::Undefinition) => state.undefine(&fact.name),
+            (true, MacroKind::Definition) => state.define_name(&fact.name),
+            (true, MacroKind::Undefinition) => state.undefine(&fact.name),
             _ => state.mark_uncertain(&fact.name),
         }
 
@@ -4527,7 +4819,7 @@ pub(crate) fn apply_fact(
 
     match reach {
         // In force: the name and its value, as the file wrote them.
-        FactReach::Active => crate::index::environment::observe_a_macro_fact(state, fact),
+        FactReach::Active => index::environment::observe_a_macro_fact(state, fact),
         // Handled above.
         FactReach::Inactive | FactReach::Unknown => {}
     }

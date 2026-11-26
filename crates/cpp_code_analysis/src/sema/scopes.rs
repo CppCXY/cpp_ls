@@ -30,6 +30,7 @@
 //! binding that cannot be placed is dropped, and the resulting gap is visible to a consumer — which is better
 //! than a binding in the wrong scope, and much better than a panic in an editor.
 
+use crate::{paths, symbol};
 use cpp_parser::{
     CppAstNode, CppAstToken, CppSyntaxKind, CppSyntaxNode, CppTokenKind, MacroBodies,
 };
@@ -2701,11 +2702,11 @@ fn is_a_constructor_declarator(declarator: &CppSyntaxNode) -> bool {
 /// found by the operator it is.
 fn function_binding_kind(name: &Name) -> BindingKind {
     match name.kind {
-        crate::symbol::NameKind::Destructor(_) => BindingKind::Destructor,
-        crate::symbol::NameKind::Conversion(_) => BindingKind::ConversionFunction,
-        crate::symbol::NameKind::Operator(_) => BindingKind::OperatorFunction,
-        crate::symbol::NameKind::Literal(_) => BindingKind::LiteralOperator,
-        crate::symbol::NameKind::Identifier(_) => BindingKind::Function,
+        symbol::NameKind::Destructor(_) => BindingKind::Destructor,
+        symbol::NameKind::Conversion(_) => BindingKind::ConversionFunction,
+        symbol::NameKind::Operator(_) => BindingKind::OperatorFunction,
+        symbol::NameKind::Literal(_) => BindingKind::LiteralOperator,
+        symbol::NameKind::Identifier(_) => BindingKind::Function,
     }
 }
 
@@ -4098,7 +4099,7 @@ fn module_name_of(node: &CppSyntaxNode, wrapper: CppSyntaxKind) -> Option<Qualif
 ///
 /// Exposed so that a caller assembling a table across files can mark the bindings it copies in, without this
 /// module needing to know that includes exist.
-pub fn included_origin(file: crate::paths::FileId) -> BindingOrigin {
+pub fn included_origin(file: paths::FileId) -> BindingOrigin {
     BindingOrigin::Included { file }
 }
 

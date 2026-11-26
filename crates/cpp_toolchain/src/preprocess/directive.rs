@@ -768,6 +768,8 @@ pub fn fold_quoted_header_names(source: &str, tokens: &mut [CppTokenData]) {
 
 #[cfg(test)]
 mod tests {
+    use crate::directive;
+    use crate::preprocess;
 
     /// **A quoted `#include` with a backslash is still an include.** The quoted operand of `#include` is a header name,
     /// and a header name has no escape sequences, so `"sub\header.h"` is a path. Three readers used to refuse it and the
@@ -780,7 +782,7 @@ mod tests {
             "#include \"..\\..\\include\\config.h\"\n",
         ] {
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-            let preprocessing = crate::preprocess::preprocess(source, &tokens);
+            let preprocessing = preprocess::preprocess(source, &tokens);
 
             let include = preprocessing
                 .directives
@@ -788,7 +790,7 @@ mod tests {
                 .find_map(|spanned| spanned.directive.as_include())
                 .unwrap_or_else(|| panic!("{source:?} is an include"));
 
-            assert_eq!(include.form, crate::directive::IncludeForm::Quote);
+            assert_eq!(include.form, directive::IncludeForm::Quote);
             assert!(
                 include.target.contains('\\'),
                 "the path keeps its separator: {:?}",

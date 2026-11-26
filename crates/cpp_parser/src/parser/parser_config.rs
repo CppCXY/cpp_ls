@@ -1,3 +1,4 @@
+use crate::features;
 use rowan::NodeCache;
 
 use crate::{
@@ -113,10 +114,10 @@ pub struct ParserConfig<'cache> {
 }
 
 /// **The vendor a dialect stands for** - the one thing [`Dialect`] ever said about syntax.
-fn dialect_vendor(dialect: Dialect) -> crate::features::Vendor {
+fn dialect_vendor(dialect: Dialect) -> features::Vendor {
     match dialect {
-        Dialect::Gnu => crate::features::Vendor::Gnu,
-        Dialect::Msvc => crate::features::Vendor::Msvc,
+        Dialect::Gnu => features::Vendor::Gnu,
+        Dialect::Msvc => features::Vendor::Msvc,
     }
 }
 
@@ -212,7 +213,7 @@ impl<'cache> ParserConfig<'cache> {
     /// A dialect already named survives this: the language config says what the *standard* is, and the dialect says
     /// whose compiler, so the vendor of [`ParserConfig::with_dialect`] is re-applied here. That is what makes the two
     /// builders idempotent in either order.
-    pub fn with_language(mut self, language: crate::features::LanguageConfig) -> Self {
+    pub fn with_language(mut self, language: features::LanguageConfig) -> Self {
         self.lexer_config.language = if self.dialect_was_named {
             language.with_vendor(dialect_vendor(self.dialect))
         } else {
@@ -224,7 +225,7 @@ impl<'cache> ParserConfig<'cache> {
         self
     }
 
-    pub fn language(&self) -> crate::features::LanguageConfig {
+    pub fn language(&self) -> features::LanguageConfig {
         self.lexer_config.language()
     }
 

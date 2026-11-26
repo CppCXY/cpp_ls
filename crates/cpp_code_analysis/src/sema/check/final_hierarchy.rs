@@ -33,6 +33,9 @@
 //! a rule that reported it would underline correct code.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 /// **`final-class-derived` / `override-of-final`** — see the module documentation.
 pub struct FinalHierarchy;
@@ -49,7 +52,7 @@ impl Check for FinalHierarchy {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Type)
+            .filter(|fact| fact.kind == DeclKind::Type)
             .map(|fact| {
                 (
                     fact.name.to_string(),
@@ -63,15 +66,10 @@ impl Check for FinalHierarchy {
             for base in bases {
                 // **The base's own fact**, through the index: the class may be declared in a header this file
                 // includes. A base nobody read is silence — "not read" is not "not final".
-                let crate::Known::Yes(declared) = context.index().definition(base, context.path)
-                else {
+                let Known::Yes(declared) = context.index().definition(base, context.path) else {
                     continue;
                 };
-                if !declared
-                    .fact
-                    .modifiers
-                    .contains(crate::DeclModifiers::FINAL)
-                {
+                if !declared.fact.modifiers.contains(DeclModifiers::FINAL) {
                     continue;
                 }
                 context.add_in_the_file(
@@ -93,8 +91,8 @@ impl Check for FinalHierarchy {
             .declarations
             .iter()
             .filter(|fact| {
-                fact.kind == crate::DeclKind::Function
-                    && fact.modifiers.contains(crate::DeclModifiers::OVERRIDE)
+                fact.kind == DeclKind::Function
+                    && fact.modifiers.contains(DeclModifiers::OVERRIDE)
                     && !fact.is_a_destructor()
             })
             .filter_map(|fact| {
@@ -116,18 +114,16 @@ impl Check for FinalHierarchy {
             let mut could_not_read_a_base = false;
             for base in bases {
                 match context.model.members_of(base) {
-                    crate::Known::Yes(list) => {
+                    Known::Yes(list) => {
                         if !list.unlisted.is_empty() {
                             could_not_read_a_base = true;
                         }
                         for member in &list.members {
-                            if member.fact.kind != crate::DeclKind::Function
-                                || member.fact.name != *name
-                            {
+                            if member.fact.kind != DeclKind::Function || member.fact.name != *name {
                                 continue;
                             }
                             any_overridable = true;
-                            if !member.fact.modifiers.contains(crate::DeclModifiers::FINAL) {
+                            if !member.fact.modifiers.contains(DeclModifiers::FINAL) {
                                 all_final = false;
                             }
                         }

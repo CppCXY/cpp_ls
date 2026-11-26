@@ -89,6 +89,10 @@
 //! measurement that keeps it honest is a corpus that is *known good*: the standard library. A check that reports
 //! anything at all on a header it read correctly is wrong, and that is a test that can fail.
 
+use crate::Known;
+use crate::ScopeTree;
+use crate::file;
+use crate::sema;
 use std::path::Path;
 
 use cpp_parser::SourceRange;
@@ -201,19 +205,7 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
         // **Which rule costs what**, at `CPPLS_TRACE_DIAGNOSTICS=1`. A pull on the reader'"'"'s project takes seconds to
         // answer zero findings, and the table is the only way to say which rule spends them rather than guess.
-        let started = std::time::Instant::now();
         T::check(context);
-        let took = started.elapsed();
-        if crate::probes::diagnostics() && took.as_millis() >= 2 {
-            eprintln!(
-                "[diagnostics]   check {:<45} {:>6} ms",
-                std::any::type_name::<T>()
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or("?"),
-                took.as_millis()
-            );
-        }
     }
 }
 
@@ -229,7 +221,7 @@ pub struct CheckContext<'a> {
     /// wrong about another file.
     pub summary: &'a FileSummary,
     /// **The file's questions, and the only way a check asks them.**
-    pub model: crate::sema::model::SemanticModel<'a>,
+    pub model: sema::model::SemanticModel<'a>,
     /// **The text a range from the *tree* is an offset into** — the view's own reading, which is the **rendering**:
     /// macros expanded, directives resolved, headers inlined where their `#include` was.
     ///
@@ -313,7 +305,7 @@ impl<'a> CheckContext<'a> {
     pub fn new(
         path: &'a Path,
         summary: &'a FileSummary,
-        model: crate::sema::model::SemanticModel<'a>,
+        model: sema::model::SemanticModel<'a>,
         source: &'a str,
         written: &'a str,
         errors: &'a [cpp_parser::CppParseError],
@@ -412,14 +404,10 @@ impl<'a> CheckContext<'a> {
         let range = cpp_parser::source_range(node.text_range());
         let start = self
             .view
-            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
-                range.start_offset,
-            ))?;
+            .file_offset_of(file::coordinates::ReadingOffset::new(range.start_offset))?;
         let end = self
             .view
-            .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(
-                range.end_offset(),
-            ))?;
+            .file_offset_of_end(file::coordinates::ReadingOffset::new(range.end_offset()))?;
         self.written.get(start.get()..end.get())
     }
 
@@ -501,9 +489,7 @@ impl<'a> CheckContext<'a> {
     fn in_the_file(&self, range: SourceRange) -> SourceRange {
         let Some(start) = self
             .view
-            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
-                range.start_offset,
-            ))
+            .file_offset_of(file::coordinates::ReadingOffset::new(range.start_offset))
         else {
             return range;
         };
@@ -513,9 +499,7 @@ impl<'a> CheckContext<'a> {
         // `std::string x = 123;` underlined from `123` to the end of the statement.
         let end = self
             .view
-            .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(
-                range.end_offset(),
-            ))
+            .file_offset_of_end(file::coordinates::ReadingOffset::new(range.end_offset()))
             .unwrap_or(start);
         SourceRange::new(start.get(), end.get().saturating_sub(start.get()))
     }
@@ -575,7 +559,7 @@ impl<'a> CheckContext<'a> {
     }
 
     /// **The scopes of the file's own text**, which is what turns a name in an expression into a declaration.
-    pub fn scopes(&self) -> &crate::ScopeTree {
+    pub fn scopes(&self) -> &ScopeTree {
         self.model.scopes()
     }
 
@@ -605,7 +589,7 @@ impl<'a> CheckContext<'a> {
     pub fn type_of(
         &self,
         expression: &cpp_parser::CppSyntaxNode,
-    ) -> crate::Known<(crate::sema::types::Type, std::path::PathBuf)> {
+    ) -> Known<(sema::types::Type, std::path::PathBuf)> {
         self.model.type_of(expression)
     }
 
@@ -731,12 +715,7 @@ impl<'a> CheckContext<'a> {
     /// The kinds are still used as a cheap filter before the shape is read, so the cost is one kind test per node
     /// rather than a child list per node — `CppIndexExpr`/`CppMemberExpr` would be two casts per node, and this is
     /// the hot path of four checks.
-    pub fn member_accesses(
-        &self,
-    ) -> Vec<(
-        cpp_parser::CppSyntaxNode,
-        crate::sema::resolve::MemberAccess,
-    )> {
+    pub fn member_accesses(&self) -> Vec<(cpp_parser::CppSyntaxNode, sema::resolve::MemberAccess)> {
         use cpp_parser::CppSyntaxKind;
         self.own_syntax_nodes()
             .filter(|node| {
@@ -748,9 +727,7 @@ impl<'a> CheckContext<'a> {
                     CppSyntaxKind::IndexExpr | CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr
                 )
             })
-            .filter_map(|node| {
-                crate::sema::resolve::member_access_of(&node).map(|access| (node, access))
-            })
+            .filter_map(|node| sema::resolve::member_access_of(&node).map(|access| (node, access)))
             .collect()
     }
 
@@ -1440,7 +1417,7 @@ fn is_a_char_pointer_spelling(written: &str) -> bool {
 pub fn a_class_can_be_built_from(
     context: &CheckContext<'_>,
     class: &str,
-    value: &crate::sema::types::Type,
+    value: &sema::types::Type,
 ) -> Option<bool> {
     // **A target that names no class is a question this cannot answer**, and asking it is not free: the name goes to
     // the index, which resolves it, finds nothing, and falls back to a definition query and a member walk. Measured on
@@ -1479,7 +1456,7 @@ pub fn a_class_can_be_built_from(
     //
     // Measured on the same file, `assign-type-check` was **1 221 ms of a 1 497 ms diagnostic pass**, two calls of
     // this function at ~600 ms each, and a diagnostic runs on every pull: that is the latency a reader feels.
-    let crate::Known::Yes(members) = context.model.own_members_of(class) else {
+    let Known::Yes(members) = context.model.own_members_of(class) else {
         return None;
     };
 
@@ -1530,7 +1507,7 @@ pub fn a_class_can_be_built_from(
 
 /// **Whether one written parameter list holds a parameter that could accept this value** — see
 /// [`a_class_can_be_built_from`] for the rule and why it is this narrow.
-fn parameters_that_could_accept(written: &str, value: &crate::sema::types::Type) -> Option<bool> {
+fn parameters_that_could_accept(written: &str, value: &sema::types::Type) -> Option<bool> {
     // The value has to be something this can classify. A class-to-class conversion is a question about two
     // declarations, and this is asked with one of them in hand.
     if !value.is_arithmetic() {
@@ -1795,11 +1772,11 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 /// for two calls that pass exactly what they should.
 pub fn member_access_above(
     node: &cpp_parser::CppSyntaxNode,
-) -> Option<crate::sema::resolve::MemberAccess> {
+) -> Option<sema::resolve::MemberAccess> {
     let mut current = Some(node.clone());
     for _ in 0..3 {
         let node = current?;
-        if let Some(access) = crate::sema::resolve::member_access_of(&node) {
+        if let Some(access) = sema::resolve::member_access_of(&node) {
             return Some(access);
         }
         let parent = node.parent()?;

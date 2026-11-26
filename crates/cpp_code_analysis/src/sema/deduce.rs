@@ -33,6 +33,7 @@
 //! type depends on a template argument. A consumer that shows `auto` for those is showing what the file says; a
 //! consumer that invented a type would be showing something the file does not.
 
+use crate::index;
 use std::path::Path;
 
 use cpp_parser::{CppAstNode, CppSyntaxNode};
@@ -82,7 +83,7 @@ pub fn deduced_type_of(
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto{}")));
     };
 
-    match crate::index::project::type_of_expression(
+    match index::project::type_of_expression(
         index,
         &mut |_: &Path| None,
         scopes,

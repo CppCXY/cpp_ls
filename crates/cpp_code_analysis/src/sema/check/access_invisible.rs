@@ -40,6 +40,8 @@
 //! grammar recovered around, and because the question — "which of the three labels is above this line" — is a
 //! question about lines.
 
+use crate::Known;
+use crate::ScopeKind;
 use cpp_parser::CppSyntaxNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -90,7 +92,7 @@ impl Check for AccessInvisible {
                 continue;
             }
 
-            let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
+            let Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
             // **The object's class has to be one this file declares** — which is this rule's own scope, not an
@@ -109,7 +111,7 @@ impl Check for AccessInvisible {
             {
                 continue;
             }
-            let crate::Known::Yes(members) = context.model.members_of(class_spelling) else {
+            let Known::Yes(members) = context.model.members_of(class_spelling) else {
                 continue;
             };
             let Some(member) = members
@@ -215,7 +217,7 @@ fn the_class_the_reader_is_in(context: &CheckContext<'_>, node: &CppSyntaxNode) 
     let mut scope = context.view.scopes.scope_at(at);
     while let Some(id) = scope {
         let data = context.view.scopes.scope(id)?;
-        if matches!(data.kind, crate::ScopeKind::Class) {
+        if matches!(data.kind, ScopeKind::Class) {
             return data.name.as_deref().map(str::to_string);
         }
         scope = data.parent;

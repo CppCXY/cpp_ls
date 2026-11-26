@@ -22,6 +22,94 @@ fix many parser and toolchain bug
 
 ### Fixed
 
+- **A typedef of a class shows its declaration, across lines.** The card's generated alias line had no type spelling to
+  use for an anonymous class body, fell back to the source, and collapsed it to one line — neovim's `lcs_chars_T` was a
+  single 200-character row. The fallback now keeps the declaration's own line breaks and strips `///<` comments, so the
+  card reads as the file does. `typedef struct { … } T;` also no longer renders as `using T = T;`: its recorded target
+  is its own name, and the source `typedef` line is the only spelling that carries the body.
+- **An alias is priced as the type it names.** `typedef int64_t Integer;` answered `size 1 byte(s)` — the empty-class
+  rule — because an alias has no members and the layout never looked through it. A type alias with no member list is now
+  sized by its target (`Integer` 8 bytes, alignment 8), and a member spelled with an alias uses that target's size.
+- **A statement's semicolon stays on its block's line.** The formatter put the `;` after a closing brace on a line of
+  its own: neovim's `TEXTLOCK_WRAP({ … });` expanded to `}` / `;` because the macro's own body writes `code;` and the
+  argument is a block. The `;` is now part of the brace's line (`};`), which is also what `struct S { … };` and a lambda
+  statement write.
+- **A header declaration reaches the file that includes it when the tool cooks.** `cpp_inspect --cook` asked for
+  `Session::cook`, which renders the requested file alone: neovim's `api/vim.c` therefore had no `typebuf` (declared
+  in `globals.h` by `EXTERN typebuf_T typebuf INIT(…)` after `macros_defs.h`/`input_defs.h`), and `define` answered
+  `NotDeclaredHere`. The tool now performs the same unit read the server pump does (`Session::read_the_unit`), which
+  files each declaration under the file that wrote it; `define typebuf` lands in `globals.h:575`, and `api/vim.c`,
+  `window.c`, `ui.c` and `ex_docmd.c` diagnose cleanly. The parser-shape heuristic intended to paper over this was
+  withdrawn — it accepted `EXTERN typebuf_T …` without include evidence, which C does not.
+- **A completion on an open file no longer asks the pump for the file it already has.** The completion handler called
+  `AnalysisState::prepare` on every request; that path takes the analysis read lock to find out the file is open, so
+  while the pump held it for a program read a one-line edit cost **1609 ms**, and the first completion after the edit
+  took **1857 ms**. An open buffer is already in the provider chain, and the completion's own `catch_up` rebuilds the
+  summary the edit dropped; `prepare_for_completion` answers from `OpenDocuments` without the lock. Measured over the
+  wire on neovim's `channel.c`: before the fix the post-edit requests were 476 / 708 / 1857 / 762 / 95 / 93 ms; after
+  it, 91–702 ms with the steady ones **90–110 ms**, and `prepare` is 0 ms on every request.
+- **A completion asks the current buffer's rendering for a name its own tree cannot bind, without cooking in the
+  request.** `kvec_t(int64_t) ids` is an expression statement to the raw parser and an anonymous struct to the
+  preprocessor, so `ids.` listed nothing and `ids` itself was missing after a fresh insertion. The editable view still
+  supplies the position and the ordinary answer; when that answer has no item beginning with the typed word, the
+  handler asks the **cached** current rendering. If the edit's rendering has not landed yet, the ordinary list is
+  returned with `isIncomplete` set — the pump builds it, the next request answers — instead of holding the analysis
+  while it renders a translation unit (the shape that made a workspace reload show 235 files forever). Measured over
+  the wire on neovim's `channel.c`: `ids.` lists `capacity`, `items`, `size`; `ids` completes itself; `KV_` at an
+  incomplete `kvec_t(int64_t) ifd3 = KV_` lists `KV_INITIAL_VALUE`.
+- **A macro argument's token maps to its own rendering occurrence, not the previous one.** neovim's `ids.items`
+  inside `DICT_OBJ(...)` has no preserved written span (the argument was substituted into a macro body), so the
+  reverse start-offset walk answered with the `ids` of a `for` loop ten lines above and the hover said the type was
+  unknown. The mapping now prefers a span whose `written` range contains the offset, and otherwise matches the
+  spelling plus its surrounding context (`ids.` before, `[` after); `ids.items` hovers as `int64_t*`.
+- **A member of a macro-declared local is resolved through the rendering.** `kvec_t(int64_t) ids = …` is an
+  anonymous struct after the preprocessor and an expression statement before it, so the plain reading had no binding
+  for `ids` and the hover said `` `ids` has no member `size` ``. A card that is a failed member lookup (or a
+  conditional-macro card) is now re-asked against the rendering, where the struct's members are; the card reads
+  `size_t size`, declared at the declaration's line.
+- **A self-identical conditional macro does not hide the type it names.** neovim's `map_defs.h` writes
+  `#ifdef __NetBSD__ / #define uint64_t uint64_t / #endif`; `uint64_t` hovered as "a macro whose `#define` is inside
+  a conditional block" on Windows. A pass-through macro is skipped, and the standard fixed-width typedefs have their
+  own card (`uint64_t` — the 64-bit unsigned integer type from `<stdint.h>`).
+- **Macros complete while their declaration is still being typed.** `kvec` before `kvec_t(int64_t) ids` is an
+  expression statement to the parser until the `(`, so the declaration-shaped name query offered none of `kvec.h`'s
+  macros. Ordinary code completion now includes the file's own and its direct includes' macros, filtered by the
+  prefix like every other name; `kvec`, `KV_I` and `KV_INI` all keep the candidate.
+- **An assignment is not the condition of a following conditional.** `m = ptr ? a : b` was parsed as
+  `(m = ptr) ? a : b`, so `assign-type-check` compared `ptr`'s pointer type against `m`'s `int` — neovim's
+  `ex_getln.c:3055` was reported for a valid expression. The conditional's condition now stops above the assignment
+  family and the assignment is folded after it, right-associatively, including `>>=` and a braced right-hand side.
+- **A conditional branch's `static` is not the definition's.** main.c's `#ifdef MAKE_LIB` branches merge `nvim_main`
+  and `main` into one declaration; the `#else` side was read as an old-style parameter list, and walking it for
+  modifiers found a body-local `static`. `nvim_main` was drawn as `static int nvim_main` although the source and the
+  preceding declaration both say `int`. The modifier walk now stops at `OldStyleParameterList`, and the fact is
+  `modifiers = 0`. `FORMAT_VERSION` 62 → 63.
+- **A pointer converts to `bool`.** `assign-type-check` treated the scalar-to-`_Bool` conversion as no conversion at
+  all, so neovim's `bool setrgbf = tui->ti.defs[kTerm_set_rgb_foreground];` (a `const char *`) was reported twice.
+  A pointer (through qualifiers, or an array that decays) into `bool`/`_Bool` is now an implicit conversion in both
+  C and C++.
+- **A C enumerator is visible across files, and its card reads its own enum's value.** In C an enumerator is an
+  ordinary name in the enclosing scope; the index filed `EVENT_BUFADD` with `scope: auto_event` and the in-scope
+  lookup dropped it as if the enum were a class. A `.c` file now keeps unscoped enumerators (`enum class` keeps the
+  C++ scoped exclusion), so `EVENT_BUFADD` jumps to `auevents_enum.generated.h`. The card also walked the *caller's*
+  tree at the header's offset and printed `= 3`; it now counts in the declaring file and prints `EVENT_BUFADD = 0`,
+  "an enumerator of `auto_event`".
+- **An alias cycle no longer overflows the stack.** `operator_returns_of` followed the first declaration of a name,
+  whatever its kind: `typedef struct proc { … } Proc;` plus a variable `Proc proc;` made it follow `Proc` → the
+  variable's `type_of` → `Proc` forever. Opening neovim's `channel.c` (`proc->status`) killed the server's worker with
+  a stack overflow in both `undefined-field` and `param-type-check`. Only a `DeclKind::Type` declaration may be the
+  alias arm now; `channel.c` diagnoses cleanly.
+- **Stale generated placeholders shadowed 92 declarations.** neovim's real declaration of `api_free_luaref` is
+  `build/include/lua/executor.h.generated.h:26`, and `cstr_as_string`'s is
+  `build/include/api/private/helpers.h.generated.h:26`; this checkout also had 92 two-byte
+  `build/src/nvim/auto/**/*.generated.h` placeholders (CRLF, from 2026-10-28) earlier in the compile command's include
+  path, so both the compiler and the analysis saw only calls and reported implicit declarations. The placeholders were
+  moved to `build/stale-auto-20261124`; the real generated headers now resolve, `cstr_as_string` hovers as
+  `String cstr_as_string(const char* str)`, and the diagnostic is gone. This is not a case of C accepting the call:
+  MinGW GCC 15.1 under `-std=gnu99` rejects an implicit function declaration outright, and this checkout has no
+  `buffer_updates.c.obj` — a fresh compile of that translation unit fails until the stale generated-header directory
+  is cleaned or regenerated. The cross-translation-unit fallback tried in the previous commit was a workaround for the
+  same artifact and has been removed.
 - **`__FILE__` answers the compile command's spelling, and `#line N "name"` is applied.** `__FILE__` used to be the
   empty literal in every rendering and `#line` was parsed and then dropped: a file whose command writes `src/a.cpp`
   now expands it to `"src/a.cpp"`, and a `#line` changes the line and file the following lines report. A GNU line

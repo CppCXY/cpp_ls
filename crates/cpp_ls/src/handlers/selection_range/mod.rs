@@ -38,9 +38,6 @@ pub async fn on_selection_range(
 
     // Read in first, under the write lock: the chain is read from the file's own tree, and a file nobody has read
     // has none.
-    if let Some(path) = uri_to_file_path(&uri) {
-        context.analysis().prepare(&path).await;
-    }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
