@@ -339,9 +339,9 @@ pub fn names_for_a_doc_comment(
     range: cpp_parser::SourceRange,
 ) -> NameCompletions {
     let names = if scope.is_empty() {
-        declarations_in_scope(index, path, None, written)
+        declarations_in_scope(index, path, None, written, true)
     } else {
-        declarations_in_scope(index, path, Some(scope), written)
+        declarations_in_scope(index, path, Some(scope), written, true)
     };
     NameCompletions {
         scope: scope.to_string(),
@@ -380,7 +380,7 @@ pub fn name_completions_at(
     // line), and a filter that treated "nothing written" as "nothing matches" would empty the list exactly when it
     // is most wanted.
     let names = if position.scope.is_empty() {
-        match visible_names(index, scopes, root, path, offset, &position.written) {
+        match visible_names(index, scopes, root, path, offset, &position.written, true) {
             Known::Yes(names) => names,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
@@ -551,6 +551,7 @@ pub(crate) fn visible_names(
     path: &Path,
     offset: usize,
     written: &str,
+    in_completion: bool,
 ) -> Known<Vec<OfferedName>> {
     let Some(innermost) = scopes.scope_at(offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
@@ -647,6 +648,7 @@ pub(crate) fn visible_names(
         path,
         chain.len(),
         written,
+        in_completion,
     ));
 
     sort_and_hide(&mut names);
@@ -666,8 +668,12 @@ pub(crate) fn global_offers(
     path: &Path,
     depth: usize,
     written: &str,
+    in_completion: bool,
 ) -> Vec<OfferedName> {
-    let mut names = offered(global_names(index, scopes, root, path, written), depth);
+    let mut names = offered(
+        global_names(index, scopes, root, path, written, in_completion),
+        depth,
+    );
     sort_and_hide(&mut names);
     names
 }
@@ -738,7 +744,7 @@ pub(crate) fn names_in_a_scope_at(
     // The global name space has no spelling of its own: `::` is what the file writes, and `None` is what a
     // declaration at file scope records.
     if scope == "::" {
-        return Known::Yes(global_offers(index, scopes, root, path, 0, written));
+        return Known::Yes(global_offers(index, scopes, root, path, 0, written, true));
     }
 
     // A leading `::` on a longer path — `::ns::Widget` — asks for the *global* one, and the spelling to look up is
@@ -1087,6 +1093,7 @@ pub(crate) fn global_names(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     written: &str,
+    in_completion: bool,
 ) -> Vec<Candidate> {
     let mut names: Vec<Candidate> = scopes
         .root()
@@ -1102,7 +1109,13 @@ pub(crate) fn global_names(
         name.from = NameProvenance::ThisFile;
     }
 
-    names.extend(declarations_in_scope(index, path, None, written));
+    names.extend(declarations_in_scope(
+        index,
+        path,
+        None,
+        written,
+        in_completion,
+    ));
     names
 }
 
@@ -1118,6 +1131,7 @@ pub(crate) fn declarations_in_scope(
     visible_from: &Path,
     scope: Option<&str>,
     written: &str,
+    in_completion: bool,
 ) -> Vec<Candidate> {
     // **The prefix is applied here, where the names are still borrowed.** Everything below this point is work per
     // declaration — a `DeclFact` clone, a provenance lookup, a `Vec` push — and on a file that includes `<string>`
@@ -1126,38 +1140,83 @@ pub(crate) fn declarations_in_scope(
     // names it drops could not have been offered anyway. See [`crate::sema::resolve::name_position_at`].
     let accepts = |fact: &DeclFact| name_starts_with(fact, written);
 
-    let found = match scope {
-        Some(spelling) => index.declarations_in_where(spelling, visible_from, accepts),
+    match scope {
+        Some(spelling) => index
+            .declarations_in_where(spelling, visible_from, accepts)
+            .into_iter()
+            .map(|declaration| {
+                Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                )
+            })
+            .collect(),
         // **The full walk, and it has to be.** A cheap version of this arm (the `#include` graph plus a prefix over the
         // raw summaries) was measured and reverted: it cost 1.18 s either way — the time is in `bindings_of`'s type
         // inference, not here — and it changed what completion offers, because the walk's answer includes the **cooked**
         // reading's declarations (a name a macro writes) and excludes the branches a condition does not take. Two
         // handshake tests say so: `a_name_only_the_cooked_reading_declares_is_offered_over_the_wire` and
         // `a_c_reader_gets_completion_and_signature_help_for_what_the_file_defines`.
-        None => index.visible_declarations_where(visible_from, |fact| {
-            accepts(fact) && fact.scope.is_none() && !fact.local
-        }),
-    };
-
-    // **Each of the two queries applied its own budget**, and this function must not apply a third: the global
-    // name space is unbounded in size and the tier it produces ranks last ([`MAX_COLLECTED_NAMES`]), while one named
-    // scope holds what it holds ([`MAX_COLLECTED_IN_A_SCOPE`]). A second cut here is what made `std::` offer 175 of
-    // its 2 008 names.
-    found
-        .into_iter()
-        .map(|declaration| {
-            Candidate::new(
-                declaration.file.clone(),
-                declaration.fact.clone(),
-                provenance_of(
-                    index,
-                    visible_from,
-                    declaration.visibility,
-                    &declaration.file,
-                ),
-            )
-        })
-        .collect()
+        None if in_completion => {
+            // **`in_completion` is the prepared snapshot, not a fresh walk of the closure.** The headers' global
+            // names are cloned once per declaration revision; a body edit leaves that revision alone and this is a
+            // prefix filter over the file-order list the old per-request walk would have produced. The root's own
+            // names are read from the current summary, so its offsets are never stale.
+            let snapshot = index.completion_visible_declarations(visible_from);
+            let mut found: Vec<Candidate> = Vec::new();
+            for declaration in snapshot.iter() {
+                if !accepts(&declaration.fact) {
+                    continue;
+                }
+                found.push(Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                ));
+            }
+            if let Some(summary) = index.summary(visible_from) {
+                for fact in &summary.declarations {
+                    if fact.scope.is_none() && !fact.local && accepts(fact) {
+                        found.push(Candidate::new(
+                            summary.path.clone(),
+                            fact.clone(),
+                            NameProvenance::ThisFile,
+                        ));
+                    }
+                }
+            }
+            found
+        }
+        None => index
+            .visible_declarations_where(visible_from, |fact| {
+                accepts(fact) && fact.scope.is_none() && !fact.local
+            })
+            .into_iter()
+            .map(|declaration| {
+                Candidate::new(
+                    declaration.file.clone(),
+                    declaration.fact.clone(),
+                    provenance_of(
+                        index,
+                        visible_from,
+                        declaration.visibility,
+                        &declaration.file,
+                    ),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Does this declaration's name begin with what is being typed?
@@ -1186,7 +1245,7 @@ pub(crate) fn declarations_in(
     visible_from: &Path,
     written: &str,
 ) -> Vec<Candidate> {
-    declarations_in_scope(index, visible_from, Some(spelling), written)
+    declarations_in_scope(index, visible_from, Some(spelling), written, false)
 }
 
 /// **How near the cursor a file is**, for the ranking: the buffer, a project header beside it, a header the buffer

@@ -71,7 +71,159 @@ pub(crate) fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
     crate::cache::fnv1a64(&bytes)
 }
 
+/// **The declaration part of a summary, stripped of everything a body edit moves.** Offsets, name ranges and
+/// recovery markers change with one typed character; names, scopes, kinds, types, parameters and bases are what a
+/// definition answer or a member list is made of.
+fn declaration_shape(summary: &FileSummary) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    the_walk_inputs_of(summary).hash(&mut hasher);
+    for fact in summary.declarations.iter().filter(|fact| !fact.local) {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            fact.enumerator,
+            fact.name,
+            fact.scope,
+            fact.local,
+            fact.kind,
+            fact.type_of,
+            fact.returns,
+            fact.parameters(),
+            fact.bases(),
+            fact.pattern(),
+            fact.guard
+        )
+        .hash(&mut hasher);
+        format!("{:?}", fact.modifiers).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn cooked_declaration_shape(declarations: &[DeclFact]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for fact in declarations.iter().filter(|fact| !fact.local) {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            fact.enumerator,
+            fact.name,
+            fact.scope,
+            fact.local,
+            fact.kind,
+            fact.type_of,
+            fact.returns,
+            fact.parameters(),
+            fact.bases(),
+            fact.pattern(),
+            fact.guard
+        )
+        .hash(&mut hasher);
+        format!("{:?}", fact.modifiers).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 impl ProjectIndex {
+    /// **Drop only the declaration answers that actually cite this file.** A body edit hashes to the same
+    /// declaration shape as the text before it, and a class in a header does not stop being a class because a
+    /// character moved in somebody's function body.
+    fn forget_declaration_answers_from(&self, path: &str) {
+        let path = normalize(Path::new(path));
+        if let Ok(mut answers) = self.definition_answers.lock() {
+            answers.retain(|_, answer| match answer {
+                Known::Yes(definitions) => definitions
+                    .found
+                    .iter()
+                    .all(|declaration| normalize(&declaration.file) != path),
+                _ => true,
+            });
+        }
+        if let Ok(mut answers) = self.type_answers.lock() {
+            answers.retain(|_, answer| match answer {
+                Known::Yes((_, file)) => normalize(file) != path,
+                _ => true,
+            });
+        }
+    }
+
+    /// The shape-changing case: a declaration was added, removed or rewritten, so every answer may have moved.
+    fn forget_every_declaration_answer(&self) {
+        if let Ok(mut answers) = self.definition_answers.lock() {
+            answers.clear();
+        }
+        if let Ok(mut answers) = self.type_answers.lock() {
+            answers.clear();
+        }
+    }
+
+    /// Drop the completion snapshots whose closure contains this file — **not the snapshot of the file itself**,
+    /// which excludes its own root facts and is refreshed from the current summary by the query.
+    fn forget_completion_snapshots(&self, path: &str) {
+        let path = normalize(Path::new(path));
+        if let Ok(mut snapshots) = self.completion_names.lock() {
+            snapshots.retain(|root, snapshot| {
+                normalize(Path::new(root)) == path || !snapshot.contributors.contains(&path)
+            });
+        }
+    }
+
+    /// **The `in_completion` view of the global name space**: the headers' file-scope names, cloned once per
+    /// declaration revision in the index's file order — the same order and the same collection budget the old
+    /// per-request walk used. The root's own names are not here: they come from its scope tree and its current
+    /// summary on every query, so a body edit never invalidates this.
+    pub(crate) fn completion_visible_declarations(
+        &self,
+        visible_from: &Path,
+    ) -> std::sync::Arc<Vec<OwnedVisibleDeclaration>> {
+        let root = normalize(visible_from);
+        if let Ok(snapshots) = self.completion_names.lock()
+            && let Some(snapshot) = snapshots.get(&root)
+            && snapshot.revision == self.declaration_revision
+        {
+            return snapshot.names.clone();
+        }
+
+        let found = self.visible_declarations_upto(
+            visible_from,
+            &|fact| fact.scope.is_none() && !fact.local,
+            MAX_COLLECTED_NAMES,
+            Narrow::Nothing,
+        );
+        let mut contributors: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut names: Vec<OwnedVisibleDeclaration> = Vec::new();
+        for declaration in found {
+            let file = normalize(&declaration.file);
+            contributors.insert(file.clone());
+            if file == root {
+                continue;
+            }
+            names.push(OwnedVisibleDeclaration {
+                file: declaration.file,
+                fact: declaration.fact.clone(),
+                visibility: declaration.visibility,
+            });
+        }
+        names.truncate(MAX_COLLECTED_NAMES);
+        let names = std::sync::Arc::new(names);
+        if let Ok(mut snapshots) = self.completion_names.lock() {
+            if snapshots.len() >= 4
+                && !snapshots.contains_key(&root)
+                && let Some(oldest) = snapshots.keys().next().cloned()
+            {
+                snapshots.remove(&oldest);
+            }
+            snapshots.insert(
+                root,
+                CachedCompletionNames {
+                    revision: self.declaration_revision,
+                    names: names.clone(),
+                    contributors,
+                },
+            );
+        }
+        names
+    }
+
     pub fn new() -> Self {
         ProjectIndex {
             // **Incomplete**, so that a name this index has not been told about is `Unknown` rather than "not
@@ -232,13 +384,19 @@ impl ProjectIndex {
         let known_to_the_index =
             self.known_paths.contains(&rewritten) || self.summaries.contains_key(&rewritten);
         self.invalidate_visibility_answers(path, known_to_the_index);
-        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
-        // class, and nothing computed before it may answer after it.
-        if let Ok(mut answers) = self.type_answers.lock() {
-            answers.clear();
-        }
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
+        // **An edit that leaves the declarations alone keeps the answers about other files.** The old rule was a
+        // global clear on every insert, so one typed character in a function body threw away every class and
+        // definition answer the index had computed — including the headers' — and the next completion walked the
+        // whole closure again. The declaration-shape hash tells the two edits apart: a body edit has the same facts
+        // at new offsets, and only the answers that actually cite this file are dropped.
+        let shape = declaration_shape(&summary);
+        let declarations_changed = self.declaration_shapes.get(&rewritten).copied() != Some(shape);
+        self.declaration_shapes.insert(rewritten.clone(), shape);
+        if declarations_changed {
+            self.declaration_revision = self.declaration_revision.wrapping_add(1);
+            self.forget_every_declaration_answer();
+        } else {
+            self.forget_declaration_answers_from(&rewritten);
         }
         // **The walk memo is dropped per contributor rather than whole** — see [`ProjectIndex::visibility`]. A
         // re-read of a file the index already knew can only change the walks that read it; a file it has never seen
@@ -258,6 +416,7 @@ impl ProjectIndex {
         // live in another file keeps its answer. See [ProjectIndex::member_lists].
         self.forget_member_lists(path);
         self.forget_guard_answers(path);
+        self.forget_completion_snapshots(&rewritten);
         // …and every macro walk this file was part of, by the rule the visibility memo above states.
         self.forget_macro_walks(path, known_to_the_index);
         let mut summary = summary;
@@ -411,21 +570,16 @@ impl ProjectIndex {
         // rebuilt, and one that never read it answers exactly as before — the correctness rule the old contributor
         // drop implemented, without the cost of dropping entries that could not have changed.
         self.walk_inputs.remove(&path);
-        // **And the inference answers, for the same reason.** A summary that arrives can turn a type's `Unknown` into a
-        // class, and nothing computed before it may answer after it.
-        if let Ok(mut answers) = self.type_answers.lock() {
-            answers.clear();
-        }
-        // **The visibility walks stay** — `walk_inputs` above makes every walk that read the forgotten file a miss by
-        // fingerprint, and one that never read it answers exactly as before. Dropping them here was what made a
-        // keystroke in one file throw away every other file's walk.
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
-        }
+        // **A file that is gone is a declaration change for the answers that cite it, not for every answer.**
+        // The global clear here made a `forget`-then-insert edit — which is every keystroke — throw away every
+        // header's class and definition answer. Keep the answers about files that did not move; the re-insert
+        // compares declaration shapes and decides whether a wider invalidation is needed.
+        self.forget_declaration_answers_from(&path);
 
         // A file that is gone is a contributor that changed: every member list it was made of is dropped.
         self.forget_member_lists(Path::new(&path));
         self.forget_guard_answers(Path::new(&path));
+        self.forget_completion_snapshots(&path);
         // **And every macro walk that read it.** A walk that never did cannot answer differently, which is what keeps
         // a header's answers alive across an edit to the `.c` file that includes it.
         self.forget_macro_walks(Path::new(&path), true);
@@ -702,17 +856,22 @@ impl ProjectIndex {
         // computations over three keystrokes — and 37/37 once this comparison was in place.
         if changed {
             self.forget_member_lists(Path::new(&path));
+            self.forget_completion_snapshots(&path);
+            // **A re-cook of the same declarations at new offsets is not a declaration change.** A body edit
+            // moves every fact after the edit, so the old full-equality test said "changed" on every keystroke
+            // and the global clear below threw away every header's answers. Compare the semantic shape instead:
+            // same declarations keep the answers about other files, and only this file's own answers go.
+            let shape = cooked_declaration_shape(&reading.declarations);
+            let key = (path.clone(), id);
+            let declarations_changed = self.cooked_shapes.get(&key).copied() != Some(shape);
+            self.cooked_shapes.insert(key, shape);
+            if declarations_changed {
+                self.declaration_revision = self.declaration_revision.wrapping_add(1);
+                self.forget_every_declaration_answer();
+            } else {
+                self.forget_declaration_answers_from(&path);
+            }
         }
-        // **What a cooked reading can change is the declaration answers, and nothing else here.** A walk reads
-        // includes and their conditions — facts of the file's *own text*, which the cooked reading does not rewrite
-        // — so clearing the walk memo for a cook was over-invalidation of the most expensive kind: the second pass
-        // cooks ~1 200 files back to back, and every one of them threw away every closure the queries had built.
-        // Measured: it was the reason a keystroke right after a cold start walked five closures again (33.5 ms).
-        self.definition_answers
-            .lock()
-            .expect("the definition memo is not poisoned")
-            .clear();
-
         // The name index holds this file's *other* reading of the same id, if any, and then this one.
         let _tracing = false
             && (path.ends_with("stl_map.h")
@@ -1091,11 +1250,11 @@ impl ProjectIndex {
         let path = normalize(path);
         self.forget_member_lists(Path::new(&path));
         self.forget_guard_answers(Path::new(&path));
+        self.forget_completion_snapshots(&path);
         // A cooked reading names things the raw one does not (`_STD_BEGIN` is `namespace std {` to it), so an
         // answer given while it was held can stop being true when it goes — the same rule as `forget`, see there.
-        if let Ok(mut declared) = self.definition_answers.lock() {
-            declared.clear();
-        }
+        self.declaration_revision = self.declaration_revision.wrapping_add(1);
+        self.forget_declaration_answers_from(&path);
         self.forget_the_readings_of(&path);
     }
 

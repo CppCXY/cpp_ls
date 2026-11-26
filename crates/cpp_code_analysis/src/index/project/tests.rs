@@ -3992,3 +3992,71 @@ fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
         "and a member resolves: {found:?}"
     );
 }
+
+/// **A body edit reuses the completion snapshot.** The header's global names are the expensive half; a
+/// function body changing at new offsets is not a declaration change and must not rebuild them.
+#[test]
+fn a_body_edit_keeps_the_completion_snapshot() {
+    let mut index = ProjectIndex::new();
+    let header = summarize(
+        Path::new("/p/widget.h"),
+        "struct Widget { int size; };\n",
+        SummaryKey::new(0, 0),
+    );
+    let main = "/p/main.cpp";
+    let before = "#include \"widget.h\"\nvoid f() { int a = 1; }\n";
+    let after = "#include \"widget.h\"\nvoid f() { int b = 2; }\n";
+    let mut summary = summarize(Path::new(main), before, SummaryKey::new(0, 0));
+    for include in &mut summary.includes {
+        include.resolved = Some(std::path::PathBuf::from("/p/widget.h"));
+    }
+    index.insert(header);
+    index.insert(summary);
+
+    let definition = index.definition("Widget", Path::new(main));
+    assert!(matches!(definition, Known::Yes(_)));
+    let cached_before = index
+        .definition_answers
+        .lock()
+        .expect("the definition memo")
+        .len();
+    assert!(cached_before > 0);
+
+    let first = index.completion_visible_declarations(Path::new(main));
+    index.forget(Path::new(main));
+    let mut edited = summarize(Path::new(main), after, SummaryKey::new(0, 1));
+    for include in &mut edited.includes {
+        include.resolved = Some(std::path::PathBuf::from("/p/widget.h"));
+    }
+    index.insert(edited);
+    let second = index.completion_visible_declarations(Path::new(main));
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "a body edit rebuilt the completion snapshot"
+    );
+    assert_eq!(
+        cached_before,
+        index
+            .definition_answers
+            .lock()
+            .expect("the definition memo")
+            .len(),
+        "a body edit threw away a header's definition answer"
+    );
+
+    let mut header = summarize(
+        Path::new("/p/widget.h"),
+        "struct Widget { int size; };\nstruct Extra { int value; };\n",
+        SummaryKey::new(1, 0),
+    );
+    for include in &mut header.includes {
+        include.resolved = None;
+    }
+    index.forget(Path::new("/p/widget.h"));
+    index.insert(header);
+    let third = index.completion_visible_declarations(Path::new(main));
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &third),
+        "a declaration change did not rebuild the completion snapshot"
+    );
+}

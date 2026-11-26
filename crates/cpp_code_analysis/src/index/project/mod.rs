@@ -273,6 +273,19 @@ pub struct ProjectIndex {
     /// request asks the same closure question thousands of times, so the fingerprint is taken once per request: a walk
     /// built or validated at this number answers from the stamp alone until the index changes again.
     changed: u64,
+    /// **How many times the declaration set changed** — one bump when a summary or cooked reading adds, removes or
+    /// rewrites a declaration, and not when only a body's offsets move. It keys the completion snapshot.
+    declaration_revision: u64,
+    /// The declaration-shape hash last filed for each path, kept across `forget` so an edit can tell "the same
+    /// declarations at new offsets" from "different declarations". See `insert_at`.
+    declaration_shapes: std::collections::HashMap<String, u64>,
+    /// The declaration-shape hash of each cooked reading, keyed like the reading itself.
+    cooked_shapes: std::collections::HashMap<(String, u32), u64>,
+    /// **The names a completion can see, prepared once per declaration revision.** The old path walked the whole
+    /// concrete closure and cloned every declaration on every keystroke; this is the `in_completion` view: a sorted
+    /// snapshot of the headers, with the root file's own names added fresh by the query. A body edit does not
+    /// change the declaration revision, so the snapshot survives it.
+    completion_names: std::sync::Mutex<std::collections::HashMap<String, CachedCompletionNames>>,
 
     /// The inverted index — see [`crate::index::names`]. Derived from `summaries` and `cooked`, and updated in the
     /// same call that changes either; nothing else writes it.
@@ -566,6 +579,23 @@ struct CachedMacroWalk {
 struct CachedMacroState {
     contributors: Vec<String>,
     state: Marked,
+}
+
+/// One header declaration in [`ProjectIndex::completion_names`] — cloned once per declaration revision, so a
+/// completion's per-keystroke work is a prefix lookup instead of a visibility walk over every included file.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedVisibleDeclaration {
+    pub file: std::path::PathBuf,
+    pub fact: DeclFact,
+    pub visibility: IncludeVisibility,
+}
+
+/// The sorted header snapshot of one completion root.
+#[derive(Debug)]
+pub(crate) struct CachedCompletionNames {
+    pub revision: u64,
+    pub names: std::sync::Arc<Vec<OwnedVisibleDeclaration>>,
+    pub contributors: std::collections::HashSet<String>,
 }
 
 /// One entry of [`ProjectIndex::macro_names`] — the same shape, for the whole-name-set walk.
