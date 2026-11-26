@@ -341,7 +341,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
             }
         }
         if !questions.is_empty() {
-            let answers = index.answer_the_guards(&view.path, &questions);
+            let (answers, stamp, contributors) = index.answer_the_guards(&view.path, &questions);
 
             let mut installed: HashMap<(String, u32, usize), crate::Visibility> = HashMap::new();
             for (question, answer) in questions.iter().zip(answers) {
@@ -350,7 +350,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 }
             }
 
-            index.install_answered_guards(&view.path, installed);
+            index.install_answered_guards(&view.path, installed, stamp, contributors);
         }
     }
     let mut out: Vec<Name> = Vec::new();

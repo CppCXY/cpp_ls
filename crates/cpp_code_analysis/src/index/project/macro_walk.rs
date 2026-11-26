@@ -4210,7 +4210,11 @@ impl ProjectIndex {
         &self,
         root: &Path,
         questions: &[(String, u32, usize)],
-    ) -> Vec<Option<crate::Visibility>> {
+    ) -> (
+        Vec<Option<crate::Visibility>>,
+        u64,
+        std::sync::Arc<Vec<String>>,
+    ) {
         let mut walk = GuardWalk::new();
         let mut asked: Vec<Option<Vec<(u32, usize)>>> = Vec::with_capacity(questions.len());
         for (file, region, fact_offset) in questions {
@@ -4241,18 +4245,23 @@ impl ProjectIndex {
 
         let certain = self.certainly_in_the_translation_unit(root);
         let mut state = self.macros.clone();
+        let mut contributors: HashSet<String> = HashSet::new();
         self.macro_candidates(
             root,
             &mut Vec::new(),
             false,
-            &mut HashSet::new(),
+            &mut contributors,
             &certain,
             &mut Collecting::Guards(&mut walk),
             &mut state,
             None,
         );
+        contributors.insert(normalize(root));
+        let mut contributors: Vec<String> = contributors.into_iter().collect();
+        contributors.sort();
+        let stamp = self.the_walks_fingerprint(&contributors);
 
-        asked
+        let answers = asked
             .into_iter()
             .enumerate()
             .map(|(question, chain)| {
@@ -4272,7 +4281,8 @@ impl ProjectIndex {
                     crate::Visibility::Active
                 })
             })
-            .collect()
+            .collect();
+        (answers, stamp, std::sync::Arc::new(contributors))
     }
 
     /// **Install the verdicts [`ProjectIndex::answer_the_guards`] produced**, so the guard filter finds them
@@ -4282,6 +4292,8 @@ impl ProjectIndex {
         &self,
         root: &Path,
         answers: HashMap<(String, u32, usize), crate::Visibility>,
+        stamp: u64,
+        contributors: std::sync::Arc<Vec<String>>,
     ) {
         if answers.is_empty() {
             return;
@@ -4296,7 +4308,7 @@ impl ProjectIndex {
             }
             installed.insert(
                 normalize(root),
-                (self.changed, std::sync::Arc::new(answers)),
+                (stamp, contributors, std::sync::Arc::new(answers)),
             );
         }
     }
@@ -4307,8 +4319,8 @@ impl ProjectIndex {
         root: &Path,
     ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>> {
         let installed = self.answered_guards.lock().ok()?;
-        let (stamp, answers) = installed.get(&normalize(root))?;
-        (*stamp == self.changed).then(|| std::sync::Arc::clone(answers))
+        let (stamp, contributors, answers) = installed.get(&normalize(root))?;
+        (self.the_walks_fingerprint(contributors) == *stamp).then(|| std::sync::Arc::clone(answers))
     }
 
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?

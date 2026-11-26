@@ -505,6 +505,7 @@ pub struct ProjectIndex {
             String,
             (
                 u64,
+                std::sync::Arc<Vec<String>>,
                 std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>,
             ),
         >,
