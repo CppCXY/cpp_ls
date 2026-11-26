@@ -58,6 +58,7 @@
 //! that launched the editor exists, which is why this is a machine state and not a mistake. So the names are also
 //! looked for where their installers put them: see `INSTALLED_COMPILER_NAMES`.
 
+use crate::ProjectLanguage;
 use crate::hash;
 use crate::include;
 use std::path::{Path, PathBuf};
@@ -1636,7 +1637,7 @@ impl Toolchain {
         // it changes: a project compiled by `nvcc` has `.cu` files and headers written with `__device__` in them, and
         // the grammar has to know before it reads the first one.
         if self.cuda {
-            config = config.with_language_family(crate::ProjectLanguage::Cuda);
+            config = config.with_language_family(ProjectLanguage::Cuda);
         }
 
         // **The standard the compiler was asked about**, when the project did not state one. It is the same

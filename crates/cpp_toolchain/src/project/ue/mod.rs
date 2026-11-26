@@ -47,6 +47,7 @@
 //! where a rule is found by its code and where its tests are. What this module owns is the *answers* those rules read,
 //! so that two rules cannot disagree about which class a `UCLASS()` annotates.
 
+use crate::ProjectLanguage;
 use crate::include;
 use std::path::{Path, PathBuf};
 
@@ -135,7 +136,7 @@ impl UnrealSection {
         }
         // **The family is Unreal**, not a separate boolean: the parser and the project rules must agree with the one
         // value the configuration carries, and the validator has already rejected a file that enables two families.
-        config = config.with_language_family(crate::ProjectLanguage::Unreal);
+        config = config.with_language_family(ProjectLanguage::Unreal);
         // **The project's own generated code first.** UHT writes each module's generated headers into
         // `Intermediate/Build/<Platform>/<Config>/Inc/<Module>/UHT`, and that directory is what makes
         // `#include "MyActor.generated.h"` resolve — the header a UE source file includes, and the one that declares

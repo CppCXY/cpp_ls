@@ -16,6 +16,7 @@
 //! **The family is exclusive.** A project is ordinary C++, CUDA, Unreal, or Ascend C — never two; the configuration
 //! validator rejects a file that enables more than one.
 
+use crate::ProjectLanguage;
 use crate::include;
 use std::path::PathBuf;
 
@@ -47,7 +48,7 @@ impl AscendSection {
         root: &std::path::Path,
     ) -> include::config::CompilerConfig {
         if self.enable {
-            config = config.with_language_family(crate::ProjectLanguage::AscendC);
+            config = config.with_language_family(ProjectLanguage::AscendC);
         }
         if let Some(toolkit) = &self.toolkit {
             let toolkit = if toolkit.is_absolute() {

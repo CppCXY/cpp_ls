@@ -32,6 +32,7 @@
 //! The rules that judge CUDA code are checks like any other and live in `sema::check`; this
 //! module owns the configuration and the discovery, so that the grammar's CUDA flag has one source.
 
+use crate::ProjectLanguage;
 use crate::include;
 use std::path::PathBuf;
 
@@ -103,7 +104,7 @@ impl CudaSection {
         root: &std::path::Path,
     ) -> include::config::CompilerConfig {
         if self.enable {
-            config = config.with_language_family(crate::ProjectLanguage::Cuda);
+            config = config.with_language_family(ProjectLanguage::Cuda);
         }
         if let Some(host) = &self.host_compiler {
             let name = host

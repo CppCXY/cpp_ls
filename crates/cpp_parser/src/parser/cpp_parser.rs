@@ -1,3 +1,4 @@
+use crate::ProjectLanguage;
 use crate::features;
 use crate::grammar;
 use crate::is_trivia;
@@ -1274,7 +1275,7 @@ impl<'a> CppParser<'a> {
     /// The grammar has one switch per family, not one flag per extension. CUDA asks this in the specifier sequence
     /// (the placement qualifiers) and the postfix loop (the launch brackets); Ascend C asks it in the specifier
     /// sequence for its AICore qualifiers.
-    pub(crate) fn family(&self) -> crate::ProjectLanguage {
+    pub(crate) fn family(&self) -> ProjectLanguage {
         self.parse_config.family
     }
 

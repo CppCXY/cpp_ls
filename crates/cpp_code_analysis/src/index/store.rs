@@ -60,6 +60,7 @@ use crate::IndexedUnit;
 use crate::MAX_INCLUDE_DEPTH;
 use crate::MacroView;
 use crate::Marked;
+use crate::ProjectLanguage;
 use crate::READING_FINGERPRINT;
 use crate::RenderedUnit;
 use crate::TranslationUnit;
@@ -3567,10 +3568,10 @@ impl<F: FileProvider> SummaryStore<F> {
         // reading must never answer another. Unreal is not a grammar switch, but its conventions and defines change
         // what the project's own headers mean, so it is part of the same key byte.
         bytes.push(match self.config.language() {
-            crate::ProjectLanguage::Cpp => b'-',
-            crate::ProjectLanguage::Cuda => b'c',
-            crate::ProjectLanguage::Unreal => b'u',
-            crate::ProjectLanguage::AscendC => b'a',
+            ProjectLanguage::Cpp => b'-',
+            ProjectLanguage::Cuda => b'c',
+            ProjectLanguage::Unreal => b'u',
+            ProjectLanguage::AscendC => b'a',
         });
         bytes.push(0);
 

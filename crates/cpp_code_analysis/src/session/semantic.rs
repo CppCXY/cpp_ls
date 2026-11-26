@@ -88,7 +88,9 @@
 //! ```
 
 use crate::FactGuard;
+use crate::ProjectLanguage;
 use crate::Visibility;
+use crate::ascend;
 use crate::index;
 use crate::preprocess;
 use crate::sema;
@@ -236,7 +238,7 @@ pub enum NameModifier {
 /// answer that several unrelated declarations share comes back `Ambiguous` and gets **no** colour, which is this
 /// layer's way of refusing to guess.
 pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
-    classified_names_in_family(index, view, crate::ProjectLanguage::Cpp)
+    classified_names_in_family(index, view, ProjectLanguage::Cpp)
 }
 
 /// **The same pass for one project family.** Ascend C's qualifiers are identifiers to the lexer and reserved
@@ -245,7 +247,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
 pub fn classified_names_in_family(
     index: &ProjectIndex,
     view: &FileView,
-    family: crate::ProjectLanguage,
+    family: ProjectLanguage,
 ) -> Vec<Name> {
     // Timed because this runs on the interactive path — once per request for the file being edited — and because
     // "how much does a colour cost" is a question the probe in `examples/semantic_probe.rs` answers from here
@@ -458,8 +460,7 @@ pub fn classified_names_in_family(
         // the token either disappears or takes a header declaration of the same spelling. The family is the switch —
         // the same text in ordinary C++ is an ordinary name.
         if family.is_ascend_c()
-            && crate::ascend::word(text)
-                .is_some_and(|word| word.kind == crate::ascend::WordKind::Qualifier)
+            && ascend::word(text).is_some_and(|word| word.kind == ascend::WordKind::Qualifier)
         {
             out.push(Name {
                 range,

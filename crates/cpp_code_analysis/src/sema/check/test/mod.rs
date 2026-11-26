@@ -23,6 +23,7 @@
 //! Both go through [`crate::Session::diagnostics`], which is what a client is shown. A file that asserts on a code
 //! **not** being present is the common case, and it says so in its message rather than in a comment.
 
+use crate::ProjectLanguage;
 use crate::{
     CompilerConfig, DiagnosticCode, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
@@ -38,14 +39,14 @@ pub(super) fn codes_of(source: &str) -> Vec<DiagnosticCode> {
 /// declared elsewhere, a forward declaration in an included header. `files` is `(path, text)`, and `asking` is the
 /// file the findings are asked of.
 pub(super) fn codes_in(files: &[(&str, &str)], asking: &str) -> Vec<DiagnosticCode> {
-    codes_in_family(files, asking, crate::ProjectLanguage::Cpp)
+    codes_in_family(files, asking, ProjectLanguage::Cpp)
 }
 
 /// The codes one file produces when the project is read as `family`.
 pub(super) fn codes_in_family(
     files: &[(&str, &str)],
     asking: &str,
-    family: crate::ProjectLanguage,
+    family: ProjectLanguage,
 ) -> Vec<DiagnosticCode> {
     session_with_family(files, asking, family)
         .diagnostics(std::path::Path::new(asking))
@@ -96,13 +97,13 @@ pub(super) fn assert_reported(codes: &[DiagnosticCode], code: DiagnosticCode, wh
 
 /// The session every fixture is asked through — indexed, with the asking file's rendering built.
 fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
-    session_with_family(files, asking, crate::ProjectLanguage::Cpp)
+    session_with_family(files, asking, ProjectLanguage::Cpp)
 }
 
 fn session_with_family(
     files: &[(&str, &str)],
     asking: &str,
-    family: crate::ProjectLanguage,
+    family: ProjectLanguage,
 ) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
     for (path, text) in files {
