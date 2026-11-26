@@ -14,6 +14,40 @@ use super::*;
 // The project's own configuration file
 // -------------------------------------------------------------------------------------------
 
+/// **An Ascend C family takes `.cce` and `.asc` as project sources**, because those are the Ascend compiler's own
+/// kernel suffixes. A project that is not Ascend C leaves them alone, exactly as it leaves `.cu` alone.
+#[test]
+pub(crate) fn an_ascend_family_scans_cce_and_asc_sources() {
+    let project = Project::new("ascend-scan");
+    project.write("kernels/add.cce", "void add_kernel() { }\n");
+    project.write("kernels/helper.asc", "void helper() { }\n");
+    project.write("main.cpp", "int main() { return 0; }\n");
+    project.write(
+        ".cppls.toml",
+        "[compile.ascend]\nenable = true\ninclude = [\"include\"]\n",
+    );
+
+    let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+    let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+    assert!(
+        project
+            .relative(session.project_files())
+            .iter()
+            .any(|path| path == "kernels/add.cce"),
+        "the .cce kernel is a project source: {:?}",
+        project.relative(session.project_files())
+    );
+    assert!(
+        project
+            .relative(session.project_files())
+            .iter()
+            .any(|path| path == "kernels/helper.asc"),
+        "the .asc kernel is a project source: {:?}",
+        project.relative(session.project_files())
+    );
+}
+
 #[test]
 pub(crate) fn a_project_configuration_narrows_the_scan_and_widens_the_source_list() {
     // The two things `[workspace]` is for: a tree the analysis should not read, and an extension the engine

@@ -7,11 +7,11 @@ use crate::FileSummary;
 use crate::MacroDefinitions;
 use crate::ParsedDefinitions;
 use crate::completion;
-use crate::cuda_source_extensions;
 use crate::effect;
 use crate::file;
 use crate::index;
 use crate::project;
+use crate::{ascend_source_extensions, cuda_source_extensions};
 
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
@@ -85,6 +85,15 @@ impl<F: FileProvider + Clone> Session<F> {
         if config.cuda() {
             extra_extensions.extend(
                 cuda_source_extensions()
+                    .iter()
+                    .map(|extension| (*extension).to_string()),
+            );
+        }
+        // **And an Ascend C project takes `.cce`/`.asc`**, for the same reason: the family is the project statement
+        // that makes those files source rather than a vendored file with an unusual suffix.
+        if config.ascend_c() {
+            extra_extensions.extend(
+                ascend_source_extensions()
                     .iter()
                     .map(|extension| (*extension).to_string()),
             );

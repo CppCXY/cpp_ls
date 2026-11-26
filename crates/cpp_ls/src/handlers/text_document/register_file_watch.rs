@@ -39,6 +39,7 @@ fn watched_globs() -> Vec<String> {
     let extensions: Vec<&str> = cpp_code_analysis::source_extensions()
         .iter()
         .chain(cpp_code_analysis::cuda_source_extensions())
+        .chain(cpp_code_analysis::ascend_source_extensions())
         .copied()
         .collect();
 
@@ -143,6 +144,7 @@ mod tests {
         for extension in cpp_code_analysis::source_extensions()
             .iter()
             .chain(cpp_code_analysis::cuda_source_extensions())
+            .chain(cpp_code_analysis::ascend_source_extensions())
         {
             assert!(
                 globs.contains(&format!(",{extension},"))

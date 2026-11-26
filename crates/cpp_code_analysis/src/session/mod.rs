@@ -387,6 +387,14 @@ pub fn cuda_source_extensions() -> &'static [&'static str] {
 /// See [`cuda_source_extensions`].
 pub const CUDA_SOURCE_EXTENSIONS: &[&str] = &["cu", "cuh"];
 
+/// **The extensions an Ascend C project adds to the scan.** The Ascend compiler accepts `.cce` and `.asc` kernel sources (and `-x cce`/`-x asc` for a file with any suffix); they are the project_files` own source only when the family is Ascend C, like `.cu`/`.cuh` for CUDA.
+pub const ASCEND_SOURCE_EXTENSIONS: &[&str] = &["cce", "asc"];
+
+/// See [`ascend_source_extensions`].
+pub fn ascend_source_extensions() -> &'static [&'static str] {
+    ASCEND_SOURCE_EXTENSIONS
+}
+
 /// The files a session reads through: the editor's buffers in front of a fallback provider.
 pub type SessionFiles<F = DiskFiles> = OverlayFiles<OpenDocuments, F>;
 
