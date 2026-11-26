@@ -493,6 +493,10 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         // never goes idle: measured once as `index slice: … 2 to cook, 0 left` once a second for as long as a window
         // stayed open, with every diagnostic pull answered 1.4 s late because the pump held the lock it waited for.
         let mut no_progress = 0usize;
+        // **The load is not finished when the queue is empty.** The pump still writes the sharing cache, publishes
+        // the first inactive regions and reads the open file's program; the bar used to end before that work, and the
+        // machine stayed busy with no indicator. These flags keep it on screen until the post-drain work has run.
+        let mut settling_the_load = false;
 
         // **The wave the pump is asking for**, adjusted after every slice (see below). It starts small because the first
         // wave of a cold start is the expensive one — measured: a fixed cap of 32 held the writer for 3309 ms on the
@@ -1011,21 +1015,24 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // knows which files exist and can answer questions about them; the second pass makes those answers
                 // better, not available. So the bar follows the queue (`Session::pending`) and the pump keeps
                 // draining everything (`was_pending` still reads `pending_work`).
-                let (to_read, to_cook, to_reread) = match context
+                let (to_read, to_cook, to_reread, to_read_as_a_program) = match context
                     .analysis()
                     .query_blocking(|session| {
                         Some((
                             session.pending(),
                             session.pending_cooking(),
                             session.re_read_backlog(),
+                            session.pending_units(),
                         ))
                     })
                     .await
                 {
                     crate::context::RequestOutcome::Ready(counts) => counts,
-                    _ => (pending, 0, 0),
+                    _ => (pending, 0, 0, 0),
                 };
-                let message = if to_read > 0 {
+                let message = if to_read_as_a_program > 0 {
+                    format!("{to_read} files to read, {to_read_as_a_program} program(s) to read")
+                } else if to_read > 0 {
                     format!("{to_read} files to read, {to_cook} to cook, {to_reread} to re-read")
                 } else {
                     format!(
@@ -1115,28 +1122,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // waiting for it are published — after that the loop waits for the next edit.
             if first_pass {
                 first_pass = false;
-                // **The bar ends here, and that is the whole of what "Load workspace" promises.** It used to be owed
-                // until every translation unit had been read as a program; that pass is gone (`e22fa00` deleted the
-                // background read of the whole project, because clangd does not pay that price and neither should we),
-                // and the flag that carried the promise went with it — **and so did this call**, which left the bar on
-                // screen for ever. Reported from an editor: "cuda工程一直在加载" — a three-file project, `the workspace
-                // is indexed` in the log, and no `end` on the wire.
-                //
-                // The queue has drained and the index can answer questions about the project's files. A program is read
-                // on demand from here (the pump's own `read_a_program`, one per open file), and a bar for that would be
-                // a bar for work the reader did not ask for.
-                context.status_bar().finish_progress_task(
-                    ProgressTask::LoadWorkspace,
-                    Some("the workspace is indexed".to_string()),
-                );
-                // **The one number that bounds how long a request can have been made to wait.** A query and an update
-                // take the same lock, so this is the worst case *by construction*: if a completion felt slow and this
-                // says 12 ms, the wait was inside that completion's own work rather than in the queue behind the
-                // indexer — and if it says 701, the queue is the whole story and no amount of query tuning helps.
-                log::info!(
-                    "the workspace is indexed — the longest an update held the analysis was {} ms",
-                    context.analysis().worst_write_hold()
-                );
+                settling_the_load = true;
+                // **The bar ends after the post-drain work, not before it.** The queue being empty means every file
+                // has been read; it does not mean the pump is done: the sharing cache is saved, the first inactive
+                // regions are published, and the open file's program may still be read. Those are seconds of CPU on
+                // a real project, and ending the indicator first made them look like runaway background work.
 
                 // After the drain, so it holds everything this run learned; the entries carry their
                 // own identity, so a stale file is inert rather than wrong.
@@ -1158,6 +1148,16 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // opened its files before the project was read, so nothing had a rendering to answer from at
                 // `didOpen` — and unlike a request, a notification is never asked for again.
                 crate::handlers::inactive_regions::publish_all(&context).await;
+
+                // **The lenses, once — not on every edit.** A code lens is a count of files read, so the count
+                // published before this file's closure was ready can be low; one refresh here asks for the settled
+                // number. It is deliberately not repeated after body edits: `workspace/codeLens/refresh` asks the
+                // client to replace its list, and a client is entitled to clear the old virtual lines before asking
+                // again, which is the flicker this removes. The client already asks for its lenses when its text
+                // changes; the handler serves its last list while a summary is rebuilt.
+                if context.lsp_features().supports_refresh_code_lens() {
+                    context.client().refresh_code_lenses();
+                }
             } else if was_pending {
                 // **…and the hints, for the same reason and with a measurement of their own.**
                 //
@@ -1184,13 +1184,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // silence. Nothing else in this loop notices: the document did not change.
                 if context.lsp_features().supports_refresh_semantic_tokens() {
                     context.client().refresh_semantic_tokens();
-                }
-                // **…and the lenses, whose number is a count of files read.** A lens published before this file's
-                // closure was ready says fewer references than there are, and a client keeps that number until its
-                // document changes. The handler withholds the number until the closure is ready; this is what asks
-                // again once it is.
-                if context.lsp_features().supports_refresh_code_lens() {
-                    context.client().refresh_code_lenses();
                 }
                 // **…and the inactive regions, which are a *push* and therefore have no refresh to fall back on.**
                 // A file's dead branches become answerable only when its cook lands (the per-file cook of the file's
@@ -1241,6 +1234,16 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     .flatten()
             {
                 if wait.is_zero() {
+                    // **The program read is the last CPU-heavy part of a first load.** Keep the bar on screen for
+                    // it: on the neovim checkout this is seconds of parsing and a reader has no other signal that it
+                    // is still loading.
+                    if settling_the_load {
+                        context.status_bar().update_progress_task(
+                            ProgressTask::LoadWorkspace,
+                            None,
+                            Some("reading the program for the compiler's view".to_string()),
+                        );
+                    }
                     // **Then breathe.** A project has one program per translation unit, and a pump that read them
                     // back to back would peg a core for minutes after every pause; one idle tick between them is
                     // the same pace the loop uses when it has nothing to do.
@@ -1268,11 +1271,39 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                             context.client().refresh_semantic_tokens();
                         }
                     }
+                    // **The bar retires when no program is still owed**, not when the first one finished: a
+                    // project has one program per open translation unit.
+                    if settling_the_load {
+                        let still_owed = read
+                            && context
+                                .analysis()
+                                .with_snapshot(|session| {
+                                    session.the_wait_before_a_program_may_be_read().is_some()
+                                })
+                                .unwrap_or(false);
+                        if !still_owed {
+                            finish_the_load(&context);
+                            settling_the_load = false;
+                        }
+                    }
                     context.analysis().wait_for_work(IDLE_WAIT).await;
                 } else {
+                    // A deferred program is work for a later idle moment, not work the current load indicator
+                    // should wait for; the reader has stopped typing and the bar can retire.
+                    if settling_the_load {
+                        finish_the_load(&context);
+                        settling_the_load = false;
+                    }
                     context.analysis().wait_for_work(wait).await;
                 }
                 continue;
+            }
+
+            // **The load settles when no program is owed and nothing is pending.** A deferred program (wait > 0)
+            // has its own idle moment; the next edit will schedule it and no progress bar can wait for typing.
+            if settling_the_load {
+                finish_the_load(&context);
+                settling_the_load = false;
             }
 
             // **A timeout is not work.** `wait_for_work` answers whether something was queued while the loop waited;
@@ -1286,6 +1317,18 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             }
         }
     });
+}
+
+/// End the load indicator only once the pump has nothing left that it started — see `settling_the_load`.
+fn finish_the_load(context: &ServerContextSnapshot) {
+    context.status_bar().finish_progress_task(
+        ProgressTask::LoadWorkspace,
+        Some("the workspace is indexed".to_string()),
+    );
+    log::info!(
+        "the workspace is indexed — the longest an update held the analysis was {} ms",
+        context.analysis().worst_write_hold()
+    );
 }
 
 /// The folders the client opened.
