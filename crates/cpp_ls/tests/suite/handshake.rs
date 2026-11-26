@@ -2259,6 +2259,74 @@ fn links_and_type_definitions_are_ready_on_the_first_request_after_open() {
     );
 }
 
+/// **A member list after `.` edits at the cursor, not at the next line.**
+///
+/// The members were found — `capacity`, `items`, `size` — but their replace range was mapped from the rendering with
+/// `file_offset_of`, which answers where an offset *starts*. An empty range at a token boundary came back at the start
+/// of the next line, the client discarded every item because the edit was somewhere else, and the popup never appeared.
+/// Measured on neovim's `channel.c` at `ids.` after `kvec_t(int64_t) ids`.
+#[test]
+fn a_member_completion_after_a_dot_edits_at_the_cursor() {
+    let source = "\
+#define KV(T) struct { T *items; int size; }
+void f() {
+  KV(int) ids;
+  ids.
+}
+";
+    let project = Project::new("member-edit-range");
+    project.write("a.cpp", source);
+    let uri = uri_of(&project.root().join("a.cpp"));
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    let response = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": 3, "character": 6 },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == "size"))
+        },
+    );
+    let items = response["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a member list: {response}"));
+    for item in items {
+        let range = &item["textEdit"]["range"];
+        assert_eq!(
+            range["start"],
+            json!({ "line": 3, "character": 6 }),
+            "{item}"
+        );
+        assert_eq!(range["end"], json!({ "line": 3, "character": 6 }), "{item}");
+    }
+}
+
 /// **An edit to an included header is visible to the completion that follows it.**
 ///
 /// This is the shape a user reported and diagnosed as "文件的 didchange 尚未处理完毕": an edit reaches the analysis in

@@ -280,23 +280,34 @@ impl AnalysisState {
                     return Some(raw);
                 }
             }
-            let start =
-                rendered.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                    found.replace.start_offset,
-                ));
-            // **The end of a range maps with `file_offset_of_end`.** `file_offset_of` answers where an offset
-            // *starts*, so the end of a name that is the last token of a line came back as the first character of the
-            // next line — measured as a completion item whose edit replaced `HWND__` and the newline after it.
-            let end = rendered.file_offset_of_end(
-                cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                    found.replace.end_offset(),
-                ),
-            );
-            if let (Some(start), Some(end)) = (start, end) {
-                found.replace = cpp_parser::SourceRange::new(
-                    start.get(),
-                    end.get().saturating_sub(start.get()),
+            // **An empty replace range is the cursor itself, and mapping it can move it.** `file_offset_of` asks
+            // where an offset *starts*; at a token boundary an empty range in a rendering whose line breaks are gone
+            // comes back at the start of the **next** file line. Measured at `ids.` in neovim's `channel.c`: the
+            // members were found, but every item's edit replaced line 1086 column 0 instead of line 1085 column 6,
+            // and the client discarded the list. The editable offset is already the answer for an empty range.
+            if found.replace.start_offset == found.replace.end_offset() {
+                found.replace = cpp_parser::SourceRange::new(offset.get(), 0);
+            } else {
+                let start = rendered.file_offset_of(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        found.replace.start_offset,
+                    ),
                 );
+                // **The end of a range maps with `file_offset_of_end`.** `file_offset_of` answers where an offset
+                // *starts*, so the end of a name that is the last token of a line came back as the first character
+                // of the next line — measured as a completion item whose edit replaced `HWND__` and the newline
+                // after it.
+                let end = rendered.file_offset_of_end(
+                    cpp_code_analysis::file::coordinates::ReadingOffset::new(
+                        found.replace.end_offset(),
+                    ),
+                );
+                if let (Some(start), Some(end)) = (start, end) {
+                    found.replace = cpp_parser::SourceRange::new(
+                        start.get(),
+                        end.get().saturating_sub(start.get()),
+                    );
+                }
             }
             Some(found)
         })
