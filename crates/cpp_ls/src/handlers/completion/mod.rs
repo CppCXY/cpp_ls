@@ -476,6 +476,14 @@ pub async fn on_completion_resolve(
         return RequestOutcome::Ready(item);
     };
 
+    // **Resolve is a request about one declaration, and that declaration's file may be exactly the one the pump
+    // has not reached yet.** A completion list can be built from the buffer's own reading while the project index
+    // is still filling; the item then has an identity whose summary is absent, `declaration_in` answers `None`, and
+    // the item comes back unchanged for ever — the client has no reason to ask again. Prepare that one file's
+    // summary and rendering first, the same way a diagnostic pull does; resolve is sent for one item, and its
+    // contract is allowed to wait for that item's declaration.
+    let _ = context.analysis().prepare_for_a_diagnostic(&file).await;
+
     let looked_up = file.clone();
     let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
         // **The detail the list did not send**, found from the identity the list did send. This is the whole reason
