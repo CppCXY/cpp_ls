@@ -2790,3 +2790,21 @@ fn a_use_before_the_declaration_finds_nothing() {
         "a member is visible throughout its class"
     );
 }
+
+/// **`wchar_t` and its three siblings are types, not variables.** The lexer has no token kind for them and hands
+/// them over as identifiers, so without the builtin check they reach the index — which has no declaration — and
+/// either disappear or take whatever declaration a header happens to give the spelling.
+#[test]
+fn the_wide_character_builtins_are_types() {
+    let source = "wchar_t a; char8_t b; char16_t c; char32_t d;";
+    let classified: Vec<(String, NameKind)> = classified(source)
+        .into_iter()
+        .map(|(text, kind, _)| (text.trim().to_string(), kind))
+        .collect();
+    for spelling in ["wchar_t", "char8_t", "char16_t", "char32_t"] {
+        assert!(
+            classified.contains(&(spelling.to_string(), NameKind::Type)),
+            "{spelling} must be a type: {classified:?}"
+        );
+    }
+}

@@ -1266,7 +1266,7 @@ fn split_trailing_parameters(written: &str) -> Option<(&str, &str)> {
 /// `long double` are builtins whose spelling is several words, so the test is on the whole spelling. Nothing here is
 /// a keyword this layer handles earlier for another reason (`auto`, `decltype`) — those are read as the placeholders
 /// they are before this function is reached.
-fn is_a_builtin(spelling: &str) -> bool {
+pub(crate) fn is_a_builtin(spelling: &str) -> bool {
     matches!(
         spelling,
         "void"

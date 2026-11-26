@@ -159,6 +159,9 @@ pub enum Provenance {
     /// The name is a `#define` written in this file. A use of it is classified too, because a macro is a name like
     /// any other to a reader — and the one this file writes is the one in front of them.
     Macro,
+    /// The token is a language builtin whose spelling the lexer hands over as an identifier — `wchar_t`,
+    /// `char8_t`, `char16_t`, `char32_t`. There is no declaration to point at, but the colour must still be a type.
+    Builtin,
 }
 
 /// One name in a file, with what it is.
@@ -431,6 +434,22 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 declaration: define.start_offset == at,
                 modifiers: Vec::new(),
                 provenance: Provenance::Macro,
+            });
+            continue;
+        }
+
+        // **The four builtin types the lexer hands over as identifiers.** `wchar_t`, `char8_t`, `char16_t` and
+        // `char32_t` are keywords of the language, but this parser's lexer has no token kind for them and parses
+        // them as names. Without this check they reach the index, which has no declaration to answer with, and the
+        // token falls through with no colour — or, when some header happens to declare the spelling, as a variable.
+        // The list is the language's, not a heuristic: see `crate::sema::types::is_a_builtin`.
+        if crate::sema::types::is_a_builtin(text) {
+            out.push(Name {
+                range,
+                kind: NameKind::Type,
+                declaration: false,
+                modifiers: Vec::new(),
+                provenance: Provenance::Builtin,
             });
             continue;
         }
