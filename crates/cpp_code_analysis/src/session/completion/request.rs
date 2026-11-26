@@ -3,6 +3,17 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::super::*;
+use crate::CompletionSet;
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::HeaderIndex;
+use crate::Known;
+use crate::completion;
+use crate::doc;
+use crate::file;
+use crate::index;
+use crate::inlay;
+use crate::sema;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// What to offer after a member access at `offset`: the object's type, its members, and the edit.
@@ -46,7 +57,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // offered into a sentence. Measured: `a_comment_and_a_literal_offer_nothing` failed against this query while
         // `completions` was already refusing.
         if let Some(written) = view.written_text()
-            && crate::file::view::in_prose(written, offset.get())
+            && file::view::in_prose(written, offset.get())
         {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
         }
@@ -56,7 +67,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // name to offer, and `Unknown` says so rather than answering about the nearest thing that is.
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
         };
-        crate::index::project::name_completions_traced(
+        index::project::name_completions_traced(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -93,7 +104,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The header index is **cloned** rather than borrowed — see [`Session::headers`] — and on a project the size of
     /// the latency fixture that clone measures **0 ms**, against 350–1270 ms for the query beside it while the index
     /// was filling. It is named here because it is the obvious suspect for a per-keystroke cost and it is not one.
-    pub fn completions(&self, view: &FileView, offset: FileOffset) -> crate::CompletionSet {
+    pub fn completions(&self, view: &FileView, offset: FileOffset) -> CompletionSet {
         // **The list, then the edits that go with it.** A name offered from a header this file does not include is only
         // usable once the `#include` is there, so every item that carries an [`Inclusion`](crate::completion::Inclusion)
         // gets its insertion here — the position is a line in the **written** text, which the completion itself never
@@ -113,7 +124,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_files_this_file_could_include(
         &self,
         path: &std::path::Path,
-    ) -> Vec<crate::completion::Unincluded> {
+    ) -> Vec<completion::Unincluded> {
         if !self
             .project_config()
             .config
@@ -156,7 +167,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             }
             // **Already reached** by an `#include`, transitively: its names are visible, so there is nothing to add.
-            let key = crate::file::paths::normalize_path(file, cfg!(windows));
+            let key = file::paths::normalize_path(file, cfg!(windows));
             if reached.contains(&key) {
                 continue;
             }
@@ -174,12 +185,14 @@ impl<F: FileProvider + Clone> Session<F> {
                 .summary(file)
                 .and_then(|summary| summary.modules.module.clone())
             {
-                Some(module) => crate::completion::Inclusion::Import(module.to_string()),
-                None => crate::completion::Inclusion::Include(
-                    crate::completion::the_include_spelling(file, path, &include_paths),
-                ),
+                Some(module) => completion::Inclusion::Import(module.to_string()),
+                None => completion::Inclusion::Include(completion::the_include_spelling(
+                    file,
+                    path,
+                    &include_paths,
+                )),
             };
-            found.push(crate::completion::Unincluded {
+            found.push(completion::Unincluded {
                 file: file.clone(),
                 inclusion,
             });
@@ -196,7 +209,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the name and no include, rather than an edit at an offset that may have moved.
     pub(crate) fn attach_the_inclusions(
         &self,
-        offered: &mut crate::CompletionSet,
+        offered: &mut CompletionSet,
         path: &std::path::Path,
     ) {
         if !offered.items.iter().any(|item| item.inclusion.is_some()) {
@@ -212,8 +225,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             };
             let at = match inclusion {
-                crate::completion::Inclusion::Include(_) => after_includes,
-                crate::completion::Inclusion::Import(_) => after_imports,
+                completion::Inclusion::Include(_) => after_includes,
+                completion::Inclusion::Import(_) => after_imports,
             };
             item.additional_edits
                 .push((cpp_parser::SourceRange::new(at, 0), inclusion.line()));
@@ -225,7 +238,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         view: &FileView,
         offset: FileOffset,
-    ) -> crate::CompletionSet {
+    ) -> CompletionSet {
         // **The headers this file could add**, and what accepting one of their names has to edit — see
         // `Session::the_files_this_file_could_include`.
         let unincluded = self.the_files_this_file_could_include(&view.path);
@@ -255,7 +268,7 @@ impl<F: FileProvider + Clone> Session<F> {
         {
             let source: &str = view.written_text().unwrap_or(&view.source);
             if let Some((written, range)) =
-                crate::completion::context::module_name_from_the_text(source, offset.get())
+                completion::context::module_name_from_the_text(source, offset.get())
             {
                 return self.module_completions(&written, range);
             }
@@ -287,11 +300,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 None => view.root.clone(),
             };
             if let Some(
-                context @ (crate::completion::CompletionContext::DocComment { .. }
-                | crate::completion::CompletionContext::DocLink { .. }),
-            ) = crate::completion::doc_comment_at(&written_root, offset.get())
+                context @ (completion::CompletionContext::DocComment { .. }
+                | completion::CompletionContext::DocLink { .. }),
+            ) = completion::doc_comment_at(&written_root, offset.get())
             {
-                return crate::completion::completion_with(
+                return completion::completion_with(
                     self.store.index(),
                     &view.scopes,
                     &view.root,
@@ -315,8 +328,8 @@ impl<F: FileProvider + Clone> Session<F> {
             // which is how a link's question used to reach the code path.
             // **…and a code block is the exception**: `@code … @endcode` is an example of *code*, which is where a
             // name does belong, and it is asked before the refusal so an example keeps its completion.
-            if crate::doc::inside_a_code_block(text, offset.get()) {
-                return crate::completion::completion_at(
+            if doc::inside_a_code_block(text, offset.get()) {
+                return completion::completion_at(
                     self.store.index(),
                     &view.scopes,
                     &view.root,
@@ -333,23 +346,23 @@ impl<F: FileProvider + Clone> Session<F> {
                 );
             }
 
-            if crate::doc::is_a_documentation_comment(text, offset.get())
-                || crate::file::view::in_prose(text, offset.get())
+            if doc::is_a_documentation_comment(text, offset.get())
+                || file::view::in_prose(text, offset.get())
             {
-                return crate::CompletionSet::default();
+                return CompletionSet::default();
             }
-            let context = crate::completion::context_at(&written_root, offset.get());
+            let context = completion::context_at(&written_root, offset.get());
             match context {
                 // **The program is in the rendering; the buffer is in the file.** The `replace` range is carried by
                 // the context (read from the written text) and the *lookup* needs a reading offset - the one the
                 // cursor maps to, or the rendering''s end when it maps nowhere (measured: `one::` at the end of a
                 // file has no position in the rendering at all, and the answer was an empty set).
-                crate::completion::CompletionContext::DirectiveArgument { .. }
-                | crate::completion::CompletionContext::Qualified(_) => {
+                completion::CompletionContext::DirectiveArgument { .. }
+                | completion::CompletionContext::Qualified(_) => {
                     let in_the_reading = view
                         .reading_offset_of(offset)
                         .map_or(view.source.len(), |at| at.get());
-                    return crate::completion::completion_with(
+                    return completion::completion_with(
                         self.store.index(),
                         &view.scopes,
                         &view.root,
@@ -369,11 +382,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 // **`MacroBody` is here too**: a `#define` line is in the file and not in the rendering, and the
                 // answer needs no reading position at all — the parameters come from the line, the macros from the
                 // summary.
-                context @ (crate::completion::CompletionContext::DirectiveName { .. }
-                | crate::completion::CompletionContext::Include { .. }
-                | crate::completion::CompletionContext::MacroBody { .. }
-                | crate::completion::CompletionContext::Condition { .. }) => {
-                    return crate::completion::completion_with(
+                context @ (completion::CompletionContext::DirectiveName { .. }
+                | completion::CompletionContext::Include { .. }
+                | completion::CompletionContext::MacroBody { .. }
+                | completion::CompletionContext::Condition { .. }) => {
+                    return completion::completion_with(
                         self.store.index(),
                         &view.scopes,
                         &view.root,
@@ -391,15 +404,15 @@ impl<F: FileProvider + Clone> Session<F> {
                     );
                 }
                 // **`Nothing` is an answer, not a miss**: prose, and a directive that takes no argument (`#endif `).
-                crate::completion::CompletionContext::Nothing => {
-                    return crate::CompletionSet::default();
+                completion::CompletionContext::Nothing => {
+                    return CompletionSet::default();
                 }
                 _ => {}
             }
         }
 
         let Some(offset) = view.reading_offset_of(offset) else {
-            return crate::CompletionSet::default();
+            return CompletionSet::default();
         };
 
         // The header index through its lock, and **an empty one on a poisoned lock**: a completion is a suggestion
@@ -411,7 +424,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(|headers| headers.clone())
             .unwrap_or_default();
 
-        let mut set = crate::completion::completion_at(
+        let mut set = completion::completion_at(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -439,7 +452,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// A clone rather than a borrow, because the answer is behind a lock that is written when the project's file
     /// list grows. See [`Session::completions`] for the whole reason.
-    pub fn headers(&self) -> crate::HeaderIndex {
+    pub fn headers(&self) -> HeaderIndex {
         self.headers
             .read()
             .map(|headers| headers.clone())
@@ -485,23 +498,23 @@ impl<F: FileProvider + Clone> Session<F> {
             // asked first for the same reason it is asked there: a declaration with nothing above it costs no parse.
             let Some(written) = view.written_text() else {
                 // No rendering: this view *is* a parse of the file's own text, and its comments are its own nodes.
-                return crate::file::view::documentation_at(&view.root, offset);
+                return file::view::documentation_at(&view.root, offset);
             };
-            if !crate::file::view::might_be_documented(written, offset) {
+            if !file::view::might_be_documented(written, offset) {
                 return None;
             }
             let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
-            return crate::file::view::documentation_at(&tree.get_red_root(), offset);
+            return file::view::documentation_at(&tree.get_red_root(), offset);
         }
 
         let declared_in = self.vfs.held(file)?;
-        if !crate::file::view::might_be_documented(&declared_in.text, offset) {
+        if !file::view::might_be_documented(&declared_in.text, offset) {
             return None;
         }
 
         let tree =
             cpp_parser::CppParser::parse(&declared_in.text, cpp_parser::ParserConfig::default());
-        crate::file::view::documentation_at(&tree.get_red_root(), offset)
+        file::view::documentation_at(&tree.get_red_root(), offset)
     }
 
     /// **The type of the expression at `offset`**, as far as this analysis can tell — what a hover shows when the
@@ -535,7 +548,7 @@ impl<F: FileProvider + Clone> Session<F> {
         expression: &cpp_parser::CppSyntaxNode,
     ) -> Known<ExpressionType> {
         let written = expression.text().to_string().trim().to_string();
-        match crate::index::project::type_of_expression(
+        match index::project::type_of_expression(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
@@ -581,17 +594,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // follows it — `->` of `ci_func(ci)->p` is written text and survives the expansion.
         let stop = self.the_rendering_offset(path, usize::from(range.end()))?;
         let rendered = self.view(path)?;
-        let found =
-            crate::sema::resolve::the_largest_expression_between(&rendered.root, first, stop)
-                .or_else(|| {
-                    let last =
-                        self.the_rendering_offset(path, usize::from(range.end()).checked_sub(1)?)?;
-                    crate::sema::resolve::the_smallest_expression_covering(
-                        &rendered.root,
-                        first,
-                        last,
-                    )
-                })?;
+        let found = sema::resolve::the_largest_expression_between(&rendered.root, first, stop)
+            .or_else(|| {
+                let last =
+                    self.the_rendering_offset(path, usize::from(range.end()).checked_sub(1)?)?;
+                sema::resolve::the_smallest_expression_covering(&rendered.root, first, last)
+            })?;
 
         match self.type_of_the_expression(&rendered, &found) {
             Known::Yes(found) => Some(found),
@@ -599,12 +607,12 @@ impl<F: FileProvider + Clone> Session<F> {
         }
     }
     pub fn type_at(&self, view: &FileView, offset: ReadingOffset) -> Known<ExpressionType> {
-        let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset.get()) else {
+        let Some(expression) = sema::resolve::expression_at(&view.root, offset.get()) else {
             return Known::No;
         };
 
         let written = expression.text().to_string().trim().to_string();
-        let answer = match crate::index::project::type_of_expression(
+        let answer = match index::project::type_of_expression(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
@@ -635,7 +643,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // asking the whole `tsvalue(o)->shrlen` in the rendering answered the *object*'s type (`TString*`) rather
             // than the member's. The object's type crosses correctly (its end is the expansion's end), and the member
             // is then found in it: `TString::shrlen`, `ls_byte`.
-            if let Some(access) = crate::sema::resolve::member_access_of(&expression)
+            if let Some(access) = sema::resolve::member_access_of(&expression)
                 && let Some(object_type) =
                     self.the_type_of_an_expression_in_the_rendering(&view.path, &access.object)
                 && let Known::Yes(list) = self.members_of(view, &object_type.type_of)
@@ -683,8 +691,8 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         offset: ReadingOffset,
     ) -> Option<ProjectDefinition> {
-        let callee = crate::sema::resolve::name_node_at(&view.root, offset.get())?;
-        crate::index::project::a_member_of_the_enclosing_class(
+        let callee = sema::resolve::name_node_at(&view.root, offset.get())?;
+        index::project::a_member_of_the_enclosing_class(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -717,7 +725,7 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         range: cpp_parser::SourceRange,
     ) -> Vec<ParameterHint> {
-        let mut hints = crate::inlay::parameter_hints(self.store.index(), view, range, |path| {
+        let mut hints = inlay::parameter_hints(self.store.index(), view, range, |path| {
             self.view_of_the_file(path)
         });
 
@@ -756,8 +764,8 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         view: &FileView,
         range: cpp_parser::SourceRange,
-    ) -> Vec<crate::inlay::TypeHint> {
-        let mut hints = crate::inlay::type_hints(
+    ) -> Vec<inlay::TypeHint> {
+        let mut hints = inlay::type_hints(
             view,
             range,
             |at| match self.type_at(view, ReadingOffset::new(at)) {
@@ -786,11 +794,9 @@ impl<F: FileProvider + Clone> Session<F> {
         );
         // **And a generic lambda's parameter**, whose type exists only at the call the lambda is an argument of —
         // see [`Session::a_generic_lambdas_parameter_type`], which is where the four rules live.
-        hints.extend(crate::inlay::lambda_parameter_hints(
-            view,
-            range,
-            |parameter| self.a_generic_lambdas_parameter_type(view, parameter),
-        ));
+        hints.extend(inlay::lambda_parameter_hints(view, range, |parameter| {
+            self.a_generic_lambdas_parameter_type(view, parameter)
+        }));
         for hint in &mut hints {
             let Some(placed) = view.file_offset_of(ReadingOffset::new(hint.offset)) else {
                 continue;
@@ -845,30 +851,30 @@ impl<F: FileProvider + Clone> Session<F> {
         let call = lambda.ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
         })?;
-        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
+        let arguments = sema::call_syntax::arguments_of(&call)?;
         let at = arguments
             .iter()
             .position(|argument| argument.text_range() == lambda.text_range())?;
 
         // **A member call**, which is the shape a callback is normally passed to: `object.member(…)`.
         let callee = call.children().next()?;
-        let access = crate::sema::check::member_access_above(&callee);
+        let access = sema::check::member_access_above(&callee);
         let access = access?;
         let object_at = usize::from(access.object.text_range().start());
-        let crate::Known::Yes(object) = self.type_at(view, ReadingOffset::new(object_at)) else {
+        let Known::Yes(object) = self.type_at(view, ReadingOffset::new(object_at)) else {
             return None;
         };
         let object_is_const = self.the_object_is_const(view, object_at);
         let object_is_const = object_is_const?;
 
         let members = self.members_of(view, &object.type_of);
-        let crate::Known::Yes(list) = members else {
+        let Known::Yes(list) = members else {
             return None;
         };
-        let mut candidates: Vec<&crate::index::project::ProjectMember> = list
+        let mut candidates: Vec<&index::project::ProjectMember> = list
             .members
             .iter()
-            .filter(|member| member.fact.kind == crate::DeclKind::Function)
+            .filter(|member| member.fact.kind == DeclKind::Function)
             .filter(|member| member.fact.name == access.member)
             // **The argument has to be a *template parameter* of the callee.** `call(std::function<void(Foo&)>)`
             // needs no deduction — the type is written — so a candidate with a concrete parameter is not this
@@ -880,7 +886,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 let Some(list) = member.fact.parameter_list() else {
                     return false;
                 };
-                let types = crate::sema::overload::parameters_in(list).0;
+                let types = sema::overload::parameters_in(list).0;
                 let Some(written) = types.get(at) else {
                     return false;
                 };
@@ -900,14 +906,14 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             // Rule 1: a `const` object reaches only the `const` members.
             .filter(|member| {
-                !object_is_const || member.fact.modifiers.contains(crate::DeclModifiers::CONST)
+                !object_is_const || member.fact.modifiers.contains(DeclModifiers::CONST)
             })
             .collect();
         if candidates.is_empty() {
             return None;
         }
         // Rule 3: a constraint that cannot be evaluated leaves the choice open, while more than one survives.
-        let constrained = |member: &&crate::index::project::ProjectMember| {
+        let constrained = |member: &&index::project::ProjectMember| {
             member
                 .fact
                 .requires_clause()
@@ -920,10 +926,9 @@ impl<F: FileProvider + Clone> Session<F> {
         if !object_is_const
             && candidates
                 .iter()
-                .any(|member| !member.fact.modifiers.contains(crate::DeclModifiers::CONST))
+                .any(|member| !member.fact.modifiers.contains(DeclModifiers::CONST))
         {
-            candidates
-                .retain(|member| !member.fact.modifiers.contains(crate::DeclModifiers::CONST));
+            candidates.retain(|member| !member.fact.modifiers.contains(DeclModifiers::CONST));
         }
         if candidates.len() != 1 {
             return None;
@@ -931,11 +936,10 @@ impl<F: FileProvider + Clone> Session<F> {
         let chosen = candidates[0];
 
         // Rule 4: the parameter's name, and the body's call of it.
-        let name =
-            crate::sema::call_syntax::parameter_names_from_text(chosen.fact.parameter_list()?)?
-                .get(at)
-                .cloned()
-                .flatten()?;
+        let name = sema::call_syntax::parameter_names_from_text(chosen.fact.parameter_list()?)?
+            .get(at)
+            .cloned()
+            .flatten()?;
         let declaring = self.view_of_the_file(&chosen.file)?;
         // **That member's own body**, not the file: the first call named `fn` in a file that declares two classes is
         // the other class's, and the report this answers is a project where it was — `cbar.call(…)` was answered with
@@ -944,7 +948,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .the_declaration_node(&chosen.file, chosen.fact.name_range.start_offset)
             .unwrap_or_else(|| declaring.root.clone());
         let (argument, spelled) = the_argument_the_body_passes(&declaring, &declared_at, &name)?;
-        let crate::Known::Yes(passed) = self.type_at(
+        let Known::Yes(passed) = self.type_at(
             &declaring,
             ReadingOffset::new(usize::from(argument.text_range().start())),
         ) else {
@@ -953,8 +957,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **`*this` is `const T` in a `const` member** — the one qualifier the type of `this` does not carry here, and
         // the difference between `Foo&` and `const Foo&`, which is the whole answer for `cfoo.call(…)`.
         let mut deduced = passed.type_of;
-        if spelled.trim() == "*this" && chosen.fact.modifiers.contains(crate::DeclModifiers::CONST)
-        {
+        if spelled.trim() == "*this" && chosen.fact.modifiers.contains(DeclModifiers::CONST) {
             deduced = format!("const {deduced}");
         }
         let lvalue = spelled.trim().starts_with('*') || is_a_name_expression(&argument);
@@ -1025,7 +1028,7 @@ fn the_argument_the_body_passes(
         if callee.text().to_string().trim() != name {
             continue;
         }
-        let Some(arguments) = crate::sema::call_syntax::arguments_of(&call) else {
+        let Some(arguments) = sema::call_syntax::arguments_of(&call) else {
             continue;
         };
         let Some(argument) = arguments.into_iter().next() else {

@@ -32,6 +32,7 @@
 //! * A fact whose `body_range` does not fit its text. Counted in [`Skeleton::unreadable`]. A summary and a text that
 //!   disagree are a bug elsewhere, and guessing at the definition would hide it.
 
+use crate::IncludeFact;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -89,7 +90,7 @@ impl Skeleton {
     pub fn resolved_by(
         summary: &FileSummary,
         text: &str,
-        resolve: &mut dyn FnMut(&crate::IncludeFact) -> Option<PathBuf>,
+        resolve: &mut dyn FnMut(&IncludeFact) -> Option<PathBuf>,
     ) -> Self {
         let mut steps: Vec<Step> =
             Vec::with_capacity(summary.macros.len() + summary.includes.len());

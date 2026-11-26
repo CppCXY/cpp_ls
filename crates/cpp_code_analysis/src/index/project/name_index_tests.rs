@@ -3,8 +3,12 @@
 //! Moved out of `project/mod.rs` without a change.
 
 use super::*;
+use crate::CompilerConfig;
+use crate::FileIndexer;
+use crate::MemoryFiles;
 use crate::cache::SummaryKey;
 use crate::index::summarize;
+use crate::preprocess;
 
 const WORDS: [&str; 6] = ["Widget", "size", "run", "Gadget", "count", "widest"];
 
@@ -60,10 +64,10 @@ fn file(index: &mut ProjectIndex, number: usize, source: &str) {
 fn cook(index: &mut ProjectIndex, number: usize, source: &str) {
     let path = format!("/p/f{number}.h");
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-    let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
-    let provider = crate::MemoryFiles::new();
-    let config = crate::CompilerConfig::default();
-    let indexed = crate::FileIndexer::new(&provider, &config).index_rendering(
+    let rendered = preprocess::cooked::cook(source, &tokens).render();
+    let provider = MemoryFiles::new();
+    let config = CompilerConfig::default();
+    let indexed = FileIndexer::new(&provider, &config).index_rendering(
         Path::new(&path),
         &rendered,
         SummaryKey::new(number as u64, 0),

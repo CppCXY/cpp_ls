@@ -23,6 +23,11 @@
 //! check stay quiet. That is the direction to be wrong in. Measured on MSVC's headers, the narrower rule reported
 //! `__pragma`-heavy declarations whose uses are written inside macros, and the file-wide question does not.
 
+use crate::DeclFact;
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::ScopeKind;
+use crate::file;
 use std::collections::HashMap;
 
 use cpp_parser::CppTokenKind;
@@ -50,7 +55,7 @@ fn declares_a_member(context: &CheckContext<'_>, at: usize) -> bool {
     scopes
         .scope_at(at)
         .and_then(|scope| scopes.scope(scope))
-        .is_some_and(|data| data.kind == crate::ScopeKind::Class)
+        .is_some_and(|data| data.kind == ScopeKind::Class)
 }
 fn is_deliberately_unused(name: &str) -> bool {
     name.starts_with('_')
@@ -66,7 +71,7 @@ fn is_deliberately_unused(name: &str) -> bool {
 ///
 /// The declared type is the evidence and the only evidence: `auto` says nothing about a destructor either, so a local
 /// whose type the fact did not record is left alone.
-fn its_type_cannot_have_a_destructor(fact: &crate::DeclFact) -> bool {
+fn its_type_cannot_have_a_destructor(fact: &DeclFact) -> bool {
     fact.type_of
         .as_deref()
         .is_some_and(super::undefined_name::is_a_builtin_spelling)
@@ -137,13 +142,13 @@ impl Check for Unused {
             .filter_map(|body| {
                 let start = context
                     .view
-                    .file_offset_of(crate::file::coordinates::ReadingOffset::new(usize::from(
+                    .file_offset_of(file::coordinates::ReadingOffset::new(usize::from(
                         body.text_range().start(),
                     )))?
                     .get();
                 let end = context
                     .view
-                    .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(usize::from(
+                    .file_offset_of_end(file::coordinates::ReadingOffset::new(usize::from(
                         body.text_range().end(),
                     )))?
                     .get();
@@ -155,7 +160,7 @@ impl Check for Unused {
         for fact in &context.summary.declarations {
             // **A local variable inside a function body**, which is the only shape this rule claims — see the module
             // documentation for the reasoning behind each condition.
-            if !fact.local || fact.kind != crate::DeclKind::Variable {
+            if !fact.local || fact.kind != DeclKind::Variable {
                 continue;
             }
             // **The comparison happens in the rendering's coordinates**, because the two sides come from different
@@ -177,7 +182,7 @@ impl Check for Unused {
             // only by the locals that are inside a body, so it is a handful rather than every declaration.
             let Some(at) = context
                 .view
-                .reading_offset_of(crate::file::coordinates::FileOffset::new(at))
+                .reading_offset_of(file::coordinates::FileOffset::new(at))
             else {
                 continue;
             };
@@ -201,7 +206,7 @@ impl Check for Unused {
             // attribute node, so reading it here would be a second reading of the same spelling. Measured on
             // `attributes.cpp` of the C++ corpus, whose only `unused` finding was a variable written
             // `[[maybe_unused]]` three lines above it.
-            if fact.modifiers.contains(crate::DeclModifiers::MAYBE_UNUSED) {
+            if fact.modifiers.contains(DeclModifiers::MAYBE_UNUSED) {
                 continue;
             }
 

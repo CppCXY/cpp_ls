@@ -76,7 +76,7 @@ fn main() {
         }
     };
 
-    let files = match crate::cli::files_to_check(&root, &args) {
+    let files = match cli::files_to_check(&root, &args) {
         Ok(files) => files,
         Err(problem) => {
             eprintln!("cpp_check: {problem}");
@@ -107,7 +107,7 @@ fn main() {
         }
     };
 
-    let clock = crate::cli::Clock::start();
+    let clock = cli::Clock::start();
     // **One session, one pass.** Files are checked in path order, and a check reads the index — so the answer to a
     // file early in the run is built from less than the answer to a file late in it. That is the price of not
     // indexing the whole project first (`index_everything` is the call that would, and on a real project it does not

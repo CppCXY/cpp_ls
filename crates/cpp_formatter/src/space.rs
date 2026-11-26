@@ -20,6 +20,7 @@ use crate::config::Style;
 use crate::options::StyleOption;
 use crate::roles::Roles;
 use crate::tokens::{Stream, Token};
+use crate::{layout, tokens};
 use cpp_parser::CppTokenKind;
 
 /// The number of spaces between `tokens[index - 1]` and `tokens[index]`.
@@ -155,7 +156,7 @@ fn between_rules(
     // A cast glues to its *operand*: `(void)x`. A binary operator after the parenthesis is not an operand
     // (`sizeof(int) == 4` keeps its spaces), which is why the operator check comes first.
     if previous.kind == RightParen
-        && !crate::layout::is_a_binary_operator(current.kind)
+        && !layout::is_a_binary_operator(current.kind)
         && is_a_cast_expression(stream, index - 1)
     {
         return 0;
@@ -341,7 +342,7 @@ fn between_rules(
     /// The roles classify such a brace as an *initializer* (the body is a list of declarations), which is right for the
     /// layout but wrong for the space before the closer: clang-format writes `enum class E { A, B };`, and the roles`
     /// answer would produce `{ A, B};`.
-    fn closes_a_declaration_body(stream: &crate::tokens::Stream<'_>, index: usize) -> bool {
+    fn closes_a_declaration_body(stream: &tokens::Stream<'_>, index: usize) -> bool {
         let mut depth = 0isize;
         let mut opener: Option<usize> = Option::None;
         for cursor in (0..index).rev() {

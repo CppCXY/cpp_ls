@@ -8,20 +8,30 @@
 //! by this pass and then by `clang-format` differs only where the *decisions* differ, which is what the audit
 //! measures; a file formatted by this pass can never lose a comment or a token.
 
+use crate::breaks;
 use crate::columns::Columns;
+use crate::comments;
+use crate::config;
 use crate::config::Style;
+use crate::functions;
+use crate::includes;
 use crate::layout;
+use crate::options;
 use crate::options::StyleOption;
+use crate::regions;
 use crate::roles;
+use crate::rows;
 use crate::space;
+use crate::tables;
 use crate::tokens;
+use crate::wrapping;
 
 /// Format `source`, keeping its line structure and deciding the indentation.
 pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // **P3 sorts includes before anything else**: it moves tokens, so it is a source transformation, not a
     // whitespace decision (see `includes.rs`). `stem` is the file's own name without its extension, which is how the
     // main header is recognised; with `SortIncludes.Enabled: false` the text is returned untouched.
-    let source = &crate::includes::sorted(source, stem, style);
+    let source = &includes::sorted(source, stem, style);
     let stream = tokens::stream(source);
     let roles = roles::of(source);
     let blocks = layout::blocks(&stream, &roles, style);
@@ -29,7 +39,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // at `ContinuationIndentWidth`, which the block rules have no way to know.
     let init_depths = layout::init_depths(&stream, &roles);
     // **The rows of a braced table**, which `AlignArrayOfStructures: Left` pads into columns.
-    let mut row_paddings = crate::rows::paddings(&stream, &roles, style);
+    let mut row_paddings = rows::paddings(&stream, &roles, style);
     let columns = Columns::new(style);
     let max_empty = style.count(StyleOption::MaxEmptyLinesToKeep);
     let line_ending = tokens::line_ending(source);
@@ -89,19 +99,18 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // are kept: this pass adds breaks, it does not re-flow).
     let mut forced_breaks = vec![false; stream.tokens.len()];
     if style.count(StyleOption::ColumnLimit) > 0 {
-        for line in crate::breaks::logical_lines_with(&stream, Some(&roles)) {
+        for line in breaks::logical_lines_with(&stream, Some(&roles)) {
             // **Only the source lines are searched**: a statement that is already spread over several lines is
             // short per line, and breaking it by its *whole* length adds breaks clang-format never makes (measured:
             // 28 of 43 files changed when clang-format`s own 80-column output was fed back through us).
-            for at in crate::breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks)
-            {
+            for at in breaks::break_over_long_pieces(&stream, &roles, style, &line, &blocks) {
                 forced_breaks[at] = true;
             }
         }
     }
 
     // **`// clang-format off` … `on`**: the gaps inside those spans are the user`s (`regions.rs`).
-    let disabled = crate::regions::per_token(&stream, &crate::regions::disabled_spans(source));
+    let disabled = regions::per_token(&stream, &regions::disabled_spans(source));
 
     // **The lines `BreakBeforeBraces` asks for**: a `{` (or an `else` after a `}`) that must start a line, one that
     // must stay on the previous line, and an empty body the style splits. Kept three vectors rather than one enum
@@ -128,7 +137,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     let mut lambda_body: Vec<Option<(usize, usize)>> = vec![None; stream.tokens.len()];
     if style.count(StyleOption::ColumnLimit) > 0 {
         let option = style.text(StyleOption::AllowShortFunctionsOnASingleLine);
-        for definition in crate::functions::definitions(&stream, &roles) {
+        for definition in functions::definitions(&stream, &roles) {
             let allowed = match option {
                 "All" => true,
                 "Inline" | "InlineOnly" => definition.inside_a_record,
@@ -136,9 +145,8 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 _ => false,
             };
             let indent = blocks[definition.start].unwrap_or(0);
-            let fits =
-                crate::functions::one_line_width(&stream, &roles, style, &definition, indent)
-                    <= style.count(StyleOption::ColumnLimit);
+            let fits = functions::one_line_width(&stream, &roles, style, &definition, indent)
+                <= style.count(StyleOption::ColumnLimit);
             // **A comment in the body keeps its own line**, so the join is refused rather than moved around it.
             let commented = (definition.start + 1..=definition.close)
                 .any(|index| !stream.gaps[index].comments.is_empty());
@@ -146,12 +154,12 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // `[this](…, FormatResolve &resolve) { DoResolve(…); }` even when the lambda's signature already spans
             // several lines (measured). The width is checked while printing, where the `{`'s column is known.
             let is_a_lambda = roles.brace_kind.get(&stream.tokens[definition.open].start)
-                == Some(&crate::roles::BraceKind::Lambda);
+                == Some(&roles::BraceKind::Lambda);
             if is_a_lambda && definition.single_statement && !definition.nested_block && !commented
             {
                 lambda_body[definition.open] = Some((
                     definition.close,
-                    crate::functions::body_width(&stream, &roles, style, &definition) - 1,
+                    functions::body_width(&stream, &roles, style, &definition) - 1,
                 ));
             } else if allowed
                 && fits
@@ -183,7 +191,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             if definition.open + 1 == definition.close
                 && spans_lines
                 && !fits
-                && kind.is_some_and(|kind| crate::wrapping::a_brace_starts_a_line(style, *kind))
+                && kind.is_some_and(|kind| wrapping::a_brace_starts_a_line(style, *kind))
             {
                 wrapped[definition.open] = true;
                 wrapped[definition.close] = true;
@@ -236,7 +244,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             let mut width = blocks[start].unwrap_or(0);
             for at in start..=end {
                 if at > start {
-                    width += crate::space::between(&stream, at, &roles, style);
+                    width += space::between(&stream, at, &roles, style);
                 }
                 width += stream.tokens[at].text.chars().count();
             }
@@ -273,7 +281,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
     // * a statement that does not fit (the breaker owns it, and the fitting model it uses is not complete yet);
     // * a statement already on one line.
     if style.count(StyleOption::ColumnLimit) > 0 {
-        for line in crate::breaks::logical_lines_with(&stream, Some(&roles)) {
+        for line in breaks::logical_lines_with(&stream, Some(&roles)) {
             if line.end <= line.start + 1 {
                 continue;
             }
@@ -309,13 +317,13 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                         }
                         depth += 1;
                         if let Some(close) = pairs[index]
-                            && let Some(cells) = crate::tables::cells_of(&stream, index, close)
+                            && let Some(cells) = tables::cells_of(&stream, index, close)
                         {
                             let widths: Vec<usize> = cells
                                 .iter()
                                 .enumerate()
                                 .map(|(at, cell)| {
-                                    crate::tables::cell_width(
+                                    tables::cell_width(
                                         &stream,
                                         &roles,
                                         style,
@@ -332,7 +340,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                                 }
                                 first_column += stream.tokens[at].text.chars().count();
                             }
-                            if crate::tables::layout(
+                            if tables::layout(
                                 &widths,
                                 first_column + 1,
                                 style.count(StyleOption::ColumnLimit),
@@ -424,7 +432,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 && roles
                     .brace_kind
                     .get(&stream.tokens[line.end].start)
-                    .is_none_or(|kind| !crate::wrapping::a_brace_starts_a_line(style, *kind))
+                    .is_none_or(|kind| !wrapping::a_brace_starts_a_line(style, *kind))
             {
                 width += 2;
             }
@@ -475,7 +483,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 }
                 overflows || indent + piece + trailing > limit
             } && let Some(breaks) =
-                crate::breaks::break_line(&stream, &roles, style, &line, indent, trailing)
+                breaks::break_line(&stream, &roles, style, &line, indent, trailing)
             {
                 // **The breaking half**: clang-format decides where a statement that does not fit is cut, and its
                 // answer is the penalty search. The search's positions become forced breaks and everything else in
@@ -641,7 +649,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     Some((indent, true))
                 } else if let Some(open) = closers[index]
                     && roles.brace_kind.get(&stream.tokens[open].start)
-                        == Some(&crate::roles::BraceKind::CaseLabel)
+                        == Some(&roles::BraceKind::CaseLabel)
                 {
                     // **The closer of a braced `case` body goes back to the label`s column** too.
                     let indent =
@@ -863,7 +871,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                 let comment_text: std::borrow::Cow<'_, str> = if an_include_line {
                     std::borrow::Cow::Borrowed(comment.text)
                 } else {
-                    crate::comments::normalized(comment.text, style)
+                    comments::normalized(comment.text, style)
                 };
                 out.push_str(prefix);
                 out.push_str(&comment_text);
@@ -923,7 +931,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // **The comment that made this gap non-empty is a line of the block**: its text and everything after it
             // come from the source, written once, after the column this pass decided.
             if let Some(comment) = own_line_comment {
-                let comment_text = crate::comments::normalized(comment.text, style);
+                let comment_text = comments::normalized(comment.text, style);
                 if in_list {
                     out.push_str(&comment_text);
                 }
@@ -1011,7 +1019,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
                     | cpp_parser::CppTokenKind::RightBracket
                     | cpp_parser::CppTokenKind::Comma
             );
-            let comment_text = crate::comments::normalized(comment.text, style);
+            let comment_text = comments::normalized(comment.text, style);
             out.push_str(&" ".repeat(usize::from(before)));
             out.push_str(&comment_text);
             out.push_str(&" ".repeat(usize::from(after)));
@@ -1183,15 +1191,15 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // (measured on nlohmann json`s `json_sax.hpp`). The bracket stack tells them apart: a list opened inside a
             // `(`/`[` is an argument.
             && stack.is_empty()
-            && crate::tables::is_an_initializer_list(&roles, &stream, index)
-            && let Some(cells) = crate::tables::cells_of(&stream, index, close)
+            && tables::is_an_initializer_list(&roles, &stream, index)
+            && let Some(cells) = tables::cells_of(&stream, index, close)
         {
             let first = cells[0][0];
             let widths: Vec<usize> = cells
                 .iter()
                 .enumerate()
                 .map(|(at, cell)| {
-                    crate::tables::cell_width(&stream, &roles, style, cell, at + 1 == cells.len())
+                    tables::cell_width(&stream, &roles, style, cell, at + 1 == cells.len())
                 })
                 .collect();
             let limit = style.count(StyleOption::ColumnLimit);
@@ -1201,11 +1209,11 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // rows is the answer; a tie keeps the first row on the `{` line.
             let after_the_brace = column + space::between(&stream, first, &roles, style);
             let continued = statement_indent + style.count(StyleOption::ContinuationIndentWidth);
-            let candidates: Vec<(usize, bool, crate::tables::Table)> =
+            let candidates: Vec<(usize, bool, tables::Table)> =
                 [(after_the_brace, true), (continued, false)]
                     .into_iter()
                     .filter_map(|(first_column, on_the_brace_line)| {
-                        crate::tables::layout(&widths, first_column, limit)
+                        tables::layout(&widths, first_column, limit)
                             .map(|table| (first_column, on_the_brace_line, table))
                     })
                     .collect();
@@ -1215,8 +1223,7 @@ pub fn format(source: &str, stem: Option<&str>, style: &Style) -> String {
             // the integer array, the five-name list and the twenty-string list (one row's difference) it keeps the
             // first row on the `{` line. The exact tie-break inside clang-format is not documented anywhere this
             // formatter can read, so this is a rule that reproduces every measured case.
-            let rows_of =
-                |table: &crate::tables::Table| widths.len().div_ceil(table.columns.max(1));
+            let rows_of = |table: &tables::Table| widths.len().div_ceil(table.columns.max(1));
             let after = candidates
                 .iter()
                 .find(|(_, on_the_brace_line, _)| *on_the_brace_line);
@@ -1764,12 +1771,7 @@ fn is_an_assignment(kind: cpp_parser::CppTokenKind) -> bool {
 /// **An `#include` line is exempt**: clang-format sorts and places includes but leaves their trailing comments byte for
 /// byte (`#include <bit> //byteswap` stays as written, while `#define X //no space` and `int y; //also` both get the
 /// space — measured on the oracle). The caller passes `skip_comments` for those gaps.
-fn verbatim_gap(
-    source: &str,
-    gap: &crate::tokens::Gap,
-    style: &Style,
-    skip_comments: bool,
-) -> String {
+fn verbatim_gap(source: &str, gap: &tokens::Gap, style: &Style, skip_comments: bool) -> String {
     if gap.comments.is_empty() || skip_comments {
         return source.get(gap.start..gap.end).unwrap_or("").to_string();
     }
@@ -1777,7 +1779,7 @@ fn verbatim_gap(
     let mut cursor = gap.start;
     for comment in &gap.comments {
         out.push_str(source.get(cursor..comment.start).unwrap_or(""));
-        out.push_str(&crate::comments::normalized(comment.text, style));
+        out.push_str(&comments::normalized(comment.text, style));
         cursor = comment.end;
     }
     out.push_str(source.get(cursor..gap.end).unwrap_or(""));
@@ -1809,9 +1811,9 @@ struct WrappingLines {
 /// style keeps on its own line (`SplitEmpty*`). A `{` whose construct the tree could not name gets neither answer: it
 /// keeps the author's line, which is the same rule every role in this formatter follows.
 fn wrapping_lines(
-    stream: &crate::tokens::Stream<'_>,
-    roles: &crate::roles::Roles,
-    style: &crate::config::Style,
+    stream: &tokens::Stream<'_>,
+    roles: &roles::Roles,
+    style: &config::Style,
 ) -> WrappingLines {
     // **Qualified, not a glob**: `CppTokenKind` has a `None` variant, and a glob import shadows `Option::None` with
     // it — which is a type error on every `let Some(…) = … else { closed = None; }` below.
@@ -1820,7 +1822,7 @@ fn wrapping_lines(
     // Allman brace under `Attach` when the limit is 0 and attaches it when there is a limit — measured, and it is the
     // difference between this project's own corpus (limit 0) and a real file. A *break the style demands* still
     // happens with limit 0 (Microsoft wraps a record body either way), so only the join is gated.
-    let reflows = style.count(crate::options::StyleOption::ColumnLimit) > 0;
+    let reflows = style.count(options::StyleOption::ColumnLimit) > 0;
     let count = stream.tokens.len();
     let mut wrapped = vec![false; count];
     // **A short control body this pass moved to its own line**, which needs the indent the layout cannot give it.
@@ -1835,10 +1837,10 @@ fn wrapping_lines(
 
     // One entry per `{` the stream opened, `Some` only when it is a **block** — a braced initializer is not one, and
     // its `}` must not pop a block's entry.
-    let mut open: Vec<(usize, Option<crate::roles::BraceKind>)> = Vec::new();
+    let mut open: Vec<(usize, Option<roles::BraceKind>)> = Vec::new();
     // The block the last `}` closed, which is what tells a `do`'s `while` from a `while` statement that follows an
     // unrelated block.
-    let mut closed: Option<(usize, crate::roles::BraceKind)> = None;
+    let mut closed: Option<(usize, roles::BraceKind)> = None;
     // **First pass: what closes what.** The placement of an opener cannot be decided until its closer is known,
     // because an **empty** body is not placed by its construct's rule at all (`{}` stays on one line under `Allman`
     // and `Attach`; only `SplitEmpty*` splits it) — measured on `AlignAnalyzer::AlignAnalyzer() {}`, which clang-format
@@ -1876,7 +1878,7 @@ fn wrapping_lines(
                 // no comment with the LLVM default of 1, while two statements do — measured: `namespace d { void f(); }`
                 // stays `}`, and `void f(); void g();` (two unwrapped lines, even on one source line) gets
                 // `} // namespace d`.
-                if kind == crate::roles::BraceKind::Namespace && open_index + 1 != index {
+                if kind == roles::BraceKind::Namespace && open_index + 1 != index {
                     let mut body_lines = 0usize;
                     let mut depth = 0isize;
                     for inner in &stream.tokens[open_index + 1..index] {
@@ -1910,9 +1912,9 @@ fn wrapping_lines(
             K::ElseKeyword | K::CatchKeyword => {
                 if index > 0 && stream.tokens[index - 1].kind == K::RightBrace {
                     let wraps = if token.kind == K::ElseKeyword {
-                        crate::wrapping::else_starts_a_line(style)
+                        wrapping::else_starts_a_line(style)
                     } else {
-                        crate::wrapping::catch_starts_a_line(style)
+                        wrapping::catch_starts_a_line(style)
                     };
                     if wraps {
                         wrapped[index] = true;
@@ -1932,7 +1934,7 @@ fn wrapping_lines(
                         open_index > 0 && stream.tokens[open_index - 1].kind == K::DoKeyword
                     });
                 if is_a_do_while {
-                    if crate::wrapping::while_starts_a_line(style) {
+                    if wrapping::while_starts_a_line(style) {
                         wrapped[index] = true;
                     } else if reflows {
                         attached[index] = true;
@@ -1954,7 +1956,7 @@ fn wrapping_lines(
             // `{` is written on its own line (measured), and `BreakBeforeBraces` still decides its placement —
             // `enum class E` then `{` is attached by `LLVM` (measured on the oracle) and kept apart by `Allman`.
             if enum_bodies[index] {
-                if crate::wrapping::a_brace_starts_a_line(style, crate::roles::BraceKind::Enum) {
+                if wrapping::a_brace_starts_a_line(style, roles::BraceKind::Enum) {
                     wrapped[index] = true;
                 } else if reflows {
                     attached[index] = true;
@@ -1963,7 +1965,7 @@ fn wrapping_lines(
             continue;
         };
         let closer = pairs[index];
-        let wraps = crate::wrapping::a_brace_starts_a_line(style, kind);
+        let wraps = wrapping::a_brace_starts_a_line(style, kind);
         if closer == Some(index + 1) {
             // **An empty body's placement is its own decision**, and there are two families, both measured:
             //
@@ -1976,24 +1978,22 @@ fn wrapping_lines(
             //   `void f() {}` and `struct S\n{\n};`).
             let a_block = matches!(
                 kind,
-                crate::roles::BraceKind::Control
-                    | crate::roles::BraceKind::Try
-                    | crate::roles::BraceKind::Catch
-                    | crate::roles::BraceKind::CaseLabel
+                roles::BraceKind::Control
+                    | roles::BraceKind::Try
+                    | roles::BraceKind::Catch
+                    | roles::BraceKind::CaseLabel
             );
             // **`AllowShortFunctionsOnASingleLine: None` splits an empty function body too**: the oracle writes
             // `void z() {` then `}` — the option means "a function body is never on one line", not "a non-empty one
             // is not". With `All` the same body is `{}` under `Attach`, and `SplitEmpty*` still governs the styles
             // that split records and namespaces.
-            let never_one_line = matches!(
-                kind,
-                crate::roles::BraceKind::Function | crate::roles::BraceKind::Lambda
-            ) && style.text(StyleOption::AllowShortFunctionsOnASingleLine)
-                == "None"
-                && style.count(StyleOption::ColumnLimit) > 0;
+            let never_one_line =
+                matches!(kind, roles::BraceKind::Function | roles::BraceKind::Lambda)
+                    && style.text(StyleOption::AllowShortFunctionsOnASingleLine) == "None"
+                    && style.count(StyleOption::ColumnLimit) > 0;
             if a_block
                 || never_one_line
-                || (wraps && crate::wrapping::split_empty_body(style, kind))
+                || (wraps && wrapping::split_empty_body(style, kind))
                 // **A declaration that follows a directive keeps its empty body split**: clang-format writes
                 //
                 //     template <typename T>
@@ -2037,9 +2037,7 @@ fn wrapping_lines(
         // (`AllowShortEnumsOnASingleLine`) instead of this rule.
         if matches!(
             kind,
-            crate::roles::BraceKind::Class
-                | crate::roles::BraceKind::Struct
-                | crate::roles::BraceKind::Union
+            roles::BraceKind::Class | roles::BraceKind::Struct | roles::BraceKind::Union
         ) && let Some(closer) = closer
             && closer > index + 1
         {
@@ -2049,7 +2047,7 @@ fn wrapping_lines(
         // **A block's statement is never on one line either**: `AllowShortBlocksOnASingleLine` is `Never` in `LLVM`,
         // `Google` and `Microsoft` alike, so `if (a) { g(); }` comes back as three lines however the author wrote it
         // (measured on the oracle under all three styles). The **empty** `{}` is the branch above.
-        if kind == crate::roles::BraceKind::Control
+        if kind == roles::BraceKind::Control
             && let Some(closer) = closer
             && closer > index + 1
             && stream.gaps[index + 1].newlines == 0
@@ -2061,10 +2059,8 @@ fn wrapping_lines(
         // back as three lines under every style (`AllowShortLambdasOnASingleLine: All` joins a body with **one**
         // statement only — measured on the oracle). A one-statement body is the short-function/lambda rule's business,
         // and a control block is the rule above.
-        if matches!(
-            kind,
-            crate::roles::BraceKind::Function | crate::roles::BraceKind::Lambda
-        ) && let Some(closer) = closer
+        if matches!(kind, roles::BraceKind::Function | roles::BraceKind::Lambda)
+            && let Some(closer) = closer
             && closer > index + 1
             && stream.gaps[index + 1].newlines == 0
         {
@@ -2215,7 +2211,7 @@ fn wrapping_lines(
     if !style.flag(StyleOption::AllowShortCaseLabelsOnASingleLine) {
         for index in 0..count.saturating_sub(1) {
             if stream.tokens[index].kind != K::Colon
-                || !crate::breaks::is_a_case_label(stream, index)
+                || !breaks::is_a_case_label(stream, index)
                 || stream.gaps[index + 1].newlines > 0
             {
                 continue;

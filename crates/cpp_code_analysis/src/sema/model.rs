@@ -42,6 +42,11 @@
 //! are — stay with [`ProjectIndex`], which is the one implementation of them. The model's reason to exist is narrow
 //! and hard: it is the only thing that holds both this file's tree **and** a way to get another's.
 
+use crate::DeclFact;
+use crate::FileView;
+use crate::completion;
+use crate::index;
+use crate::sema;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,11 +70,11 @@ pub struct SemanticModel<'a> {
     /// Boxed and owned rather than borrowed, because the caller constructs it on the spot — `&mut resolver` for a
     /// local does not outlive the call that made it — and boxed rather than generic so that `SemanticModel` has one
     /// type and can appear in a signature without naming a closure.
-    resolver: RefCell<Box<dyn FnMut(&Path) -> Option<crate::FileView> + 'a>>,
+    resolver: RefCell<Box<dyn FnMut(&Path) -> Option<FileView> + 'a>>,
     /// What this model has already been asked, by node. `RefCell` because the queries are `&self` — a caller with a
     /// shared model is the ordinary case, and a check that had to hold `&mut` would not be able to ask two questions
     /// while iterating the file.
-    types: crate::index::project::TypeMemo,
+    types: index::project::TypeMemo,
     /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
     /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
     members: RefCell<BTreeMap<String, Known<MemberList>>>,
@@ -79,7 +84,7 @@ pub struct SemanticModel<'a> {
     /// for one per class-typed declaration, so that pass dominated the pull (1 801 builds, 6.6 s of a 7.2 s
     /// diagnostic pass on a 901-line file — `docs/diagnostics-performance.md` §2.4). The cell makes the table a
     /// *request*-scoped object, the same way `types` and `members` are.
-    shapes: crate::sema::declarations::ShapeTable,
+    shapes: sema::declarations::ShapeTable,
 }
 
 impl<'a> SemanticModel<'a> {
@@ -95,7 +100,7 @@ impl<'a> SemanticModel<'a> {
         scopes: &'a ScopeTree,
         source: &'a str,
         path: &'a Path,
-        resolver: Box<dyn FnMut(&Path) -> Option<crate::FileView> + 'a>,
+        resolver: Box<dyn FnMut(&Path) -> Option<FileView> + 'a>,
     ) -> SemanticModel<'a> {
         SemanticModel {
             index,
@@ -104,9 +109,9 @@ impl<'a> SemanticModel<'a> {
             source,
             path,
             resolver: RefCell::new(resolver),
-            types: crate::index::project::TypeMemo::default(),
+            types: index::project::TypeMemo::default(),
             members: RefCell::new(BTreeMap::new()),
-            shapes: crate::sema::declarations::ShapeTable::new(),
+            shapes: sema::declarations::ShapeTable::new(),
         }
     }
 
@@ -180,11 +185,8 @@ impl<'a> SemanticModel<'a> {
     /// from [`crate::completion::the_class_after_the_operator`], which `ptr->` completion has used since the smart
     /// pointers landed. `undefined-field` asks it for an arrow, which it used to skip outright: "an arrow is not
     /// evidence" was the right answer while nothing here could follow one.
-    pub fn the_class_after_an_arrow(
-        &self,
-        written: &crate::sema::types::Type,
-    ) -> Option<(String, bool)> {
-        crate::completion::the_class_after_the_operator(
+    pub fn the_class_after_an_arrow(&self, written: &sema::types::Type) -> Option<(String, bool)> {
+        completion::the_class_after_the_operator(
             self.index,
             self.scopes,
             self.root,
@@ -200,7 +202,7 @@ impl<'a> SemanticModel<'a> {
     /// chain: measured on `test_module`'s `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms**
     /// of walking for a class whose own list is empty. A check that only needs the class's own constructors —
     /// `assign-type-check` — was paying that on every pull. See [`project::own_members_of`].
-    pub fn own_members_of(&self, class: &str) -> Known<Vec<(std::path::PathBuf, crate::DeclFact)>> {
+    pub fn own_members_of(&self, class: &str) -> Known<Vec<(std::path::PathBuf, DeclFact)>> {
         project::own_members_of_with(
             &self.shapes,
             self.index,
@@ -248,7 +250,7 @@ impl<'a> SemanticModel<'a> {
 
         self.scopes.scope_chain(innermost).iter().any(|id| {
             self.scopes.scope(*id).is_some_and(|scope| {
-                scope.kind == crate::sema::symbol::ScopeKind::TemplateParameters
+                scope.kind == sema::symbol::ScopeKind::TemplateParameters
                     && scope.bindings.iter().any(|binding| binding.name.is(name))
             })
         })

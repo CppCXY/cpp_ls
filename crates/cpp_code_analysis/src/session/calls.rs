@@ -3,6 +3,17 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::*;
+use crate::DeclFact;
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
+use crate::ProjectIndex;
+use crate::build_facts;
+use crate::index;
+use crate::outline_of;
+use crate::preprocess;
+use crate::project;
+use crate::sema;
 
 /// **A member's written type with the macros in it expanded** — `const l_signalT` is `const sig_atomic_t` where
 /// `#define l_signalT sig_atomic_t` is in force at the member.
@@ -72,8 +83,8 @@ fn spelled_without_its_qualifiers(spelled: &str) -> &str {
 }
 
 /// The layout a **type alias to a scalar** reports: a size and an alignment, with no fields of its own.
-fn a_scalar_layout(size: usize, alignment: usize) -> crate::sema::layout::ClassLayout {
-    crate::sema::layout::ClassLayout {
+fn a_scalar_layout(size: usize, alignment: usize) -> sema::layout::ClassLayout {
+    sema::layout::ClassLayout {
         size,
         alignment,
         union: false,
@@ -408,14 +419,14 @@ impl<F: FileProvider + Clone> Session<F> {
     ) -> Option<Vec<usize>> {
         let (types, candidates) =
             self.the_candidates_of_a_call(view, offset, parameter_lists, template_parameters)?;
-        match crate::sema::overload::choose(&types, &candidates) {
-            crate::sema::overload::Choice::One(chosen) => Some(vec![chosen]),
+        match sema::overload::choose(&types, &candidates) {
+            sema::overload::Choice::One(chosen) => Some(vec![chosen]),
             // **Nothing decides between them**, so the viable set is the answer: every one of them can accept this call,
             // and the ones arity alone rules out are gone.
-            crate::sema::overload::Choice::Ambiguous => Some(
-                crate::sema::overload::viable_candidates(&types, &candidates),
-            ),
-            crate::sema::overload::Choice::None => None,
+            sema::overload::Choice::Ambiguous => {
+                Some(sema::overload::viable_candidates(&types, &candidates))
+            }
+            sema::overload::Choice::None => None,
         }
     }
 
@@ -430,8 +441,8 @@ impl<F: FileProvider + Clone> Session<F> {
     ) -> Option<usize> {
         let (types, candidates) =
             self.the_candidates_of_a_call(view, offset, parameter_lists, template_parameters)?;
-        match crate::sema::overload::choose(&types, &candidates) {
-            crate::sema::overload::Choice::One(chosen) => Some(chosen),
+        match sema::overload::choose(&types, &candidates) {
+            sema::overload::Choice::One(chosen) => Some(chosen),
             _ => None,
         }
     }
@@ -443,23 +454,20 @@ impl<F: FileProvider + Clone> Session<F> {
         offset: ReadingOffset,
         parameter_lists: &[Option<String>],
         template_parameters: &[Vec<String>],
-    ) -> Option<(
-        Vec<crate::Known<String>>,
-        Vec<crate::sema::overload::Candidate>,
-    )> {
+    ) -> Option<(Vec<Known<String>>, Vec<sema::overload::Candidate>)> {
         let token = cpp_parser::token_at(&view.root, offset.get())?;
         let call = token.parent_ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
         })?;
-        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
+        let arguments = sema::call_syntax::arguments_of(&call)?;
 
         // The engine answers with a parsed `Type` and the file it came from; the resolver ranks spellings, which is the
         // same information the facts carry.
         let session: &Session<F> = self;
-        let index: &crate::ProjectIndex = session.store.index();
+        let index: &ProjectIndex = session.store.index();
         let resolver =
             Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
-        let model = crate::sema::model::SemanticModel::new(
+        let model = sema::model::SemanticModel::new(
             index,
             &view.root,
             &view.scopes,
@@ -467,22 +475,22 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             resolver,
         );
-        let types: Vec<crate::Known<String>> = arguments
+        let types: Vec<Known<String>> = arguments
             .iter()
             .map(|argument| match model.type_of(argument) {
-                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
-                crate::Known::No => crate::Known::No,
-                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+                Known::Yes((a_type, _)) => Known::Yes(a_type.to_string()),
+                Known::No => Known::No,
+                Known::Unknown(reason) => Known::Unknown(reason),
             })
             .collect();
 
-        let candidates: Vec<crate::sema::overload::Candidate> = parameter_lists
+        let candidates: Vec<sema::overload::Candidate> = parameter_lists
             .iter()
             .enumerate()
             .map(|(at, parameters)| {
                 let (declared, variadic) = parameters
                     .as_deref()
-                    .map(crate::sema::overload::parameters_in)
+                    .map(sema::overload::parameters_in)
                     .unwrap_or_default();
                 // **A template candidate is ranked as what the call instantiates**, when the caller
                 // could read its header: `take(T*)` and `take(T)` say nothing about an `int*`, and
@@ -492,25 +500,20 @@ impl<F: FileProvider + Clone> Session<F> {
                 // substituted — and the substitution below consumes `declared`.
                 let declared_for_ordering = declared.clone();
                 let (types, is_a_template) =
-                    match crate::sema::deduction::deduce(&names, &declared, &types) {
+                    match sema::deduction::deduce(&names, &declared, &types) {
                         Some(arguments) => (
                             declared
                                 .iter()
                                 .map(|spelling| {
-                                    crate::sema::types::substituted_spelling(
-                                        spelling, &names, &arguments,
-                                    )
+                                    sema::types::substituted_spelling(spelling, &names, &arguments)
                                 })
                                 .collect(),
                             true,
                         ),
                         None => (declared, !names.is_empty()),
                     };
-                let candidate = crate::sema::overload::Candidate::new(
-                    types,
-                    variadic,
-                    format!("declaration {at}"),
-                );
+                let candidate =
+                    sema::overload::Candidate::new(types, variadic, format!("declaration {at}"));
                 if is_a_template {
                     candidate.with_declaration(declared_for_ordering, names.clone())
                 } else {
@@ -530,15 +533,15 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the same tree, which is why the two cannot disagree about what the file says.
     ///
     /// One parse and one fact-building pass, the price [`Session::outline`] already pays per request.
-    pub fn facts_of_the_view(&self, view: &FileView) -> Vec<crate::DeclFact> {
-        let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+    pub fn facts_of_the_view(&self, view: &FileView) -> Vec<DeclFact> {
+        let preprocessing = preprocess(&view.source, view.tree.get_tokens());
         let errors: Vec<cpp_parser::SourceRange> = view
             .tree
             .get_errors()
             .iter()
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
-        crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors, true).0
+        build_facts(&view.scopes, &preprocessing, &view.root, &errors, true).0
     }
 
     /// **The declaration's own node**, for a fact that names one — the syntax a rendering needs.
@@ -599,13 +602,13 @@ impl<F: FileProvider + Clone> Session<F> {
         let call = token.parent_ancestors().find(|node| {
             cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
         })?;
-        let arguments = crate::sema::call_syntax::arguments_of(&call)?;
+        let arguments = sema::call_syntax::arguments_of(&call)?;
 
         let session: &Session<F> = self;
-        let index: &crate::ProjectIndex = session.store.index();
+        let index: &ProjectIndex = session.store.index();
         let resolver =
             Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
-        let model = crate::sema::model::SemanticModel::new(
+        let model = sema::model::SemanticModel::new(
             index,
             &view.root,
             &view.scopes,
@@ -613,16 +616,16 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             resolver,
         );
-        let types: Vec<crate::Known<String>> = arguments
+        let types: Vec<Known<String>> = arguments
             .iter()
             .map(|argument| match model.type_of(argument) {
-                crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
-                crate::Known::No => crate::Known::No,
-                crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+                Known::Yes((a_type, _)) => Known::Yes(a_type.to_string()),
+                Known::No => Known::No,
+                Known::Unknown(reason) => Known::Unknown(reason),
             })
             .collect();
 
-        crate::sema::deduction::deduce(template_parameters, parameters, &types)
+        sema::deduction::deduce(template_parameters, parameters, &types)
     }
     /// The members of a type, as a file's own scopes and the index together know them.
     ///
@@ -654,7 +657,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         view: &FileView,
         written_type: &str,
-    ) -> Known<crate::sema::layout::ClassLayout> {
+    ) -> Known<sema::layout::ClassLayout> {
         self.the_layout_of_a_class(view, written_type, 0)
     }
 
@@ -663,7 +666,7 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         written_type: &str,
         depth: usize,
-    ) -> Known<crate::sema::layout::ClassLayout> {
+    ) -> Known<sema::layout::ClassLayout> {
         self.the_layout_of_a_class_with(view, written_type, &[], depth)
     }
 
@@ -688,12 +691,11 @@ impl<F: FileProvider + Clone> Session<F> {
         written_type: &str,
         arguments: &[String],
         depth: usize,
-    ) -> Known<crate::sema::layout::ClassLayout> {
+    ) -> Known<sema::layout::ClassLayout> {
         if depth > 6 {
             return Known::No;
         }
-        let (head, arguments) = match crate::index::project::split_template_arguments(written_type)
-        {
+        let (head, arguments) = match index::project::split_template_arguments(written_type) {
             Some((head, written)) if arguments.is_empty() => (head, written),
             _ => (written_type.to_string(), arguments.to_vec()),
         };
@@ -734,8 +736,8 @@ impl<F: FileProvider + Clone> Session<F> {
         let data_members = list
             .own()
             .filter(|member| {
-                member.fact.kind == crate::DeclKind::Variable
-                    && !member.fact.modifiers.contains(crate::DeclModifiers::STATIC)
+                member.fact.kind == DeclKind::Variable
+                    && !member.fact.modifiers.contains(DeclModifiers::STATIC)
             })
             .count();
 
@@ -770,7 +772,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **Declaration order**, which is what decides the offsets: `members_of` answers in the index's own order
         // (names sorted, because a lookup by name is what it is for), and a layout computed in that order is a
         // different class. A member's own declaration offset is the only thing that says where it was written.
-        let mut own: Vec<&crate::index::ProjectMember> = list.own().collect();
+        let mut own: Vec<&index::ProjectMember> = list.own().collect();
         own.sort_by(|left, right| {
             left.file.cmp(&right.file).then(
                 left.fact
@@ -783,9 +785,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let fact = &member.fact;
             // **Data members only**: a member function, a nested type, a `static` — none of them take a byte in the
             // object, and `sizeof` does not count them.
-            if fact.kind != crate::DeclKind::Variable
-                || fact.modifiers.contains(crate::DeclModifiers::STATIC)
-            {
+            if fact.kind != DeclKind::Variable || fact.modifiers.contains(DeclModifiers::STATIC) {
                 continue;
             }
             let Some(type_of) = fact.type_of.as_deref() else {
@@ -863,7 +863,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
-        Known::Yes(crate::sema::layout::ClassLayout::of_members(
+        Known::Yes(sema::layout::ClassLayout::of_members(
             &sized, union, unknown,
         ))
     }
@@ -926,7 +926,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// folder rather than counting by hand.
     fn the_constant_a_declaration_writes(
         &self,
-        found: &crate::index::project::ProjectDefinition,
+        found: &index::project::ProjectDefinition,
     ) -> Option<usize> {
         let text = self.text(&found.file)?;
         let after = text.get(found.fact.name_range.end_offset()..)?;
@@ -968,7 +968,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let Known::Yes(alias) = self.store.index().definition(head, &view.path) else {
             return None;
         };
-        if alias.fact.kind != crate::DeclKind::Type {
+        if alias.fact.kind != DeclKind::Type {
             return None;
         }
         let target = alias.fact.type_of.as_deref()?.trim();
@@ -985,8 +985,8 @@ impl<F: FileProvider + Clone> Session<F> {
         base: &str,
         depth: usize,
         instantiation: &Instantiation<'_>,
-    ) -> Option<crate::sema::layout::ClassLayout> {
-        let spelled = crate::sema::types::substituted_spelling_with_defaults(
+    ) -> Option<sema::layout::ClassLayout> {
+        let spelled = sema::types::substituted_spelling_with_defaults(
             base,
             instantiation.parameters,
             instantiation.defaults,
@@ -1021,9 +1021,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let summary = self.store.index().summary(&found.file)?;
         let simple = written_type.rsplit("::").next().unwrap_or(written_type);
         let class = summary.declarations.iter().find(|fact| {
-            fact.name == simple
-                && fact.kind == crate::DeclKind::Type
-                && fact.parameter_list().is_none()
+            fact.name == simple && fact.kind == DeclKind::Type && fact.parameter_list().is_none()
         })?;
         // **A member's `scope` is the class's qualified name**, which is the scope the class was written in plus its
         // own name — `Widget` at file scope, `ns::Widget` in a namespace.
@@ -1035,7 +1033,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .declarations
             .iter()
             .filter(|fact| {
-                fact.kind == crate::DeclKind::Variable && fact.scope.as_deref() == Some(&qualified)
+                fact.kind == DeclKind::Variable && fact.scope.as_deref() == Some(&qualified)
             })
             .map(|fact| (fact.name.to_string(), fact.name_range.end_offset()))
             .collect();
@@ -1115,7 +1113,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
         let spelled = match instantiation {
-            Some(environment) => crate::sema::types::substituted_spelling_with_defaults(
+            Some(environment) => sema::types::substituted_spelling_with_defaults(
                 spelling,
                 environment.parameters,
                 environment.defaults,
@@ -1150,12 +1148,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 .checked_mul(count)
                 .map(|size| (size, element_alignment));
         }
-        if let Some(builtin) = crate::sema::layout::a_builtin_in_memory(spelled) {
+        if let Some(builtin) = sema::layout::a_builtin_in_memory(spelled) {
             return Some(builtin);
         }
         if let Some(environment) = instantiation
             && let Some(alias) = environment.members.iter().find(|member| {
-                member.fact.kind == crate::DeclKind::Type
+                member.fact.kind == DeclKind::Type
                     && member.fact.name == spelled
                     && member.fact.parameter_list().is_none()
             })
@@ -1171,7 +1169,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Some((owner, member, arguments)) = split_a_dependent_name(spelled) {
             return self.the_size_of_a_dependent_type(view, &owner, &member, &arguments, depth);
         }
-        if let Some((head, arguments)) = crate::index::project::split_template_arguments(spelled) {
+        if let Some((head, arguments)) = index::project::split_template_arguments(spelled) {
             // **The arguments are read in the environment of the class being laid out.** `_Mypair`'s type is
             // `_Compressed_pair<_Alty, _Scary_val>`, and both spellings are *member aliases of `std::vector`* — so
             // they are resolved here, where that class's members are at hand, and `_Compressed_pair` is instantiated
@@ -1238,11 +1236,11 @@ impl<F: FileProvider + Clone> Session<F> {
         };
         let alias = list.members.iter().find(|candidate| {
             candidate.fact.name == member
-                && candidate.fact.kind == crate::DeclKind::Type
+                && candidate.fact.kind == DeclKind::Type
                 && candidate.fact.type_of.is_some()
         })?;
         let written = alias.fact.type_of.as_deref()?;
-        let target = crate::sema::types::substituted_spelling_with_defaults(
+        let target = sema::types::substituted_spelling_with_defaults(
             written,
             alias.fact.parameters(),
             alias.fact.parameter_defaults(),
@@ -1285,21 +1283,21 @@ impl<F: FileProvider + Clone> Session<F> {
         let Some(environment) = instantiation else {
             return spelling.to_string();
         };
-        let spelled = crate::sema::types::substituted_spelling_with_defaults(
+        let spelled = sema::types::substituted_spelling_with_defaults(
             spelling,
             environment.parameters,
             environment.defaults,
             environment.arguments,
         );
         let Some(alias) = environment.members.iter().find(|member| {
-            member.fact.kind == crate::DeclKind::Type
+            member.fact.kind == DeclKind::Type
                 && member.fact.name == spelled.trim()
                 && member.fact.parameter_list().is_none()
         }) else {
             return spelled;
         };
         match alias.fact.type_of.as_deref() {
-            Some(target) => crate::sema::types::substituted_spelling_with_defaults(
+            Some(target) => sema::types::substituted_spelling_with_defaults(
                 target,
                 environment.parameters,
                 environment.defaults,
@@ -1322,7 +1320,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if known.fact.parameters().is_empty() {
             return None;
         }
-        let target = crate::sema::types::substituted_spelling_with_defaults(
+        let target = sema::types::substituted_spelling_with_defaults(
             written,
             known.fact.parameters(),
             known.fact.parameter_defaults(),
@@ -1346,8 +1344,8 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         written_type: &str,
         path: &std::path::Path,
-        listed: Known<crate::index::MemberList>,
-    ) -> Known<crate::index::MemberList> {
+        listed: Known<index::MemberList>,
+    ) -> Known<index::MemberList> {
         let unreal = self
             .project_config()
             .config
@@ -1378,16 +1376,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // written, and it is the honest place for a hover to open.
         let class_fact = declared.fact.clone();
         let class_name = class_fact.name.to_string();
-        for (name, type_of) in
-            crate::project::ue::generated_members(&class_name, class_fact.bases())
-        {
+        for (name, type_of) in project::ue::generated_members(&class_name, class_fact.bases()) {
             let mut fact = class_fact.clone();
             fact.name = name.into();
-            fact.kind = crate::DeclKind::Type;
+            fact.kind = DeclKind::Type;
             fact.type_of = Some(type_of.into());
             // A generated member is not a member of a **namespace**: it belongs to the class it was generated for.
             fact.scope = Some(class_name.as_str().into());
-            list.members.push(crate::index::ProjectMember {
+            list.members.push(index::ProjectMember {
                 file: declared.file.clone(),
                 fact,
                 declared_in: class_name.to_string(),
@@ -1535,17 +1531,16 @@ impl<F: FileProvider + Clone> Session<F> {
     /// rendering existing — so the "summary is gone between a keystroke and the next drain" case that the fallback
     /// existed for is now the only case, and the panel never waits for a cook.
     pub fn outline(&self, view: &FileView) -> Vec<OutlineSymbol> {
-        let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+        let preprocessing = preprocess(&view.source, view.tree.get_tokens());
         let errors: Vec<cpp_parser::SourceRange> = view
             .tree
             .get_errors()
             .iter()
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
-        let (facts, _guards) =
-            crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors, true);
+        let (facts, _guards) = build_facts(&view.scopes, &preprocessing, &view.root, &errors, true);
 
-        crate::outline_of(&facts)
+        outline_of(&facts)
     }
 }
 
@@ -1573,7 +1568,7 @@ pub(crate) struct Instantiation<'a> {
     pub parameters: &'a [String],
     pub defaults: &'a [String],
     pub arguments: &'a [String],
-    pub members: &'a [crate::index::ProjectMember],
+    pub members: &'a [index::ProjectMember],
 }
 
 /// Does a type spelling use one of these names as a **word**? _Ty2 matches _Ty2* and ector<_Ty2>; _Ty20 does
@@ -1594,7 +1589,7 @@ fn split_a_dependent_name(spelling: &str) -> Option<(String, String, Vec<String>
     if tail.is_empty() {
         return None;
     }
-    match crate::index::project::split_template_arguments(tail) {
+    match index::project::split_template_arguments(tail) {
         Some((member, arguments)) => Some((owner.to_string(), member, arguments)),
         None => Some((owner.to_string(), tail.to_string(), Vec::new())),
     }

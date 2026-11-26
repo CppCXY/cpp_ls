@@ -31,6 +31,8 @@
 //! already has (`sema::resolve::name_at`), which is free to disagree with it. The client positions the popup
 //! itself when the answer carries none, which is what happens today.
 
+use crate::handlers;
+use crate::util;
 use cpp_code_analysis::{
     DeclFact, DeclKind, DiskFiles, FactGuard, FileView, Known, ProjectDefinition, ProjectMacro,
     Session, UnknownReason,
@@ -661,7 +663,7 @@ fn hover_of_the_program(
     // and the queries below would spend their time finding that out.
     if let Some(found) = timed!(
         "format_string",
-        crate::handlers::format::format_string_hover(session, view, in_the_file)
+        handlers::format::format_string_hover(session, view, in_the_file)
     ) {
         return Some(found);
     }
@@ -794,11 +796,8 @@ fn hover_of_the_program(
                 // `LuaLexer`'s and told the reader "which one a call means is decided by the arguments" — about a
                 // **data member**, which has no arguments and no second reading. Find References and Go to Definition
                 // narrow by the cursor's class; this is the same rule, at the same offset.
-                let found = crate::handlers::references::narrowed_to_the_cursors_class(
-                    view,
-                    offset.get(),
-                    found,
-                );
+                let found =
+                    handlers::references::narrowed_to_the_cursors_class(view, offset.get(), found);
                 // **A class name is one declaration, not an overload set.** `LuaParser p(…)` hovers three facts — the
                 // class and its two constructors, which are filed under the same name because a constructor's name is
                 // its class's — and the answer listed the constructors as if a call were meant ("3 declarations …
@@ -2825,7 +2824,7 @@ fn where_clause(
     let asked = session
         .files()
         .held(file)
-        .and_then(|declaring| crate::util::position_in_file(declaring, in_the_file));
+        .and_then(|declaring| util::position_in_file(declaring, in_the_file));
 
     match asked {
         Some(position) => format!("`{name}:{}:{}`", position.line + 1, position.character + 1),

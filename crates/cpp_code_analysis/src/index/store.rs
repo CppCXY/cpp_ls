@@ -55,6 +55,24 @@
 //! directory's includers; until then, an unresolved include simply is never stored, so the common shape of the
 //! problem heals on its own.
 
+use crate::CACHE_DIRECTORY;
+use crate::IndexedUnit;
+use crate::MAX_INCLUDE_DEPTH;
+use crate::MacroView;
+use crate::Marked;
+use crate::READING_FINGERPRINT;
+use crate::RenderedUnit;
+use crate::TranslationUnit;
+use crate::UnitDefinitions;
+use crate::Visibility;
+use crate::cooked;
+use crate::file;
+use crate::include;
+use crate::index;
+use crate::macros;
+use crate::preprocess;
+use crate::summary;
+use crate::summary_codec;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -174,12 +192,11 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// owner is the store whose summaries they were made from. A second store over another project used to answer
     /// from the first one's table (cleared on open, which hid the bug rather than fixing it), and a
     /// [`crate::MemoryReport`] could not account for it at all.
-    walk_cache: crate::index::walk_cache::WalkCache,
+    walk_cache: index::walk_cache::WalkCache,
     /// **The directive readings this store has been asked for** — see [`SummaryStore::directive_summary`] for why
     /// there is a table and what the key is.
-    directives: std::sync::Mutex<
-        std::collections::HashMap<String, (u64, std::sync::Arc<crate::FileSummary>)>,
-    >,
+    directives:
+        std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<FileSummary>)>>,
 }
 
 /// **How many directive readings are remembered** — a table that is cleared when it fills, like the include
@@ -212,7 +229,7 @@ pub struct ReRead {
     /// **The readings that belong to L2** — a rendering of a file in a program, filed as that file's cooked facts. A
     /// query prefers them (`ProjectIndex::the_reading_for`) while the summary stays the environment-free reading of the
     /// file's own text (design note §2.1). Committed by [`SummaryStore::commit_the_re_read`], which is the write half.
-    pub cooked: Vec<(PathBuf, crate::CookedFile)>,
+    pub cooked: Vec<(PathBuf, CookedFile)>,
     /// **Files this pass could not read yet**, because the closure they need is not in the index
     /// yet — see [`SummaryStore::a_timeline_of_its_own`].
     not_yet: Vec<PathBuf>,
@@ -304,7 +321,7 @@ where
 pub struct Prepared {
     outcome: PreparedOutcome,
     with_environment: bool,
-    rendering: Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>>,
+    rendering: Option<std::sync::Arc<preprocess::cooked::RenderedCooked>>,
     /// **The text this was built from, by its hash** — what a commit compares the file against, because a wave is
     /// prepared and committed at two different moments and the file can be written in between.
     content_hash: Option<u64>,
@@ -336,10 +353,7 @@ impl Prepared {
 
     pub(crate) fn rendering(
         &self,
-    ) -> Option<(
-        u64,
-        std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
-    )> {
+    ) -> Option<(u64, std::sync::Arc<preprocess::cooked::RenderedCooked>)> {
         let PreparedOutcome::Built { summary, .. } = &self.outcome else {
             return None;
         };
@@ -352,10 +366,10 @@ pub(crate) struct DetachedRead<F: FileProvider> {
     source: String,
     config: CompilerConfig,
     files: F,
-    seed: crate::Marked,
+    seed: Marked,
     key: SummaryKey,
     dead_macros: Vec<usize>,
-    timeline: Option<std::sync::Arc<crate::TranslationUnit>>,
+    timeline: Option<std::sync::Arc<TranslationUnit>>,
 }
 
 impl<F: FileProvider> DetachedRead<F> {
@@ -369,16 +383,12 @@ impl<F: FileProvider> DetachedRead<F> {
                     .environment_of(&self.path)
                     .expect("the captured timeline contains the file");
                 let definitions = unit.definitions();
-                let seed = crate::macros::MacroTable::from_marked(&self.seed);
+                let seed = macros::MacroTable::from_marked(&self.seed);
                 let (tokens, _) =
                     cpp_parser::lex(&self.source, &cpp_parser::LexerConfig::default());
-                let macros = crate::preprocess::cooked::FileMacros::new(
-                    &view,
-                    &definitions,
-                    Some(&seed),
-                    true,
-                );
-                let rendered = crate::preprocess::cooked::cook_with_file(
+                let macros =
+                    preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
+                let rendered = preprocess::cooked::cook_with_file(
                     &self.source,
                     &tokens,
                     &macros,
@@ -425,7 +435,7 @@ enum PreparedOutcome {
         stored: bool,
         /// **The rendering's own reading**, when the summary came from one — a file read through its timeline has both
         /// layers, and the cooked one is what a query prefers (see `ProjectIndex::the_reading_for`).
-        cooked: Option<crate::CookedFile>,
+        cooked: Option<CookedFile>,
     },
 }
 
@@ -505,7 +515,7 @@ impl Default for IncludeBudget {
     fn default() -> Self {
         IncludeBudget {
             max_files: 4096,
-            max_depth: crate::MAX_INCLUDE_DEPTH,
+            max_depth: MAX_INCLUDE_DEPTH,
         }
     }
 }
@@ -593,7 +603,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // `thread_local`, then a global, and either way a store could answer from another project's walks).
 
         SummaryStore {
-            cache: root.join(crate::CACHE_DIRECTORY),
+            cache: root.join(CACHE_DIRECTORY),
             root,
             config,
             files,
@@ -608,7 +618,7 @@ impl<F: FileProvider> SummaryStore<F> {
             cache_file: cache::cache_db::DATABASE_FILE,
             generation: 0,
             include_searches: std::sync::Mutex::new(std::collections::HashMap::new()),
-            walk_cache: crate::index::walk_cache::WalkCache::new(),
+            walk_cache: index::walk_cache::WalkCache::new(),
             directives: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -661,11 +671,7 @@ impl<F: FileProvider> SummaryStore<F> {
     fn summary_database(&self) -> Option<std::sync::Arc<cache::cache_db::SummaryCache>> {
         self.summary_database
             .get_or_init(|| {
-                cache::cache_db::shared_named(
-                    &self.cache,
-                    self.cache_file,
-                    crate::READING_FINGERPRINT,
-                )
+                cache::cache_db::shared_named(&self.cache, self.cache_file, READING_FINGERPRINT)
             })
             .clone()
     }
@@ -694,12 +700,12 @@ impl<F: FileProvider> SummaryStore<F> {
     ///
     /// `None` is "not cached" — never an error: a record from another version decodes to nothing and the caller
     /// cooks the unit again, which is the answer for a cache that is not authoritative.
-    pub fn cached_unit(&self, key: u64) -> Option<crate::RenderedUnit> {
+    pub fn cached_unit(&self, key: u64) -> Option<RenderedUnit> {
         self.summary_database()?.unit(key).ok().flatten()
     }
 
     /// **A unit's facts**, by the hash of the rendering they were read from — see [`SummaryStore::cached_unit`].
-    pub fn cached_indexed_unit(&self, program: u64) -> Option<crate::IndexedUnit> {
+    pub fn cached_indexed_unit(&self, program: u64) -> Option<IndexedUnit> {
         self.summary_database()?
             .indexed_unit(program)
             .ok()
@@ -707,14 +713,14 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 
     /// Remember a unit's facts — see [`SummaryStore::cached_indexed_unit`].
-    pub fn remember_indexed_unit(&self, program: u64, unit: &crate::IndexedUnit) {
+    pub fn remember_indexed_unit(&self, program: u64, unit: &IndexedUnit) {
         if let Some(database) = self.summary_database() {
             let _ = database.put_indexed_unit(program, unit);
         }
     }
 
     /// Remember a unit rendering — see [`SummaryStore::cached_unit`].
-    pub fn remember_unit(&self, key: u64, unit: &crate::RenderedUnit) {
+    pub fn remember_unit(&self, key: u64, unit: &RenderedUnit) {
         if let Some(database) = self.summary_database() {
             let _ = database.put_unit(key, unit);
         }
@@ -773,7 +779,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// one that is not, and they get different answers to "was this code compiled" without either of them being
     /// re-indexed — which is what keeps `-DX` from invalidating a project's cache. See
     /// [`crate::index::environment`].
-    pub fn with_macros(mut self, macros: crate::include::graph::Marked) -> Self {
+    pub fn with_macros(mut self, macros: include::graph::Marked) -> Self {
         self.index = std::mem::take(&mut self.index).with_macros(macros);
         self
     }
@@ -794,7 +800,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// Exposed for the two places that are *about* the table rather than about a walk: the memory report, and the
     /// save/restore of the unit cache. A walk receives it by parameter — see [`crate::TranslationUnit::walk`] — so
     /// that the store, not a static, is what owns it.
-    pub(crate) fn contributions(&self) -> &crate::index::walk_cache::WalkCache {
+    pub(crate) fn contributions(&self) -> &index::walk_cache::WalkCache {
         &self.walk_cache
     }
 
@@ -815,10 +821,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let encoded: Vec<(u64, Vec<u8>)> = entries
             .into_iter()
             .map(|(key, contribution)| {
-                (
-                    key,
-                    crate::index::walk_cache_codec::encode_one(key, &contribution),
-                )
+                (key, index::walk_cache_codec::encode_one(key, &contribution))
             })
             .collect();
         database.put_contributions(&encoded).unwrap_or(0)
@@ -838,7 +841,7 @@ impl<F: FileProvider> SummaryStore<F> {
         };
         let mut entries = Vec::with_capacity(rows.len());
         for (key, bytes) in rows {
-            if let Some(contribution) = crate::index::walk_cache_codec::decode_one(&bytes) {
+            if let Some(contribution) = index::walk_cache_codec::decode_one(&bytes) {
                 entries.push((key, contribution));
             }
         }
@@ -864,7 +867,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// The key is the file and **the hash of the text it was read from**, so an edit misses and the next read
     /// rescans; `env_hash` is not needed because this reading is the file's own `#define`s and `#include`s, which no
     /// other file's environment changes. Bounded: the entries are small and the table is cleared when it fills.
-    pub fn directive_summary(&self, path: &Path) -> Option<std::sync::Arc<crate::FileSummary>> {
+    pub fn directive_summary(&self, path: &Path) -> Option<std::sync::Arc<FileSummary>> {
         let source = self.files.read(path)?;
         let hash = content_hash(&source);
         let key = normalize_path(path, cfg!(windows));
@@ -877,7 +880,7 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         let summary = std::sync::Arc::new(
-            crate::index::FileIndexer::new(&self.files, &self.config)
+            index::FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
                 .directive_summary(path, &source),
         );
@@ -911,7 +914,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn index_the_rendering(
         &mut self,
         path: &Path,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
         environment: Option<&dyn cpp_parser::MacroFacts>,
     ) -> Option<&FileSummary> {
         let source = self.files.read(path)?;
@@ -938,11 +941,11 @@ impl<F: FileProvider> SummaryStore<F> {
     /// what makes it comparable with [`SummaryStore::directive_summary`] field by field.
     ///
     /// Nothing is stored; a parse paid for by a caller that wants to look at it and nothing else.
-    pub fn parsed_summary(&self, path: &Path) -> Option<crate::FileSummary> {
+    pub fn parsed_summary(&self, path: &Path) -> Option<FileSummary> {
         let source = self.files.read(path)?;
-        let key = crate::SummaryKey::new(crate::content_hash(&source), self.context_hash(path));
+        let key = SummaryKey::new(content_hash(&source), self.context_hash(path));
         Some(
-            crate::index::FileIndexer::new(&self.files, &self.config)
+            index::FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
                 .index(path, &source, key),
         )
@@ -1049,18 +1052,14 @@ impl<F: FileProvider> SummaryStore<F> {
     /// [`crate::Session`]'s `Step::with_the_environment` makes, and it is true for a stronger reason than it used to
     /// be: the summary *is* the rendering, so the pass's own trigger (a split or guarded declaration) is already
     /// false for it.
-    pub fn prepare_with_the_timeline(
-        &self,
-        path: &Path,
-        unit: &crate::TranslationUnit,
-    ) -> Prepared {
+    pub fn prepare_with_the_timeline(&self, path: &Path, unit: &TranslationUnit) -> Prepared {
         self.prepare_inner(path, None, Some(unit))
     }
 
     pub(crate) fn detached_read(
         &self,
         path: &Path,
-        timeline: Option<std::sync::Arc<crate::TranslationUnit>>,
+        timeline: Option<std::sync::Arc<TranslationUnit>>,
     ) -> Option<DetachedRead<F>>
     where
         F: Clone,
@@ -1109,7 +1108,7 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
         mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
-        timeline: Option<&crate::TranslationUnit>,
+        timeline: Option<&TranslationUnit>,
     ) -> Prepared {
         let Some(source) = ({ self.files.read(path) }) else {
             return Prepared {
@@ -1260,17 +1259,17 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
         source: &str,
-        unit: &crate::TranslationUnit,
-        view: crate::MacroView<'_>,
+        unit: &TranslationUnit,
+        view: MacroView<'_>,
         key: SummaryKey,
-    ) -> (crate::FileSummary, crate::CookedFile) {
-        let seed = crate::macros::MacroTable::from_marked(self.index.macros());
+    ) -> (FileSummary, CookedFile) {
+        let seed = macros::MacroTable::from_marked(self.index.macros());
         let definitions = unit.definitions();
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let macros =
-            { crate::preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
+            { preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
         let rendered = {
-            crate::preprocess::cooked::cook_with_file(
+            preprocess::cooked::cook_with_file(
                 source,
                 &tokens,
                 &macros,
@@ -1292,7 +1291,7 @@ impl<F: FileProvider> SummaryStore<F> {
             .index_the_readings(path, source, &rendered, key);
         // **Both layers from one parse**: the summary (declarations + directives, what `commit` files as L1) and the
         // cooked reading (what a program saw, filed as L2). `CookedFile::from` says which four things those are.
-        let cooked = crate::CookedFile {
+        let cooked = CookedFile {
             declarations: indexed.summary.declarations.clone(),
             macros: indexed.summary.macros.clone(),
             diagnostics: indexed.diagnostics,
@@ -1659,7 +1658,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn re_read_where_a_body_decides(
         &mut self,
         files: &[PathBuf],
-        units: &[std::sync::Arc<crate::TranslationUnit>],
+        units: &[std::sync::Arc<TranslationUnit>],
     ) -> usize {
         let plan = self.prepare_the_re_read(files, units, false, true);
         self.commit_the_re_read(plan)
@@ -1915,15 +1914,12 @@ impl<F: FileProvider> SummaryStore<F> {
     /// `None` means "not stored for the program as it is now", and the caller pays for the pass as before. A hit is
     /// verified the same way a normal cache hit is ([`SummaryStore::resolution_still_holds`]), because a header that
     /// moved changes the program without changing any text the key names.
-    pub fn the_stored_refinement(&self, path: &Path) -> Option<crate::FileSummary> {
+    pub fn the_stored_refinement(&self, path: &Path) -> Option<FileSummary> {
         self.the_stored_refinement_reason(path).ok()
     }
 
     /// Why a stored refinement is not usable, named — the instrument the hit-rate measurements needed.
-    fn the_stored_refinement_reason(
-        &self,
-        path: &Path,
-    ) -> Result<crate::FileSummary, &'static str> {
+    fn the_stored_refinement_reason(&self, path: &Path) -> Result<FileSummary, &'static str> {
         let Some(source) = self.files.read(path) else {
             return Err("no text");
         };
@@ -1949,7 +1945,7 @@ impl<F: FileProvider> SummaryStore<F> {
 
     /// **Put a refined reading the cache held into the index** — the commit half of
     /// [`SummaryStore::take_the_stored_refinements`].
-    pub fn apply_a_stored_refinement(&mut self, summary: crate::FileSummary) {
+    pub fn apply_a_stored_refinement(&mut self, summary: FileSummary) {
         self.commit_reread(summary, true);
     }
 
@@ -1972,7 +1968,7 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
         reading: &CookedFile,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
     ) {
         let Some(source) = self.files.read(path) else {
             return;
@@ -1988,7 +1984,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(database) = self.summary_database() else {
             return;
         };
-        let bytes = crate::summary_codec::encode_the_cooked_record(reading, Some(rendered));
+        let bytes = summary_codec::encode_the_cooked_record(reading, Some(rendered));
         database.put_cooked_reading(key, &bytes);
     }
 
@@ -2000,7 +1996,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn the_stored_cooked_reading_with_rendering(
         &self,
         path: &Path,
-    ) -> Option<(CookedFile, crate::preprocess::cooked::RenderedCooked)> {
+    ) -> Option<(CookedFile, preprocess::cooked::RenderedCooked)> {
         self.the_stored_cook_reason(path).ok()
     }
 
@@ -2027,10 +2023,10 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn the_stored_cook_reason(
         &self,
         path: &Path,
-    ) -> Result<(CookedFile, crate::preprocess::cooked::RenderedCooked), &'static str> {
+    ) -> Result<(CookedFile, preprocess::cooked::RenderedCooked), &'static str> {
         let bytes = self.the_stored_cook_bytes(path)?;
         let (cooked, rendered) =
-            crate::summary_codec::decode_the_cooked_record(&bytes).map_err(|_| "undecodable")?;
+            summary_codec::decode_the_cooked_record(&bytes).map_err(|_| "undecodable")?;
         let rendered = rendered.ok_or("no rendering")?;
         Ok((cooked, rendered))
     }
@@ -2066,10 +2062,7 @@ impl<F: FileProvider> SummaryStore<F> {
         {
             return None;
         }
-        Some((
-            key,
-            crate::summary_codec::encode_the_cooked_reading(reading),
-        ))
+        Some((key, summary_codec::encode_the_cooked_reading(reading)))
     }
 
     /// **Write a record [`SummaryStore::prepare_a_cooked_record`] prepared.**
@@ -2103,7 +2096,7 @@ impl<F: FileProvider> SummaryStore<F> {
         };
         let database = self.summary_database()?;
         let bytes = database.cooked_reading(key)?;
-        crate::summary_codec::decode_the_cooked_reading(&bytes).ok()
+        summary_codec::decode_the_cooked_reading(&bytes).ok()
     }
 
     /// **Was this file's reading already decided to need no repair?** — the answer
@@ -2129,7 +2122,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(fingerprint) = self.the_closure_fingerprint(path) else {
             return false;
         };
-        let key = crate::cache::SummaryKey::new(summary.key.content_hash, summary.key.context_hash)
+        let key = cache::SummaryKey::new(summary.key.content_hash, summary.key.context_hash)
             .with_environment(fingerprint);
         let Some(database) = self.summary_database() else {
             return false;
@@ -2200,7 +2193,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn prepare_the_re_read(
         &self,
         indexed: &[PathBuf],
-        units: &[std::sync::Arc<crate::TranslationUnit>],
+        units: &[std::sync::Arc<TranslationUnit>],
         truncated: bool,
         // **May this caller walk a file's own timeline?** See the two arms below: the session can, and wants a
         // rendering; `index_includes_from` cannot, and wants the macro evidence a raw reading keeps.
@@ -2276,16 +2269,14 @@ impl<F: FileProvider> SummaryStore<F> {
         // to do, in both of its loops, and it was 7.4 s of a 9.3 s cold index (`stages`: `bodied-env` 4 040 ms +
         // `re-env` 3 363 ms). A unit is cached — on disk by the content of its whole closure, in memory by
         // `Session::translation_unit_of` — so the pass pays for one walk and then asks positions in it.
-        let seed = crate::macros::MacroTable::from_marked(self.index.macros());
+        let seed = macros::MacroTable::from_marked(self.index.macros());
         // **Built once per timeline, not once per slice.** definitions() walks every event and allocates an
         // Arc per definition; the pass used to pay that again for every slice that reused the same unit —
         // measured at ~2.6 ms per unit, ~8 units per slice, 81 slices, **1.7 s of a 5.8 s pass**.
-        let unit_definitions: Vec<crate::UnitDefinitions<'_>> =
+        let unit_definitions: Vec<UnitDefinitions<'_>> =
             units.iter().map(|unit| unit.definitions()).collect();
-        let environments: Vec<(
-            &std::sync::Arc<crate::TranslationUnit>,
-            crate::UnitDefinitions<'_>,
-        )> = units.iter().zip(unit_definitions).collect();
+        let environments: Vec<(&std::sync::Arc<TranslationUnit>, UnitDefinitions<'_>)> =
+            units.iter().zip(unit_definitions).collect();
 
         // **The names the files being re-read could possibly need** — the filter's own filter, and the one that
         // decides whether this pass costs anything on a warm start.
@@ -2432,7 +2423,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut is_bodied: std::collections::HashSet<&str> = std::collections::HashSet::new();
         // The cache the **timeline-less** caller's fallback reads definitions through — one parse per definition
         // rather than one per definition per file. Unused when the caller passes units, which is the session.
-        let mut definitions = crate::summary::MacroDefinitions::default();
+        let mut definitions = summary::MacroDefinitions::default();
 
         // Scoped to **this loop** and stopped before the pass continues: what follows re-parses files through
         // `FileIndexer::index`, which is already timed as `Parse` + `Sweep`, and a timer that enclosed it would
@@ -2486,7 +2477,7 @@ impl<F: FileProvider> SummaryStore<F> {
                         // defines it, which is a position in the walk — no closure walked here at all. The cook is
                         // built here, from the view and the unit's definitions, because the renderer borrows them.
                         Some((view, definitions)) => {
-                            let bodies = crate::preprocess::cooked::FileMacros::new(
+                            let bodies = preprocess::cooked::FileMacros::new(
                                 view,
                                 *definitions,
                                 Some(&seed),
@@ -2501,7 +2492,7 @@ impl<F: FileProvider> SummaryStore<F> {
                         // its own unit root; the session passes units and never comes here.
                         None => {
                             let environment = environment.get_or_insert_with(|| {
-                                let evidence = crate::summary::macros_from_the_closure_with_bodies(
+                                let evidence = summary::macros_from_the_closure_with_bodies(
                                     summary,
                                     |wanted| {
                                         let key = normalize_path(wanted, cfg!(windows));
@@ -2556,7 +2547,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 self.index.summary(path).is_some_and(|summary| {
                     summary.declarations.iter().any(|fact| {
                         fact.split_by_a_directive
-                            || !matches!(fact.guard, crate::summary::FactGuard::Unconditional)
+                            || !matches!(fact.guard, summary::FactGuard::Unconditional)
                     })
                 })
             })
@@ -2589,7 +2580,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // [`SummaryStore::commit_the_re_read`] is for — so the plan is a list here and a loop there.
         let mut rebuilt: Vec<(FileSummary, bool)> = Vec::new();
         // **The L2 half of the plan** — renderings, which the commit files as cooked readings.
-        let mut cooked: Vec<(PathBuf, crate::CookedFile)> = Vec::new();
+        let mut cooked: Vec<(PathBuf, CookedFile)> = Vec::new();
         // **And the candidates that cannot be read yet** — a closure the index does not describe completely. The
         // caller queues them again; see [`ReRead::waiting_for_the_index`].
         let not_yet: Vec<PathBuf> = Vec::new();
@@ -2680,14 +2671,10 @@ impl<F: FileProvider> SummaryStore<F> {
             {
                 let definitions = unit.definitions();
                 let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-                let macros = crate::preprocess::cooked::FileMacros::new(
-                    &view,
-                    &definitions,
-                    Some(&seed),
-                    true,
-                );
+                let macros =
+                    preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
                 let rendered = {
-                    crate::preprocess::cooked::cook_with_file(
+                    preprocess::cooked::cook_with_file(
                         source,
                         &tokens,
                         &macros,
@@ -2749,10 +2736,9 @@ impl<F: FileProvider> SummaryStore<F> {
             // **The reading is the rendering's**, and this is the branch that makes it possible: a timeline can render
             // a file, which is what the timeline-less half of this pass cannot do (see the note on `eager`).
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-            let macros =
-                crate::preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
+            let macros = preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
             let rendered = {
-                crate::preprocess::cooked::cook_with_file(
+                preprocess::cooked::cook_with_file(
                     source,
                     &tokens,
                     &macros,
@@ -2927,9 +2913,9 @@ impl<F: FileProvider> SummaryStore<F> {
         sources: &std::collections::HashMap<String, String>,
     ) -> Option<cpp_parser::MacroEnvironment> {
         let summary = self.index.summary(path)?;
-        let mut definitions = crate::summary::MacroDefinitions::default();
+        let mut definitions = summary::MacroDefinitions::default();
 
-        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+        let evidence = summary::macros_from_the_closure_with_bodies(
             summary,
             |wanted| {
                 Some((
@@ -3065,8 +3051,8 @@ impl<F: FileProvider> SummaryStore<F> {
         // is decided by the compile command, not by any file this walk reads — and an unseeded table answers
         // `Unknown` for every such region. `self.index.macros()` is the same seed the renderer's own table starts
         // from (`Session::rendering_of`), so the two cannot disagree about what the compilation defines.
-        let mut table = crate::preprocess::macros::MacroTable::from_marked(self.index.macros());
-        let mut parsed = crate::cooked::ParsedDefinitions::new();
+        let mut table = preprocess::macros::MacroTable::from_marked(self.index.macros());
+        let mut parsed = cooked::ParsedDefinitions::new();
 
         // **One decision per `(offset, name)`** — the definition a file leaves behind, or `None` for a name it takes
         // away. A file's directives all land at one offset in the rendered file (the `#include` that reached it), so
@@ -3119,8 +3105,8 @@ impl<F: FileProvider> SummaryStore<F> {
             let visibility = a_facts_visibility(&summary.guards, fact, &table, answers);
             let is_a_definition = fact.kind.is_definition();
             let taken = match visibility {
-                crate::Visibility::Active => true,
-                crate::Visibility::Inactive => false,
+                Visibility::Active => true,
+                Visibility::Inactive => false,
                 // **An undecided `#undef` still decides, and an undecided `#define` does not.** The pair is the one
                 // the reverse walk had, and it is conservative in the direction that matters: claiming a name is a
                 // macro because a `#if` *might* have defined it poisons every use downstream, while an `#undef` that
@@ -3130,7 +3116,7 @@ impl<F: FileProvider> SummaryStore<F> {
                 // inside `#if defined(_WIN32)`: keeping `min` defined expanded `std::min(a, b)` into
                 // `std::((( a ) < ( b )) ? ( a ) : ( b ))` and reported *expected `;` after expression* on a line a
                 // compiler accepts. See `tests/undef_of_an_included_macro.rs`.
-                crate::Visibility::Unknown => !is_a_definition,
+                Visibility::Unknown => !is_a_definition,
             };
             if !taken {
                 continue;
@@ -3233,7 +3219,7 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
         sources: &std::collections::HashMap<String, String>,
-    ) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+    ) -> Option<std::sync::Arc<TranslationUnit>> {
         let root = self.index.summary(path)?;
 
         // **Every file of the closure, text and all, before the walk starts** — `walk`'s lookup hands out `&str` for
@@ -3279,8 +3265,8 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         // The walk's own definition cache: one parse per `#define` rather than one per file that includes it.
-        let mut definitions = crate::summary::MacroDefinitions::default();
-        let unit = crate::TranslationUnit::walk(
+        let mut definitions = summary::MacroDefinitions::default();
+        let unit = TranslationUnit::walk(
             root,
             |wanted| {
                 let summary = self.index.summary(wanted)?;
@@ -3428,8 +3414,8 @@ impl<F: FileProvider> SummaryStore<F> {
             return known.clone();
         }
 
-        let resolver = crate::include::IncludeResolver::new(&self.files, config);
-        let mut interner = crate::file::paths::PathInterner::new(cfg!(windows));
+        let resolver = include::IncludeResolver::new(&self.files, config);
+        let mut interner = file::paths::PathInterner::new(cfg!(windows));
         let resolved = resolver
             .resolve(&fact.as_include(), directory, None, &mut interner)
             .resolved()
@@ -3470,7 +3456,7 @@ impl<F: FileProvider> SummaryStore<F> {
             "{form:?}|{is_next}|{spelling}|{directory:?}|{paths:?}|{:?}",
             config.dialect()
         );
-        crate::cache::content_hash(&folded).to_string()
+        cache::content_hash(&folded).to_string()
     }
 
     /// The work set when `path` changes: the file, and everything that transitively includes it.
@@ -3636,14 +3622,11 @@ impl<F: FileProvider> SummaryStore<F> {
 /// and builds the cook where it is used, which is one line and no allocation — a `MacroView` is two words.
 fn bodies_of<'pass>(
     environments: &'pass [(
-        &'pass std::sync::Arc<crate::TranslationUnit>,
-        crate::UnitDefinitions<'pass>,
+        &'pass std::sync::Arc<TranslationUnit>,
+        UnitDefinitions<'pass>,
     )],
     path: &Path,
-) -> Option<(
-    crate::MacroView<'pass>,
-    &'pass crate::UnitDefinitions<'pass>,
-)> {
+) -> Option<(MacroView<'pass>, &'pass UnitDefinitions<'pass>)> {
     environments.iter().find_map(|(unit, definitions)| {
         let view = unit.environment_of(path)?;
         Some((view, definitions))
@@ -3724,9 +3707,9 @@ enum APlainShape {
 /// **Write a refined summary under the key that names the closure it was read in** — the half of the second pass that
 /// used to be thrown away, and the reason a second start can skip the pass instead of redoing it.
 fn store_it(
-    database: &Option<std::sync::Arc<crate::cache::cache_db::SummaryCache>>,
+    database: &Option<std::sync::Arc<cache::cache_db::SummaryCache>>,
     path: &Path,
-    summary: &crate::FileSummary,
+    summary: &FileSummary,
     generation: u64,
 ) {
     let Some(database) = database else {
@@ -3816,8 +3799,7 @@ fn words_mentioned_by(
 /// is let through.
 fn has_unresolved_includes(summary: &FileSummary) -> bool {
     summary.includes.iter().any(|include| {
-        include.resolved.is_none()
-            && matches!(include.guard, crate::summary::FactGuard::Unconditional)
+        include.resolved.is_none() && matches!(include.guard, summary::FactGuard::Unconditional)
     })
 }
 
@@ -3841,7 +3823,7 @@ fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
         bytes.extend_from_slice(body.as_bytes());
         bytes.push(0);
     }
-    crate::cache::fnv1a64(&bytes)
+    cache::fnv1a64(&bytes)
 }
 
 /// **Was the region a fact was written in compiled?** — asked of the conditions the summary stored, against the
@@ -3870,13 +3852,13 @@ fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
 /// The key is `(region, branch)` rather than the region: an `#if`/`#elif` pair is one region with two bodies, and
 /// the two branches are different questions with different answers.
 fn a_facts_visibility(
-    guards: &crate::summary::SummaryGuards,
-    fact: &crate::summary::MacroFact,
-    table: &crate::preprocess::macros::MacroTable,
+    guards: &summary::SummaryGuards,
+    fact: &summary::MacroFact,
+    table: &preprocess::macros::MacroTable,
     answers: &mut std::collections::HashMap<(u32, usize), Option<bool>>,
-) -> crate::Visibility {
-    let crate::summary::FactGuard::Region(innermost) = fact.guard else {
-        return crate::Visibility::Active;
+) -> Visibility {
+    let summary::FactGuard::Region(innermost) = fact.guard else {
+        return Visibility::Active;
     };
 
     let mut unknown = false;
@@ -3898,14 +3880,14 @@ fn a_facts_visibility(
         };
         match answer {
             Some(true) => {}
-            Some(false) => return crate::Visibility::Inactive,
+            Some(false) => return Visibility::Inactive,
             None => unknown = true,
         }
     }
 
     if unknown {
-        crate::Visibility::Unknown
+        Visibility::Unknown
     } else {
-        crate::Visibility::Active
+        Visibility::Active
     }
 }

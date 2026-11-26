@@ -5,6 +5,10 @@
 //! here.
 
 use super::*;
+use crate::FileSummary;
+use crate::MemoryReport;
+use crate::file;
+use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **A view already parsed from exactly this input**, or `None`.
@@ -22,9 +26,8 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_view_cache(
         &self,
         key: &ViewKey,
-    ) -> &std::sync::Mutex<
-        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
-    > {
+    ) -> &std::sync::Mutex<cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>>
+    {
         if key.rendering.is_some() {
             &self.rendering_views
         } else {
@@ -93,12 +96,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .store
             .index()
             .summaries()
-            .map(|summary| {
-                (
-                    summary.path.clone(),
-                    crate::FileSummary::heap_bytes(summary),
-                )
-            })
+            .map(|summary| (summary.path.clone(), FileSummary::heap_bytes(summary)))
             .collect();
         candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.1));
 
@@ -138,7 +136,7 @@ impl<F: FileProvider + Clone> Session<F> {
         forgotten
     }
 
-    pub fn memory_report(&self) -> crate::MemoryReport {
+    pub fn memory_report(&self) -> MemoryReport {
         let (vfs_files, vfs_text_bytes, vfs_line_index_bytes) = self.vfs.accounting();
         let (summaries, summary_bytes, cooked_files, cooked_bytes) =
             self.store.index().accounting();
@@ -165,7 +163,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // whole unit's tree and a buffer view is a page, and a report that added only one of them would
         // understate what a reader with a big file open is paying for.
         let counted = |cache: &std::sync::Mutex<
-            cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
+            cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>,
         >| {
             cache
                 .lock()
@@ -211,10 +209,10 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.len(),
             self.prefetched
                 .values()
-                .map(crate::index::store::Prepared::heap_bytes)
+                .map(index::store::Prepared::heap_bytes)
                 .sum::<usize>(),
         );
-        crate::MemoryReport {
+        MemoryReport {
             prefetched,
             prefetched_bytes,
             vfs_files,

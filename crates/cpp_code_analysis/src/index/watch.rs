@@ -69,6 +69,8 @@
 //! event does. That is a real difference for a diagnostics feature and no difference at all for correctness, and
 //! keeping the two apart is what stops the watcher from becoming load-bearing.
 
+use crate::CACHE_DIRECTORY;
+use crate::project;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -174,7 +176,7 @@ impl WatchFilter {
 
         WatchFilter {
             root: root.to_path_buf(),
-            cache: root.join(crate::CACHE_DIRECTORY),
+            cache: root.join(CACHE_DIRECTORY),
             configuration: root.join(COMPILE_DATABASE),
             ignored: Vec::new(),
             ignored_patterns: Vec::new(),
@@ -297,7 +299,7 @@ impl WatchFilter {
         path.file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
-                crate::project::CONFIGURATION_FILE_NAMES
+                project::CONFIGURATION_FILE_NAMES
                     .iter()
                     .any(|known| known.eq_ignore_ascii_case(name))
             })
@@ -768,6 +770,7 @@ fn normalize(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ChangeBatch, EventKind, FileEvent, PathPattern, WatchFilter};
+    use crate::Known;
     use crate::file::paths::{DiskFiles, MemoryFiles};
     use crate::include::config::CompilerConfig;
     use crate::index::store::SummaryStore;
@@ -1090,7 +1093,7 @@ mod tests {
         }
         assert!(matches!(
             store.index().definition("Widget", Path::new("/p/main.cpp")),
-            crate::Known::Yes(_)
+            Known::Yes(_)
         ));
 
         let mut events = batch("/p");
@@ -1106,7 +1109,7 @@ mod tests {
         assert!(
             matches!(
                 store.index().definition("Widget", Path::new("/p/main.cpp")),
-                crate::Known::Unknown(_)
+                Known::Unknown(_)
             ),
             "and the declaration in the deleted file stops being found before anything is re-read"
         );
@@ -1518,10 +1521,7 @@ mod tests {
             "and the file it resolves to was indexed by following the include"
         );
         assert!(
-            matches!(
-                store.index().definition("Generated", &main),
-                crate::Known::Yes(_)
-            ),
+            matches!(store.index().definition("Generated", &main), Known::Yes(_)),
             "so the declaration in it is reachable"
         );
     }
@@ -1542,7 +1542,7 @@ mod tests {
         store.get(&main).expect("the file reads");
         assert!(matches!(
             store.index().definition("Widget", &main),
-            crate::Known::Yes(_)
+            Known::Yes(_)
         ));
 
         project.remove("widget.h");
@@ -1565,10 +1565,7 @@ mod tests {
             "the search fails now, and the summary records the attempt rather than the old answer"
         );
         assert!(
-            matches!(
-                store.index().definition("Widget", &main),
-                crate::Known::Unknown(_)
-            ),
+            matches!(store.index().definition("Widget", &main), Known::Unknown(_)),
             "so the declaration is no longer found"
         );
     }
@@ -1613,10 +1610,7 @@ mod tests {
         );
         assert_eq!(store.stats().reused, 1);
         assert!(
-            matches!(
-                store.index().definition("Renamed", &after),
-                crate::Known::Yes(_)
-            ),
+            matches!(store.index().definition("Renamed", &after), Known::Yes(_)),
             "and the renamed file answers for itself"
         );
     }

@@ -36,6 +36,8 @@
 //! that module contains", which is a state a consumer renders differently from "the module is empty". See
 //! [`ImportOutcome`] for the one case where the distinction is subtler than it looks.
 
+use crate::directive;
+use crate::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -529,7 +531,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         directory: &Path,
         interner: &mut PathInterner,
     ) -> ImportOutcome {
-        let include = crate::directive::Include {
+        let include = directive::Include {
             target: name.into(),
             form: if is_angle {
                 IncludeForm::Angle
@@ -925,7 +927,7 @@ fn follow_imports<F: FileProvider>(
     state.visited.insert(file);
     state.on_path.push(file);
 
-    let including = crate::paths::parent_normalized(path, scanner.files.is_case_insensitive());
+    let including = paths::parent_normalized(path, scanner.files.is_case_insensitive());
 
     for declaration in &info.imports {
         let outcome = match &declaration.target {

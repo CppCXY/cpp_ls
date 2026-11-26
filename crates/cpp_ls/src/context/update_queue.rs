@@ -42,6 +42,7 @@
 //! Only the worker applies notifications. Requests observe its completed sequence and never take ownership of an
 //! in-progress update, so cancelling a waiter cannot drop the update.
 
+use crate::util;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -102,7 +103,7 @@ pub enum UpdateEvent {
     /// It carries the configuration the client **already reported**, not the params of the notification: the read is a
     /// server→client round trip, and awaiting one here would hold the queue's apply lock across a wait for a client that
     /// may be waiting for an answer queued behind the same lock. The handler reads; this event is the application.
-    Configuration(crate::handlers::ClientConfig),
+    Configuration(handlers::ClientConfig),
 }
 
 impl UpdateEvent {
@@ -435,7 +436,7 @@ async fn process_batch(snapshot: &ServerContextSnapshot, events: Vec<UpdateEvent
         match event {
             UpdateEvent::Changed(params) => {
                 let uri = params.text_document.uri.clone();
-                let Some(path) = crate::util::uri_to_file_path(&uri) else {
+                let Some(path) = util::uri_to_file_path(&uri) else {
                     continue;
                 };
                 let changed = {
@@ -454,7 +455,7 @@ async fn process_batch(snapshot: &ServerContextSnapshot, events: Vec<UpdateEvent
                     continue;
                 };
                 let uri = params.text_document.uri.clone();
-                let Some(path) = crate::util::uri_to_file_path(&uri) else {
+                let Some(path) = util::uri_to_file_path(&uri) else {
                     continue;
                 };
                 let replaced = {

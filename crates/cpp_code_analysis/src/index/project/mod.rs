@@ -32,6 +32,8 @@
 //! **guarded** include is reported as [`Known::Unknown`] rather than as visible or invisible — the same rule the
 //! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
+use crate::CookedDiagnostic;
+use crate::IndexedRendering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -117,7 +119,7 @@ pub struct CookedFile {
     /// consumer that reads **these** has no region to judge.
     pub macros: Vec<MacroFact>,
     /// The rendering's parse errors, placed in the file — see [`crate::CookedDiagnostic`].
-    pub diagnostics: Vec<crate::CookedDiagnostic>,
+    pub diagnostics: Vec<CookedDiagnostic>,
     /// Errors the parse of the rendering reported that **this file cannot show**, because the text they are about is
     /// not written here.
     ///
@@ -142,7 +144,7 @@ impl CookedFile {
     }
 }
 
-impl From<crate::IndexedRendering> for CookedFile {
+impl From<IndexedRendering> for CookedFile {
     /// What the index keeps of a rendering's reading: the declarations, **the macros it was read with**, the errors
     /// this file can show, and the count of the ones it cannot.
     ///
@@ -150,7 +152,7 @@ impl From<crate::IndexedRendering> for CookedFile {
     /// empty, because that text was spelled out by this crate rather than by the file, and keeping them would invite
     /// a reader to believe them. Macros are the exception and the point — a rendering's macros are the ones the
     /// preprocessor *chose*, with no region left to judge (see [`CookedFile::macros`]).
-    fn from(indexed: crate::IndexedRendering) -> Self {
+    fn from(indexed: IndexedRendering) -> Self {
         CookedFile {
             declarations: indexed.summary.declarations,
             macros: indexed.summary.macros,
@@ -436,7 +438,7 @@ pub struct ProjectIndex {
     /// The alternative — the one the `FactGuard::Region` arm's own comment names — is the incremental
     /// `macros_at`/`macro_environment` state, one walk per file with conditions answered as they are reached,
     /// which removes the per-edge cost instead of the invalidation.
-    visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
+    visibility_answers: std::sync::Mutex<HashMap<(String, u32), Visibility>>,
     /// **The inference answers that outlive one request** — see [`ProjectIndex::a_remembered_type`].
     ///
     /// `TypeMemo` lives for one request, so a pull, a hover and the next pull ask the same questions of the same tree
@@ -467,7 +469,7 @@ pub struct ProjectIndex {
     /// **One verdict per guarded declaration** — see `certain_declarations`. A guard costs a macro walk, and the
     /// same fact is asked again on every pull that names the declaration: measured on the real project, the
     /// uncached filter took a diagnostic pull from **28 ms to 71 ms** (`lsp_status`).
-    guard_answers: std::sync::Mutex<HashMap<(PathBuf, usize, u32), crate::Visibility>>,
+    guard_answers: std::sync::Mutex<HashMap<(PathBuf, usize, u32), Visibility>>,
     /// **The macro environment of one `(name, file)`** — [`ProjectIndex::macro_environment`]'s walk, remembered.
     ///
     /// The walk is the expensive half of every macro question and it does not depend on the offset, but it was done
@@ -506,7 +508,7 @@ pub struct ProjectIndex {
             (
                 u64,
                 std::sync::Arc<Vec<String>>,
-                std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>,
+                std::sync::Arc<HashMap<(String, u32, usize), Visibility>>,
             ),
         >,
     >,

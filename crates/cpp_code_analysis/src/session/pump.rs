@@ -5,6 +5,10 @@
 //! drains it drives are the program read's three phases.
 
 use super::*;
+use crate::FileSummary;
+use crate::TranslationUnit;
+use crate::cache;
+use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// Mark **the files a reader is looking at** for cooking, skipping the ones that already have a reading.
@@ -681,7 +685,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **What the cache already refined, before any timeline is built.** A file whose reading was refined under
         // its own closure needs no unit, no render and no parse: the summary goes into the index at commit time. What
         // is left is the honest work, and the timelines are built for that and nothing else.
-        let mut refinements: Vec<crate::FileSummary> = Vec::new();
+        let mut refinements: Vec<FileSummary> = Vec::new();
         for path in &slice {
             // **A miss for this content is permanent, so it is asked once** — see the field.
             let key = self
@@ -759,11 +763,7 @@ impl<F: FileProvider + Clone> Session<F> {
     const READ_AHEAD_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
     /// Put a prepared slice in the read-ahead, remembering when it was made.
-    fn remember_a_prepared(
-        &mut self,
-        path: std::path::PathBuf,
-        made: crate::index::store::Prepared,
-    ) {
+    fn remember_a_prepared(&mut self, path: std::path::PathBuf, made: index::store::Prepared) {
         let key = queue_key(&path);
         if self.prefetched.insert(key.clone(), made).is_none() {
             self.prefetched_order.push_back(key);
@@ -780,7 +780,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut total = self
             .prefetched
             .values()
-            .map(crate::index::store::Prepared::heap_bytes)
+            .map(index::store::Prepared::heap_bytes)
             .sum::<usize>();
         while total > Self::READ_AHEAD_BUDGET_BYTES {
             let Some(newest) = self.prefetched_order.pop_back() else {
@@ -1019,7 +1019,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn finish_a_slice(
         &mut self,
         done: &[Step],
-        units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+        units: Vec<std::sync::Arc<TranslationUnit>>,
     ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
@@ -1326,7 +1326,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &mut self,
         root: &Path,
         prepared: Option<PreparedUnitReading>,
-        records: Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)>,
+        records: Vec<(cache::cache_db::CacheKey, Vec<u8>)>,
     ) -> Option<UnitReading> {
         let Some(prepared) = prepared else {
             // **A declined read is retried — three times.** The walk can be refused for a reason that heals: a
@@ -1452,7 +1452,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let _ = self.the_macros_of(&path, &text);
 
             Some((
-                (path, crate::cache::content_hash(&text)),
+                (path, cache::content_hash(&text)),
                 std::sync::Arc::new(reading),
             ))
         };

@@ -5,6 +5,22 @@
 //! the flags), which is what makes a cached unit reusable across runs and what makes a stale one detectable.
 
 use super::*;
+use crate::CookedFile;
+use crate::FileId;
+use crate::FileView;
+use crate::IndexedUnit;
+use crate::MacroDefinitions;
+use crate::ProjectIndex;
+use crate::RenderedUnit;
+use crate::TranslationUnit;
+use crate::cache;
+use crate::completion;
+use crate::effect;
+use crate::index;
+use crate::paths;
+use crate::preprocess;
+use crate::sema;
+use crate::session;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **The query entry point for one file** — a [`crate::sema::model::SemanticModel`] over `view`, with the
@@ -29,10 +45,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The memo is sound for a different reason than the borrow: its answers are keyed by node ranges in `view`,
     /// and `view` is the caller's — an edit replaces the view rather than mutating it, so a model cannot outlive the
     /// text its answers are about. There is no invalidation rule to write because there is nothing to invalidate.
-    pub fn semantic_model<'s>(
-        &'s self,
-        view: &'s FileView,
-    ) -> crate::sema::model::SemanticModel<'s> {
+    pub fn semantic_model<'s>(&'s self, view: &'s FileView) -> sema::model::SemanticModel<'s> {
         // **The resolver: a path in, that file's own reading out.** `view_of_the_file` and not `view`, because a
         // declaration's type is written in the file it was written in — this file's *rendering* is not that file's
         // tree, and answering a question about `<vector>` with a rendering of the file being edited would answer in
@@ -42,7 +55,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // the resolver only needs `&Session` (obtaining a file's tree is a read of the VFS and a parse, not a
         // mutation of the analysis), so it does not conflict with the index reference taken beside it.
         let session: &'s Session<F> = self;
-        let index: &'s crate::ProjectIndex = session.store.index();
+        let index: &'s ProjectIndex = session.store.index();
 
         // **The views this model has already been given, by path.** The resolver parses the file it is asked about,
         // and one diagnostic pass asks about the same few headers again and again: measured on EmmyLuaCodeStyle's
@@ -65,7 +78,7 @@ impl<F: FileProvider + Clone> Session<F> {
             made
         });
 
-        crate::sema::model::SemanticModel::new(
+        sema::model::SemanticModel::new(
             index,
             &view.root,
             &view.scopes,
@@ -91,7 +104,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The **writer** path's way to hold a file: a notification, an indexing step, a caller that knows it is about
     /// to ask several questions about one file. After this, [Session::view] and [Session::text] answer for it.
-    pub fn load(&mut self, path: impl AsRef<Path>) -> Option<crate::FileId> {
+    pub fn load(&mut self, path: impl AsRef<Path>) -> Option<FileId> {
         self.vfs.load(path)
     }
 
@@ -139,10 +152,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **The timeline of one program** — public for the probes and tests that measure a reading by its environment
     /// rather than by a request. A caller that merely wants an answer wants a query instead: this walks (or loads)
     /// the whole unit, which is the most expensive thing this crate does.
-    pub fn translation_unit_of(
-        &self,
-        path: &Path,
-    ) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+    pub fn translation_unit_of(&self, path: &Path) -> Option<std::sync::Arc<TranslationUnit>> {
         self.unit_and_state_of(path).map(|(unit, _)| unit)
     }
 
@@ -154,7 +164,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn unit_and_state_of(
         &self,
         path: &Path,
-    ) -> Option<(std::sync::Arc<crate::TranslationUnit>, bool)> {
+    ) -> Option<(std::sync::Arc<TranslationUnit>, bool)> {
         let key = queue_key(path);
 
         // **The guard is bound and dropped before the body**, not held across it: `held_units()` is a `Mutex`, and
@@ -184,7 +194,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // per-directory files (`cache.redb` holds the summaries and the unit renderings now). A timeline is
         // cheap to rebuild — 38 ms — and rebuilding it is the only way its environment is guaranteed to be the one
         // the current index describes; a stored one outlives the files it was built from. So the walk runs.
-        let cached: Option<crate::TranslationUnit> = None;
+        let cached: Option<TranslationUnit> = None;
 
         let (unit, provisional) = match cached {
             Some(unit) => {
@@ -272,9 +282,8 @@ impl<F: FileProvider + Clone> Session<F> {
                         // C++ source, and a .c program read with __cplusplus takes every C++ branch in every
                         // system header (measured: 24 xtern "C++" blocks in Lua's ldebug.c stream, and 15
                         // parse errors after them).
-                        let seed =
-                            crate::session::the_marked_seed_for(&self.config, index.macros(), path);
-                        crate::TranslationUnit::walk(
+                        let seed = session::the_marked_seed_for(&self.config, index.macros(), path);
+                        TranslationUnit::walk(
                             root,
                             |wanted| {
                                 let (held, text) =
@@ -438,7 +447,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_timeline_to_read_through(
         &self,
         path: &Path,
-    ) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+    ) -> Option<std::sync::Arc<TranslationUnit>> {
         if let Some((false, unit)) = self.held_units().get(&queue_key(path))
             && unit.environment_of(path).is_some()
         {
@@ -565,7 +574,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ) -> (u64, u64) {
         let mut contents: Vec<u64> = closure
             .iter()
-            .map(|(_, text)| crate::cache::content_hash(text))
+            .map(|(_, text)| cache::content_hash(text))
             .collect();
         contents.sort_unstable();
 
@@ -657,7 +666,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let (closure, by_key) = self.closure_with_text_from(&root_path, Some(summary));
         let mut definitions = self.held_definitions();
         let index = self.store.index();
-        let unit = crate::TranslationUnit::walk(
+        let unit = TranslationUnit::walk(
             summary,
             |wanted| {
                 let (held, text) = closure.get(*by_key.get(&queue_key(wanted))?)?;
@@ -709,7 +718,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// It is behind a lock for the same reason the units table is: this cache was what made a unit walk need
     /// `&mut self`, and `&mut self` put the walk inside the writer where every request waits for it.
-    pub(crate) fn held_definitions(&self) -> std::sync::MutexGuard<'_, crate::MacroDefinitions> {
+    pub(crate) fn held_definitions(&self) -> std::sync::MutexGuard<'_, MacroDefinitions> {
         self.definitions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -749,10 +758,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// walking timelines to reconstruct.
     ///
     /// `None` when the root has no summary — nothing has read it, which is a state rather than an error.
-    pub fn effect_walk(
-        &self,
-        root: &Path,
-    ) -> Option<(HashMap<PathBuf, u64>, crate::effect::Walked)> {
+    pub fn effect_walk(&self, root: &Path) -> Option<(HashMap<PathBuf, u64>, effect::Walked)> {
         self.store.index().summary(root)?;
         let reads = SessionReads {
             files: &self.files,
@@ -771,18 +777,18 @@ impl<F: FileProvider + Clone> Session<F> {
         if cache.len() >= cache::cache_lru::EFFECT_ENTRIES {
             cache.clear();
         }
-        let seed = crate::effect::Macros::new();
+        let seed = effect::Macros::new();
         let surfaces = self
             .surfaces
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (signatures, walked) = crate::effect::Chain::new(&reads, &mut cache)
+        let (signatures, walked) = effect::Chain::new(&reads, &mut cache)
             .with_surfaces(&surfaces)
             .at_signatures(root, &seed);
         Some((signatures, walked))
     }
 
-    pub fn render_the_unit(&self, root: &Path) -> Option<crate::RenderedUnit> {
+    pub fn render_the_unit(&self, root: &Path) -> Option<RenderedUnit> {
         let unit = self.translation_unit_of(root)?;
         let (sources, key) = self.the_units_inputs(&unit);
 
@@ -816,7 +822,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // is honest but decides nothing, and `#if __has_include(<span>)` is a shape real headers are full of, so a
         // cook that cannot answer it reads a branch on no evidence. The resolver's own search is what an `#include`
         // would use, which is what makes the two agree.
-        let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
+        let search = preprocess::cooked::Search::new(&self.files, &self.config);
         // **The compiler's answers for this program.** A `#if __has_builtin(…)` in a header decides which
         // declarations the program has; without the probe the unit would take the else branch while the file's own
         // cook takes the then branch, and the two readings would disagree about which branch was compiled.
@@ -850,7 +856,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// makes the two disagree, which is a miss rather than a stale answer.
     pub(crate) fn the_rendering_still_describes(
         &self,
-        rendered: &crate::RenderedUnit,
+        rendered: &RenderedUnit,
         stored: u64,
     ) -> bool {
         let mut inputs: Vec<(&std::path::Path, u64)> = Vec::new();
@@ -858,9 +864,9 @@ impl<F: FileProvider + Clone> Session<F> {
             let Some(text) = self.files.read(path) else {
                 return false;
             };
-            inputs.push((path.as_path(), crate::cache::content_hash(&text)));
+            inputs.push((path.as_path(), cache::content_hash(&text)));
         }
-        crate::cache::a_rendering_key(&inputs) == stored
+        cache::a_rendering_key(&inputs) == stored
     }
 
     /// **The texts a unit's cook reads, and the key its rendering is filed under.**
@@ -879,7 +885,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// that matters is already fixed inside the stream by the walk.
     pub(crate) fn the_units_inputs(
         &self,
-        unit: &crate::TranslationUnit,
+        unit: &TranslationUnit,
     ) -> (HashMap<PathBuf, String>, u64) {
         let mut sources: HashMap<PathBuf, String> = HashMap::new();
         for path in unit.files() {
@@ -890,12 +896,12 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let inputs: Vec<(&std::path::Path, u64)> = sources
             .iter()
-            .map(|(path, text)| (path.as_path(), crate::cache::content_hash(text)))
+            .map(|(path, text)| (path.as_path(), cache::content_hash(text)))
             .collect();
         // **Folded with the reader, not only with the texts** — see [`crate::cache::a_rendering_key`], whose note
         // records why: a rendering is a function of the reader as well as of the bytes, and a key that names only the
         // bytes cannot invalidate a stream whose inputs happen not to have moved.
-        let key = crate::cache::a_rendering_key(&inputs);
+        let key = cache::a_rendering_key(&inputs);
 
         (sources, key)
     }
@@ -938,7 +944,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .or_else(|| self.store.cached_unit(units_key))
             && self.the_rendering_still_describes(&rendered, units_key)
         {
-            let program = crate::cache::content_hash(&rendered.text);
+            let program = cache::content_hash(&rendered.text);
             let known = self
                 .unit_index
                 .lock()
@@ -986,7 +992,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let (program, known) = match &rendered {
             Some(rendered) => {
-                let program = crate::cache::content_hash(&rendered.text);
+                let program = cache::content_hash(&rendered.text);
                 let known = self
                     .unit_index
                     .lock()
@@ -1085,7 +1091,7 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// Remember what a program's parse came out as — the one-entry memo `Session::unit_index` holds.
-    pub(crate) fn remember_the_unit_index(&self, program: u64, indexed: &crate::IndexedUnit) {
+    pub(crate) fn remember_the_unit_index(&self, program: u64, indexed: &IndexedUnit) {
         if let Ok(mut memo) = self.unit_index.lock() {
             *memo = Some((program, indexed.clone()));
         }
@@ -1101,7 +1107,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .config
             .completion
             .max_items
-            .unwrap_or(crate::completion::ITEM_BUDGET)
+            .unwrap_or(completion::ITEM_BUDGET)
             .clamp(1, MAX_COMPLETION_ITEMS)
     }
 
@@ -1117,9 +1123,9 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn prepare_the_unit_records(
         &self,
         prepared: &PreparedUnitReading,
-    ) -> Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)> {
+    ) -> Vec<(cache::cache_db::CacheKey, Vec<u8>)> {
         let files = &prepared.indexed.files;
-        let prepare = |(path, cooked): &(std::path::PathBuf, crate::CookedFile)| {
+        let prepare = |(path, cooked): &(std::path::PathBuf, CookedFile)| {
             self.store.prepare_a_cooked_record(path, cooked)
         };
         // **In parallel, because each record's fingerprint is a walk of its own file's closure.** They share nothing
@@ -1155,7 +1161,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn commit_a_unit_reading(
         &mut self,
         prepared: PreparedUnitReading,
-        records: Vec<(crate::cache::cache_db::CacheKey, Vec<u8>)>,
+        records: Vec<(cache::cache_db::CacheKey, Vec<u8>)>,
     ) -> Option<UnitReading> {
         if !self.is_current(&prepared.revision) {
             log::debug!("discarding a unit reading prepared for an older session revision");
@@ -1471,12 +1477,12 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the two agree; see [`crate::completion::the_class_after_the_operator`].
     pub fn the_class_after_the_operator(
         &self,
-        view: &crate::FileView,
+        view: &FileView,
         written: &str,
         arrow: bool,
     ) -> Option<String> {
         let reached = self.the_type_after_the_operator(view, written, arrow)?;
-        let reached = crate::sema::types::parse_type_spelling(&reached);
+        let reached = sema::types::parse_type_spelling(&reached);
         let bare = reached.class_name().map(str::to_string)?;
         // **The class as the index files it.** A member is recorded under the class's qualified name, and a type
         // deduced from a `std::` function is spelled without the namespace: `make_shared` answers
@@ -1485,7 +1491,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return Some(bare);
         }
         Some(
-            crate::index::project::qualified_from_the_index(self.store.index(), &view.path, &bare)
+            index::project::qualified_from_the_index(self.store.index(), &view.path, &bare)
                 .unwrap_or(bare),
         )
     }
@@ -1498,29 +1504,27 @@ impl<F: FileProvider + Clone> Session<F> {
     /// showed the class template's letter (`B second`) while `members_of("Duo<int, double>")` answered `double`.
     pub fn the_type_after_the_operator(
         &self,
-        view: &crate::FileView,
+        view: &FileView,
         written: &str,
         arrow: bool,
     ) -> Option<String> {
-        let written = crate::sema::types::parse_type_spelling(written);
+        let written = sema::types::parse_type_spelling(written);
         // **The pointee, by `element_type` with the type's own arguments substituted** — `shared_ptr<Node>` reaches
         // `Node`, where the completion's resolver answered `std::shared_ptr` because `element_type` is written `_Tp`. See
         // [`crate::index::project::the_pointee_of_a_handle`]; the resolver below stays for a raw pointer and for an
         // `operator->` whose return type is a class.
-        if arrow && let crate::sema::types::Type::Named { name, arguments } = &written {
+        if arrow && let sema::types::Type::Named { name, arguments } = &written {
             // **The class as the index files it.** A member is recorded under the class's qualified name, and a type
             // deduced from a `std::` function is spelled without the namespace: `make_shared` answers
             // `shared_ptr<Node>` while the class is `std::shared_ptr`, whose `element_type` is the member being read.
             let class = match name.contains("::") {
                 true => name.clone(),
-                false => crate::index::project::qualified_from_the_index(
-                    self.store.index(),
-                    &view.path,
-                    name,
-                )
-                .unwrap_or_else(|| name.clone()),
+                false => {
+                    index::project::qualified_from_the_index(self.store.index(), &view.path, name)
+                        .unwrap_or_else(|| name.clone())
+                }
             };
-            if let Some((pointee, _)) = crate::index::project::the_pointee_of_a_handle(
+            if let Some((pointee, _)) = index::project::the_pointee_of_a_handle(
                 self.store.index(),
                 &view.scopes,
                 &view.root,
@@ -1531,7 +1535,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 return Some(pointee);
             }
         }
-        crate::completion::the_type_after_the_operator(
+        completion::the_type_after_the_operator(
             self.store.index(),
             &view.scopes,
             &view.root,
@@ -1904,8 +1908,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // `module_reading`) already pass a directory, which is why the standard-module tests
         // passed: their module is found through an include path's sibling `modules/` directory, and
         // the broken first entry was never the one that answered.
-        let directory =
-            crate::paths::parent_normalized(importing, self.files.is_case_insensitive());
+        let directory = paths::parent_normalized(importing, self.files.is_case_insensitive());
 
         for module in wanted {
             if let ImportOutcome::Resolved(unit) =

@@ -1,3 +1,4 @@
+use crate::kind;
 use rowan::{TextRange, TextSize};
 
 use crate::{
@@ -21,7 +22,7 @@ impl CppSyntaxId {
         CppSyntaxId { kind, range }
     }
 
-    pub fn from_ptr(ptr: crate::kind::CppSyntaxNodePtr) -> Self {
+    pub fn from_ptr(ptr: kind::CppSyntaxNodePtr) -> Self {
         CppSyntaxId {
             kind: ptr.kind(),
             range: ptr.text_range(),

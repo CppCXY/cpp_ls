@@ -21,6 +21,7 @@
 //! is deliberately the only writer — the lock order fixes is `workspace_manager`
 //! before `analysis`, and keeping the mutations here is what makes that rule checkable by reading one file.
 
+use crate::handlers;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -244,7 +245,7 @@ fn spawn_workspace_reload_task(handles: ReloadTaskHandles, context: ServerContex
 
         // The same path as the first open: the compiler runs again, the new flags are read, the buffers are
         // re-marked, the project is indexed, and the diagnostics are published again.
-        crate::handlers::start_analysis(context.clone()).await;
+        handlers::start_analysis(context.clone()).await;
     });
 }
 

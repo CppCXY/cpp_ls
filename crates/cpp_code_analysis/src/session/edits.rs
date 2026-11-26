@@ -9,6 +9,9 @@
 //! writer**: see [`Session::prepare_a_reconcile`] for why, and [`ReconcileAnswer`] for what crosses between them.
 
 use super::*;
+use crate::MacroAt;
+use crate::file;
+use crate::preprocess;
 
 /// **What a reconcile found on disk** — the answer [`Session::prepare_a_reconcile`] hands to
 /// [`Session::commit_a_reconcile`], and the only thing that crosses between the two phases.
@@ -50,7 +53,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// a member of some *other* file's unit, and which one is answered by the project's source list: the first source
     /// whose walk reaches it. `None` when nothing in the project reaches it, which is the honest "this session
     /// cannot speak about that file" rather than a `false` that would read as "not defined".
-    pub fn macro_at(&mut self, file: &Path, name: &str, offset: usize) -> Option<crate::MacroAt> {
+    pub fn macro_at(&mut self, file: &Path, name: &str, offset: usize) -> Option<MacroAt> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if self.project.iter().any(|root| root == file) {
             candidates.push(file.to_path_buf());
@@ -352,7 +355,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // index must forget the summary and re-read what resolved to it — and the difference is only who said so.
         for path in &self.project {
             let key = queue_key(path);
-            let stamp = crate::file::FileStamp::of(path);
+            let stamp = file::FileStamp::of(path);
             if stamp.is_none() || !listed_keys.contains(&key) {
                 answer.removed.push(path.clone());
                 continue;
@@ -558,7 +561,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if !self.directive_signatures.contains_key(&queue_key(path))
             && let Some(held) = self.vfs.held(path)
         {
-            let before = crate::preprocess::directive::directive_signature(&held.text);
+            let before = preprocess::directive::directive_signature(&held.text);
             self.directive_signatures.insert(queue_key(path), before);
         }
         let moved = self.directives_moved(path, Some(text));
@@ -638,7 +641,7 @@ impl<F: FileProvider + Clone> Session<F> {
             };
         };
 
-        let now = crate::preprocess::directive::directive_signature(text);
+        let now = preprocess::directive::directive_signature(text);
         match self.directive_signatures.insert(key, now) {
             Some(before) => DirectivesMoved {
                 environment: before.environment != now.environment,

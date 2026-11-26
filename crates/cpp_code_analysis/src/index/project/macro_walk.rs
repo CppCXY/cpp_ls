@@ -5,6 +5,15 @@
 //! decided which branch was taken, and the order the files were included in.
 
 use super::*;
+use crate::CookedDiagnostic;
+use crate::FactGuard;
+use crate::MacroKind;
+use crate::ProjectMember;
+use crate::UnlistedBase;
+use crate::Visibility;
+use crate::cache;
+use crate::index;
+use crate::sema;
 
 /// **What one file contributes to a visibility walk**, as a number — see [`ProjectIndex::the_walks_fingerprint`].
 ///
@@ -27,8 +36,8 @@ pub(crate) fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
         bytes.push(0);
         bytes.push(u8::from(include.is_next));
         bytes.push(match include.guard {
-            crate::FactGuard::Unconditional => 0,
-            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+            FactGuard::Unconditional => 0,
+            FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
         });
     }
     for conditional in &summary.guards.conditionals {
@@ -60,15 +69,15 @@ pub(crate) fn the_walk_inputs_of(summary: &FileSummary) -> u64 {
         }
         bytes.push(0);
         bytes.push(match fact.guard {
-            crate::FactGuard::Unconditional => 0,
-            crate::FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
+            FactGuard::Unconditional => 0,
+            FactGuard::Region(region) => 1 + (region.min(u32::from(u8::MAX) - 1) as u8),
         });
     }
     // **A module edge is a different kind of edge** and it is read by the same walk's second half — see
     // [`ProjectIndex::visible_files_with_modules`]. Debug is exact enough for a cache key, and a summary almost always
     // has nothing recorded here.
     bytes.extend_from_slice(format!("{:?}", summary.modules).as_bytes());
-    crate::cache::fnv1a64(&bytes)
+    cache::fnv1a64(&bytes)
 }
 
 /// **The declaration part of a summary, stripped of everything a body edit moves.** Offsets, name ranges and
@@ -983,7 +992,7 @@ impl ProjectIndex {
                         .iter()
                         .map(MacroFact::heap_bytes)
                         .sum::<usize>()
-                    + reading.diagnostics.len() * std::mem::size_of::<crate::CookedDiagnostic>();
+                    + reading.diagnostics.len() * std::mem::size_of::<CookedDiagnostic>();
             }
         }
         (
@@ -1048,12 +1057,12 @@ impl ProjectIndex {
                             .members
                             .iter()
                             .map(|member| {
-                                std::mem::size_of::<crate::ProjectMember>()
+                                std::mem::size_of::<ProjectMember>()
                                     + DeclFact::heap_bytes(&member.fact)
                             })
                             .sum();
                         let unlisted =
-                            held.list.unlisted.len() * std::mem::size_of::<crate::UnlistedBase>();
+                            held.list.unlisted.len() * std::mem::size_of::<UnlistedBase>();
                         members
                             + unlisted
                             + held.contributors.len() * std::mem::size_of::<PathBuf>()
@@ -1075,7 +1084,7 @@ impl ProjectIndex {
                     answers.len(),
                     answers.len()
                         * (std::mem::size_of::<(PathBuf, usize, u32)>()
-                            + std::mem::size_of::<crate::Visibility>()),
+                            + std::mem::size_of::<Visibility>()),
                 )
             })
             .unwrap_or_default();
@@ -1110,7 +1119,7 @@ impl ProjectIndex {
                     answers.len(),
                     answers.len()
                         * (std::mem::size_of::<(String, u32)>()
-                            + std::mem::size_of::<crate::Visibility>()
+                            + std::mem::size_of::<Visibility>()
                             + 24),
                 )
             })
@@ -1436,7 +1445,7 @@ impl ProjectIndex {
             let qualified = qualified.to_lowercase();
             // What the fact is called for ordering: its name, or — with none — the last segment of its scope.
             let name = match fact.name.is_empty() {
-                false => crate::index::names::lowercase(&fact.name),
+                false => index::names::lowercase(&fact.name),
                 true => qualified
                     .rsplit("::")
                     .next()
@@ -2156,7 +2165,7 @@ impl ProjectIndex {
             }
         };
         for path in contributors {
-            eat(crate::cache::fnv1a64(path.as_bytes()));
+            eat(cache::fnv1a64(path.as_bytes()));
             eat(self
                 .walk_inputs
                 .get(path)
@@ -2792,7 +2801,7 @@ impl ProjectIndex {
                             None => {
                                 // **What a condition costs, counted** — the probe that says whether a warm walk is
                                 // warm because the memo works or because there was nothing to ask.
-                                let answer = crate::index::environment::visibility_at(
+                                let answer = index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
                                     include.guard,
@@ -2807,7 +2816,7 @@ impl ProjectIndex {
                         };
 
                         match answer {
-                            crate::Visibility::Active => so_far,
+                            Visibility::Active => so_far,
                             // **A condition that was decided, and not taken**: the file is not part of this
                             // translation unit at all, so nothing in it is visible — the edge is dropped rather
                             // than downgraded, and so is everything only reachable through it.
@@ -2821,10 +2830,10 @@ impl ProjectIndex {
                             // **false** for this compilation — were in the visibility list as `Conditional`, and
                             // their names were **8 of every 10 completion items**: 14351 items, 4.5 MB of JSON, for
                             // a cursor in a 78-line file (`zmmintrin.h` 5256, `arm64_neon.h` 2852, `arm_neon.h` 2117).
-                            crate::Visibility::Inactive => continue,
+                            Visibility::Inactive => continue,
                             // A condition nobody can decide: the file may or may not be there, which is exactly what
                             // `Conditional` means to every consumer.
-                            crate::Visibility::Unknown => IncludeVisibility::Conditional,
+                            Visibility::Unknown => IncludeVisibility::Conditional,
                         }
                     }
                 };
@@ -3580,8 +3589,7 @@ impl ProjectIndex {
                 if alias.fact.kind != DeclKind::Type {
                     return None;
                 }
-                let target =
-                    crate::sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
+                let target = sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
                 let class = target.class_name()?;
 
                 let qualified = if class.contains("::") {
@@ -4210,11 +4218,7 @@ impl ProjectIndex {
         &self,
         root: &Path,
         questions: &[(String, u32, usize)],
-    ) -> (
-        Vec<Option<crate::Visibility>>,
-        u64,
-        std::sync::Arc<Vec<String>>,
-    ) {
+    ) -> (Vec<Option<Visibility>>, u64, std::sync::Arc<Vec<String>>) {
         let mut walk = GuardWalk::new();
         let mut asked: Vec<Option<Vec<(u32, usize)>>> = Vec::with_capacity(questions.len());
         for (file, region, fact_offset) in questions {
@@ -4271,14 +4275,14 @@ impl ProjectIndex {
                 for (region, _) in chain {
                     match answers.get(&region).copied().flatten() {
                         Some(true) => {}
-                        Some(false) => return Some(crate::Visibility::Inactive),
+                        Some(false) => return Some(Visibility::Inactive),
                         None => unknown = true,
                     }
                 }
                 Some(if unknown {
-                    crate::Visibility::Unknown
+                    Visibility::Unknown
                 } else {
-                    crate::Visibility::Active
+                    Visibility::Active
                 })
             })
             .collect();
@@ -4291,7 +4295,7 @@ impl ProjectIndex {
     pub fn install_answered_guards(
         &self,
         root: &Path,
-        answers: HashMap<(String, u32, usize), crate::Visibility>,
+        answers: HashMap<(String, u32, usize), Visibility>,
         stamp: u64,
         contributors: std::sync::Arc<Vec<String>>,
     ) {
@@ -4317,7 +4321,7 @@ impl ProjectIndex {
     fn answered_guards_of(
         &self,
         root: &Path,
-    ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), crate::Visibility>>> {
+    ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), Visibility>>> {
         let installed = self.answered_guards.lock().ok()?;
         let (stamp, contributors, answers) = installed.get(&normalize(root))?;
         (self.the_walks_fingerprint(contributors) == *stamp).then(|| std::sync::Arc::clone(answers))
@@ -4387,12 +4391,10 @@ impl ProjectIndex {
                             .guards
                             .region_at(at.region, offset)
                             .and_then(|region| {
-                                region.visibility(
-                                    &crate::index::environment::MacrosHere::from_walk(
-                                        state,
-                                        at.condition_at,
-                                    ),
-                                )
+                                region.visibility(&index::environment::MacrosHere::from_walk(
+                                    state,
+                                    at.condition_at,
+                                ))
                             }),
                     };
 
@@ -4545,7 +4547,7 @@ impl GuardWalk {
                     .guards
                     .region_at(due.region, due.fact_offset)
                     .and_then(|region| {
-                        region.visibility(&crate::index::environment::MacrosHere::from_walk(
+                        region.visibility(&index::environment::MacrosHere::from_walk(
                             state,
                             condition_at,
                         ))
@@ -4783,12 +4785,10 @@ impl Collecting<'_> {
         }
 
         let asked = summary.guards.region_at(region, offset)?;
-        Some(
-            asked.visibility(&crate::index::environment::MacrosHere::from_walk(
-                state,
-                condition_at,
-            )),
-        )
+        Some(asked.visibility(&index::environment::MacrosHere::from_walk(
+            state,
+            condition_at,
+        )))
     }
 }
 
@@ -4809,8 +4809,8 @@ pub(crate) fn apply_fact(
         // …unless the region settles the name whatever its own condition says, which is the one thing an
         // undecidable branch *can* still say — and it says it about definedness only, never about the value.
         match (fact.settles_the_name, fact.kind) {
-            (true, crate::MacroKind::Definition) => state.define_name(&fact.name),
-            (true, crate::MacroKind::Undefinition) => state.undefine(&fact.name),
+            (true, MacroKind::Definition) => state.define_name(&fact.name),
+            (true, MacroKind::Undefinition) => state.undefine(&fact.name),
             _ => state.mark_uncertain(&fact.name),
         }
 
@@ -4819,7 +4819,7 @@ pub(crate) fn apply_fact(
 
     match reach {
         // In force: the name and its value, as the file wrote them.
-        FactReach::Active => crate::index::environment::observe_a_macro_fact(state, fact),
+        FactReach::Active => index::environment::observe_a_macro_fact(state, fact),
         // Handled above.
         FactReach::Inactive | FactReach::Unknown => {}
     }

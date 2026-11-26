@@ -46,6 +46,8 @@
 //! but do not diagnose inside it" gets the editor behaviour people expect: completion offers both, and
 //! neither is called an error.
 
+use crate::preprocess;
+use crate::token;
 use cpp_parser::SourceRange;
 
 use crate::{
@@ -79,7 +81,7 @@ pub struct Branch {
     /// have it — and that is the honest comparison: two branches that have computed different things about the same
     /// tokens *are* different values, and the only ways to get here are `Clone` (which copies them) and the four
     /// construction sites (which leave them empty).
-    parsed: std::sync::OnceLock<Option<crate::preprocess::condition::ConditionExpr>>,
+    parsed: std::sync::OnceLock<Option<preprocess::condition::ConditionExpr>>,
     /// `true` once this branch is known to be macro-independent — either because the expansion came back
     /// unchanged, or because parsing it failed, which no macro state can repair.
     fixed: std::sync::OnceLock<bool>,
@@ -166,7 +168,7 @@ impl Branch {
             // Sound because `fixed` is only set together with `parsed`, and only when the expansion was the
             // identity — so re-parsing would yield this same expression.
             return match self.parsed.get().and_then(Option::as_ref) {
-                Some(expr) => crate::preprocess::condition::eval(expr, macros).is_true(),
+                Some(expr) => preprocess::condition::eval(expr, macros).is_true(),
                 // Stored as `None`: the tokens do not parse, and no macro state makes them parse. `evaluate`
                 // answers `Unknown` for that, which is `None` here.
                 None => None,
@@ -185,10 +187,10 @@ impl Branch {
         if !a_replacement_can_change_the_parse(&self.tokens) {
             // Parsed with **no expansion at all**, and the parse is what is kept. `eval` resolves each name against
             // `macros` itself, so the expression is the same one the expanding path would have built.
-            let parsed = crate::preprocess::condition::parse_condition(&self.tokens).ok();
+            let parsed = preprocess::condition::parse_condition(&self.tokens).ok();
             let held = parsed
                 .as_ref()
-                .map(|expr| crate::preprocess::condition::eval(expr, macros).is_true())
+                .map(|expr| preprocess::condition::eval(expr, macros).is_true())
                 // The same answer `evaluate` gives for tokens that do not parse: not decidable. No macro state can
                 // make them parse, so this is kept too — see the `fixed` note.
                 .unwrap_or(None);
@@ -250,9 +252,7 @@ fn a_replacement_can_change_the_parse(tokens: &[Token]) -> bool {
             continue;
         }
         // The two forms whose `(` introduces an operand rather than a call.
-        if token.text() == "defined"
-            || crate::preprocess::condition::is_a_builtin_operator(token.text())
-        {
+        if token.text() == "defined" || preprocess::condition::is_a_builtin_operator(token.text()) {
             continue;
         }
         return true;
@@ -270,9 +270,7 @@ fn a_replacement_can_change_the_parse(tokens: &[Token]) -> bool {
 /// Deliberately **not** generalised to "a constant expression" (`#if 0 && FOO`): that needs the parse this exists to
 /// avoid, and short-circuiting is the compiler's job, not this function's.
 fn a_constant_condition(tokens: &[Token]) -> Option<bool> {
-    let mut significant = tokens
-        .iter()
-        .filter(|token| !crate::token::is_trivia(token.kind));
+    let mut significant = tokens.iter().filter(|token| !token::is_trivia(token.kind));
     let only = significant.next()?;
     if significant.next().is_some() {
         return None;
@@ -312,7 +310,7 @@ fn is_defined(name: Option<&str>, macros: &impl MacroValues) -> Option<bool> {
         // [`crate::preprocess::cooked::supported_attribute`] could never be reached — `_NO_SPECIALIZATIONS_OF_TYPE_TRAITS`
         // expanded to nothing and `[[msvc::no_specializations(...)]]` was missing from the stream at
         // `xtr1common:27`.
-        if crate::preprocess::condition::is_a_builtin_operator(name) {
+        if preprocess::condition::is_a_builtin_operator(name) {
             return Some(true);
         }
 

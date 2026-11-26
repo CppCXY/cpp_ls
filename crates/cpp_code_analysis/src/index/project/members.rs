@@ -5,6 +5,15 @@
 //! facts, its base clauses substituted, its aliases resolved, and the standard's own fixed deductions.
 
 use super::*;
+use crate::DeclKind;
+use crate::FactGuard;
+use crate::FileView;
+use crate::ScopeId;
+use crate::ScopeKind;
+use crate::ScopeTree;
+use crate::Visibility;
+use crate::index;
+use crate::sema;
 
 /// Which member a `obj.member` or `ptr->member` at `offset` names.
 ///
@@ -34,8 +43,8 @@ use super::*;
 /// * `Unknown(UnparsableName)` — the offset is not on a member access at all.
 pub fn member_across_files(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -44,7 +53,7 @@ pub fn member_across_files(
     // callers that ask it many times over one file (the semantic-token pass asks it once per member access).
     member_across_files_with(
         &TypeMemo::default(),
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -61,15 +70,15 @@ pub fn member_across_files(
 /// pass on a 901-line file spent 1 150 ms here (docs/diagnostics-performance.md §3.3).
 pub(crate) fn member_across_files_with(
     memo: &TypeMemo,
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
-    let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
+    let Some(access) = sema::resolve::member_access_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
@@ -163,7 +172,7 @@ pub(crate) fn the_braced_initialiser_of(
     let NamedDeclaration::Here(binding) = named else {
         return None;
     };
-    let declarator = crate::sema::types::declarator_declaring(root, binding.name_range)?;
+    let declarator = sema::types::declarator_declaring(root, binding.name_range)?;
     let parent = declarator.parent()?;
     // **The list is wrapped**: `Pair p{1, 2.5}` is `InitDeclarator > [Declarator "p", Initializer "{1, 2.5}"]`, and the
     // `Initializer` holds the `InitListExpr`. One hop, not a search: a subtree search would also find a braced list in an
@@ -183,7 +192,7 @@ pub(crate) fn the_braced_initialiser_of(
 /// arguments), which is why a member inherited through a template base comes back with a finished type.
 pub(crate) fn a_member_of_the_enclosing_class(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     callee: &cpp_parser::CppSyntaxNode,
@@ -285,7 +294,7 @@ pub(crate) fn a_type_the_expression_names(
         return Some(spelled.to_string());
     }
     let names_a_type = match index.definition(spelled, path) {
-        Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+        Known::Yes(found) => found.fact.kind == DeclKind::Type,
         // **A name is a type when one of its declarations is one.** `std::string` is an alias (a `Type`) and also has a
         // constructor named `string`, so the name query answers `Ambiguous`; requiring *every* candidate to be a type
         // refused the head of `std::string{"three"}` and, with it, the whole `std::tuple{1, 2.5, std::string{"three"}}`
@@ -298,7 +307,7 @@ pub(crate) fn a_type_the_expression_names(
                 found
                     .found
                     .iter()
-                    .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                    .any(|declaration| declaration.fact.kind == DeclKind::Type)
             }),
         // **An inline namespace is not part of the name a reader writes.** `std::string` is
         // `using string = basic_string<char>;` inside `std::__cxx11`, so its qualified name is `std::__cxx11::string` and
@@ -312,7 +321,7 @@ pub(crate) fn a_type_the_expression_names(
                     found
                         .found
                         .iter()
-                        .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                        .any(|declaration| declaration.fact.kind == DeclKind::Type)
                 })
         }
     };
@@ -331,7 +340,7 @@ pub(crate) fn a_namespace_aliass_target(
     class: &str,
 ) -> Option<String> {
     let found = index.definition(class, path).value()?;
-    if found.fact.kind != crate::DeclKind::Namespace {
+    if found.fact.kind != DeclKind::Namespace {
         return None;
     }
     let written = found.fact.type_of.clone()?.to_string();
@@ -357,8 +366,8 @@ pub(crate) fn a_namespace_aliass_target(
 pub(crate) fn the_deduction_the_standard_fixes(
     name: &str,
     class_as_written: &str,
-    element_types: &[crate::sema::types::Type],
-) -> Option<Vec<crate::sema::types::Type>> {
+    element_types: &[sema::types::Type],
+) -> Option<Vec<sema::types::Type>> {
     let plain = class_as_written
         .rsplit("::")
         .next()
@@ -420,8 +429,8 @@ pub(crate) fn the_deduction_the_standard_fixes(
 pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     elements: &[cpp_parser::CppSyntaxNode],
@@ -432,20 +441,20 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     if spelled.contains('<') {
         return None;
     }
-    let class = crate::sema::types::parse_type_spelling(spelled);
-    let crate::sema::types::Type::Named { name, arguments } = &class else {
+    let class = sema::types::parse_type_spelling(spelled);
+    let sema::types::Type::Named { name, arguments } = &class else {
         return None;
     };
     if !arguments.is_empty() {
         return None;
     }
 
-    let element_types: Vec<crate::sema::types::Type> = elements
+    let element_types: Vec<sema::types::Type> = elements
         .iter()
         .filter_map(|element| {
             match type_of_expression_memoed(
                 memo,
-                &crate::sema::declarations::ShapeTable::new(),
+                &sema::declarations::ShapeTable::new(),
                 index,
                 declaring,
                 scopes,
@@ -503,7 +512,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     // started: a table that exists so that a walk is unnecessary cannot be read after it.
     if let Some(deduced) = the_deduction_the_standard_fixes(name, &class_as_written, &element_types)
     {
-        return Some(crate::sema::types::Type::Named {
+        return Some(sema::types::Type::Named {
             name: class_as_written,
             arguments: deduced,
         });
@@ -531,11 +540,11 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         return None;
     }
 
-    let mut agreed: Option<Vec<crate::sema::types::Type>> = None;
+    let mut agreed: Option<Vec<sema::types::Type>> = None;
     for constructor in listed
         .members
         .iter()
-        .filter(|member| member.fact.kind == crate::DeclKind::Function)
+        .filter(|member| member.fact.kind == DeclKind::Function)
         .filter(|member| member.fact.name == constructor_name)
     {
         let deduced = deduce_the_parameters(
@@ -545,7 +554,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         );
         // Every parameter must have been replaced: one left standing is not a deduction.
         let every = deduced.iter().all(|argument| {
-            !matches!(argument, crate::sema::types::Type::Named { name, .. }
+            !matches!(argument, sema::types::Type::Named { name, .. }
                 if parameters.iter().any(|parameter| parameter == name))
         });
         if !every {
@@ -558,7 +567,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         }
     }
 
-    agreed.map(|arguments| crate::sema::types::Type::Named {
+    agreed.map(|arguments| sema::types::Type::Named {
         name: name.clone(),
         arguments,
     })
@@ -575,18 +584,18 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
 /// strips) and for a substitution that does not land on a class.
 pub(crate) fn the_pointee_of_a_handle(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
-    arguments: &[crate::sema::types::Type],
-) -> Option<(String, Vec<crate::sema::types::Type>)> {
+    arguments: &[sema::types::Type],
+) -> Option<(String, Vec<sema::types::Type>)> {
     let written: Vec<String> = arguments
         .iter()
         .map(|argument| argument.to_string())
         .collect();
     let Known::Yes((fact, file)) = member_fact(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -626,7 +635,7 @@ pub(crate) fn the_pointee_of_a_handle(
             let declared = index.files_declaring(base_type_name(&name), path);
             declared
                 .iter()
-                .any(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                .any(|declaration| declaration.fact.kind == DeclKind::Type)
                 .then_some((name, arguments))
         }
         _ => None,
@@ -675,9 +684,9 @@ pub(crate) fn the_class_spelling(type_of: &Type) -> String {
 /// that wrote none has not said nothing, it has said "whatever the name it used stands for". See
 /// [`resolve_aliases_with_arguments`].
 pub(crate) fn member_access_class_and_arguments(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -719,7 +728,7 @@ pub(crate) fn member_access_class_and_arguments(
 /// about the program, and only one of them has a fix the reader can apply.
 pub(crate) fn offerable_members(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -775,7 +784,7 @@ pub(crate) fn offerable_members(
 /// offers only public members.
 pub(crate) fn classes_the_cursor_is_in(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -790,9 +799,9 @@ pub(crate) fn classes_the_cursor_is_in(
         .scope_chain(innermost)
         .into_iter()
         .filter(|scope| {
-            scopes.scope(*scope).is_some_and(|data| {
-                matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
-            })
+            scopes
+                .scope(*scope)
+                .is_some_and(|data| matches!(data.kind, ScopeKind::Class | ScopeKind::Enum))
         })
         .filter_map(|scope| scopes.qualification_prefix_of(scope))
         .collect();
@@ -887,13 +896,13 @@ pub(crate) fn classes_the_cursor_is_in(
 /// exposed: one `direct_members`, measured at 4–16 ms.
 pub fn own_members_of(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
 ) -> Known<Vec<(PathBuf, DeclFact)>> {
     own_members_of_with(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -904,9 +913,9 @@ pub fn own_members_of(
 
 /// [own_members_of], with the file's declaration table threaded in.
 pub fn own_members_of_with(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -918,7 +927,7 @@ pub fn own_members_of_with(
 ///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
 pub fn members_of(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -927,7 +936,7 @@ pub fn members_of(
     // [`members_of_with`] and `SemanticModel`'s cell — and this wrapper is what keeps every other caller of the
     // public query compiling without a parameter it would have nothing to pass.
     members_of_with(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -942,9 +951,9 @@ pub fn members_of(
 /// asks about many classes of one file must hand in **one** table: building it per class is what made a
 /// diagnostics pass quadratic (`docs/diagnostics-performance.md` §2.4 — 1 801 builds, 6.6 s of 7.2 s).
 pub fn members_of_with(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -1116,7 +1125,7 @@ impl ProjectIndex {
     /// found" would be a claim about a search that should not have been made. The answer is three-way underneath
     /// (`visibility_at`), and `Unknown` comes back **true**: a guard this layer cannot decide must not silence a
     /// finding, the same rule the declaration lookup follows.
-    pub fn the_guard_is_taken(&self, file: &Path, guard: crate::FactGuard, offset: usize) -> bool {
+    pub fn the_guard_is_taken(&self, file: &Path, guard: FactGuard, offset: usize) -> bool {
         self.a_guard_is_taken(file, guard, offset, None)
     }
 
@@ -1129,35 +1138,35 @@ impl ProjectIndex {
     pub(crate) fn a_guard_is_taken(
         &self,
         file: &Path,
-        guard: crate::FactGuard,
+        guard: FactGuard,
         offset: usize,
-        answered: Option<&HashMap<(String, u32, usize), crate::Visibility>>,
+        answered: Option<&HashMap<(String, u32, usize), Visibility>>,
     ) -> bool {
         let region = match guard {
-            crate::FactGuard::Unconditional => return true,
-            crate::FactGuard::Region(region) => region,
+            FactGuard::Unconditional => return true,
+            FactGuard::Region(region) => region,
         };
         // **Already answered by this query's one walk** — see `ProjectIndex::answer_the_guards`, which turns the
         // twenty-five 276-file walks of a colouring pass into one. Absent, the filter walks as it always did.
         if let Some(answers) = answered
             && let Some(answer) = answers.get(&(normalize(file), region, offset))
         {
-            return *answer != crate::Visibility::Inactive;
+            return *answer != Visibility::Inactive;
         }
         let key = (file.to_path_buf(), offset, region);
         if let Ok(known) = self.guard_answers.lock()
             && let Some(answer) = known.get(&key)
         {
-            return *answer != crate::Visibility::Inactive;
+            return *answer != Visibility::Inactive;
         }
-        let visibility = crate::index::environment::visibility_at(self, file, guard, offset);
+        let visibility = index::environment::visibility_at(self, file, guard, offset);
         if let Ok(mut known) = self.guard_answers.lock() {
             if known.len() >= MAX_GUARD_ANSWERS {
                 known.clear();
             }
             known.insert(key, visibility);
         }
-        visibility != crate::Visibility::Inactive
+        visibility != Visibility::Inactive
     }
 
     /// **Drop every memoized guard verdict about `path`** — called wherever the index changes for it.
@@ -1232,9 +1241,9 @@ impl ProjectIndex {
 }
 
 pub(crate) fn members_of_inner(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -1462,7 +1471,7 @@ pub(crate) fn members_of_inner(
                 .files_declaring(&head, path)
                 .into_iter()
                 .any(|declared| {
-                    declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+                    declared.fact.kind == DeclKind::Type && declared.fact.type_of.is_some()
                 });
             if head_is_an_alias {
                 let candidates = the_classes_a_base_clause_names(index, path, &written);
@@ -1595,9 +1604,9 @@ pub(crate) fn members_of_inner(
 /// class is in it, and from the fact the index holds otherwise — and falls back to `bases_of` when neither answers, so the
 /// walk is never worse than it was.
 pub(crate) fn the_base_clauses_of(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -1613,8 +1622,8 @@ pub(crate) fn the_base_clauses_of(
                 .find(|binding| binding.name.identifier_text() == Some(name))
         })
     {
-        return Known::Yes(crate::sema::declarations::declared_bases_of_with(
-            crate::sema::declarations::shapes_from(shapes, root),
+        return Known::Yes(sema::declarations::declared_bases_of_with(
+            sema::declarations::shapes_from(shapes, root),
             binding,
         ));
     }
@@ -1630,7 +1639,7 @@ pub(crate) fn the_base_clauses_of(
     // only a name), so the rule needs no preference beyond the fact's own flag. A name with no definition keeps the
     // first declaration, which is all there is.
     let candidates = index.files_declaring(&base, path);
-    let is_a_type = |declared: &VisibleDeclaration<'_>| declared.fact.kind == crate::DeclKind::Type;
+    let is_a_type = |declared: &VisibleDeclaration<'_>| declared.fact.kind == DeclKind::Type;
     let chosen = candidates
         .iter()
         .position(|declared| is_a_type(declared) && declared.fact.definition)
@@ -1700,7 +1709,7 @@ fn the_file_of_a_class_body(index: &ProjectIndex, path: &Path, class: &str) -> O
     let mut types: Vec<&ProjectDefinition> = decl
         .found
         .iter()
-        .filter(|one| one.fact.kind == crate::DeclKind::Type)
+        .filter(|one| one.fact.kind == DeclKind::Type)
         .collect();
     if types.is_empty() {
         return None;
@@ -1743,7 +1752,7 @@ pub(crate) fn substitute_a_base_clause(
     }
     let Some(declared) = candidates
         .iter()
-        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+        .find(|declared| declared.fact.kind == DeclKind::Type)
     else {
         return clause.to_string();
     };
@@ -1756,7 +1765,7 @@ pub(crate) fn substitute_a_base_clause(
         return clause.to_string();
     }
 
-    crate::sema::types::substituted_spelling(clause, &names, &arguments)
+    sema::types::substituted_spelling(clause, &names, &arguments)
 }
 
 /// Every declaration written **directly in** the class or namespace `class` names.
@@ -1833,7 +1842,7 @@ pub(crate) fn the_classes_a_base_clause_names(
             let parameters = index
                 .files_declaring(&head, path)
                 .into_iter()
-                .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+                .find(|declared| declared.fact.kind == DeclKind::Type)
                 .map(|declared| declared.fact.parameters().to_vec())
                 .unwrap_or_default();
             let scope = index
@@ -1851,8 +1860,7 @@ pub(crate) fn the_classes_a_base_clause_names(
             let Some(target) = fact.fact.type_of.clone() else {
                 return Vec::new();
             };
-            let substituted =
-                crate::sema::types::substituted_spelling(&target, &parameters, &arguments);
+            let substituted = sema::types::substituted_spelling(&target, &parameters, &arguments);
             if substituted == spelling {
                 return Vec::new();
             }
@@ -1866,16 +1874,13 @@ pub(crate) fn the_classes_a_base_clause_names(
         };
         let declared = index.files_declaring(&head, path);
         if let Some(alias) = declared.iter().find(|declared| {
-            declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+            declared.fact.kind == DeclKind::Type && declared.fact.type_of.is_some()
         }) {
             let Some(target) = alias.fact.type_of.clone() else {
                 return Vec::new();
             };
-            let substituted = crate::sema::types::substituted_spelling(
-                &target,
-                alias.fact.parameters(),
-                &arguments,
-            );
+            let substituted =
+                sema::types::substituted_spelling(&target, alias.fact.parameters(), &arguments);
             if substituted == spelling {
                 return Vec::new();
             }
@@ -1885,7 +1890,7 @@ pub(crate) fn the_classes_a_base_clause_names(
         // **The chain ends at a class**, which is the answer — `chosen<int>` is a base, not an alias.
         if declared
             .iter()
-            .any(|declared| declared.fact.kind == crate::DeclKind::Type)
+            .any(|declared| declared.fact.kind == DeclKind::Type)
         {
             return vec![without_typename];
         }
@@ -1925,7 +1930,7 @@ pub(crate) fn the_bool_a_trait_has(
     let facts = index.files_declaring(&head, path);
     let declarations: Vec<&VisibleDeclaration<'_>> = facts
         .iter()
-        .filter(|declared| declared.fact.kind == crate::DeclKind::Type)
+        .filter(|declared| declared.fact.kind == DeclKind::Type)
         .collect();
 
     let matches = |declared: &&&VisibleDeclaration<'_>| {
@@ -1957,9 +1962,9 @@ pub(crate) fn the_bool_a_trait_has(
 }
 
 pub(crate) fn direct_members(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -1990,7 +1995,7 @@ pub(crate) fn direct_members(
     {
         // **The file's shapes once, not once per member.** See [`fact_from_binding_with`] for the measurement: this
         // list is 151 members of `std::vector` on libstdc++, and the per-member form built the table 151 times.
-        let shapes = crate::sema::declarations::shapes_from(shapes, root);
+        let shapes = sema::declarations::shapes_from(shapes, root);
         return Known::Yes(
             data.bindings
                 .iter()
@@ -2021,7 +2026,7 @@ pub(crate) fn direct_members(
     if let Some(scope) = a_class_nested_in_another(scopes, class)
         && let Some(data) = scopes.scope(scope)
     {
-        let shapes = crate::sema::declarations::shapes_from(shapes, root);
+        let shapes = sema::declarations::shapes_from(shapes, root);
         let qualified = scopes
             .qualified_name_of(scope)
             .unwrap_or_else(|| class.to_string());
@@ -2134,7 +2139,7 @@ pub(crate) fn direct_members(
                 let names: std::collections::BTreeSet<String> = found
                     .found
                     .iter()
-                    .filter(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                    .filter(|declaration| declaration.fact.kind == DeclKind::Type)
                     .map(|declaration| declaration.fact.qualified_name())
                     .collect();
                 if let [qualified] = names.iter().collect::<Vec<_>>().as_slice() {
@@ -2165,16 +2170,13 @@ pub(crate) fn direct_members(
 ///
 /// A table with two of them is an ambiguity and answers `None`: guessing between two nested classes named `inner`
 /// would make a member list about a class the reader did not write, and a wrong member list is worse than no list.
-pub(crate) fn a_class_nested_in_another(
-    scopes: &crate::ScopeTree,
-    class: &str,
-) -> Option<crate::ScopeId> {
+pub(crate) fn a_class_nested_in_another(scopes: &ScopeTree, class: &str) -> Option<ScopeId> {
     let mut found = None;
     for (index, scope) in scopes.scopes().iter().enumerate() {
-        if scope.kind != crate::ScopeKind::Class || scope.name.as_deref() != Some(class) {
+        if scope.kind != ScopeKind::Class || scope.name.as_deref() != Some(class) {
             continue;
         }
-        let id = crate::ScopeId(index);
+        let id = ScopeId(index);
         match scopes.qualified_name_of(id) {
             // Keyed by the spelling asked about: the caller's own branch handles it.
             Some(qualified) if qualified == class => return None,

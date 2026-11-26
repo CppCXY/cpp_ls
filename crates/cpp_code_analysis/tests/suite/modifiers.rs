@@ -215,7 +215,7 @@ public:
 /// The two branches merge into one declaration, and the `#else` side was read as an old-style parameter list. Walking
 /// it for modifiers found a `static` inside the body and recorded `nvim_main` as `static int nvim_main`.
 #[test]
-fn a_conditional_branchs_static_is_not_the_definitions() {
+fn a_conditional_branches_static_is_not_the_definitions() {
     let source = "\
 #ifdef MAKE_LIB
 int nvim_main(int argc, char **argv);

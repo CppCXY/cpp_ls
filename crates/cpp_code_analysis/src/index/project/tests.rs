@@ -4,8 +4,22 @@
 //! machinery, which is the point of testing it from here.
 
 use super::{IncludeVisibility, ProjectIndex};
+use crate::CompilerConfig;
+use crate::CookedFile;
+use crate::DeclKind;
+use crate::FileIndexer;
+use crate::MacroDefinitions;
+use crate::Marked;
+use crate::MemoryFiles;
+use crate::NoMacroBodies;
+use crate::TranslationUnit;
+use crate::WalkCache;
+use crate::build_scopes;
 use crate::cache::SummaryKey;
+use crate::index;
 use crate::index::summarize;
+use crate::preprocess;
+use crate::summary;
 use crate::symbol::{Known, UnknownReason};
 use std::path::Path;
 
@@ -37,7 +51,7 @@ fn a_member_named_like_its_class_does_not_hide_the_class() {
     };
     assert_eq!(
         definition.fact.kind,
-        crate::DeclKind::Type,
+        DeclKind::Type,
         "the name `LSPHandle` resolved to {:?} in {}",
         definition.fact.kind,
         definition.file.display()
@@ -97,7 +111,7 @@ fn a_declaration_a_macro_makes_is_found_once_the_file_is_cooked() {
     ];
 
     let mut index = ProjectIndex::new();
-    let mut definitions = crate::MacroDefinitions::default();
+    let mut definitions = MacroDefinitions::default();
     for (path, source) in files {
         let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0));
         for include in &mut summary.includes {
@@ -124,27 +138,27 @@ fn a_declaration_a_macro_makes_is_found_once_the_file_is_cooked() {
             .map(|(_, source)| *source)
             .unwrap_or("")
     };
-    let unit = crate::TranslationUnit::walk(
+    let unit = TranslationUnit::walk(
         index.summary(api).expect("indexed"),
         |wanted| {
             index
                 .summary(wanted)
                 .map(|summary| (summary, text_of(wanted)))
         },
-        &crate::Marked::default(),
+        &Marked::default(),
         &mut definitions,
         false,
-        &crate::WalkCache::new(),
+        &WalkCache::new(),
     );
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
     let unit_definitions = unit.definitions();
     let view = unit.environment_of(api).expect("the unit reaches api.h");
-    let macros = crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, None, true);
-    let rendered = crate::preprocess::cooked::cook_with(source, &tokens, &macros).render();
+    let macros = preprocess::cooked::FileMacros::new(&view, &unit_definitions, None, true);
+    let rendered = preprocess::cooked::cook_with(source, &tokens, &macros).render();
 
-    let provider = crate::MemoryFiles::new();
-    let config = crate::CompilerConfig::default();
-    let indexer = crate::FileIndexer::new(&provider, &config);
+    let provider = MemoryFiles::new();
+    let config = CompilerConfig::default();
+    let indexer = FileIndexer::new(&provider, &config);
     let indexed = indexer.index_rendering(api, &rendered, SummaryKey::new(0, 0));
     assert_eq!(indexed.mapped.dropped, 0, "every range landed in the file");
     index.insert_cooked(api, indexed.into());
@@ -175,10 +189,10 @@ fn a_declaration_both_readings_found_is_one_candidate() {
     let mut index = index(&[("/p/a.h", source)]);
 
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-    let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
-    let provider = crate::MemoryFiles::new();
-    let config = crate::CompilerConfig::default();
-    let indexer = crate::FileIndexer::new(&provider, &config);
+    let rendered = preprocess::cooked::cook(source, &tokens).render();
+    let provider = MemoryFiles::new();
+    let config = CompilerConfig::default();
+    let indexer = FileIndexer::new(&provider, &config);
     let indexed = indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
     assert_eq!(indexed.mapped.dropped, 0);
     index.insert_cooked(Path::new("/p/a.h"), indexed.into());
@@ -188,12 +202,12 @@ fn a_declaration_both_readings_found_is_one_candidate() {
 }
 
 /// A cooked reading of `source`, as [`crate::Session::cook`] builds one: the rendering indexed and mapped back.
-fn cooked_reading_of(path: &str, source: &str) -> crate::CookedFile {
+fn cooked_reading_of(path: &str, source: &str) -> CookedFile {
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-    let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
-    let provider = crate::MemoryFiles::new();
-    let config = crate::CompilerConfig::default();
-    let indexer = crate::FileIndexer::new(&provider, &config);
+    let rendered = preprocess::cooked::cook(source, &tokens).render();
+    let provider = MemoryFiles::new();
+    let config = CompilerConfig::default();
+    let indexer = FileIndexer::new(&provider, &config);
     indexer
         .index_rendering(Path::new(path), &rendered, SummaryKey::new(0, 0))
         .into()
@@ -860,7 +874,7 @@ fn a_local_declaration_is_answered_without_looking_in_the_index() {
     let (index, tree) = analysed(&[("/p/widget.h", "int count;\n")], "/p/main.cpp", source);
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -907,7 +921,7 @@ fn another_files_local_is_never_the_answer() {
     assert_eq!(helper.scope, None, "…which is why the scope cannot say so");
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -938,7 +952,7 @@ fn another_files_local_is_never_the_answer() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -971,7 +985,7 @@ fn a_call_resolves_through_the_return_type_of_a_header() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::member_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1002,7 +1016,7 @@ fn a_name_only_a_header_declares_is_found_through_the_index() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1032,7 +1046,7 @@ fn a_qualified_name_resolves_into_an_included_header() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1062,7 +1076,7 @@ fn a_qualified_name_is_not_answered_by_a_same_named_declaration_elsewhere() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1093,7 +1107,7 @@ fn a_global_spelling_does_not_match_a_namespaced_declaration() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1128,7 +1142,7 @@ fn member_of(
 ) -> Known<super::ProjectDefinition> {
     let (index, tree) = analysed(files, from, source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     super::member_across_files(
         &index,
@@ -1336,7 +1350,7 @@ fn a_gnu_label_declaration_binds_labels_not_variables() {
             .unwrap_or_else(|| panic!("`{name}` is declared by the `__label__` line"));
         assert_eq!(
             fact.kind,
-            crate::summary::DeclKind::Other,
+            summary::DeclKind::Other,
             "`{name}` is a label, not a variable"
         );
         assert_eq!(fact.type_of, None, "a label writes no type");
@@ -1420,7 +1434,7 @@ fn a_member_access_reaches_a_class_in_an_included_header() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::member_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1826,7 +1840,7 @@ fn a_member_inherited_across_a_header_resolves() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::member_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1896,7 +1910,7 @@ fn a_local_declaration_still_wins_when_the_header_also_has_the_name() {
     );
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -1929,7 +1943,7 @@ fn members_of_class(
 ) -> Known<super::MemberList> {
     let (index, tree) = analysed(files, from, source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     super::members_of(&index, &scopes, &root, Path::new(from), class)
 }
@@ -2011,7 +2025,7 @@ fn an_elaborated_type_specifier_does_not_declare_the_tag() {
     let (index, tree) = analysed(&[("/p/corpus.h", header)], "/p/bits.c", source);
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -2041,7 +2055,7 @@ fn an_elaborated_enum_specifier_does_not_declare_the_tag() {
     let (index, tree) = analysed(&[("/p/corpus.h", header)], "/p/bits.c", source);
 
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
     let found = super::definition_across_files(
         &index,
         &mut |_: &Path| None,
@@ -2438,7 +2452,7 @@ fn a_member_list_crosses_a_header_and_keeps_the_base_tagged() {
         source,
     );
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let found = super::members_of(&index, &scopes, &root, Path::new("/p/main.cpp"), "Derived");
     let Known::Yes(list) = found else {
@@ -2584,7 +2598,7 @@ fn a_member_added_to_a_base_appears_without_reindexing_the_derived_class() {
 
     let tree = cpp_parser::CppParser::parse(main, cpp_parser::ParserConfig::default());
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let listed = |index: &ProjectIndex| match super::members_of(
         index,
@@ -2660,7 +2674,7 @@ fn completions_at(
 ) -> Known<super::MemberCompletions> {
     let (index, tree) = analysed_while_typing(files, from, source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     super::member_completions_at(
         &index,
@@ -2976,7 +2990,7 @@ fn the_members_offered_cross_a_header() {
         source,
     );
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let found = super::member_completions_at(
         &index,
@@ -3094,7 +3108,7 @@ fn a_cursor_on_the_object_asks_about_the_object() {
     let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
     let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let found = super::member_completions_at(
         &index,
@@ -3119,7 +3133,7 @@ fn a_cursor_inside_a_name_filters_by_the_part_before_it() {
     let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
     let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     // Two characters into `size`.
     let cursor = at(source, "w.size") + 2 + 2;
@@ -3171,7 +3185,7 @@ fn a_jump_on_a_member_that_is_not_written_yet_has_nothing_to_jump_to() {
     let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.\n}\n";
     let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let found = super::member_across_files(
         &index,
@@ -3206,7 +3220,7 @@ fn names_at(
 ) -> Known<super::NameCompletions> {
     let (index, tree) = analysed_while_typing(files, from, source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     super::name_completions_at(
         &index,
@@ -3228,7 +3242,7 @@ fn names_at_blank(
 ) -> Known<super::NameCompletions> {
     let (index, tree) = analysed_while_typing(files, from, source);
     let root = tree.get_red_root();
-    let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+    let scopes = build_scopes(&root, &NoMacroBodies);
 
     let at = source
         .find("void f()")
@@ -3967,7 +3981,7 @@ fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
         let summary = index
             .summary(Path::new(path))
             .expect("the fixture is summarized");
-        crate::index::CookedFile::declarations(summary.declarations.clone())
+        index::CookedFile::declarations(summary.declarations.clone())
     };
     // The reading a render produces for the header, filed on its own.
     index.insert_cooked(Path::new("/p/a.h"), cooked_of(&index, "/p/a.h"));
@@ -3977,7 +3991,7 @@ fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
         7,
         cooked_of(&index, "/p/main.cpp"),
     );
-    index.insert_cooked_in_a_program(Path::new("/p/a.h"), 7, crate::index::CookedFile::default());
+    index.insert_cooked_in_a_program(Path::new("/p/a.h"), 7, index::CookedFile::default());
 
     let members = index
         .declarations_in("Widget", Path::new("/p/main.cpp"))

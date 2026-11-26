@@ -29,6 +29,25 @@
 //! honest answer rather than a missing one: the file said `#include "widget.h"` and nothing here knows where
 //! that is.
 
+use crate::CookedDiagnostic;
+use crate::DeclFact;
+use crate::FilePreprocessing;
+use crate::ImportOutcome;
+use crate::ImportTarget;
+use crate::IndexedRendering;
+use crate::IndexedUnit;
+use crate::Marked;
+use crate::ModuleInfo;
+use crate::ModuleReading;
+use crate::ModuleScanner;
+use crate::ModuleUnit;
+use crate::RenderedUnit;
+use crate::directive;
+use crate::guards;
+use crate::preprocess;
+use crate::sema;
+use crate::summary;
+use crate::summary_codec;
 // Until the splice is in, the type and its fields are read by nothing but their own tests, and an
 // allow here is the honest way to say so rather than a green build bought by deleting the tests.
 #[allow(dead_code)]
@@ -114,7 +133,7 @@ pub struct FileIndexer<'a, F: FileProvider> {
     dead_macros: Vec<usize>,
     /// **What the compilation defines**, which no file in the closure knows: `__cplusplus` and the rest of the
     /// compiler's own names. See [`FileIndexer::with_seed`].
-    seed: Option<&'a crate::Marked>,
+    seed: Option<&'a Marked>,
     /// The includes a scan already resolved — see [`FileIndexer::scan_includes`]. Resolving an include is a
     /// filesystem search, so a caller that has done it once passes the answers along instead of paying twice.
     scanned: Option<&'a ScannedIncludes>,
@@ -131,7 +150,7 @@ pub struct ScannedIncludes {
     found: std::collections::HashMap<
         usize,
         (
-            crate::preprocess::directive::IncludeForm,
+            preprocess::directive::IncludeForm,
             Box<str>,
             bool,
             Option<PathBuf>,
@@ -152,7 +171,7 @@ impl ScannedIncludes {
     fn resolved(
         &self,
         at: usize,
-        include: &crate::preprocess::directive::Include,
+        include: &preprocess::directive::Include,
     ) -> Option<Option<PathBuf>> {
         let (form, target, is_next, resolved) = self.found.get(&at)?;
         (*form == include.form && **target == *include.target && *is_next == include.is_next)
@@ -234,7 +253,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     ///
     /// The same value the store was seeded with (`SummaryStore::with_macros`), so that there is one answer to what
     /// the compilation defines rather than two.
-    pub fn with_seed(mut self, seed: &'a crate::Marked) -> Self {
+    pub fn with_seed(mut self, seed: &'a Marked) -> Self {
         self.seed = Some(seed);
         self
     }
@@ -352,7 +371,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let directory = path.parent().unwrap_or(Path::new("."));
 
         let mut scanned = ScannedIncludes::default();
-        for spanned in crate::preprocess::directive::scan_directives(source, &tokens) {
+        for spanned in preprocess::directive::scan_directives(source, &tokens) {
             let Directive::Include(include) = &spanned.directive else {
                 continue;
             };
@@ -412,9 +431,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     pub fn index_rendering(
         &self,
         path: &Path,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
         key: SummaryKey,
-    ) -> crate::IndexedRendering {
+    ) -> IndexedRendering {
         // **The text this reading is built from**, written out when `CPPLS_DUMP_RENDERING_DIR` names a directory.
         //
         // A parse that goes wrong only here cannot be seen in `inspect tree`, which reads the file's own text, and
@@ -444,7 +463,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 .reported_span(range)
                 .or_else(|| rendered.reported_at(range.start_offset));
             match placed {
-                Some(range) => diagnostics.push(crate::CookedDiagnostic {
+                Some(range) => diagnostics.push(CookedDiagnostic {
                     range,
                     message: error.message.clone(),
                 }),
@@ -452,7 +471,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             }
         }
 
-        crate::IndexedRendering {
+        IndexedRendering {
             summary,
             rendered: std::sync::Arc::new(rendered.clone()),
             mapped: report,
@@ -488,9 +507,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         &self,
         path: &Path,
         source: &str,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
         key: SummaryKey,
-    ) -> crate::IndexedRendering {
+    ) -> IndexedRendering {
         let mut indexed = { self.index_rendering(path, rendered, key) };
         // **The directive half, unless the caller read it already** — see [`FileIndexer::with_directives`]. The
         // order is the architecture's (`directives → unit → parse`), and the caller that needed the directives *first*
@@ -590,9 +609,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     pub fn index_unit_rendering(
         &self,
         root: &Path,
-        stream: &crate::RenderedUnit,
+        stream: &RenderedUnit,
         key: SummaryKey,
-    ) -> crate::IndexedUnit {
+    ) -> IndexedUnit {
         // Built afresh for each parse: a configuration is consumed by the parser it is given to.
         //
         // **No macro environment** — see the note in [`FileIndexer::index`], and note that this is the one parse
@@ -659,10 +678,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
 
-        let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
+        let mut files: Vec<(std::path::PathBuf, CookedFile)> = stream
             .files
             .iter()
-            .map(|path| (path.clone(), crate::CookedFile::default()))
+            .map(|path| (path.clone(), CookedFile::default()))
             .collect();
         let mut unplaced = 0usize;
         let errors = tree.get_errors().len();
@@ -688,8 +707,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // summary had lost `visit_once` — gave the class **108 members, 18 of them named `EndLine`**, one per copy of
         // the same declaration at the same offset, and the hover drew one line for each. The same rule for a
         // `#define`, whose name range is the position that names it.
-        let mut merged: Vec<(std::path::PathBuf, crate::CookedFile)> =
-            Vec::with_capacity(files.len());
+        let mut merged: Vec<(std::path::PathBuf, CookedFile)> = Vec::with_capacity(files.len());
         let mut where_to: std::collections::HashMap<std::path::PathBuf, usize> =
             std::collections::HashMap::new();
         // The sites each merged entry already holds, parallel to `merged`.
@@ -745,7 +763,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         }
         let files = merged;
 
-        crate::IndexedUnit {
+        IndexedUnit {
             files,
             unplaced,
             tokens: stream.len(),
@@ -790,17 +808,15 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // `0L`, and a table that keeps all three answers `0L` for a file compiled as C++20. See
             // [`preprocess_with`], which is where the rule and its cost are stated.
             match self.seed {
-                Some(seed) => {
-                    crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed)
-                }
-                None => crate::preprocess::preprocess(source, tree.get_tokens()),
+                Some(seed) => preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed),
+                None => preprocess::preprocess(source, tree.get_tokens()),
             }
         };
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
         let evidence: &dyn cpp_parser::MacroBodies = match self.bodies {
             Some(bodies) => bodies,
-            None => &crate::sema::scopes::NoMacroBodies,
+            None => &sema::scopes::NoMacroBodies,
         };
         let scopes = build_scopes_with(&root, evidence, keep_locals);
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
@@ -909,7 +925,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             guards.visit_once = preprocessing.directives.iter().any(|spanned| {
                 matches!(
                     &spanned.directive,
-                    crate::directive::Directive::Pragma { tokens }
+                    directive::Directive::Pragma { tokens }
                         if tokens.first().is_some_and(|token| token.text() == "once")
                 )
             });
@@ -955,7 +971,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // **Which names this file mentions**, so that a references query can skip it without reading it. Built
             // from the tree the parse just produced — the identifiers are already there, and a filter built from the
             // *text* would count the names inside comments and strings. See [`FileSummary::use_filter`].
-            use_filter: crate::summary::use_filter_of(&root),
+            use_filter: summary::use_filter_of(&root),
             modules,
         }
     }
@@ -995,8 +1011,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // same reason.
         fold_quoted_header_names(source, &mut tokens);
         let preprocessing = match self.seed {
-            Some(seed) => crate::preprocess::preprocess_with_a_seed(source, &tokens, seed),
-            None => crate::preprocess::preprocess(source, &tokens),
+            Some(seed) => preprocess::preprocess_with_a_seed(source, &tokens, seed),
+            None => preprocess::preprocess(source, &tokens),
         };
 
         let mut interner = PathInterner::new(cfg!(windows));
@@ -1038,7 +1054,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         macros.sort_by_key(|fact| fact.range.start_offset);
         includes.sort_by_key(|fact| fact.range.start_offset);
 
-        let mut guards = crate::summary::SummaryGuards::default();
+        let mut guards = summary::SummaryGuards::default();
         let mut guarded: Vec<(&mut FactGuard, usize)> = macros
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
@@ -1057,7 +1073,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         guards.visit_once = preprocessing.directives.iter().any(|spanned| {
             matches!(
                 &spanned.directive,
-                crate::directive::Directive::Pragma { tokens }
+                directive::Directive::Pragma { tokens }
                     if tokens.first().is_some_and(|token| token.text() == "once")
             )
         });
@@ -1086,8 +1102,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // **From the tokens**, which is what this function has: the filter's contract is that a `false` is
             // certain, and the token stream is the file's whole text — every branch, every macro body. See
             // [`crate::summary::use_filter_of_tokens`].
-            use_filter: crate::summary::use_filter_of_tokens(source, &tokens),
-            modules: crate::ModuleReading::default(),
+            use_filter: summary::use_filter_of_tokens(source, &tokens),
+            modules: ModuleReading::default(),
         }
     }
 }
@@ -1107,8 +1123,8 @@ fn modules_of<F: FileProvider>(
     including: &Path,
     resolver: &IncludeResolver<'_, F>,
     interner: &mut PathInterner,
-) -> crate::ModuleReading {
-    let info = crate::ModuleInfo::from_tree(root);
+) -> ModuleReading {
+    let info = ModuleInfo::from_tree(root);
 
     // **A header unit is a header**, and `import <vector>;` finds it by the same search `#include <vector>` uses —
     // so the same resolver is asked, and a second implementation of "which `vector` did you mean" does not exist to
@@ -1121,13 +1137,13 @@ fn modules_of<F: FileProvider>(
         .imports
         .iter()
         .filter_map(|declaration| match &declaration.target {
-            crate::ImportTarget::HeaderUnit { name, is_angle } => {
-                let include = crate::directive::Include {
+            ImportTarget::HeaderUnit { name, is_angle } => {
+                let include = directive::Include {
                     target: name.to_string().into(),
                     form: if *is_angle {
-                        crate::directive::IncludeForm::Angle
+                        directive::IncludeForm::Angle
                     } else {
-                        crate::directive::IncludeForm::Quote
+                        directive::IncludeForm::Quote
                     },
                     is_next: false,
                 };
@@ -1156,7 +1172,7 @@ fn modules_of<F: FileProvider>(
     // state — nothing is known about it — rather than an empty partition.
     let partitions: Vec<std::path::PathBuf> = match info.module_name.as_deref() {
         Some(module) if info.has_an_imported_partition() => {
-            let mut scanner = crate::ModuleScanner::new(resolver.files(), resolver.config());
+            let mut scanner = ModuleScanner::new(resolver.files(), resolver.config());
             let mut found = Vec::new();
 
             for declaration in &info.imports {
@@ -1164,7 +1180,7 @@ fn modules_of<F: FileProvider>(
                     continue;
                 };
 
-                if let crate::ImportOutcome::Resolved(unit) =
+                if let ImportOutcome::Resolved(unit) =
                     scanner.resolve_partition(Some(module), name, including, interner)
                     && let Some(entry) = scanner.units().iter().find(|entry| entry.file == unit)
                 {
@@ -1177,7 +1193,7 @@ fn modules_of<F: FileProvider>(
         _ => Vec::new(),
     };
 
-    crate::ModuleReading {
+    ModuleReading {
         module: info.module_name,
         partition: info.partition_name,
         // **`is_interface` is `ModuleUnit::is_interface`, not `== InterfaceUnit`.** A partition has two unit kinds
@@ -1185,7 +1201,7 @@ fn modules_of<F: FileProvider>(
         // interface variant answered `false` for every partition interface unit there is, which is how this was
         // written first. `ModuleUnit` already states the rule (and `exports_to_importers` states the *different*
         // question a module name asks); this is the caller that has to use it.
-        is_interface: info.unit.is_some_and(crate::ModuleUnit::is_interface),
+        is_interface: info.unit.is_some_and(ModuleUnit::is_interface),
         imports: info
             .imports
             .iter()
@@ -1234,7 +1250,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
 
             Some(MacroFact {
                 name: definition.name.to_string(),
-                kind: crate::summary::MacroKind::Definition,
+                kind: summary::MacroKind::Definition,
                 function_like: definition.is_function_like(),
                 body: macro_body_shape(definition),
                 value: macro_value(definition),
@@ -1244,7 +1260,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 // inside the same conditional region as the directive that wrote it — a `#define` cannot span an
                 // `#endif`.
                 range: definition.name_range,
-                guard: crate::summary::FactGuard::Unconditional,
+                guard: summary::FactGuard::Unconditional,
                 // **Where the body is**, derived from the body's own tokens rather than searched for in the
                 // directive's text: `MacroDef::body.tokens` each carry their range, so the span from the first
                 // to the last *is* the replacement list. `None` for an empty body (`#define FOO`), which is the
@@ -1257,7 +1273,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
         }
         Directive::Undef { name: Some(name) } => Some(MacroFact {
             name: name.to_string(),
-            kind: crate::summary::MacroKind::Undefinition,
+            kind: summary::MacroKind::Undefinition,
             function_like: false,
             // Nothing to say about a body, and saying `Unknown` is the honest way to say it.
             body: cpp_parser::MacroBody::Unknown,
@@ -1268,7 +1284,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             // comment under it, and a jump to an #undef should land on the line that wrote it.
             range: spanned.line,
             body_range: None,
-            guard: crate::summary::FactGuard::Unconditional,
+            guard: summary::FactGuard::Unconditional,
             settles_the_name: false,
         }),
         _ => None,
@@ -1282,7 +1298,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
 /// function-like macro is not a value at all (`#if F(x)` is not how a macro is asked about), and neither is a body
 /// of two tokens, a body that is a name, or an empty body: a condition asking about any of them is `Unknown`, and
 /// storing a spelling that no evaluator can use would only make the cache bigger.
-fn macro_value(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<str>> {
+fn macro_value(definition: &preprocess::macros::MacroDef) -> Option<Box<str>> {
     if definition.is_function_like() {
         return None;
     }
@@ -1307,7 +1323,7 @@ fn macro_value(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<s
 /// `_STL_LANG` is `__cplusplus`, which is itself a macro with a value. `vcruntime.h` writes exactly that, and with
 /// the alias unreadable `_HAS_CXX17` never became defined — so every `#if _HAS_CXX17` below it, including the one
 /// around `<atomic>` in `<memory>`, was undecidable.
-fn macro_alias(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<str>> {
+fn macro_alias(definition: &preprocess::macros::MacroDef) -> Option<Box<str>> {
     // `#define A(x) x` used without arguments is a name, not `x`: only an object-like macro aliases another.
     if definition.is_function_like() {
         return None;
@@ -1331,16 +1347,15 @@ fn macro_alias(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<s
 /// the answer is an index rather than a boolean.
 /// [own_guard_region] for a caller with **no tree** — see [FileIndexer::directive_summary].
 fn own_guard_region_from_tokens(
-    preprocessing: &crate::FilePreprocessing,
+    preprocessing: &FilePreprocessing,
     tokens: &[cpp_parser::CppTokenData],
 ) -> Option<usize> {
-    match crate::guards::detect_guard_from_tokens(&preprocessing.directives, tokens) {
-        crate::guards::Guard::Macro(_) => Some(0),
-        crate::guards::Guard::PragmaOnce => {
-            crate::guards::has_a_macro_guard_from_tokens(&preprocessing.directives, tokens)
-                .then_some(0)
+    match guards::detect_guard_from_tokens(&preprocessing.directives, tokens) {
+        guards::Guard::Macro(_) => Some(0),
+        guards::Guard::PragmaOnce => {
+            guards::has_a_macro_guard_from_tokens(&preprocessing.directives, tokens).then_some(0)
         }
-        crate::guards::Guard::None => None,
+        guards::Guard::None => None,
     }
 }
 
@@ -1426,9 +1441,7 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 /// expander hands *its* token slice to the paste operator, whose positions were recorded against the body as written —
 /// so changing the start would move every `##` in the project by one token, which is the X-macro paste this interacts
 /// with.
-fn body_range_of(
-    definition: &crate::preprocess::macros::MacroDef,
-) -> Option<cpp_parser::SourceRange> {
+fn body_range_of(definition: &preprocess::macros::MacroDef) -> Option<cpp_parser::SourceRange> {
     let first = definition.body.tokens.first()?;
     let start = first.range.start_offset;
     let end = match definition.body.significant().last() {
@@ -1440,7 +1453,7 @@ fn body_range_of(
         end.saturating_sub(start),
     ))
 }
-fn macro_body_shape(definition: &crate::preprocess::macros::MacroDef) -> cpp_parser::MacroBody {
+fn macro_body_shape(definition: &preprocess::macros::MacroDef) -> cpp_parser::MacroBody {
     use cpp_parser::CppTokenKind;
     use cpp_parser::MacroBody;
 
@@ -1573,7 +1586,7 @@ fn is_compiler_specifier_macro(tokens: &[cpp_parser::CppTokenKind], spelling: &s
 }
 
 /// The spelling of a macro body's first significant token, for the tests that have to read it by name.
-fn first_spelling(definition: &crate::preprocess::macros::MacroDef) -> &str {
+fn first_spelling(definition: &preprocess::macros::MacroDef) -> &str {
     definition
         .body
         .significant()
@@ -1632,10 +1645,10 @@ fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
 /// and not from the program's, because the program's had read a text that was no longer the file's. With the fence
 /// gone there is one parse of one stream, and every fact from it belongs to the file the fact was written in.
 fn file_what_was_found(
-    declarations: Vec<crate::DeclFact>,
+    declarations: Vec<DeclFact>,
     tree: &CppSyntaxTree,
-    stream: &crate::RenderedUnit,
-    files: &mut [(std::path::PathBuf, crate::CookedFile)],
+    stream: &RenderedUnit,
+    files: &mut [(std::path::PathBuf, CookedFile)],
     unplaced: &mut usize,
 ) {
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
@@ -1727,7 +1740,7 @@ fn include_fact<F: FileProvider>(
         resolved,
         is_next: include.is_next,
         range,
-        guard: crate::summary::FactGuard::Unconditional,
+        guard: summary::FactGuard::Unconditional,
     })
 }
 
@@ -1742,7 +1755,7 @@ fn include_fact<F: FileProvider>(
 #[allow(dead_code)]
 pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::Result<PathBuf> {
     let path = summary.key.path_under(cache_directory);
-    let bytes = crate::summary_codec::encode(summary);
+    let bytes = summary_codec::encode(summary);
 
     if let Some(directory) = path.parent() {
         std::fs::create_dir_all(directory)?;
@@ -1770,7 +1783,7 @@ pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::
 #[allow(dead_code)]
 pub fn read_summary(path: &Path) -> Result<FileSummary, SummaryReadError> {
     let bytes = std::fs::read(path).map_err(SummaryReadError::Io)?;
-    crate::summary_codec::decode(&bytes).map_err(SummaryReadError::Decode)
+    summary_codec::decode(&bytes).map_err(SummaryReadError::Decode)
 }
 
 /// Why a stored summary could not be read.
@@ -1798,10 +1811,13 @@ mod tests {
     use super::{FileIndexer, include_fact, macro_body_shape, summarize, write_summary};
     use crate::cache::SummaryKey;
     use crate::file::paths::{FileProvider, MemoryFiles, PathInterner};
+    use crate::include;
     use crate::include::IncludeResolver;
     use crate::include::config::CompilerConfig;
+    use crate::preprocess;
     use crate::preprocess::directive::{Directive, IncludeForm};
     use crate::preprocess::macros::MacroTable;
+    use crate::summary;
     use crate::summary::{DeclKind, FactGuard, MacroKind};
     use cpp_parser::{CppParser, MacroBody, ParserConfig};
     use std::path::{Path, PathBuf};
@@ -1810,7 +1826,7 @@ mod tests {
         SummaryKey::new(0, 0)
     }
 
-    fn summary(source: &str) -> crate::summary::FileSummary {
+    fn summary(source: &str) -> summary::FileSummary {
         summarize(Path::new("/p/widget.cpp"), source, key())
     }
 
@@ -2063,7 +2079,7 @@ mod tests {
     }
 
     /// The facts about `name`, with their guards and the settling flag, for a short assertion.
-    fn macro_facts(source: &str, name: &str) -> Vec<(crate::summary::MacroKind, FactGuard, bool)> {
+    fn macro_facts(source: &str, name: &str) -> Vec<(summary::MacroKind, FactGuard, bool)> {
         summary(source)
             .macros
             .iter()
@@ -2355,7 +2371,7 @@ mod tests {
         // searched the local directory for `<vector>` would find a project's own file of that name and shadow
         // the standard header.
         let mut config = CompilerConfig::default();
-        config.include_paths = vec![crate::include::config::IncludePath::system("/usr/include")];
+        config.include_paths = vec![include::config::IncludePath::system("/usr/include")];
 
         let indexer = FileIndexer::new(&files, &config);
         let summary = indexer.index(
@@ -2427,7 +2443,7 @@ mod tests {
 
         for (source, expected) in cases {
             let tree = CppParser::parse(source, ParserConfig::default());
-            let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
+            let preprocessing = preprocess::preprocess(source, tree.get_tokens());
 
             let Directive::Define(define) = &preprocessing.directives[0].directive else {
                 panic!("{source:?} must be a define");
@@ -2448,7 +2464,7 @@ mod tests {
         // it an expression would be right in this case and wrong for a statement that happens to be written that
         // way, so the answer is `Unknown` — which still rules out the call reading.
         let tree = CppParser::parse("#define A (a) + (b)", ParserConfig::default());
-        let preprocessing = crate::preprocess::preprocess("#define A (a) + (b)", tree.get_tokens());
+        let preprocessing = preprocess::preprocess("#define A (a) + (b)", tree.get_tokens());
 
         let Directive::Define(define) = &preprocessing.directives[0].directive else {
             panic!("must be a define");
@@ -2464,7 +2480,7 @@ mod tests {
             "#include <nonexistent_xyz>\nstruct W { int a; };\n",
             ParserConfig::default(),
         );
-        let preprocessing = crate::preprocess::preprocess(
+        let preprocessing = preprocess::preprocess(
             "#include <nonexistent_xyz>\nstruct W { int a; };\n",
             tree.get_tokens(),
         );

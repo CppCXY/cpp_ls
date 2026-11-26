@@ -30,6 +30,8 @@
 //! passes that decision through. It logs how many were left, because the protocol's `WorkspaceEdit` has nowhere to
 //! put the caveat, and a rename that silently skipped two occurrences would be a claim the user cannot check.
 
+use crate::handlers;
+use crate::util;
 use std::collections::HashMap;
 
 use cpp_code_analysis::{Known, Session};
@@ -78,7 +80,7 @@ pub async fn on_prepare_rename(
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
-        let offset = crate::util::offset_at_position(&view, position)?;
+        let offset = util::offset_at_position(&view, position)?;
         // **A macro first, then a symbol.** The two paths ask the same question of different layers: a macro lives in
         // the preprocessor's table, a symbol in the index. A cursor is on one or the other, never both, so the order
         // does not change an answer; it only decides which layer is asked first.
@@ -111,7 +113,7 @@ pub async fn on_rename(
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view_of_the_file(&path)?;
-        let offset = crate::util::offset_at_position(&view, position)?;
+        let offset = util::offset_at_position(&view, position)?;
 
         workspace_edit_of_renaming_a_macro(session, &view, offset, &new_name)
             .or_else(|| workspace_edit_of_renaming_a_symbol(session, &view, offset, &new_name))
@@ -246,7 +248,7 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
         });
     }
 
-    let found = crate::handlers::references::name_level_offsets(session, view, offset, true);
+    let found = handlers::references::name_level_offsets(session, view, offset, true);
     if found.is_empty() {
         log::debug!("refusing to rename `{name}`: no declaration was found for it");
         return None;
@@ -256,7 +258,7 @@ pub fn workspace_edit_of_renaming_a_symbol<F: cpp_code_analysis::FileProvider + 
     if let Some(outside) = found
         .iter()
         .map(|(file, _)| file)
-        .find(|file| !crate::util::is_inside(file, session.root()))
+        .find(|file| !util::is_inside(file, session.root()))
     {
         log::warn!(
             "refusing to rename `{name}`: {} is outside the project",
@@ -354,7 +356,7 @@ pub fn workspace_edit_of_renaming_a_macro<F: cpp_code_analysis::FileProvider + C
         .files
         .iter()
         .map(|file| &file.file)
-        .find(|file| !crate::util::is_inside(file, session.root()))
+        .find(|file| !util::is_inside(file, session.root()))
     {
         log::warn!(
             "refusing to rename `{}`: {} is outside the project",

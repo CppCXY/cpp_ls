@@ -64,6 +64,7 @@
 //! An empty popup is still the symptom to watch for. The fix for it is the hot set and the per-file reads, **never a
 //! global wait**.
 
+use crate::util;
 /// **How many files one pull request may index** — the bound that was missing, and the 102 seconds it cost.
 ///
 /// [`Session::index_everything`] loops until the queue is **empty**, so a caller that asks for it asks for the whole
@@ -247,7 +248,7 @@ impl AnalysisState {
         let path = path.to_path_buf();
         self.run_blocking("a completion's reading", move |session| {
             let editable = session.view_of_the_file(&path)?;
-            let offset = crate::util::file_offset_at_position(&editable, position)?;
+            let offset = util::file_offset_at_position(&editable, position)?;
             let typed = identifier_before(&editable.source, offset.get());
             let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
                 !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
@@ -1161,6 +1162,7 @@ impl Default for AnalysisState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers;
     use cpp_code_analysis::CompilerConfig;
 
     /// **Diagnostics for a file nobody has indexed are still an answer.**
@@ -1224,10 +1226,7 @@ mod tests {
         );
         let diagnostics = state
             .with_snapshot(|session| {
-                crate::handlers::diagnostic::diagnose_file(
-                    session,
-                    std::path::Path::new("/p/main.cpp"),
-                )
+                handlers::diagnostic::diagnose_file(session, std::path::Path::new("/p/main.cpp"))
             })
             .flatten()
             .expect("a file whose text the client is holding has an answer")

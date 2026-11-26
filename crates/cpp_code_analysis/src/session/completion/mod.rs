@@ -55,6 +55,14 @@
 //! (`_Arg`, `__crt_…`), and what is past the budget. The remaining judgement is expressed as an *order*, because
 //! an order can be wrong cheaply and a filter cannot.
 
+use crate::CompilerConfig;
+use crate::OfferedName;
+use crate::completion;
+use crate::cuda;
+use crate::file;
+use crate::include;
+use crate::index;
+use crate::sema;
 pub mod context;
 pub mod includes;
 pub mod matching;
@@ -180,7 +188,7 @@ impl Inclusion {
 pub fn the_include_spelling(
     header: &std::path::Path,
     asking: &std::path::Path,
-    include_paths: &[crate::include::config::IncludePath],
+    include_paths: &[include::config::IncludePath],
 ) -> String {
     let header_normal = header.to_string_lossy().replace('\\', "/");
     for path in include_paths {
@@ -237,7 +245,7 @@ impl CompletionItem {
                 // **A function-like macro is inserted with its parenthesis** — the only hint a completion item carries about how a
                 // name is used: `MAX(` says it takes arguments, and `MAX` alone does not. Measured before this: the item for
                 // `#define MAX(a, b)` read `insert: "MAX"`, `kind: Macro`, and nothing else.
-                (crate::DeclKind::MacroLike, Some(_)) => format!("{}(", fact.name),
+                (DeclKind::MacroLike, Some(_)) => format!("{}(", fact.name),
                 _ => fact.name.to_string(),
             },
             snippet: false,
@@ -402,8 +410,7 @@ impl CompletionSet {
         !self.prefix.is_empty()
             && !self.items.iter().any(|item| {
                 let compared = item.filter.as_deref().unwrap_or(&item.label);
-                crate::completion::matching::quality(compared, &self.prefix)
-                    != crate::completion::matching::NONE
+                completion::matching::quality(compared, &self.prefix) != completion::matching::NONE
             })
     }
 }
@@ -435,7 +442,7 @@ impl Default for CompletionSet {
 #[derive(Debug, Clone)]
 struct Scored {
     score: Score,
-    matched: crate::completion::matching::Quality,
+    matched: completion::matching::Quality,
     item: CompletionItem,
 }
 
@@ -517,7 +524,7 @@ pub fn completion_with(
         // exists because the match must be total, and a caller that reaches it has no session to ask.
         CompletionContext::ModuleName { .. } => CompletionSet::default(),
         CompletionContext::DirectiveArgument { written, range } => {
-            let position = crate::sema::resolve::NamePosition {
+            let position = sema::resolve::NamePosition {
                 scope: String::new(),
                 written,
                 range,
@@ -554,7 +561,7 @@ pub fn completion_with(
             if qualifier.is_empty() {
                 macro_body(index, path, &written, range, &parameters)
             } else {
-                let position = crate::sema::resolve::NamePosition {
+                let position = sema::resolve::NamePosition {
                     scope: qualifier,
                     written,
                     range,
@@ -581,7 +588,7 @@ pub fn completion_with(
         // **A code block is code**, so it is answered with the same list a statement gets — keywords and snippets
         // included, because that is what a reader writing an example is writing.
         CompletionContext::DocCode { written, range } => {
-            let position = crate::sema::resolve::NamePosition {
+            let position = sema::resolve::NamePosition {
                 scope: String::new(),
                 written,
                 range,
@@ -619,7 +626,7 @@ fn doc_link_names(
         Some((scope, rest)) => (scope.to_string(), rest.to_string()),
         None => (String::new(), written.to_string()),
     };
-    let position = crate::sema::resolve::NamePosition {
+    let position = sema::resolve::NamePosition {
         scope: scope.clone(),
         written: written.clone(),
         range,
@@ -632,8 +639,7 @@ fn doc_link_names(
     // token at the top of the file instead of the word being typed: reported as "按 Tab 会把前面的补全吃掉". The
     // listing is the index's (the names visible in this file, prefix-filtered) and the range is the word the doc
     // reader measured — both of which are what a comment can honestly say.
-    let listing =
-        crate::index::project::names_for_a_doc_comment(index, path, &scope, &written, range);
+    let listing = index::project::names_for_a_doc_comment(index, path, &scope, &written, range);
     names(
         index,
         scopes,
@@ -674,7 +680,7 @@ pub fn why_no_members(
     // `rowan` rather than a wrong answer: `"Bad offset: range 0..27 offset 52"`, where 52 is a position in the file
     // (the header inlined, the directive gone) and 27 is the length of its rendering. This function reads `root`, so
     // its offset is the rendering's.
-    offset: crate::file::coordinates::ReadingOffset,
+    offset: file::coordinates::ReadingOffset,
 ) -> String {
     let offset = offset.get();
     match context_at(root, offset) {
@@ -730,7 +736,7 @@ pub(crate) fn the_class_after_the_operator(
     scopes: &ScopeTree,
     root: &CppSyntaxNode,
     path: &Path,
-    written: &crate::sema::types::Type,
+    written: &sema::types::Type,
     arrow: bool,
 ) -> Option<(String, bool)> {
     let (reached, followed_a_pointer) =
@@ -739,7 +745,7 @@ pub(crate) fn the_class_after_the_operator(
     let class = if bare.contains("::") {
         bare
     } else {
-        crate::index::project::qualified_from_the_index(index, path, &bare).unwrap_or(bare)
+        index::project::qualified_from_the_index(index, path, &bare).unwrap_or(bare)
     };
     Some((class, followed_a_pointer))
 }
@@ -755,9 +761,9 @@ pub(crate) fn the_type_after_the_operator(
     scopes: &ScopeTree,
     root: &CppSyntaxNode,
     path: &Path,
-    written: &crate::sema::types::Type,
+    written: &sema::types::Type,
     arrow: bool,
-) -> Option<(crate::sema::types::Type, bool)> {
+) -> Option<(sema::types::Type, bool)> {
     // **Whether a pointer was followed to find the class**, which is what says a `.` should have been a `->`.
     let mut followed_a_pointer = false;
     let mut current = written.clone();
@@ -776,7 +782,7 @@ pub(crate) fn the_type_after_the_operator(
             let class = if bare.contains("::") {
                 bare.clone()
             } else {
-                crate::index::project::qualified_from_the_index(index, path, &bare)
+                index::project::qualified_from_the_index(index, path, &bare)
                     .unwrap_or_else(|| bare.clone())
             };
 
@@ -817,7 +823,7 @@ pub(crate) fn the_type_after_the_operator(
                 && let Some(pointee) =
                     the_element_type_pointed_at(index, scopes, root, path, &class, &current)
             {
-                current = crate::sema::types::parse_type_spelling(&pointee);
+                current = sema::types::parse_type_spelling(&pointee);
                 followed_a_pointer = true;
                 continue;
             }
@@ -825,7 +831,7 @@ pub(crate) fn the_type_after_the_operator(
             // the chain continuing; for a `.` it is a reader who typed the wrong operator, which is reported by
             // `followed_a_pointer` so that the completion can rewrite the `.` as `->`.
             let returns = if arrow {
-                crate::index::project::operator_returns_of(
+                index::project::operator_returns_of(
                     index,
                     &mut |_: &Path| None,
                     scopes,
@@ -843,7 +849,7 @@ pub(crate) fn the_type_after_the_operator(
                 // are the honest answer for a reader who typed one by mistake.
                 return Some((current, followed_a_pointer));
             };
-            current = crate::sema::types::parse_type_spelling(&returns);
+            current = sema::types::parse_type_spelling(&returns);
             if !arrow {
                 followed_a_pointer = true;
             }
@@ -890,10 +896,9 @@ fn the_element_type_pointed_at(
     root: &CppSyntaxNode,
     path: &Path,
     class: &str,
-    written: &crate::sema::types::Type,
+    written: &sema::types::Type,
 ) -> Option<String> {
-    let Known::Yes(members) = crate::index::project::members_of(index, scopes, root, path, class)
-    else {
+    let Known::Yes(members) = index::project::members_of(index, scopes, root, path, class) else {
         return None;
     };
     let pointer_like = members.members.iter().any(|member| {
@@ -911,7 +916,7 @@ fn the_element_type_pointed_at(
         .map(|argument| argument.to_string())
         .collect();
     let walked =
-        crate::index::project::element_type_of(index, scopes, root, path, class, class, &arguments);
+        index::project::element_type_of(index, scopes, root, path, class, class, &arguments);
 
     // **A spelling only counts when it names a *class*.** `_Ptr_base` — `shared_ptr`'s base — says
     // `using element_type = remove_extent_t<_Ty>;`, and that is an **alias template**: substituted at the use it is
@@ -948,7 +953,7 @@ fn leads_to_members(
     name: &str,
 ) -> bool {
     matches!(
-        crate::index::project::members_of(index, scopes, root, path, name),
+        index::project::members_of(index, scopes, root, path, name),
         Known::Yes(list) if !list.members.is_empty()
     )
 }
@@ -969,7 +974,7 @@ fn members_of_a_written_type(
     replace: SourceRange,
     budget: usize,
 ) -> MemberAnswer {
-    let written = crate::sema::types::parse_type_spelling(of);
+    let written = sema::types::parse_type_spelling(of);
     members_of_a_type(
         index,
         scopes,
@@ -990,7 +995,7 @@ fn members(
     scopes: &ScopeTree,
     root: &CppSyntaxNode,
     path: &Path,
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
     offset: usize,
     budget: usize,
 ) -> MemberAnswer {
@@ -1012,7 +1017,7 @@ fn members(
         why,
     };
 
-    let written = match crate::index::project::type_of_expression(
+    let written = match index::project::type_of_expression(
         index,
         &mut |_: &Path| None,
         scopes,
@@ -1072,7 +1077,7 @@ fn members_of_a_type(
     root: &CppSyntaxNode,
     path: &Path,
     offset: usize,
-    written: &crate::sema::types::Type,
+    written: &sema::types::Type,
     arrow: bool,
     prefix: String,
     replace: SourceRange,
@@ -1104,7 +1109,7 @@ fn members_of_a_type(
         };
     };
 
-    let found = match crate::index::project::members_of(index, scopes, root, path, &class) {
+    let found = match index::project::members_of(index, scopes, root, path, &class) {
         Known::Yes(found) => found,
         // **The class was not found, which on a real project is usually "not read yet".** `<xstring>` declares
         // `basic_string` inside `_STD_BEGIN`/`_STD_END`, so the class is at *file* scope until that header is
@@ -1149,14 +1154,8 @@ fn members_of_a_type(
     // against the classes the cursor is in.
     let members = {
         let mut members = found;
-        let hidden = crate::index::project::offerable_members(
-            index,
-            scopes,
-            root,
-            path,
-            offset,
-            &mut members,
-        );
+        let hidden =
+            index::project::offerable_members(index, scopes, root, path, offset, &mut members);
         (members, hidden)
     };
     let (members, hidden_by_access) = members;
@@ -1204,8 +1203,8 @@ fn members_of_a_type(
         // like any other, and a member whose name does not answer it is dropped rather than merely ranked low — see
         // [`crate::completion::matching`] for the rule and why the client's own filter cannot do this alone (it
         // cannot see `to_string` when the reader typed `string`, and it does not know the words of a name).
-        let matched = crate::completion::matching::quality(&item.label, &prefix);
-        if matched == crate::completion::matching::NONE {
+        let matched = completion::matching::quality(&item.label, &prefix);
+        if matched == completion::matching::NONE {
             continue;
         }
 
@@ -1231,7 +1230,7 @@ fn members_of_a_type(
     // which is a `.` on a pointer.
     let (replace, items) = if followed_a_pointer && !arrow {
         let operator = replace.start_offset.saturating_sub(1);
-        let items: Vec<crate::completion::CompletionItem> = items
+        let items: Vec<completion::CompletionItem> = items
             .into_iter()
             .map(|mut item| {
                 item.insert = format!("->{}", item.insert);
@@ -1373,7 +1372,7 @@ fn names(
     scopes: &ScopeTree,
     root: &CppSyntaxNode,
     path: &Path,
-    position: &crate::sema::resolve::NamePosition,
+    position: &sema::resolve::NamePosition,
     offset: usize,
     with_table: bool,
     cuda: bool,
@@ -1383,7 +1382,7 @@ fn names(
     // index query at its offset answers nothing; the doc reader has already listed the names it wants (see
     // [crate::index::project::names_for_a_doc_comment]). None for every other caller, which is every ordinary
     // name position.
-    listed_by_the_caller: Option<Known<crate::index::project::NameCompletions>>,
+    listed_by_the_caller: Option<Known<index::project::NameCompletions>>,
 ) -> CompletionSet {
     let mut scored: Vec<Scored> = Vec::new();
     let mut listed_scope = position.scope.clone();
@@ -1403,23 +1402,23 @@ fn names(
     let listed = if let Some(listed) = listed_by_the_caller {
         listed
     } else if inside_a_scope {
-        Known::Yes(crate::index::project::NameCompletions {
+        Known::Yes(index::project::NameCompletions {
             scope: position.scope.clone(),
             prefix: position.written.clone(),
             name_range: position.range,
             names: index
                 .declarations_in(&position.scope, path)
                 .into_iter()
-                .map(|declaration| crate::index::project::OfferedName {
+                .map(|declaration| index::project::OfferedName {
                     fact: declaration.fact.clone(),
                     file: declaration.file.clone(),
                     depth: 0,
-                    from: crate::index::project::NameProvenance::Scope,
+                    from: index::project::NameProvenance::Scope,
                 })
                 .collect(),
         })
     } else {
-        crate::index::project::name_completions_at(index, scopes, root, path, offset)
+        index::project::name_completions_at(index, scopes, root, path, offset)
     };
 
     match listed {
@@ -1607,15 +1606,15 @@ fn names(
         // built-in variable is a variable, and a vector type is a class, because that is what each would be if a
         // toolkit header had declared it.
         if cuda {
-            for word in crate::cuda::words() {
+            for word in cuda::words() {
                 let matched = matching::quality(word.name, &listed_prefix);
                 if matched == matching::NONE {
                     continue;
                 }
                 let kind = match word.kind {
-                    crate::cuda::WordKind::Qualifier => ItemKind::Keyword,
-                    crate::cuda::WordKind::Builtin => ItemKind::Variable,
-                    crate::cuda::WordKind::VectorType => ItemKind::Class,
+                    cuda::WordKind::Qualifier => ItemKind::Keyword,
+                    cuda::WordKind::Builtin => ItemKind::Variable,
+                    cuda::WordKind::VectorType => ItemKind::Class,
                 };
                 scored.push(Scored {
                     score: Score::new(Score::KEYWORD, 0),
@@ -1779,7 +1778,7 @@ fn doc_comments(
                     .cloned()
                     .collect();
                 if let Some(list) = fact.parameter_list()
-                    && let Some(found) = crate::sema::call_syntax::parameter_names_from_text(list)
+                    && let Some(found) = sema::call_syntax::parameter_names_from_text(list)
                 {
                     names.extend(found.into_iter().flatten());
                 }
@@ -2022,7 +2021,7 @@ fn headers_for(
 /// **replaces** (`size`, so nothing of the old spelling is left behind) while this is what filters the list — and a
 /// cursor inside a name has only typed the part before it. Taking the whole spelling for both is what makes
 /// `w.si|ze` offer nothing.
-fn written_before(access: &crate::sema::resolve::MemberAccess, offset: usize) -> String {
+fn written_before(access: &sema::resolve::MemberAccess, offset: usize) -> String {
     let start = access.member_range.start_offset;
     let end = access.member_range.end_offset().min(offset);
 
@@ -2196,7 +2195,7 @@ impl Score {
 }
 
 /// The score of a name the scope walk produced: **how far from the cursor its file is**, plus what it declares.
-fn name_score(offered: &crate::OfferedName) -> Score {
+fn name_score(offered: &OfferedName) -> Score {
     use crate::index::project::NameProvenance;
 
     let tier = match offered.from {
@@ -2260,7 +2259,7 @@ fn in_a_class_body(scopes: &ScopeTree, offset: usize) -> bool {
 /// Shared and behind a lock rather than owned, because one half of it can grow: [`crate::Session::add_project_files`]
 /// hands over more of the project after the session is built, and the header list has to see them.
 pub fn header_index(
-    config: &crate::CompilerConfig,
+    config: &CompilerConfig,
     root: &Path,
     project_files: impl IntoIterator<Item = PathBuf>,
 ) -> SharedHeaders {
@@ -2272,6 +2271,9 @@ pub fn header_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeclModifiers;
+    use crate::FactGuard;
+    use crate::summary;
 
     /// **A name that does not answer what was typed is dropped, not ranked low.** The rule itself lives in
     /// [`crate::completion::matching`] and is tested there; this is the property the list depends on — that the
@@ -2330,19 +2332,19 @@ mod tests {
             scope: Some("std".into()),
             local: false,
             kind: DeclKind::Function,
-            modifiers: crate::DeclModifiers::VIRTUAL,
+            modifiers: DeclModifiers::VIRTUAL,
             type_of: None,
             returns: returns.map(smol_str::SmolStr::from),
             range: cpp_parser::SourceRange::new(0, 0),
             name_range: cpp_parser::SourceRange::new(0, 0),
             clean: true,
             split_by_a_directive: false,
-            guard: crate::FactGuard::Unconditional,
+            guard: FactGuard::Unconditional,
             access: None,
             exported: false,
             definition: true,
             // The one rare field this fixture has: the list the detail line is built from.
-            detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+            detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
                 parameter_list: parameter_list.map(str::to_string),
                 ..Default::default()
             }),

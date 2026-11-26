@@ -26,6 +26,7 @@
 //! `while`, `do`/`while`, `for`'s condition, `!`, `&&`/`||` operands and the conditional operator's condition. The walk is
 //! `if` and `while` for now; each of the others is the same two lines.
 
+use crate::Known;
 use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -52,7 +53,7 @@ impl Check for ImplicitBoolConversion {
             if the_question_answers_itself(&inner) {
                 return;
             }
-            let crate::Known::Yes((type_of, _)) = context.type_of(&inner) else {
+            let Known::Yes((type_of, _)) = context.type_of(&inner) else {
                 return;
             };
             // **Arithmetic and not `bool`.** `bool` is the type the conversion would produce, so it is not a conversion;

@@ -6,10 +6,19 @@
 //! they do not settle it.
 
 use super::*;
+use crate::DeclFact;
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::FileView;
+use crate::ScopeTree;
+use crate::completion;
+use crate::index;
+use crate::sema;
+use crate::summary;
 
 pub(crate) fn declaration_of_expression(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
@@ -18,7 +27,7 @@ pub(crate) fn declaration_of_expression(
     let written = expression.text().to_string();
     let written = written.trim();
 
-    let asked = crate::sema::resolve::definition_at(scopes, root, offset);
+    let asked = sema::resolve::definition_at(scopes, root, offset);
 
     match asked {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
@@ -94,23 +103,22 @@ pub(crate) fn declaration_of_expression(
             // ambiguity a reader can act on and a name nothing declares. See the final arm below.
             let mut was_ambiguous = false;
             for candidate in candidates {
-                let found: Option<(crate::DeclFact, PathBuf)> =
-                    match index.definition(candidate, path) {
-                        Known::Yes(found) => Some((found.fact, found.file)),
-                        // **Several declarations of one name, and one type between them.** A name query answers
-                        // `Ambiguous` when more than one declaration is visible, and that is right for "where is this
-                        // declared" — but the question here is *what type it has*, and a type is not ambiguous when
-                        // every declaration spells it the same way. MSVC's `<iostream>` declares `cin` twice (once
-                        // plain, once as `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and
-                        // every use of it lost its type: `std::cin.read(…)`, `std::cin.eof()`, a completion after
-                        // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
-                        // (which have no type as a name), keep the `Unknown` that the name query gave.
-                        Known::Unknown(UnknownReason::Ambiguous(_)) => {
-                            was_ambiguous = true;
-                            agreeing_type(index, path, candidate)
-                        }
-                        Known::Unknown(_) | Known::No => None,
-                    };
+                let found: Option<(DeclFact, PathBuf)> = match index.definition(candidate, path) {
+                    Known::Yes(found) => Some((found.fact, found.file)),
+                    // **Several declarations of one name, and one type between them.** A name query answers
+                    // `Ambiguous` when more than one declaration is visible, and that is right for "where is this
+                    // declared" — but the question here is *what type it has*, and a type is not ambiguous when
+                    // every declaration spells it the same way. MSVC's `<iostream>` declares `cin` twice (once
+                    // plain, once as `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and
+                    // every use of it lost its type: `std::cin.read(…)`, `std::cin.eof()`, a completion after
+                    // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
+                    // (which have no type as a name), keep the `Unknown` that the name query gave.
+                    Known::Unknown(UnknownReason::Ambiguous(_)) => {
+                        was_ambiguous = true;
+                        agreeing_type(index, path, candidate)
+                    }
+                    Known::Unknown(_) | Known::No => None,
+                };
 
                 if let Some((fact, file)) = found {
                     return Known::Yes(NamedDeclaration::Indexed(
@@ -189,13 +197,12 @@ pub(crate) fn a_function_pointer_returns(a_type: &Type) -> Option<Type> {
 /// kind it is, but whether a lambda is what it was initialised with.
 pub(crate) fn a_lambdas_body_the_callee_names(
     root: &cpp_parser::CppSyntaxNode,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     callee: &cpp_parser::CppSyntaxNode,
     argument_types: &[Type],
 ) -> Option<String> {
     let inside = callee.text_range();
-    let Known::Yes(binding) =
-        crate::sema::resolve::definition_at(scopes, root, inside.start().into())
+    let Known::Yes(binding) = sema::resolve::definition_at(scopes, root, inside.start().into())
     else {
         return None;
     };
@@ -211,15 +218,15 @@ pub(crate) fn a_lambdas_body_the_callee_names(
     let lambda = declarator
         .descendants()
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LambdaExpr)?;
-    crate::sema::declarations::a_lambdas_return_type(&lambda, argument_types)
+    sema::declarations::a_lambdas_return_type(&lambda, argument_types)
 }
 
 pub(crate) fn type_of_a_call(
     memo: &TypeMemo,
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
@@ -275,7 +282,7 @@ pub(crate) fn type_of_a_call(
                     })
                 })
                 .next()
-                .map(|list| crate::sema::types::read_template_arguments(&list))
+                .map(|list| sema::types::read_template_arguments(&list))
                 .unwrap_or_default()
         } else {
             from_the_callee
@@ -287,7 +294,7 @@ pub(crate) fn type_of_a_call(
     // never writes `<int*>`, it passes one. Computed only when nothing was written, which is the only case it is
     // used in, because typing every argument of every call is not free.
     let argument_types: Vec<Type> = if written_arguments.is_empty() {
-        crate::sema::call_syntax::arguments_of(call)
+        sema::call_syntax::arguments_of(call)
             .unwrap_or_default()
             .iter()
             .filter_map(|argument| {
@@ -337,7 +344,7 @@ pub(crate) fn type_of_a_call(
     // not known here"* while the body plainly returns an `int`.
     if let Some(returns) = a_lambdas_body_the_callee_names(root, scopes, &callee, &argument_types) {
         return Known::Yes((
-            crate::sema::types::parse_type_spelling(&returns),
+            sema::types::parse_type_spelling(&returns),
             path.to_path_buf(),
         ));
     }
@@ -355,7 +362,7 @@ pub(crate) fn type_of_a_call(
         memo, shapes, index, declaring, scopes, root, path, &callee, written,
     );
     let names_a_function = match &resolved {
-        Known::Yes(named) => named.fact_kind() == crate::DeclKind::Function,
+        Known::Yes(named) => named.fact_kind() == DeclKind::Function,
         _ => false,
     };
     if !names_a_function
@@ -372,10 +379,10 @@ pub(crate) fn type_of_a_call(
             &callee_type,
             "operator()",
             &argument_types,
-            crate::sema::call_syntax::arguments_of(call).map(|arguments| arguments.len()),
+            sema::call_syntax::arguments_of(call).map(|arguments| arguments.len()),
         )
     {
-        return Known::Yes((crate::sema::types::parse_type_spelling(&returns), file));
+        return Known::Yes((sema::types::parse_type_spelling(&returns), file));
     }
 
     // **The standard library's factories, whose return type the standard fixes.** `make_shared<T>(args…)` is a
@@ -388,7 +395,7 @@ pub(crate) fn type_of_a_call(
         && let Some(argument) = written_arguments.first()
     {
         return Known::Yes((
-            crate::sema::types::parse_type_spelling(&format!("{pointer}<{argument}>")),
+            sema::types::parse_type_spelling(&format!("{pointer}<{argument}>")),
             path.to_path_buf(),
         ));
     }
@@ -409,16 +416,16 @@ pub(crate) fn type_of_a_call(
     // ordinary expression typer does know. `vector<std::meta::info>` yields the element `std::meta::info`.
     if names_define_static_array(&callee)
         && let Some(first) =
-            crate::sema::call_syntax::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
+            sema::call_syntax::arguments_of(call).and_then(|nodes| nodes.into_iter().next())
         && let Known::Yes((argument, _)) = type_of_expression_memoed(
             memo, shapes, index, declaring, scopes, root, path, &first, 0,
         )
         && let Some(element) = range_element_of(as_a_range(&argument))
     {
-        let element = crate::sema::types::parse_type_spelling(&element);
+        let element = sema::types::parse_type_spelling(&element);
         let element = Arc::new(Type::Qualified {
             of: Arc::new(element),
-            qualifiers: crate::sema::types::Qualifiers::CONST,
+            qualifiers: sema::types::Qualifiers::CONST,
         });
         let array = Arc::new(Type::Array {
             of: element,
@@ -437,7 +444,7 @@ pub(crate) fn type_of_a_call(
     // template over a closure type, so the index cannot spell it; what a reader does with the result is dereference it or
     // count with it, and those are the two answers below. See [`a_ranges_algorithm_the_call_names`].
     if let Some(algorithm) = a_ranges_algorithm_the_call_names(&callee) {
-        let arguments = crate::sema::call_syntax::arguments_of(call).unwrap_or_default();
+        let arguments = sema::call_syntax::arguments_of(call).unwrap_or_default();
         match algorithm.as_str() {
             "find" | "find_if" | "find_if_not" | "max" | "min" | "max_element" | "min_element"
             | "lower_bound" | "upper_bound" | "equal_range" | "search" => {
@@ -451,13 +458,13 @@ pub(crate) fn type_of_a_call(
             }
             "count" | "count_if" | "distance" | "ssize" => {
                 return Known::Yes((
-                    crate::sema::types::parse_type_spelling("std::ptrdiff_t"),
+                    sema::types::parse_type_spelling("std::ptrdiff_t"),
                     path.to_path_buf(),
                 ));
             }
             "size" => {
                 return Known::Yes((
-                    crate::sema::types::parse_type_spelling("std::size_t"),
+                    sema::types::parse_type_spelling("std::size_t"),
                     path.to_path_buf(),
                 ));
             }
@@ -481,7 +488,7 @@ pub(crate) fn type_of_a_call(
     // hover on the member then had no class to look it up in.
     if let Some(spelling) = a_callee_that_names_a_type(index, path, &callee) {
         return Known::Yes((
-            crate::sema::types::parse_type_spelling(&spelling),
+            sema::types::parse_type_spelling(&spelling),
             path.to_path_buf(),
         ));
     }
@@ -518,7 +525,7 @@ pub(crate) fn type_of_a_call(
         &the_names_the_call_may_use(&callee),
         &written_arguments,
         &argument_types,
-        crate::sema::call_syntax::arguments_of(call)
+        sema::call_syntax::arguments_of(call)
             .map(|arguments| arguments.len())
             .unwrap_or_default(),
         memo,
@@ -528,7 +535,7 @@ pub(crate) fn type_of_a_call(
         depth,
     ) {
         return Known::Yes((
-            crate::sema::types::parse_type_spelling(&returns),
+            sema::types::parse_type_spelling(&returns),
             path.to_path_buf(),
         ));
     }
@@ -662,14 +669,14 @@ pub(crate) fn a_callee_that_names_a_type(
         None => spelled,
     };
     let names_a_type = match index.definition(bare, path) {
-        Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+        Known::Yes(found) => found.fact.kind == DeclKind::Type,
         Known::Unknown(UnknownReason::Ambiguous(_)) => {
             index.definitions(bare, path).value().is_some_and(|found| {
                 !found.found.is_empty()
                     && found
                         .found
                         .iter()
-                        .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                        .all(|declaration| declaration.fact.kind == DeclKind::Type)
             })
         }
         Known::Unknown(_) | Known::No => false,
@@ -721,8 +728,8 @@ pub(crate) fn the_return_the_overloads_agree_on(
     argument_types: &[Type],
     how_many_arguments: usize,
     memo: &TypeMemo,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     depth: usize,
 ) -> Option<String> {
@@ -735,7 +742,7 @@ pub(crate) fn the_return_the_overloads_agree_on(
         for candidate in found
             .found
             .iter()
-            .filter(|declaration| declaration.fact.kind == crate::DeclKind::Function)
+            .filter(|declaration| declaration.fact.kind == DeclKind::Function)
         {
             // **A deleted function is not a candidate** — [dcl.fct.def.delete]: it participates in overload resolution
             // only to make the call ill-formed. `std::make_unique` declares
@@ -744,7 +751,7 @@ pub(crate) fn the_return_the_overloads_agree_on(
             if candidate
                 .fact
                 .modifiers
-                .contains(crate::summary::DeclModifiers::DELETED)
+                .contains(summary::DeclModifiers::DELETED)
             {
                 continue;
             }
@@ -769,20 +776,17 @@ pub(crate) fn the_return_the_overloads_agree_on(
             ) {
                 continue;
             }
-            let substituted =
-                if written_arguments.is_empty() || candidate.fact.parameters().is_empty() {
-                    written.clone()
-                } else {
-                    let arguments: Vec<String> = written_arguments
-                        .iter()
-                        .map(|one| one.to_string())
-                        .collect();
-                    crate::sema::types::substituted_spelling(
-                        &written,
-                        candidate.fact.parameters(),
-                        &arguments,
-                    )
-                };
+            let substituted = if written_arguments.is_empty()
+                || candidate.fact.parameters().is_empty()
+            {
+                written.clone()
+            } else {
+                let arguments: Vec<String> = written_arguments
+                    .iter()
+                    .map(|one| one.to_string())
+                    .collect();
+                sema::types::substituted_spelling(&written, candidate.fact.parameters(), &arguments)
+            };
             // **A spelling that still names one of the candidate's own parameters could not be substituted** —
             // `variant_alternative_t<int, variant<_Types...>>` keeps `_Types` — and comparing it with a concrete
             // answer would make every set holding such an overload disagree for a reason that is not about the type.
@@ -827,7 +831,7 @@ pub(crate) fn a_candidate_that_can_be_called_this_way(
         // it made every set holding such a declaration disagree with the concrete answers around it.
         return false;
     };
-    let parameters = crate::sema::overload::parameters_in(parameter_list).0;
+    let parameters = sema::overload::parameters_in(parameter_list).0;
     // **A pack is recognised from the written list**, because `parameters_in` strips the `...`: `(_Types&&... _Args)`
     // comes back as one parameter, `_Types&&`, and reading that as an exact arity dropped every variadic candidate
     // — measured, `std::make_unique<Closing>()` answered nothing while two of its three overloads agree on the type.
@@ -849,7 +853,7 @@ pub(crate) fn a_candidate_that_can_be_called_this_way(
         .iter()
         .zip(argument_types)
         .all(|(parameter, argument)| {
-            !crate::sema::convert::conversion(argument, parameter, |_| None).is_refused()
+            !sema::convert::conversion(argument, parameter, |_| None).is_refused()
         })
 }
 
@@ -876,13 +880,13 @@ pub(crate) fn read_the_way_auto_does(written: &str) -> String {
 pub(crate) fn iterator_element_type(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     callee: &cpp_parser::CppSyntaxNode,
 ) -> Option<Known<(Type, PathBuf)>> {
-    let member = crate::sema::resolve::member_access_at(root, end_of_the_written_name(callee))?;
+    let member = sema::resolve::member_access_at(root, end_of_the_written_name(callee))?;
     if !matches!(
         member.member.as_str(),
         "begin"
@@ -900,7 +904,7 @@ pub(crate) fn iterator_element_type(
 
     let Known::Yes((object, file)) = type_of_expression_memoed(
         memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -914,7 +918,7 @@ pub(crate) fn iterator_element_type(
 
     let element = range_element_of(&object)?;
     Some(Known::Yes((
-        crate::sema::types::parse_type_spelling(&element),
+        sema::types::parse_type_spelling(&element),
         file,
     )))
 }
@@ -927,7 +931,7 @@ pub(crate) fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> 
         return Vec::new();
     };
 
-    crate::sema::types::read_template_arguments(&list)
+    sema::types::read_template_arguments(&list)
 }
 
 /// **The scope a bare class name was declared in**, as `scope::name`, from the index.
@@ -960,7 +964,7 @@ pub(crate) fn qualified_from_the_index(
     let declared = index.files_declaring(class, from);
     let found = declared
         .into_iter()
-        .find(|declared| declared.fact.kind == crate::DeclKind::Type)?;
+        .find(|declared| declared.fact.kind == DeclKind::Type)?;
     let scope = found.fact.scope.as_deref()?;
     (!scope.is_empty()).then(|| format!("{scope}::{class}"))
 }
@@ -976,17 +980,17 @@ pub(crate) fn qualified_from_the_index(
 /// consumer reporting "not known" should name the code the user wrote, not the half of it the lookup started at.
 pub(crate) fn declaration_of_a_callee(
     memo: &TypeMemo,
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     callee: &cpp_parser::CppSyntaxNode,
     written: &str,
 ) -> Known<NamedDeclaration> {
     // A member call: the object's type, then the member's declaration.
-    if let Some(access) = crate::sema::resolve::member_access_of(callee) {
+    if let Some(access) = sema::resolve::member_access_of(callee) {
         let object = match type_of_expression_memoed(
             memo,
             shapes,
@@ -1010,9 +1014,9 @@ pub(crate) fn declaration_of_a_callee(
         // implementation of the rule: [`crate::completion::the_class_after_the_operator`], which pointer
         // completion has used since the smart pointers landed.
         let class = if access.arrow
-            && let Some((reached, _)) = crate::completion::the_class_after_the_operator(
-                index, scopes, root, path, &object, true,
-            ) {
+            && let Some((reached, _)) =
+                completion::the_class_after_the_operator(index, scopes, root, path, &object, true)
+        {
             reached
         } else {
             let Some(own) = member_access_class(&object) else {
@@ -1055,9 +1059,7 @@ pub(crate) fn declaration_of_a_callee(
         // **A `const` object can only call a `const` member**: a candidate it could not call is not a candidate.
         let callable: Vec<(DeclFact, PathBuf)> = declared
             .into_iter()
-            .filter(|(fact, _)| {
-                !object.is_const() || fact.modifiers.contains(crate::DeclModifiers::CONST)
-            })
+            .filter(|(fact, _)| !object.is_const() || fact.modifiers.contains(DeclModifiers::CONST))
             .collect();
         if callable.len() > 1
             && let Some(call) = the_call_around(callee)
@@ -1095,7 +1097,7 @@ pub(crate) fn declaration_of_a_callee(
     // the arguments say which. Both halves (this one and the index's, below) go through the same ranking.
     if let Some(call) = the_call_around(callee)
         && let Known::Yes(bindings) =
-            crate::sema::resolve::definitions_at(scopes, root, end_of_the_written_name(callee))
+            sema::resolve::definitions_at(scopes, root, end_of_the_written_name(callee))
         && bindings.len() > 1
         && let Some(types) =
             the_types_of_the_arguments(memo, index, declaring, scopes, root, path, &call)
@@ -1105,7 +1107,7 @@ pub(crate) fn declaration_of_a_callee(
             .map(|binding| {
                 (
                     fact_from_binding_with(
-                        crate::sema::declarations::shapes_from(shapes, root),
+                        sema::declarations::shapes_from(shapes, root),
                         root,
                         "",
                         binding,
@@ -1141,7 +1143,7 @@ pub(crate) fn declaration_of_a_callee(
     // **nothing** (a local variable, or a member declared here, keeps the scope tree's answer), and the class's member
     // must be finished (a member of a template base whose arguments the member list could not read is refused).
     if matches!(
-        crate::sema::resolve::definition_at(scopes, root, end_of_the_written_name(callee)),
+        sema::resolve::definition_at(scopes, root, end_of_the_written_name(callee)),
         Known::No | Known::Unknown(UnknownReason::NotDeclaredHere(_))
     ) && let Some(member) =
         a_member_of_the_enclosing_class(index, scopes, root, path, callee, true)
@@ -1149,7 +1151,7 @@ pub(crate) fn declaration_of_a_callee(
         return Known::Yes(NamedDeclaration::Indexed(
             member.fact,
             member.file,
-            crate::sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+            sema::types::TypeBindings::new(Vec::new(), Vec::new()),
         ));
     }
 
@@ -1169,13 +1171,13 @@ pub(crate) fn declaration_of_a_callee(
                 // whose template-id the file wrote.
                 Some(bare) => {
                     let start = usize::from(callee.text_range().start());
-                    match crate::sema::resolve::definition_at(scopes, root, start + bare.len()) {
+                    match sema::resolve::definition_at(scopes, root, start + bare.len()) {
                         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
                         _ => match index.definition(&bare, path) {
                             Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(
                                 found.fact,
                                 found.file,
-                                crate::sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+                                sema::types::TypeBindings::new(Vec::new(), Vec::new()),
                             )),
                             Known::Unknown(reason) => Known::Unknown(reason),
                             Known::No => Known::No,
@@ -1265,14 +1267,14 @@ pub(crate) struct Callee {
 /// two share.
 pub(crate) fn callees_of_a_call(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Known<Vec<Callee>> {
     let memo = TypeMemo::default();
-    let shapes = crate::sema::declarations::ShapeTable::new();
+    let shapes = sema::declarations::ShapeTable::new();
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -1280,7 +1282,7 @@ pub(crate) fn callees_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
+    if let Some(access) = sema::resolve::member_access_of(&callee) {
         let members = member_callees(&memo, index, declaring, scopes, root, path, &access);
 
         // A member whose set could not be listed — the object's type is unknown, the class is not declared
@@ -1307,7 +1309,7 @@ pub(crate) fn callees_of_a_call(
     // lookup.
     let offset = end_of_the_written_name(&callee);
 
-    match crate::sema::resolve::definitions_at(scopes, root, offset) {
+    match sema::resolve::definitions_at(scopes, root, offset) {
         // Declared in this buffer: every overload of it, and the file being edited is where they are. **All** of
         // them, which is the whole point of this function: `void scale(int); double scale(double, int);` in one
         // file is one name with two declarations in one scope, and a signature list that showed one of them would
@@ -1374,8 +1376,8 @@ pub(crate) fn the_call_around(
 pub(crate) fn the_declaration_the_arguments_pick(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
@@ -1443,20 +1445,20 @@ pub(crate) fn the_name_without_its_arguments(written: &str) -> &str {
 pub(crate) fn the_types_of_the_arguments(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
 ) -> Option<Vec<Known<String>>> {
-    let arguments = crate::sema::call_syntax::arguments_of(call)?;
+    let arguments = sema::call_syntax::arguments_of(call)?;
     Some(
         arguments
             .iter()
             .map(|argument| {
                 match type_of_expression_memoed(
                     memo,
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &sema::declarations::ShapeTable::new(),
                     index,
                     declaring,
                     scopes,
@@ -1496,32 +1498,27 @@ pub(crate) fn the_one_the_arguments_select(
     // keeping it in the running is what made `auto unique = std::make_unique<Resource>(1);` ambiguous and left the
     // variable with no type. `usable` holds the original indices, in the order the ranking sees them.
     let usable: Vec<usize> = (0..candidates.len())
-        .filter(|at| {
-            !candidates[*at]
-                .0
-                .modifiers
-                .contains(crate::DeclModifiers::DELETED)
-        })
+        .filter(|at| !candidates[*at].0.modifiers.contains(DeclModifiers::DELETED))
         .collect();
     if usable.is_empty() {
         // Every candidate is deleted: the call is ill-formed whichever one it means, and "no answer" is the honest
         // report of that.
         return None;
     }
-    let built: Vec<crate::sema::overload::Candidate> = usable
+    let built: Vec<sema::overload::Candidate> = usable
         .iter()
         .enumerate()
         .map(|(at, &index)| {
             let (fact, _) = &candidates[index];
             let (declared, variadic) = fact
                 .parameter_list()
-                .map(crate::sema::overload::parameters_in)
+                .map(sema::overload::parameters_in)
                 .unwrap_or_default();
             let names = fact.parameters().to_vec();
             let declared_for_ordering = declared.clone();
             // **The deduction starts from what the call wrote.** `std::make_unique<Resource>(1)` states `_Tp` as
             // `Resource`; without that seed the candidate's every parameter stayed unbound and it ranked `Unranked`.
-            let substituted = match crate::sema::deduction::deduce_with_written(
+            let substituted = match sema::deduction::deduce_with_written(
                 &names,
                 &declared,
                 types,
@@ -1531,14 +1528,14 @@ pub(crate) fn the_one_the_arguments_select(
                     declared
                         .iter()
                         .map(|spelling| {
-                            crate::sema::types::substituted_spelling(spelling, &names, &deduced)
+                            sema::types::substituted_spelling(spelling, &names, &deduced)
                         })
                         .collect::<Vec<String>>(),
                     true,
                 ),
                 None => (declared, !names.is_empty()),
             };
-            let candidate = crate::sema::overload::Candidate::new(
+            let candidate = sema::overload::Candidate::new(
                 substituted.0,
                 variadic,
                 format!("declaration {at}"),
@@ -1551,12 +1548,12 @@ pub(crate) fn the_one_the_arguments_select(
         })
         .collect();
 
-    let choice = crate::sema::overload::choose(types, &built);
+    let choice = sema::overload::choose(types, &built);
 
     match choice {
         // The rank is a position in `built`, which is `usable`'s order — the original index is what the caller wants.
-        crate::sema::overload::Choice::One(at) => usable.get(at).copied(),
-        crate::sema::overload::Choice::Ambiguous => {
+        sema::overload::Choice::One(at) => usable.get(at).copied(),
+        sema::overload::Choice::Ambiguous => {
             let written = types.iter().find_map(|argument| match argument {
                 Known::Yes(spelling) => the_character_width(spelling),
                 _ => None,
@@ -1566,12 +1563,7 @@ pub(crate) fn the_one_the_arguments_select(
                 .filter(|at| {
                     let (fact, _) = &candidates[**at];
                     fact.parameter_list()
-                        .and_then(|list| {
-                            crate::sema::overload::parameters_in(list)
-                                .0
-                                .into_iter()
-                                .next()
-                        })
+                        .and_then(|list| sema::overload::parameters_in(list).0.into_iter().next())
                         .and_then(|first| the_character_width(&first))
                         == Some(written)
                 })
@@ -1582,7 +1574,7 @@ pub(crate) fn the_one_the_arguments_select(
                 _ => None,
             }
         }
-        crate::sema::overload::Choice::None => None,
+        sema::overload::Choice::None => None,
     }
 }
 /// **Is this spelling written for wide characters, narrow ones, or neither?** — the tie-break
@@ -1615,15 +1607,15 @@ pub(crate) fn the_character_width(spelling: &str) -> Option<bool> {
 pub(crate) fn member_callees(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
 ) -> Known<Vec<Callee>> {
     let object = match type_of_expression_memoed(
         memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -1688,10 +1680,10 @@ pub(crate) fn member_callees(
 /// than one declarator (`void (*f(int a))(int b)`).
 pub(crate) fn callee_of_a_call(
     memo: &TypeMemo,
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
@@ -1741,7 +1733,7 @@ pub(crate) fn callee_of_a_call(
 /// `reference`, whose `_Ty` nothing substitutes.
 pub(crate) fn a_members_answer_as_a_type(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class_type: &Type,
@@ -1763,20 +1755,20 @@ pub(crate) fn a_members_answer_as_a_type(
             .files_declaring(&name, path)
             .into_iter()
             .find(|declared| {
-                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+                declared.fact.kind == DeclKind::Type && declared.fact.type_of.is_some()
             })
             .and_then(|declared| declared.fact.type_of.clone())
         else {
             break;
         };
-        let resolved = crate::sema::types::parse_type_spelling(&target);
+        let resolved = sema::types::parse_type_spelling(&target);
         let Some(resolved_name) = resolved.class_name() else {
             break;
         };
         // **The target is written unqualified**, and the class it names is looked up by the index's own spelling:
         // `basic_string` in `<string>` is `std::basic_string`, and asking a member question about the bare name found
         // no class at all — the substitution then answered `reference`, the alias's *name*, which is no type either.
-        let qualified = crate::index::project::qualified_from_the_index(index, path, resolved_name)
+        let qualified = index::project::qualified_from_the_index(index, path, resolved_name)
             .unwrap_or_else(|| resolved_name.to_string());
         if qualified == name {
             break;
@@ -1789,14 +1781,14 @@ pub(crate) fn a_members_answer_as_a_type(
         // **The qualifier is written on the use, so it is put back on the target** — see the same step in
         // [`operator_returns_of_with_arguments`]: a `const std::string&` resolved to `basic_string<char, …>`
         // unqualified and the member choice then treated the object as non-const.
-        let resolved = crate::sema::types::parse_type_spelling(&match arguments.is_empty() {
+        let resolved = sema::types::parse_type_spelling(&match arguments.is_empty() {
             true => qualified,
             false => format!("{qualified}<{}>", arguments.join(", ")),
         });
         class_type = match class_type.is_const() && !resolved.is_const() {
-            true => crate::sema::types::Type::Qualified {
+            true => sema::types::Type::Qualified {
                 of: std::sync::Arc::new(resolved),
-                qualifiers: crate::sema::types::Qualifiers::CONST,
+                qualifiers: sema::types::Qualifiers::CONST,
             },
             false => resolved,
         };
@@ -1814,7 +1806,7 @@ pub(crate) fn a_members_answer_as_a_type(
     // `std::vector<int>` names one of two. The defaults are what the rest stand for — see
     // [`crate::substituted_spelling_with_defaults`], and `lineStartOffset` for the chain that needed it.
     let defaults = index.template_parameter_defaults_for(class, path, &arguments);
-    let substituted = crate::sema::types::substituted_spelling_with_defaults(
+    let substituted = sema::types::substituted_spelling_with_defaults(
         returns,
         &parameters,
         &defaults,
@@ -1834,7 +1826,7 @@ pub(crate) fn a_members_answer_as_a_type(
 
     // **The class's own declaration of that name**, which is the only one whose parameters are the ones in hand.
     let Known::Yes((fact, _)) = member_fact(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -1848,12 +1840,8 @@ pub(crate) fn a_members_answer_as_a_type(
     let Some(target) = fact.type_of.as_deref() else {
         return substituted;
     };
-    let target = crate::sema::types::substituted_spelling_with_defaults(
-        target,
-        &parameters,
-        &defaults,
-        &arguments,
-    );
+    let target =
+        sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
     // **And the target is a *name* too**, so it is followed before it is answered: `pointer` is `_Val*` in the class
     // that declares it, and `_Alloc_traits::reference` is whatever that alias names. Answering the spelling instead
     // is what made `map::find(text)->second` look `second` up in `_Rb_tree_iterator` rather than in its `pair`.
@@ -1872,7 +1860,7 @@ pub(crate) fn a_members_answer_as_a_type(
     // reach it (no parameter is written in `reference`) and the alias walk hands back `_Elem&`: a spelling no reader
     // can use. Measured through the server, `s[0]` on a `std::string&` answered **`_Elem&`** where a compiler answers
     // `char&`; the second pass is one call and turns it into `char&`.
-    let target = crate::sema::types::substituted_spelling_with_defaults(
+    let target = sema::types::substituted_spelling_with_defaults(
         &target,
         &parameters,
         &defaults,

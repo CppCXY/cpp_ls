@@ -107,6 +107,7 @@
 //! user's comments in it — so the analysis reads it and reports what it thinks, and any future "fix my config"
 //! feature has to propose a patch rather than rewrite what it did not author.
 
+use crate::CACHE_DIRECTORY;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -1187,7 +1188,7 @@ fn validate(report: &mut ConfigReport) {
             report.problems.push(ConfigProblem::warning(format!(
                 "index.cache_dir = {cache_dir:?} is not a directory name inside the project, so the default \
                  `{}` is used instead",
-                crate::CACHE_DIRECTORY
+                CACHE_DIRECTORY
             )));
             report.config.index.cache_dir = None;
         }
@@ -1315,6 +1316,8 @@ fn validate(report: &mut ConfigReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryFiles;
+    use crate::include;
 
     fn parse(text: &str) -> ConfigReport {
         parse_config(text, Path::new("/p/.cppls.toml"))
@@ -1541,10 +1544,7 @@ mod tests {
 
         // **What it does to the configuration**: the switch on, the dialect from the host compiler — `cl.exe` is
         // MSVC, whose `__int64` and `__cdecl` are the host compiler's half of a CUDA unit.
-        let config = cuda.applied_to(
-            crate::include::config::CompilerConfig::new(),
-            Path::new("/p"),
-        );
+        let config = cuda.applied_to(include::config::CompilerConfig::new(), Path::new("/p"));
         assert!(config.cuda(), "`enable` is the parser's CUDA switch");
         assert_eq!(config.dialect(), cpp_parser::Dialect::Msvc);
         assert!(
@@ -1574,10 +1574,7 @@ mod tests {
         let report = parse("[compile.cuda]\ntoolkit = '/opt/cuda'\n");
         assert_eq!(problems(&report), Vec::<String>::new());
         let cuda = report.config.compile.cuda.as_ref().expect("the section");
-        let config = cuda.applied_to(
-            crate::include::config::CompilerConfig::new(),
-            Path::new("/p"),
-        );
+        let config = cuda.applied_to(include::config::CompilerConfig::new(), Path::new("/p"));
         assert!(!config.cuda(), "no `enable`, no CUDA reading");
         assert!(
             config
@@ -1800,7 +1797,7 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_there_is_not_a_problem() {
-        let files = crate::MemoryFiles::new();
+        let files = MemoryFiles::new();
         let report = load_config(&files, Path::new("/p"), None);
 
         assert!(!report.found());
@@ -1810,7 +1807,7 @@ mod tests {
     #[test]
     fn a_file_the_caller_named_must_exist() {
         // `--config x` is an instruction, not a convention: a missing one is worth saying out loud.
-        let files = crate::MemoryFiles::new();
+        let files = MemoryFiles::new();
         let report = load_config(&files, Path::new("/p"), Some(Path::new("/p/other.toml")));
 
         assert!(!report.found());
@@ -1820,7 +1817,7 @@ mod tests {
 
     #[test]
     fn a_configuration_is_read_from_a_provider() {
-        let files = crate::MemoryFiles::new()
+        let files = MemoryFiles::new()
             .with_file("/p/.cppls.toml", "[workspace]\nexclude = [\"build/**\"]\n");
         let report = load_config(&files, Path::new("/p"), None);
 

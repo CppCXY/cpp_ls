@@ -14,6 +14,7 @@
 //! The read is the handler's; the application is an [`UpdateEvent`](crate::context::UpdateEvent) so that it is ordered
 //! with the document events — see [`the_clients_configuration`] for the deadlock that keeps the two apart.
 
+use crate::handlers;
 use lsp_types::{ClientCapabilities, ServerCapabilities};
 
 use crate::context::ServerContextSnapshot;
@@ -35,7 +36,7 @@ use super::RegisterCapabilities;
 /// server has never heard of, and re-opening a project because somebody changed their font size is a visible waste.
 pub async fn the_clients_configuration(
     context: &ServerContextSnapshot,
-) -> Option<crate::handlers::ClientConfig> {
+) -> Option<handlers::ClientConfig> {
     let (client_id, current) = {
         let workspace_manager = context.workspace_manager().lock().await;
         (
@@ -66,7 +67,7 @@ pub async fn the_clients_configuration(
 /// party gets there first (the worker, or a request that drains the queue ahead of it).
 pub async fn apply_the_clients_configuration(
     context: ServerContextSnapshot,
-    new_config: crate::handlers::ClientConfig,
+    new_config: handlers::ClientConfig,
 ) -> Option<()> {
     let unchanged = {
         let workspace_manager = context.workspace_manager().lock().await;
@@ -96,6 +97,7 @@ impl RegisterCapabilities for ConfigurationCapabilities {
 #[cfg(test)]
 mod tests {
     use crate::context::ClientId;
+    use crate::handlers;
 
     /// A configuration change that says the same thing as before must not schedule a reload — and the comparison
     /// that decides it is the whole configuration, so a new field is included the day it is added.
@@ -103,14 +105,14 @@ mod tests {
     fn two_configurations_with_the_same_settings_are_equal() {
         // Every field is written out, which is the point of the test: a field added to the struct later has to be
         // written here too, and the comparison then covers it by construction.
-        let one = crate::handlers::ClientConfig {
+        let one = handlers::ClientConfig {
             client_id: ClientId::Other,
             exclude: vec!["**/build/**".to_string()],
         };
         let other = one.clone();
         assert_eq!(one, other);
 
-        let different = crate::handlers::ClientConfig {
+        let different = handlers::ClientConfig {
             exclude: vec!["**/out/**".to_string()],
             ..one.clone()
         };

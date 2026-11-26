@@ -44,6 +44,7 @@
 //! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
 //! still draws the title.
 
+use crate::context;
 use cpp_code_analysis::{DeclKind, Known};
 use lsp_types::{
     ClientCapabilities, CodeLens, CodeLensParams, Command, Location, Position, Range,
@@ -85,7 +86,7 @@ pub async fn on_code_lens(
         // the request could not be answered for the document as it is; the client keeps what it is showing, and the
         // refresh after a load is what asks again once the answer exists.
         RequestOutcome::Missing => {
-            RequestOutcome::Cancelled(crate::context::CancelSource::ContentModified)
+            RequestOutcome::Cancelled(context::CancelSource::ContentModified)
         }
         other => other,
     }
@@ -265,6 +266,8 @@ impl RegisterCapabilities for CodeLensCapabilities {
 
 #[cfg(test)]
 mod tests {
+    use crate::handlers;
+    use crate::util;
     use cpp_code_analysis::{
         CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
     };
@@ -345,7 +348,7 @@ int f() { return grow(1) + grow(2); }
             .find(|fact| fact.name == "grow")
             .expect("the header's declaration")
             .clone();
-        let places = crate::handlers::references::places_of(
+        let places = handlers::references::places_of(
             &session,
             &fact,
             std::path::PathBuf::from("/p/a.h"),
@@ -484,7 +487,7 @@ int use(Format &f, Builder &b) { return f.NameStyleCheck(b, 1); }
 
     /// The name under a lens, from the file's own text — the fixture's text is what the lens ranges are in.
     fn lens_name(view: &cpp_code_analysis::FileView, lens: &CodeLens) -> String {
-        let Some(offset) = crate::util::offset_at_position(view, lens.range.start) else {
+        let Some(offset) = util::offset_at_position(view, lens.range.start) else {
             return String::new();
         };
         let text = &view.source[offset.get().min(view.source.len())..];

@@ -4,6 +4,11 @@
 //! `names_define_static_array`) that the member and call walks rely on.
 
 use super::*;
+use crate::DeclKind;
+use crate::FileView;
+use crate::ScopeTree;
+use crate::index;
+use crate::sema;
 
 /// **What a template-id's own arguments do to the type its declaration wrote.**
 ///
@@ -21,7 +26,7 @@ use super::*;
 /// with a different source of arguments.
 pub(crate) fn substituted_at_the_use(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
@@ -34,7 +39,7 @@ pub(crate) fn substituted_at_the_use(
     }
 
     let (names, _) = named.parameters_of(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -58,16 +63,14 @@ pub(crate) fn substituted_at_the_use(
             continue;
         }
         let parsed = parse_type_spelling(default);
-        defaults.push(
-            parsed.substituted(&crate::sema::types::TypeSubstitutions::new(
-                &names,
-                &written_arguments,
-            )),
-        );
+        defaults.push(parsed.substituted(&sema::types::TypeSubstitutions::new(
+            &names,
+            &written_arguments,
+        )));
     }
 
     let substitutions =
-        crate::sema::types::TypeSubstitutions::with_defaults(&names, &written_arguments, &defaults);
+        sema::types::TypeSubstitutions::with_defaults(&names, &written_arguments, &defaults);
     type_of.substituted(&substitutions)
 }
 /// **An argument spelling as the pattern comparison should see it**: a decidable compiler builtin, folded.
@@ -82,7 +85,7 @@ pub(crate) fn substituted_at_the_use(
 /// is what it did before this existed. The fold can therefore only add the matches that are true: it never removes
 /// one that was right, and it never invents one, which is the rule this whole matcher follows.
 pub(crate) fn folded_for_matching(argument: &str) -> String {
-    crate::sema::builtins::folded(argument)
+    sema::builtins::folded(argument)
 }
 /// **The class and member an alias template's spelling stands for** — and `None` when it is not one.
 ///
@@ -105,14 +108,14 @@ pub(crate) fn the_alias_behind(
     let Known::Yes(found) = index.definition(head.trim(), declaring) else {
         return None;
     };
-    if found.fact.kind != crate::DeclKind::Type {
+    if found.fact.kind != DeclKind::Type {
         return None;
     }
 
     let target = found.fact.type_of.as_deref()?;
-    let arguments = crate::sema::builtins::split_arguments(inside);
+    let arguments = sema::builtins::split_arguments(inside);
     let substituted =
-        crate::sema::types::substituted_spelling(target, found.fact.parameters(), &arguments);
+        sema::types::substituted_spelling(target, found.fact.parameters(), &arguments);
 
     // `typename enable_if<_Test, _Ty>::type` — the last `::` separates the class from the member it names.
     let substituted = substituted
@@ -171,7 +174,7 @@ pub fn substituted_members(
             .files_declaring(class, from)
             .into_iter()
             .find(|declared| {
-                declared.fact.kind == crate::DeclKind::Type && declared.fact.type_of.is_some()
+                declared.fact.kind == DeclKind::Type && declared.fact.type_of.is_some()
             })
             .and_then(|declared| declared.fact.type_of.clone())?;
         split_template_arguments(&target)
@@ -181,7 +184,7 @@ pub fn substituted_members(
     let Some(declared) = index
         .files_declaring(&base, from)
         .into_iter()
-        .find(|declared| declared.fact.kind == crate::DeclKind::Type)
+        .find(|declared| declared.fact.kind == DeclKind::Type)
     else {
         return Known::Yes(list);
     };
@@ -221,7 +224,7 @@ pub fn substituted_members(
     for member in list
         .members
         .iter()
-        .filter(|member| member.depth == 0 && member.fact.kind == crate::DeclKind::Type)
+        .filter(|member| member.depth == 0 && member.fact.kind == DeclKind::Type)
     {
         let Some(target) = member.fact.type_of.clone() else {
             continue;
@@ -241,7 +244,7 @@ pub fn substituted_members(
     // `typename __shared_ptr<Resource>::typename __shared_ptr<Resource>::element_type`, measured. The member's own
     // `type_of` *is* the target, so the expansion is a step for the other members only.
     let declares_an_alias = |member: &ProjectMember| {
-        member.fact.kind == crate::DeclKind::Type
+        member.fact.kind == DeclKind::Type
             && alias_names
                 .iter()
                 .any(|name| name == member.fact.name.as_str())
@@ -270,8 +273,7 @@ pub fn substituted_members(
             {
                 break;
             }
-            let next =
-                crate::sema::types::substituted_spelling(&spelling, &alias_names, &alias_targets);
+            let next = sema::types::substituted_spelling(&spelling, &alias_names, &alias_targets);
             if next == spelling {
                 break;
             }
@@ -301,18 +303,18 @@ pub fn substituted_members(
     }
     for member in &mut list.members {
         if let Some(spelling) = member.fact.detail_mut().parameter_list.as_mut() {
-            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+            *spelling = sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
             );
         }
         if let Some(spelling) = member.fact.returns.as_mut() {
-            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+            *spelling = sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
             )
             .into();
         }
         if let Some(spelling) = member.fact.type_of.as_mut() {
-            *spelling = crate::sema::types::substituted_spelling_with_defaults(
+            *spelling = sema::types::substituted_spelling_with_defaults(
                 spelling, &names, &defaults, &arguments,
             )
             .into();
@@ -396,7 +398,7 @@ pub(crate) fn the_class_a_definition_belongs_to(
         // [`crate::sema::scopes::the_qualified_name_of_a_declaration`]. Two readers of the same two shapes is how the
         // completion and the scope tree came to disagree about an out-of-class definition in the first place.
         let Some((qualifier, _)) =
-            crate::sema::scopes::the_qualified_name_of_a_declaration(declaration.syntax())
+            sema::scopes::the_qualified_name_of_a_declaration(declaration.syntax())
         else {
             continue;
         };
@@ -488,7 +490,7 @@ pub(crate) fn lists_usable_parameter_names(names: &[String]) -> bool {
 /// the step this walk needs: one level of alias, then the same question.
 pub(crate) fn an_element_type_through_the_members(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -517,7 +519,7 @@ pub(crate) fn an_element_type_through_the_members(
         let Some(written) = fact.type_of.as_deref() else {
             continue;
         };
-        let substituted = crate::sema::types::substituted_spelling(written, parameters, arguments);
+        let substituted = sema::types::substituted_spelling(written, parameters, arguments);
         let target = base_type_name(&substituted).to_string();
 
         if !target.is_empty()
@@ -530,7 +532,7 @@ pub(crate) fn an_element_type_through_the_members(
 
     // A member of kind `Type` whose target names another class — the alias of the base.
     for member in &members.members {
-        if member.fact.kind != crate::DeclKind::Type {
+        if member.fact.kind != DeclKind::Type {
             continue;
         }
         let Some(target) = member.fact.type_of.as_deref() else {
@@ -546,7 +548,7 @@ pub(crate) fn an_element_type_through_the_members(
         let bare_target = without_arguments(target.trim()).to_string();
         let qualified = resolved_in_the_enclosing_scopes(index, scopes, path, class, &bare_target);
         let qualified = resolve_aliases(
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             scopes,
             root,
@@ -574,7 +576,7 @@ pub(crate) fn an_element_type_through_the_members(
     {
         let base = resolved_in_the_enclosing_scopes(index, scopes, path, class, base.trim());
         let base = resolve_aliases(
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             scopes,
             root,
@@ -607,7 +609,7 @@ pub(crate) fn an_element_type_through_the_members(
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TableCost {
     /// The inverted index: two posting maps, the definers, and the sorted spellings.
-    pub names: crate::index::names::NameIndexCost,
+    pub names: index::names::NameIndexCost,
     /// Include edges across the project — the sum of every file's set of includers.
     pub edges: usize,
     /// The include graph and the module map, in bytes.
@@ -688,8 +690,8 @@ pub(crate) fn names_define_static_array(callee: &cpp_parser::CppSyntaxNode) -> b
 pub(crate) fn the_return_the_body_gives_back(
     memo: &TypeMemo,
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     depth: usize,
@@ -755,7 +757,7 @@ pub(crate) fn the_return_the_body_gives_back(
         };
         let Known::Yes((type_of, _)) = type_of_expression_memoed(
             memo,
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             declaring,
             the_scopes,

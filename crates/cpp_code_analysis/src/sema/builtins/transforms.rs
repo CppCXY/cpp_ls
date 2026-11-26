@@ -21,6 +21,7 @@
 //! which is exactly why they are the two left unmodelled rather than the two that were hard to reach.
 
 use super::{Answer, Builtin, Kind};
+use crate::sema;
 
 /// **A builtin whose answer is a type.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub fn apply(transform: Transform, arguments: &[String]) -> Answer {
                 return Answer::Unmodelled;
             };
             match rest.get(index) {
-                Some(written) => Answer::Type(crate::sema::types::parse_type_spelling(written)),
+                Some(written) => Answer::Type(sema::types::parse_type_spelling(written)),
                 None => Answer::Unmodelled,
             }
         }
@@ -89,6 +90,7 @@ pub fn apply(transform: Transform, arguments: &[String]) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sema;
 
     #[test]
     fn the_two_real_transforms_are_recognised_and_not_answered_for() {
@@ -135,11 +137,11 @@ mod tests {
                 Transform::TypePackElement,
                 &arguments(&["1", "int", "double"])
             ),
-            Answer::Type(crate::sema::types::parse_type_spelling("double"))
+            Answer::Type(sema::types::parse_type_spelling("double"))
         );
         assert_eq!(
             apply(Transform::TypePackElement, &arguments(&["0", "const int*"])),
-            Answer::Type(crate::sema::types::parse_type_spelling("const int*")),
+            Answer::Type(sema::types::parse_type_spelling("const int*")),
             "and the element keeps its own spelling, qualifiers and all"
         );
         assert_eq!(

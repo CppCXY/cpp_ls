@@ -23,6 +23,7 @@
 //! [`MacroReferences::rename`]'s own decision rather than this handler's. The protocol has nowhere to put the
 //! caveat, so the list carries the occurrences and the rename carries the caution.
 
+use crate::util;
 use cpp_code_analysis::{Known, ReferenceKind, Session};
 use lsp_types::{ClientCapabilities, Location, ReferenceParams, ServerCapabilities};
 use tokio_util::sync::CancellationToken;
@@ -55,7 +56,7 @@ pub async fn on_references(
         // the choice follows from it. Both reads are needed and neither is a fallback: each is the only reading that
         // can answer its own half.
         let written = session.view_of_the_file(&path)?;
-        let in_the_file = crate::util::offset_at_position(&written, position)?;
+        let in_the_file = util::offset_at_position(&written, position)?;
         if matches!(
             session.macro_references(&written, in_the_file),
             Known::Yes(_)
@@ -857,7 +858,7 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     name_level_offsets(session, view, offset, include_declaration)
         .into_iter()
         .filter_map(|(file, range)| {
-            let uri = crate::util::path_to_uri(&file)?;
+            let uri = util::path_to_uri(&file)?;
             let (Some(start), Some(end)) = (
                 position_of(session, &file, range.start_offset),
                 position_of(session, &file, range.end_offset()),
@@ -885,11 +886,11 @@ fn position_of<F: cpp_code_analysis::FileProvider + Clone>(
     offset: usize,
 ) -> Option<lsp_types::Position> {
     if let Some(held) = session.files().held(file) {
-        return crate::util::position_in(&held.text, &held.line_index, offset);
+        return util::position_in(&held.text, &held.line_index, offset);
     }
     let text = std::fs::read_to_string(file).ok()?;
     let index = cpp_parser::LineIndex::parse(&text);
-    crate::util::position_in(&text, &index, offset)
+    util::position_in(&text, &index, offset)
 }
 /// The **innermost class** whose body contains `offset` — by name, which is what a `DeclFact::scope` carries.
 ///

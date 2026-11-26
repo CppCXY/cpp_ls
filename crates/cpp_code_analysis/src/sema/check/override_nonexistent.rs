@@ -29,6 +29,9 @@
 //! the half it can prove: a name no base declares at all.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 /// **`override-nonexistent`** — see the module documentation.
 pub struct OverrideNonexistent;
@@ -42,7 +45,7 @@ impl Check for OverrideNonexistent {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Type)
+            .filter(|fact| fact.kind == DeclKind::Type)
             .map(|fact| (fact.name.to_string(), fact.bases().to_vec()))
             .collect();
 
@@ -52,8 +55,8 @@ impl Check for OverrideNonexistent {
             .declarations
             .iter()
             .filter(|fact| {
-                fact.kind == crate::DeclKind::Function
-                    && fact.modifiers.contains(crate::DeclModifiers::OVERRIDE)
+                fact.kind == DeclKind::Function
+                    && fact.modifiers.contains(DeclModifiers::OVERRIDE)
                     // **A destructor overrides a different name**: `~B` overrides `~A`, and the two spellings never
                     // match. Comparing names would report every legal `~B() override {}` in a class with a base,
                     // which is what this rule did to a fixture whose destructor is exactly that.
@@ -112,7 +115,7 @@ impl Check for OverrideNonexistent {
             let mut could_not_read_a_base = false;
             for base in bases {
                 match context.model.members_of(base) {
-                    crate::Known::Yes(list) => {
+                    Known::Yes(list) => {
                         if !list.unlisted.is_empty() {
                             could_not_read_a_base = true;
                         }

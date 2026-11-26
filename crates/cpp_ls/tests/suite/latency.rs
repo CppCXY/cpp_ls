@@ -37,6 +37,7 @@
 //! run fails on arithmetic rather than on behaviour and says nothing about a change. This is the same rule
 //! `tests/handshake.rs` states for its own `#[ignore]`d cases.
 
+use crate::common;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -1146,7 +1147,7 @@ struct Project {
 
 impl Project {
     fn new(name: &str) -> Project {
-        let root = crate::common::a_temp_directory(name);
+        let root = common::a_temp_directory(name);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the test project");
         Project { root }

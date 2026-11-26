@@ -18,6 +18,7 @@
 //! through one file's scopes, and the answer would be a different query. A client asks for a highlight on every cursor
 //! move, so the honest behaviour for a name this file cannot resolve alone is an empty list rather than a partial one.
 
+use crate::handlers;
 use cpp_code_analysis::VfsFile;
 use cpp_code_analysis::sema::declarations::{LocalReferences, local_references_of};
 use lsp_types::{
@@ -85,9 +86,7 @@ fn symbol_highlights<F: cpp_code_analysis::FileProvider + Clone>(
     let here = cpp_code_analysis::file::paths::normalize_path(&view.path, cfg!(windows));
 
     let mut found = Vec::new();
-    for (file, range) in
-        crate::handlers::references::name_level_offsets(session, view, offset, true)
-    {
+    for (file, range) in handlers::references::name_level_offsets(session, view, offset, true) {
         if cpp_code_analysis::file::paths::normalize_path(&file, cfg!(windows)) != here {
             continue;
         }

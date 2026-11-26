@@ -17,6 +17,8 @@
 //! Adding a provider is one function and one line in [`fixes_of`]; nothing about the protocol, the capability or the
 //! dispatch changes. That is the whole point of the shape.
 
+use crate::handlers;
+use crate::util;
 use cpp_code_analysis::{FileProvider, FileView, Known, Session};
 use lsp_types::{
     ClientCapabilities, CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -50,7 +52,7 @@ pub async fn on_code_action(
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let written = session.view_of_the_file(&path)?;
-        let in_the_file = crate::util::file_offset_at_position(&written, position)?;
+        let in_the_file = util::file_offset_at_position(&written, position)?;
         let view = session.view(&path)?;
         let offset = view.reading_offset_of(
             cpp_code_analysis::file::coordinates::FileOffset::new(in_the_file.get()),
@@ -172,7 +174,7 @@ impl<F: FileProvider + Clone> FixContext<'_, F> {
         at: Position,
         text: String,
     ) -> Option<CodeAction> {
-        let uri: Uri = crate::util::path_to_uri(&self.view.path)?;
+        let uri: Uri = util::path_to_uri(&self.view.path)?;
         Some(CodeAction {
             title,
             kind: Some(kind),
@@ -257,7 +259,7 @@ fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option
     let (target, in_file) = the_file_of_a_definition(fix, missing.is_a_template)?;
     let held = fix.session.files().held(&target)?;
     let text = &held.text;
-    let at = crate::util::position_in_file(held, text.len())?;
+    let at = util::position_in_file(held, text.len())?;
     // A definition wants its own lines: one blank line before it, and a newline after it.
     let separator = if text.is_empty() || text.ends_with('\n') {
         "\n"
@@ -265,7 +267,7 @@ fn create_definition<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> Option
         "\n\n"
     };
     let new_text = format!("{separator}{}\n", missing.text());
-    let uri: Uri = crate::util::path_to_uri(&target)?;
+    let uri: Uri = util::path_to_uri(&target)?;
     Some(CodeAction {
         title: format!(
             "Create definition of `{}` in {in_file}",
@@ -315,7 +317,7 @@ fn the_file_of_a_definition<F: FileProvider + Clone>(
     }
     // **A `.cpp` nobody has read is not a target**: the client does not know its contents, so an edit into it would be
     // an edit into a version that may not be the one on disk.
-    let paired = crate::handlers::switch_source_header::the_counterpart_of(fix.session, &here)
+    let paired = handlers::switch_source_header::the_counterpart_of(fix.session, &here)
         .filter(|candidate| *candidate != here)
         .filter(|candidate| fix.session.files().held(candidate).is_some());
     match paired {
@@ -352,7 +354,7 @@ fn implement_pure_virtuals<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> 
     let (target, in_file) = the_file_of_a_definition(fix, is_a_template)?;
     let held = fix.session.files().held(&target)?;
     let text = &held.text;
-    let at = crate::util::position_in_file(held, text.len())?;
+    let at = util::position_in_file(held, text.len())?;
     let separator = if text.is_empty() || text.ends_with('\n') {
         "\n"
     } else {
@@ -364,7 +366,7 @@ fn implement_pure_virtuals<F: FileProvider + Clone>(fix: &FixContext<'_, F>) -> 
         .collect::<Vec<_>>()
         .join("\n\n");
     let new_text = format!("{separator}{body}\n");
-    let uri: Uri = crate::util::path_to_uri(&target)?;
+    let uri: Uri = util::path_to_uri(&target)?;
     let count = missing.len();
     let functions = if count == 1 {
         "pure virtual function"

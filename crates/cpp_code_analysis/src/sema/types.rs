@@ -70,6 +70,7 @@
 //! a use wrote — the operation an instantiation would start from, and the one that makes
 //! `std::vector<T>::size_type` answerable once `T` is known.
 
+use crate::sema;
 use std::fmt;
 use std::sync::Arc;
 
@@ -429,7 +430,7 @@ impl Type {
     /// neither is visible in the two types: the first needs the class's constructors and the second needs its
     /// members. Answering either from the spellings alone is the invented finding the check layer exists to avoid —
     /// and `std::string s = "x";` is the most ordinary line in modern C++.
-    pub fn convertible_to(&self, target: &Type) -> crate::sema::symbol::Known<()> {
+    pub fn convertible_to(&self, target: &Type) -> sema::symbol::Known<()> {
         use crate::sema::symbol::Known;
 
         let from = self.decay();
@@ -506,7 +507,7 @@ impl Type {
                 let (to_core, to_qualified) = a_pointee_without_its_qualifiers(to_pointee);
                 let is_void = |type_of: &Type| matches!(type_of, Type::Builtin { spelling } if spelling == "void");
                 if is_void(from_core) || is_void(to_core) {
-                    Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+                    Known::Unknown(sema::symbol::UnknownReason::UnknownType(Box::from(
                         "a conversion through `void*` is not decided here",
                     )))
                 } else if from_core == to_core {
@@ -529,13 +530,13 @@ impl Type {
                     // `const char*` is declared"* — a false `param-type-check` on a call that is correct.
                     Known::No
                 } else {
-                    Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+                    Known::Unknown(sema::symbol::UnknownReason::UnknownType(Box::from(
                         "a conversion between two class pointers is a hierarchy question",
                     )))
                 }
             }
 
-            _ => Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(Box::from(
+            _ => Known::Unknown(sema::symbol::UnknownReason::UnknownType(Box::from(
                 "a conversion between these two types is not decided by their shapes",
             ))),
         }
@@ -1081,14 +1082,13 @@ fn parse_type_spelling_without_a_trailing_qualifier(written: &str) -> Type {
     //
     // Only the compiler's own names are consulted: in a type position `std::is_same<_Ty, _Uty>` is the **class** the
     // library defines, and reading it as a `bool` would be a wrong answer shaped exactly like a right one.
-    if let Some((builtin, arguments)) = crate::sema::builtins::split_a_builtin_spelling(trimmed) {
-        match crate::sema::builtins::answer(builtin, &arguments) {
-            crate::sema::builtins::Answer::Boolean(_)
-            | crate::sema::builtins::Answer::UndecidedBoolean => {
+    if let Some((builtin, arguments)) = sema::builtins::split_a_builtin_spelling(trimmed) {
+        match sema::builtins::answer(builtin, &arguments) {
+            sema::builtins::Answer::Boolean(_) | sema::builtins::Answer::UndecidedBoolean => {
                 return Type::builtin("bool");
             }
-            crate::sema::builtins::Answer::Type(type_of) => return type_of,
-            crate::sema::builtins::Answer::Unmodelled => {}
+            sema::builtins::Answer::Type(type_of) => return type_of,
+            sema::builtins::Answer::Unmodelled => {}
         }
     }
     if trimmed.is_empty() {

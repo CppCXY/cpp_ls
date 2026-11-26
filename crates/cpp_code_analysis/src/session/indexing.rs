@@ -4,6 +4,10 @@
 //! one, and the two are the same walk called with different budgets.
 
 use super::*;
+use crate::IncludeVisibility;
+use crate::TranslationUnit;
+use crate::file;
+use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **The translation units a pass over these files reads its environments out of** — one walk each, and cached.
@@ -16,7 +20,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn units_for_the_pass(
         &self,
         files: &[PathBuf],
-    ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
+    ) -> Vec<std::sync::Arc<TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the
         // argument was right about coverage and wrong about cost, because the units built here are a **local** vector
@@ -77,7 +81,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The sequential loop is also the one that walks **fewer** timelines: it skips a candidate an earlier unit
         // already covers, which is roughly 541 of 1729 on that project and is exactly what running first gives up.
-        let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
+        let mut units: Vec<std::sync::Arc<TranslationUnit>> = Vec::new();
 
         // **A unit already in memory may cover this file, and then there is nothing to walk.**
         //
@@ -89,7 +93,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The key carries the environment (`SummaryKey::env_hash`), so a summary built from one root's environment is
         // filed under it: reusing a unit can produce a *different* entry, never a wrong one.
-        let held: Vec<std::sync::Arc<crate::TranslationUnit>> = {
+        let held: Vec<std::sync::Arc<TranslationUnit>> = {
             let table = self.held_units();
             table
                 .held
@@ -140,7 +144,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn walk_the_timelines(
         &self,
         roots: Vec<PathBuf>,
-    ) -> Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)> {
+    ) -> Vec<(PathBuf, Option<std::sync::Arc<TranslationUnit>>)> {
         roots
             .into_iter()
             .map(|root| {
@@ -166,7 +170,7 @@ impl<F: FileProvider + Clone> Session<F> {
         path: PathBuf,
         priority: Priority,
         depth: usize,
-        ready: Option<crate::index::store::Prepared>,
+        ready: Option<index::store::Prepared>,
         // May this read build a translation timeline? An edited open buffer only needs its own summary; a full
         // closure walk is the difference between a keystroke and a project read.
         timeline: bool,
@@ -203,7 +207,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // and is not worth asserting anything about. See [`HeldUnit`].
         let prepared_with_environment = ready
             .as_ref()
-            .is_some_and(crate::index::store::Prepared::with_environment);
+            .is_some_and(index::store::Prepared::with_environment);
         let unit = if ready.is_none() && timeline {
             self.the_timeline_to_read_through(&spelled)
         } else {
@@ -263,7 +267,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // looking at, and the client is the authority for it.
         if !self.documents.is_open(&path) {
             let key = queue_key(&path);
-            match crate::file::FileStamp::of(&path) {
+            match file::FileStamp::of(&path) {
                 Some(stamp) => {
                     self.stamps.insert(key, stamp);
                 }
@@ -480,7 +484,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .visible_files(path)
             .iter()
             .all(|(file, visibility)| {
-                *visibility != crate::IncludeVisibility::Unconditional
+                *visibility != IncludeVisibility::Unconditional
                     || self.store.index().summary(Path::new(file)).is_some()
             })
     }
@@ -899,10 +903,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// scope. The second pass repairs that, and until it runs, a **check** reading this summary is reading an answer
     /// that is about to change.
     pub fn is_owed_a_re_read(&self, path: &Path) -> bool {
-        let key = crate::file::paths::normalize_path(path, cfg!(windows));
+        let key = file::paths::normalize_path(path, cfg!(windows));
         self.parsed_since_the_last_pass
             .iter()
-            .any(|queued| crate::file::paths::normalize_path(queued, cfg!(windows)) == key)
+            .any(|queued| file::paths::normalize_path(queued, cfg!(windows)) == key)
     }
 
     /// **Does anything this file can see wait for the second pass?** — the closure question behind

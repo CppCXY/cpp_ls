@@ -1,10 +1,11 @@
+use crate::FileSummary;
 use std::path::Path;
 
 use super::{ProjectIndex, Visibility, normalize};
 use crate::file::paths::FileProvider;
 use crate::{CompilerConfig, FileIndexer, MemoryFiles, SummaryKey};
 
-fn summary(files: &MemoryFiles, path: &str) -> crate::FileSummary {
+fn summary(files: &MemoryFiles, path: &str) -> FileSummary {
     let path = Path::new(path);
     let source = files.read(path).expect("fixture text");
     FileIndexer::new(files, &CompilerConfig::default()).index(path, &source, SummaryKey::new(0, 0))

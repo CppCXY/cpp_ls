@@ -219,20 +219,21 @@ fn align_run(
 mod tests {
     use super::*;
     use crate::config::Style;
+    use crate::roles;
+    use crate::tokens;
 
     fn padded(source: &str) -> Vec<usize> {
         let mut style = Style::default_style();
         style.set_from_text("AlignArrayOfStructures", "Left");
-        let stream = crate::tokens::stream(source);
-        let roles = crate::roles::of(source);
+        let stream = tokens::stream(source);
+        let roles = roles::of(source);
         paddings(&stream, &roles, &style)
     }
 
     #[test]
     fn the_rows_of_a_table_include_the_last_one_without_a_comma() {
-        let stream = crate::tokens::stream(
-            "int t[] = {\n  {\"a\", 1},\n  {\"bb\", 2},\n  {\"ccc\", 3}\n};\n",
-        );
+        let stream =
+            tokens::stream("int t[] = {\n  {\"a\", 1},\n  {\"bb\", 2},\n  {\"ccc\", 3}\n};\n");
         let found = rows(&stream);
         assert_eq!(found.len(), 3, "{found:?}");
     }
@@ -253,7 +254,7 @@ mod tests {
         let non_zero: Vec<usize> = found.iter().copied().filter(|pad| *pad > 0).collect();
         assert!(!non_zero.is_empty(), "{found:?}");
         // Every row's `}` carries the same padding.
-        let stream = crate::tokens::stream("int t[] = {\n  {\"a\", 1},\n  {\"ccc\", 3}\n};\n");
+        let stream = tokens::stream("int t[] = {\n  {\"a\", 1},\n  {\"ccc\", 3}\n};\n");
         let closes: Vec<usize> = rows(&stream).iter().map(|row| found[row.close]).collect();
         assert_eq!(closes.len(), 2);
         assert_eq!(closes[0], closes[1], "{closes:?}");

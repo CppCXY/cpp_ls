@@ -3,6 +3,14 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::*;
+use crate::doc;
+use crate::file;
+use crate::folding;
+use crate::format;
+use crate::index;
+use crate::sema;
+use crate::semantic;
+use crate::signature;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
@@ -16,9 +24,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// index, and a file whose includes have not been read yet answers with **fewer** classifications rather than
     /// with different ones. A caller that publishes these should therefore publish them again once
     /// [`Session::pending`] reaches zero.
-    pub fn classified_names(&self, view: &FileView) -> Vec<crate::semantic::Name> {
+    pub fn classified_names(&self, view: &FileView) -> Vec<semantic::Name> {
         use cpp_parser::CppTokenKind;
-        let mut names = crate::semantic::classified_names(self.store.index(), view);
+        let mut names = semantic::classified_names(self.store.index(), view);
 
         // **The predefined macros, which no file declares.** `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`,
         // `__cplusplus` and the compiler's own five hundred are defined by the *compiler*, so the walk above — which
@@ -58,12 +66,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             }
             claimed.insert(start);
-            names.push(crate::semantic::Name {
+            names.push(semantic::Name {
                 range: token.range,
-                kind: crate::semantic::NameKind::Macro,
+                kind: semantic::NameKind::Macro,
                 declaration: false,
                 modifiers: Vec::new(),
-                provenance: crate::semantic::Provenance::Macro,
+                provenance: semantic::Provenance::Macro,
             });
         }
 
@@ -96,7 +104,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     // **Back into the rendering's coordinates**, because the loop after this one moves every range out
                     // of the rendering and into the file; a range already in the file would be mapped a second time.
                     let Some(reading) =
-                        view.reading_offset_of(crate::file::coordinates::FileOffset::new(at))
+                        view.reading_offset_of(file::coordinates::FileOffset::new(at))
                     else {
                         continue;
                     };
@@ -104,12 +112,12 @@ impl<F: FileProvider + Clone> Session<F> {
                     if !claimed.insert(at) {
                         continue;
                     }
-                    names.push(crate::semantic::Name {
+                    names.push(semantic::Name {
                         range: cpp_parser::SourceRange::new(at, name.len()),
-                        kind: crate::semantic::NameKind::Macro,
+                        kind: semantic::NameKind::Macro,
                         declaration: false,
                         modifiers: Vec::new(),
-                        provenance: crate::semantic::Provenance::Macro,
+                        provenance: semantic::Provenance::Macro,
                     });
                 }
             }
@@ -172,7 +180,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .enumerate()
                 .map(|(index, name)| (name.range.start_offset, index))
                 .collect();
-            for name in crate::semantic::classified_names(self.store.index(), &own) {
+            for name in semantic::classified_names(self.store.index(), &own) {
                 match at_offset.get(&name.range.start_offset) {
                     Some(&index) => names[index] = name,
                     None => {
@@ -200,8 +208,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // spelling in a comment has no tree position to resolve from, and the pass that draws tokens has no session.
         {
             let text: &str = view.written_text().unwrap_or(&view.source);
-            for target in crate::doc::targets(text) {
-                if !crate::doc::is_a_documentation_comment(text, target.range.start_offset) {
+            for target in doc::targets(text) {
+                if !doc::is_a_documentation_comment(text, target.range.start_offset) {
                     continue;
                 }
                 let spelling = target.spelled_for_a_lookup();
@@ -211,9 +219,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     .definition(spelling, &view.path)
                     .value()
                     .and_then(|found| {
-                        crate::semantic::kind_of_index(crate::index::project::IndexedKind::of(
-                            &found.fact,
-                        ))
+                        semantic::kind_of_index(index::project::IndexedKind::of(&found.fact))
                     })
                     // **A macro is a name too**, and the index holds no *declaration* for one: `[`MAX`]` names a
                     // `#define`, which is a fact about text. The environment the file is compiled in is the same
@@ -225,17 +231,17 @@ impl<F: FileProvider + Clone> Session<F> {
                             .index()
                             .macro_names_in_force(&view.path)
                             .contains(spelling)
-                            .then_some(crate::semantic::NameKind::Macro)
+                            .then_some(semantic::NameKind::Macro)
                     });
                 let Some(kind) = kind else {
                     continue;
                 };
-                names.push(crate::semantic::Name {
+                names.push(semantic::Name {
                     range: target.range,
                     kind,
                     declaration: false,
                     modifiers: Vec::new(),
-                    provenance: crate::semantic::Provenance::Found,
+                    provenance: semantic::Provenance::Found,
                 });
             }
         }
@@ -246,7 +252,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // same one every other spelling in this project is read by.
         {
             let text: &str = view.written_text().unwrap_or(&view.source);
-            for block in crate::doc::code_blocks(text) {
+            for block in doc::code_blocks(text) {
                 let body = &text[block.start_offset..block.end_offset()];
                 let (tokens, _) = cpp_parser::lex(body, &cpp_parser::LexerConfig::default());
                 for token in tokens {
@@ -260,22 +266,22 @@ impl<F: FileProvider + Clone> Session<F> {
                         continue;
                     }
                     let kind = if is_a_keyword {
-                        Some(crate::semantic::NameKind::Keyword)
+                        Some(semantic::NameKind::Keyword)
                     } else {
                         self.store
                             .index()
                             .definition(spelling, &view.path)
                             .value()
                             .and_then(|found| {
-                                crate::semantic::kind_of_index(
-                                    crate::index::project::IndexedKind::of(&found.fact),
-                                )
+                                semantic::kind_of_index(index::project::IndexedKind::of(
+                                    &found.fact,
+                                ))
                             })
                     };
                     let Some(kind) = kind else {
                         continue;
                     };
-                    names.push(crate::semantic::Name {
+                    names.push(semantic::Name {
                         range: cpp_parser::SourceRange::new(
                             block.start_offset + token.range.start_offset,
                             token.range.length,
@@ -283,7 +289,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         kind,
                         declaration: false,
                         modifiers: Vec::new(),
-                        provenance: crate::semantic::Provenance::Found,
+                        provenance: semantic::Provenance::Found,
                     });
                 }
             }
@@ -324,8 +330,8 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn format_literals(
         &self,
         view: &FileView,
-        config: &crate::format::FormatConfig,
-    ) -> Vec<crate::format::FormatLiteral> {
+        config: &format::FormatConfig,
+    ) -> Vec<format::FormatLiteral> {
         // **A rendering is not this pass's text.** Its tree's tokens are the cook's, and a range in it names a place
         // in a string the reader has never seen.
         if view.written_text().is_some() {
@@ -348,7 +354,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut qualified_name = |offset: usize| -> Option<String> {
             let reading = view.reading_offset_of(FileOffset::new(offset))?;
             let Known::Yes(binding) =
-                crate::sema::resolve::definition_at(&view.scopes, &view.root, reading.get())
+                sema::resolve::definition_at(&view.scopes, &view.root, reading.get())
             else {
                 return None;
             };
@@ -359,7 +365,7 @@ impl<F: FileProvider + Clone> Session<F> {
             })
         };
 
-        crate::format::literals_in(
+        format::literals_in(
             &view.source,
             view.tree.get_tokens(),
             config,
@@ -389,7 +395,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return view.selection_chain(ReadingOffset::new(offset.get()));
         };
         let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
-        crate::file::view::selection_chain_of(&tree.get_red_root(), offset.get())
+        file::view::selection_chain_of(&tree.get_red_root(), offset.get())
     }
 
     /// **The file's foldable regions** — see [`crate::folding`].
@@ -398,7 +404,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// same reason: folding is about the file in front of the reader, so an unsaved edit is folded as it is typed,
     /// and a declaration in a branch nobody takes is a region like any other. Nothing here consults the index, the
     /// cooked reading, or any other file — a fold is a fact about this text.
-    pub fn folding_ranges(&self, view: &FileView) -> Vec<crate::folding::Fold> {
+    pub fn folding_ranges(&self, view: &FileView) -> Vec<folding::Fold> {
         // **The file in front of the reader, which is not the text this view parses any more.**
         //
         // The promise above — "the buffer's own tokens and directives" — was free while a view *was* the file's own
@@ -415,10 +421,10 @@ impl<F: FileProvider + Clone> Session<F> {
         // here rather than being kept because only this query wants these tokens, and only when a client asks.
         let Some(written) = view.written_text() else {
             // No rendering: this view *is* the file's own text, and its tokens are already the right ones.
-            return crate::folding::folding_ranges(&view.source, view.tree.get_tokens());
+            return folding::folding_ranges(&view.source, view.tree.get_tokens());
         };
         let (tokens, _) = cpp_parser::lex(written, &cpp_parser::LexerConfig::default());
-        crate::folding::folding_ranges(written, &tokens)
+        folding::folding_ranges(written, &tokens)
     }
 
     /// **The signatures of the call the cursor is inside** — see [`crate::signature`].
@@ -445,9 +451,9 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_signature_at(
         &self,
         view: &FileView,
-        offset: crate::file::coordinates::FileOffset,
-    ) -> Option<crate::signature::CallSignature> {
-        crate::signature::a_macro_signature(self.store.index(), view, offset.get(), &mut |path| {
+        offset: file::coordinates::FileOffset,
+    ) -> Option<signature::CallSignature> {
+        signature::a_macro_signature(self.store.index(), view, offset.get(), &mut |path| {
             self.view(path)
         })
     }
@@ -456,9 +462,9 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         view: &FileView,
         offset: ReadingOffset,
-    ) -> Vec<crate::signature::CallSignature> {
+    ) -> Vec<signature::CallSignature> {
         let mut signatures =
-            crate::signature::signatures_at(self.store.index(), view, offset.get(), |path| {
+            signature::signatures_at(self.store.index(), view, offset.get(), |path| {
                 self.view(path)
             });
 

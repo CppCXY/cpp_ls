@@ -34,6 +34,7 @@
 //! * **不猜**。命中只有三种归宿：确定是它（`Use`）、确定不是（计数进 `rejected`）、可能但说不准
 //!   （`Uncertain` 带 `UnknownReason`）。
 
+use crate::summary;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
@@ -603,7 +604,7 @@ pub struct SymbolToFind {
 
 impl SymbolToFind {
     /// The symbol a resolved declaration names.
-    pub fn of(fact: &crate::summary::DeclFact, declared_in: PathBuf) -> Self {
+    pub fn of(fact: &summary::DeclFact, declared_in: PathBuf) -> Self {
         let name = fact.name.to_string();
         let last_segment = match name.rsplit_once("::") {
             Some((_, last)) => last.to_string(),
@@ -1544,7 +1545,7 @@ mod tests {
 /// One `read` and one lex per candidate, bounded by `budget` files. A candidate whose text does not contain the name is
 /// one read and no lex, which is the cheap filter that makes a large closure affordable.
 pub fn name_references(
-    index: &crate::ProjectIndex,
+    index: &ProjectIndex,
     read: &dyn Fn(&std::path::Path) -> Option<String>,
     name: &str,
     declaring: &[std::path::PathBuf],

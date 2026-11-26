@@ -3,6 +3,7 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::grammar;
 
 /// The two ways a name may still become a **word of the type**, computed by the specifier loop and asked about
 /// again inside it.
@@ -81,7 +82,7 @@ pub(crate) fn name_joins_the_type(
     //
     // Asked **before** the "no type yet" early return below, because that is the other half: `S::S(int)` has no type
     // before the name and would otherwise be taken for one.
-    if has_type_specifier && crate::grammar::cpp::decls::starts_an_out_of_class_member(p) {
+    if has_type_specifier && grammar::cpp::decls::starts_an_out_of_class_member(p) {
         return false;
     }
     // A **class-like definition** is a complete type, body and all, and the name after it is the declarator:

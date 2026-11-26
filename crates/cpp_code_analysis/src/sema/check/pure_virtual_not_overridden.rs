@@ -31,6 +31,9 @@
 //! for the same reason: the summary records no parameter list for a function, so a signature cannot be compared.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 /// **`pure-virtual-not-overridden`** — see the module documentation.
 pub struct PureVirtualNotOverridden;
@@ -43,18 +46,18 @@ impl Check for PureVirtualNotOverridden {
         // because a finding needs `&mut context` while the declarations borrow it.
         let mut tried: Vec<(String, cpp_parser::SourceRange)> = Vec::new();
         for fact in &context.summary.declarations {
-            if fact.kind != crate::DeclKind::Function
-                || !fact.modifiers.contains(crate::DeclModifiers::OVERRIDE)
+            if fact.kind != DeclKind::Function || !fact.modifiers.contains(DeclModifiers::OVERRIDE)
             {
                 continue;
             }
             let Some(class) = fact.scope.as_deref() else {
                 continue;
             };
-            let Some(class_fact) =
-                context.summary.declarations.iter().find(|declared| {
-                    declared.kind == crate::DeclKind::Type && declared.name == class
-                })
+            let Some(class_fact) = context
+                .summary
+                .declarations
+                .iter()
+                .find(|declared| declared.kind == DeclKind::Type && declared.name == class)
             else {
                 continue;
             };
@@ -64,22 +67,22 @@ impl Check for PureVirtualNotOverridden {
         }
 
         for (class, name_range) in tried {
-            let crate::Known::Yes(list) = context.model.members_of(&class) else {
+            let Known::Yes(list) = context.model.members_of(&class) else {
                 continue;
             };
             // **Every pure virtual the hierarchy shows**, minus the ones something below already implemented.
             let mut missing: Vec<String> = Vec::new();
             for member in &list.members {
-                if member.fact.kind != crate::DeclKind::Function
-                    || !member.fact.modifiers.contains(crate::DeclModifiers::PURE)
+                if member.fact.kind != DeclKind::Function
+                    || !member.fact.modifiers.contains(DeclModifiers::PURE)
                 {
                     continue;
                 }
                 let overridden = list.members.iter().any(|other| {
-                    other.fact.kind == crate::DeclKind::Function
+                    other.fact.kind == DeclKind::Function
                         && other.fact.name == member.fact.name
                         && other.depth < member.depth
-                        && !other.fact.modifiers.contains(crate::DeclModifiers::PURE)
+                        && !other.fact.modifiers.contains(DeclModifiers::PURE)
                 });
                 if !overridden && !missing.iter().any(|name| name == member.fact.name.as_str()) {
                     missing.push(member.fact.name.to_string());

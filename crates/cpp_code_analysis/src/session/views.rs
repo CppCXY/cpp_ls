@@ -5,6 +5,9 @@
 //! macros expanded, directives resolved.
 
 use super::*;
+use crate::cache;
+use crate::preprocess;
+use crate::summary;
 
 /// **The regions of a file this configuration does not compile**, with the one fact a caller that paints them must
 /// respect — the answer to "may I paint these?" in one value.
@@ -235,7 +238,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // wants it read — `Session::view`'s contract for a file nobody has indexed. It is only *remembered* when the
         // cook can be served; otherwise a later query, after the index has read it, must be free to ask again.
         if self.store.index().summary(path).is_some() {
-            let key = (path.to_path_buf(), crate::cache::content_hash(text));
+            let key = (path.to_path_buf(), cache::content_hash(text));
             let first = self
                 .renderings_asked
                 .lock()
@@ -414,7 +417,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **Whether a rendering for this text is in memory**, without consulting the disk — see
     /// [`Session::view_of_the_file`], which wants to know only whether to ask for one.
     pub(crate) fn a_rendering_is_known_in_memory(&self, path: &Path, text: &str) -> bool {
-        let text_hash = crate::cache::content_hash(text);
+        let text_hash = cache::content_hash(text);
         if let Ok(open) = self.open_renderings.lock()
             && let Some((hash, _)) = open.get(&queue_key(path))
             && *hash == text_hash
@@ -433,8 +436,8 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text: &str,
-    ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
-        let text_hash = crate::cache::content_hash(text);
+    ) -> Option<std::sync::Arc<preprocess::cooked::RenderedCooked>> {
+        let text_hash = cache::content_hash(text);
         // **The open document's own rendering first, and it is not in the budget** — see
         // [`Session::open_renderings`]: the LRU is filled by a pass over the closure, and the file the reader is
         // editing is the one rendering that must survive it. Measured: after twenty seconds of indexing, `ids.`
@@ -487,7 +490,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text_hash: u64,
-        rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+        rendered: std::sync::Arc<preprocess::cooked::RenderedCooked>,
     ) {
         // **An open document is pinned outside the budget** — see [`Session::open_renderings`]: the LRU is filled by
         // a pass over the closure, and evicting the rendering of the file being edited is what made member
@@ -554,7 +557,7 @@ impl<F: FileProvider + Clone> Session<F> {
         path: &Path,
         text: &str,
     ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
-        let key = (path.to_path_buf(), crate::cache::content_hash(text));
+        let key = (path.to_path_buf(), cache::content_hash(text));
         self.macro_environments.lock().ok()?.get(&key).cloned()
     }
 
@@ -575,9 +578,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let summary = self.store.index().summary(path)?;
         let (closure, by_key) = self.closure_with_text(path);
-        let mut definitions = crate::summary::MacroDefinitions::default();
+        let mut definitions = summary::MacroDefinitions::default();
 
-        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+        let evidence = summary::macros_from_the_closure_with_bodies(
             summary,
             |wanted| {
                 let key = normalize_path(wanted, cfg!(windows));
@@ -598,7 +601,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let weight = cpp_parser::MacroFacts::len(made.as_ref());
         if let Ok(mut known) = self.macro_environments.lock() {
             known.insert(
-                (path.to_path_buf(), crate::cache::content_hash(text)),
+                (path.to_path_buf(), cache::content_hash(text)),
                 made.clone(),
                 weight,
             );

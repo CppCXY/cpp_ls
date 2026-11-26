@@ -4,6 +4,9 @@
 //! corpus can write `using A = A;` and the honest answer to a reader is a refusal rather than a loop.
 
 use super::*;
+use crate::DeclKind;
+use crate::ScopeTree;
+use crate::sema;
 
 /// **How many aliases one spelling may be followed through** — see [`a_spelling_through_the_aliases`].
 ///
@@ -80,7 +83,7 @@ pub(crate) const MAX_ALIAS_PASSES: usize = 4;
 /// member of the current class always wins over a same-named alias three classes back.
 pub(crate) fn a_spelling_through_the_aliases(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &Type,
@@ -121,19 +124,19 @@ pub(crate) fn substituted_through(
         if name.is_empty() || value.is_empty() {
             continue;
         }
-        result = crate::sema::types::substituted_spelling(
+        result = sema::types::substituted_spelling(
             &result,
             std::slice::from_ref(name),
             std::slice::from_ref(value),
         );
     }
-    crate::sema::types::substituted_spelling_with_defaults(&result, parameters, defaults, arguments)
+    sema::types::substituted_spelling_with_defaults(&result, parameters, defaults, arguments)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn a_spelling_through_the_aliases_in(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &Type,
@@ -309,13 +312,13 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     if names_a_namespace(index, path, &inner) {
         return written.to_string();
     }
-    let inner_type = crate::sema::types::parse_type_spelling(&inner);
+    let inner_type = sema::types::parse_type_spelling(&inner);
     let Some(inner_name) = inner_type.class_name() else {
         return written.to_string();
     };
     // **The arguments split where the language splits them.** `split_arguments` counts brackets
     // *and* parentheses, the same rule the pattern comparison uses.
-    let inner_arguments: Vec<String> = crate::sema::builtins::split_arguments(
+    let inner_arguments: Vec<String> = sema::builtins::split_arguments(
         inner
             .split_once('<')
             .map(|(_, rest)| rest.trim_end().strip_suffix('>').unwrap_or(rest))
@@ -330,7 +333,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     // the chain — and a class whose parameters cannot be found is a class whose members cannot be substituted.
     let inner_class = {
         let qualified = resolve_aliases(
-            &crate::sema::declarations::ShapeTable::new(),
+            &sema::declarations::ShapeTable::new(),
             index,
             scopes,
             root,
@@ -377,8 +380,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     // Measured on `Mark.cpp`: without this, the walk stopped at `__gnu_cxx::__alloc_traits<…>::template
     // rebind<MarkEvent>::other` — the spelling the report calls "极其夸张" — because `rebind<MarkEvent>` was never a
     // name any lookup was asked about.
-    if fact.kind == crate::DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty()
-    {
+    if fact.kind == DeclKind::Type && fact.type_of.is_none() && !member_arguments.is_empty() {
         let resolved_arguments: Vec<String> = member_arguments
             .iter()
             .map(|argument| {
@@ -420,7 +422,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     let target = if member_arguments.is_empty() {
         target
     } else {
-        crate::sema::types::substituted_spelling_with_defaults(
+        sema::types::substituted_spelling_with_defaults(
             &target,
             fact.parameters(),
             fact.parameter_defaults(),
@@ -458,7 +460,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
 /// declares none of its own, and answering that one would be answering nothing.
 pub(crate) fn a_member_the_class_declares(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -480,9 +482,7 @@ pub(crate) fn a_member_the_class_declares(
     let arguments: Vec<String> = class
         .split_once('<')
         .map(|(_, rest)| {
-            crate::sema::builtins::split_arguments(
-                rest.trim_end().strip_suffix('>').unwrap_or(rest),
-            )
+            sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
         })
         .unwrap_or_default();
     let parameters = index.template_parameters_for(class, path, &arguments);
@@ -506,7 +506,7 @@ pub(crate) fn a_member_the_class_declares(
     // pattern comparison, with the arguments read from the spelling — and it is the one lookup that does **not** end by
     // asking about an `operator->`, which is what keeps this walk out of the arrow's cycle.
     direct_member(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -615,7 +615,7 @@ pub(crate) fn the_name_and_its_arguments(spelling: &str) -> (&str, Vec<String>) 
         return (name, Vec::new());
     };
     let inside = rest.trim_end().strip_suffix('>').unwrap_or(rest);
-    let arguments = crate::sema::builtins::split_arguments(inside);
+    let arguments = sema::builtins::split_arguments(inside);
     (head.trim(), arguments)
 }
 
@@ -671,7 +671,7 @@ pub(crate) fn split_the_operators_of(spelling: &str) -> (String, String, String)
 
 pub(crate) fn through_an_operator_arrow(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -682,7 +682,7 @@ pub(crate) fn through_an_operator_arrow(
     // are what the arrow's return type is substituted with.
     let target = the_class_an_arrow_points_at(index, scopes, root, path, class, arguments)?;
     direct_member(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -697,7 +697,7 @@ pub(crate) fn through_an_operator_arrow(
 /// template parameter this call cannot substitute.
 pub(crate) fn the_class_an_arrow_points_at(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -708,16 +708,14 @@ pub(crate) fn the_class_an_arrow_points_at(
         .map(<[String]>::to_vec)
         .or_else(|| {
             class.split_once('<').map(|(_, rest)| {
-                crate::sema::builtins::split_arguments(
-                    rest.trim_end().strip_suffix('>').unwrap_or(rest),
-                )
+                sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
             })
         })
         .unwrap_or_default();
     // **The arguments are handed to the lookup**, so that a partial specialization whose pattern does not match is not
     // the declaration `operator->` is read from — the same rule `direct_member`'s members already follow.
     let (arrow, _) = direct_member(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -740,7 +738,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     // iterator's own `typedef _Val* pointer;` makes a `pair<const K, V>*`. The step is the same one
     // a member's recorded type goes through ([`a_spelling_through_the_aliases`]), applied here
     // because this is the second place a *spelling* is about to be used as a type.
-    let class_type = crate::sema::types::parse_type_spelling(class);
+    let class_type = sema::types::parse_type_spelling(class);
     let resolved = a_spelling_through_the_aliases(
         index,
         scopes,
@@ -751,7 +749,7 @@ pub(crate) fn the_class_an_arrow_points_at(
         &returns,
         MAX_ALIAS_HOPS,
     );
-    let substituted = crate::sema::types::substituted_spelling_with_defaults(
+    let substituted = sema::types::substituted_spelling_with_defaults(
         &resolved,
         &parameters,
         &defaults,
@@ -793,9 +791,10 @@ pub(crate) fn the_class_an_arrow_points_at(
         let names_a_class = |name: &str| {
             let bare = base_type_name(name);
             is_a_builtin_name(bare)
-                || index.files_declaring(bare, path).iter().any(|found| {
-                    found.fact.kind == crate::DeclKind::Type && found.fact.type_of.is_none()
-                })
+                || index
+                    .files_declaring(bare, path)
+                    .iter()
+                    .any(|found| found.fact.kind == DeclKind::Type && found.fact.type_of.is_none())
         };
         let walked = the_element_type_of(index, scopes, root, path, class, &bare, &arguments);
         target = match walked {
@@ -856,7 +855,7 @@ pub(crate) fn is_a_builtin_name(name: &str) -> bool {
 /// answer to this question (`std::pointer_traits` is written in terms of it) and it is one lookup away.
 pub fn element_type_of(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -868,7 +867,7 @@ pub fn element_type_of(
 
 pub(crate) fn the_element_type_of(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -911,7 +910,7 @@ pub(crate) fn the_element_type_of(
         let Some(written) = fact.type_of.as_deref() else {
             continue;
         };
-        let substituted = crate::sema::types::substituted_spelling(written, &parameters, arguments);
+        let substituted = sema::types::substituted_spelling(written, &parameters, arguments);
         let target = base_type_name(&substituted).to_string();
 
         // A parameter name is not an answer: it means the declaration named something this call cannot substitute.

@@ -87,6 +87,11 @@
 //! · a scope walk for a name no scope binds        one `HashSet` of the spellings this file declares is the filter
 //! ```
 
+use crate::FactGuard;
+use crate::Visibility;
+use crate::index;
+use crate::preprocess;
+use crate::sema;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -245,9 +250,8 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // declaration, that answer is read from the same table, and a file with a hundred accesses built a hundred of
     // them — 1 150 ms of a 1 151 ms semantic-token request on a 901-line file (§3.3 of
     // `docs/diagnostics-performance.md`).
-    let shapes: crate::sema::declarations::ShapeTable =
-        crate::sema::declarations::ShapeTable::new();
-    let types = crate::index::project::TypeMemo::default();
+    let shapes: sema::declarations::ShapeTable = sema::declarations::ShapeTable::new();
+    let types = index::project::TypeMemo::default();
     let declared = declarations_by_offset(view);
     let parameters = parameter_offsets(view);
     let macros = macro_names(view);
@@ -334,9 +338,9 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 continue;
             }
             for found in index.files_declaring(written, &view.path) {
-                if let crate::FactGuard::Region(region) = found.fact.guard {
+                if let FactGuard::Region(region) = found.fact.guard {
                     questions.push((
-                        crate::index::project::normalize(&found.file),
+                        index::project::normalize(&found.file),
                         region,
                         found.fact.range.start_offset,
                     ));
@@ -346,7 +350,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         if !questions.is_empty() {
             let (answers, stamp, contributors) = index.answer_the_guards(&view.path, &questions);
 
-            let mut installed: HashMap<(String, u32, usize), crate::Visibility> = HashMap::new();
+            let mut installed: HashMap<(String, u32, usize), Visibility> = HashMap::new();
             for (question, answer) in questions.iter().zip(answers) {
                 if let Some(answer) = answer {
                     installed.insert(question.clone(), answer);
@@ -443,7 +447,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         // them as names. Without this check they reach the index, which has no declaration to answer with, and the
         // token falls through with no colour — or, when some header happens to declare the spelling, as a variable.
         // The list is the language's, not a heuristic: see `crate::sema::types::is_a_builtin`.
-        if crate::sema::types::is_a_builtin(text) {
+        if sema::types::is_a_builtin(text) {
             out.push(Name {
                 range,
                 kind: NameKind::Type,
@@ -722,7 +726,7 @@ fn modifiers_of(
     view: &FileView,
     name_at: usize,
     kind: NameKind,
-    shapes: &std::cell::OnceCell<crate::sema::declarations::DeclarationShapes>,
+    shapes: &std::cell::OnceCell<sema::declarations::DeclarationShapes>,
 ) -> Vec<NameModifier> {
     // **Only what can carry these modifiers at all.** `readonly` and `static` are properties of an *object* and of a
     // function — not of a type, a namespace or an enumerator — and asking the shape table for them anyway is what
@@ -738,8 +742,7 @@ fn modifiers_of(
 
     // The declaration's own specifiers, in the shape table — the same source `access_at` reads, and for the same
     // reason: it is one entry per declaration rather than a walk of the tree.
-    let shapes =
-        shapes.get_or_init(|| crate::sema::declarations::DeclarationShapes::of(&view.root));
+    let shapes = shapes.get_or_init(|| sema::declarations::DeclarationShapes::of(&view.root));
     let Some(specifiers) = shapes.specifiers_at(name_at) else {
         return Vec::new();
     };
@@ -784,8 +787,8 @@ fn modifiers_of(
 fn member_kinds(
     index: &ProjectIndex,
     view: &FileView,
-    memo: &crate::index::project::TypeMemo,
-    shapes: &crate::sema::declarations::ShapeTable,
+    memo: &index::project::TypeMemo,
+    shapes: &sema::declarations::ShapeTable,
 ) -> HashMap<usize, NameKind> {
     fn writes_the_operator(node: &cpp_parser::CppSyntaxNode) -> bool {
         node.children_with_tokens()
@@ -807,7 +810,7 @@ fn member_kinds(
             continue;
         }
 
-        let Some(access) = crate::sema::resolve::member_access_of(&node) else {
+        let Some(access) = sema::resolve::member_access_of(&node) else {
             continue;
         };
         if access.member_range.length == 0 {
@@ -818,7 +821,7 @@ fn member_kinds(
         // object's type comes from this file. `None` for the view means a query that needs another file's text
         // answers nothing, which is this layer's ordinary way of declining rather than guessing — and it costs one
         // `Option` rather than a parse of a header per member.
-        let found = crate::index::project::member_across_files_with(
+        let found = index::project::member_across_files_with(
             memo,
             shapes,
             index,
@@ -894,7 +897,7 @@ fn parameter_offsets(view: &FileView) -> HashSet<usize> {
             continue;
         }
 
-        for (_, declared) in crate::sema::scopes::parameters_of(&list) {
+        for (_, declared) in sema::scopes::parameters_of(&list) {
             if let Some((_, name_range)) = declared {
                 offsets.insert(name_range.start_offset);
             }
@@ -911,7 +914,7 @@ fn parameter_offsets(view: &FileView) -> HashSet<usize> {
 /// is "is this name a macro in this file at all". A macro defined in a branch nobody takes is still a name the file
 /// defines and a reader sees.
 fn macro_names(view: &FileView) -> HashMap<String, SourceRange> {
-    let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+    let preprocessing = preprocess(&view.source, view.tree.get_tokens());
     let mut map = HashMap::new();
 
     for spanned in &preprocessing.directives {
@@ -1047,7 +1050,7 @@ fn kind_of_binding(
     binding: &Binding,
     view: &FileView,
     is_a_parameter: bool,
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
 ) -> Option<NameKind> {
     Some(match binding.kind {
         BindingKind::Namespace => NameKind::Namespace,
@@ -1090,11 +1093,11 @@ fn kind_of_binding(
             } else if view
                 .scopes
                 .scope(binding.scope)
-                .is_some_and(|scope| scope.kind == crate::ScopeKind::Class)
+                .is_some_and(|scope| scope.kind == ScopeKind::Class)
             {
                 NameKind::Property
-            } else if !crate::sema::declarations::declared_template_parameters_with(
-                crate::sema::declarations::shapes_from(shapes, &view.root),
+            } else if !sema::declarations::declared_template_parameters_with(
+                sema::declarations::shapes_from(shapes, &view.root),
                 binding,
             )
             .is_empty()
@@ -1103,8 +1106,8 @@ fn kind_of_binding(
                 // while the scope model records a variable because that is all a binding can say. The template head
                 // is in the tree, and this is what asks it.
                 NameKind::VariableTemplate
-            } else if crate::sema::declarations::declared_type_of_with(
-                crate::sema::declarations::shapes_from(shapes, &view.root),
+            } else if sema::declarations::declared_type_of_with(
+                sema::declarations::shapes_from(shapes, &view.root),
                 binding,
             )
             .is_some_and(|written| denotes_a_function_pointer(index, &view.path, &written))

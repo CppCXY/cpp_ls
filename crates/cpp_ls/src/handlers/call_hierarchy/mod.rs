@@ -35,6 +35,7 @@
 //! `incomingCalls` is one references query plus the file texts of the callers; nothing is parsed. `outgoingCalls` parses
 //! the file that holds the body once — the same parse a hover would do — and then asks `definitions` per call.
 
+use crate::handlers;
 use cpp_code_analysis::{FileProvider, Known, Session};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -183,7 +184,7 @@ pub fn incoming_calls_of<F: FileProvider + Clone>(
     name: &str,
 ) -> Vec<CallHierarchyIncomingCall> {
     let _ = name;
-    let references = crate::handlers::references::name_level_offsets(
+    let references = handlers::references::name_level_offsets(
         session,
         view,
         cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),

@@ -4,11 +4,16 @@
 //! Moved here from `project/mod.rs` without a change.
 
 use super::*;
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::FileView;
+use crate::ScopeTree;
+use crate::sema;
 
 pub(crate) fn member_fact(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -19,9 +24,9 @@ pub(crate) fn member_fact(
 }
 
 pub(crate) fn member_fact_inner(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -53,7 +58,7 @@ pub(crate) fn member_fact_inner(
     // The spelling carries them, so they are read off it, and a caller that already knows them (from an object's
     // type) keeps its own — those are the ones paired with the class's parameters by `member_bindings` afterwards.
     let from_the_spelling: Option<Vec<String>> = class.split_once('<').map(|(_, rest)| {
-        crate::sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
+        sema::builtins::split_arguments(rest.trim_end().strip_suffix('>').unwrap_or(rest))
     });
     let arguments = arguments.or(from_the_spelling.as_deref());
 
@@ -236,25 +241,25 @@ pub(crate) fn without_arguments(class: &str) -> &str {
 /// second copy of "which names go with which arguments" is a second place to get the pairing wrong.
 pub(crate) fn member_bindings(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
     arguments: &[Type],
-) -> crate::sema::types::TypeBindings {
+) -> sema::types::TypeBindings {
     if arguments.is_empty() {
-        return crate::sema::types::TypeBindings::default();
+        return sema::types::TypeBindings::default();
     }
 
     let names = class_template_parameters(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
         path,
         class,
     );
-    crate::sema::types::TypeBindings::new(names, arguments.to_vec())
+    sema::types::TypeBindings::new(names, arguments.to_vec())
 }
 
 /// **The arguments a class template deduces from an initializer** — C++17's implicit guide, for the one shape this can be
@@ -289,15 +294,15 @@ pub(crate) fn member_bindings(
 /// the deduction answered the bare template name.
 pub(crate) fn deduced_class_template_arguments(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
     class: &str,
-    initializer: &crate::sema::types::Type,
+    initializer: &sema::types::Type,
 ) -> Option<String> {
     let parameters = class_template_parameters(
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         scopes,
         root,
@@ -415,7 +420,7 @@ pub(crate) fn the_deduction_guide_deduces(
     class: &str,
     simple: &str,
     only: &str,
-    initializer: &crate::sema::types::Type,
+    initializer: &sema::types::Type,
 ) -> Option<String> {
     let deduces_to = format!("{simple}<{only}>");
     for declaration in root.descendants() {
@@ -462,9 +467,9 @@ pub(crate) fn the_first_parameter_is(list: &str, only: &str) -> bool {
 }
 
 pub(crate) fn class_template_parameters(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -474,11 +479,11 @@ pub(crate) fn class_template_parameters(
             scope
                 .bindings
                 .iter()
-                .find(|binding| binding.kind == crate::BindingKind::Class)
+                .find(|binding| binding.kind == BindingKind::Class)
         })
     {
-        let found = crate::sema::declarations::declared_template_parameters_with(
-            crate::sema::declarations::shapes_from(shapes, root),
+        let found = sema::declarations::declared_template_parameters_with(
+            sema::declarations::shapes_from(shapes, root),
             binding,
         );
         if !found.is_empty() {
@@ -521,9 +526,9 @@ pub(crate) const MAX_ALIAS_DEPTH: usize = 8;
 /// `NotDeclaredHere(<what the file wrote>)` rather than a name nobody wrote. See [`MAX_ALIAS_DEPTH`] for the bound
 /// and why a bound is needed at all.
 pub(crate) fn resolve_aliases(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -554,9 +559,9 @@ pub(crate) fn resolve_aliases(
 /// `_Ty` is the caller's step, because the caller is the one that knows what `T` stands for. See
 /// [`TypeBindings::applied_to`].
 pub(crate) fn resolve_aliases_with_arguments(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -577,9 +582,9 @@ pub(crate) fn resolve_aliases_with_arguments(
 /// **empty, complete** list, and `undefined-field` reported `result.size()`, `formattedText.begin()` and eight more
 /// members of `std::string` as undefined. Ten false positives on one file, all from this fallback.
 pub(crate) fn resolve_aliases_or_unresolved(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -726,7 +731,7 @@ pub(crate) fn resolve_aliases_or_unresolved(
             let (prefix, name) = candidate.rsplit_once("::")?;
             let mut best: Option<(usize, String)> = None;
             for found in index.files_declaring(name, path) {
-                if found.fact.kind != crate::DeclKind::Type || found.fact.type_of.is_some() {
+                if found.fact.kind != DeclKind::Type || found.fact.type_of.is_some() {
                     continue;
                 }
                 let Some(scope) = found.fact.scope.as_deref() else {
@@ -806,9 +811,9 @@ pub(crate) fn without_template_arguments(written: &str) -> String {
 }
 
 pub(crate) fn alias_target_of(
-    shapes: &crate::sema::declarations::ShapeTable,
+    shapes: &sema::declarations::ShapeTable,
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
@@ -852,7 +857,7 @@ pub(crate) fn alias_target_of(
             let inside = rest.trim_end().strip_suffix('>').unwrap_or(rest);
             (
                 head.trim().to_string(),
-                crate::sema::builtins::split_arguments(inside),
+                sema::builtins::split_arguments(inside),
             )
         }
         None => (class.to_string(), Vec::new()),
@@ -871,17 +876,17 @@ pub(crate) fn alias_target_of(
             .bindings
             .iter()
             .find(|binding| binding.name.identifier_text() == Some(short.as_str()))
-        && let Some(target) = crate::sema::declarations::declared_alias_target_with(
-            crate::sema::declarations::shapes_from(shapes, root),
+        && let Some(target) = sema::declarations::declared_alias_target_with(
+            sema::declarations::shapes_from(shapes, root),
             binding,
         )
     {
         // **The alias's own parameters replaced by what the use wrote.** A bare alias has no parameters and this
         // changes nothing; a template alias is the case the split above exists for.
-        let target = crate::sema::types::substituted_spelling(
+        let target = sema::types::substituted_spelling(
             &target,
-            &crate::sema::declarations::declared_template_parameters_with(
-                crate::sema::declarations::shapes_from(shapes, root),
+            &sema::declarations::declared_template_parameters_with(
+                sema::declarations::shapes_from(shapes, root),
                 binding,
             ),
             &written_arguments,
@@ -903,13 +908,13 @@ pub(crate) fn alias_target_of(
     // that cannot be read, it is a name that has to be asked for in the plural.
     match index.definitions(class, path) {
         Known::Yes(found) => found.found.iter().find_map(|declaration| {
-            (declaration.fact.kind == crate::DeclKind::Type)
+            (declaration.fact.kind == DeclKind::Type)
                 .then(|| declaration.fact.type_of.clone())
                 .flatten()
                 .map(|target| target.to_string())
                 .map(|target| {
                     (
-                        crate::sema::types::substituted_spelling(
+                        sema::types::substituted_spelling(
                             &target,
                             declaration.fact.parameters(),
                             &written_arguments,
@@ -953,7 +958,7 @@ fn the_close_of(text: &str, open: usize) -> Option<usize> {
 /// index is answered without walking anything.
 pub(crate) fn is_declared(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     path: &Path,
     spelling: &str,
 ) -> bool {
@@ -1009,7 +1014,7 @@ pub(crate) fn through_a_namespace_alias(
             let Some(found) = index.definition(&prefix, path).value() else {
                 continue;
             };
-            if found.fact.kind != crate::DeclKind::Namespace {
+            if found.fact.kind != DeclKind::Namespace {
                 continue;
             }
             let Some(target) = found.fact.type_of.as_deref() else {

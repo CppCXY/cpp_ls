@@ -21,6 +21,7 @@
 //! contributes nothing, and the amount left out is recorded ([`HeaderIndex::unread`]) rather than hidden. The
 //! budget is what keeps a completion from walking a `node_modules`-sized tree on a keystroke.
 
+use crate::CompilerConfig;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -461,7 +462,7 @@ fn is_a_cxx_header(name: &str) -> bool {
 }
 
 /// The include directories of a configuration, as paths to read.
-pub fn search_directories(config: &crate::CompilerConfig) -> Vec<PathBuf> {
+pub fn search_directories(config: &CompilerConfig) -> Vec<PathBuf> {
     config
         .include_paths
         .iter()

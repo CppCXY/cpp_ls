@@ -25,6 +25,8 @@
 //! the index would be wrong rather than incomplete. That is the same distinction the preprocessor layer makes with
 //! its `Value::Unknown`.
 
+use crate::cache;
+use crate::surface;
 use std::collections::HashMap;
 
 use crate::macros::MacroDef;
@@ -342,7 +344,7 @@ impl Surfaces {
 
     /// The surface of `text`, scanned once per distinct content.
     pub fn of(&self, path: &std::path::Path, text: &str) -> std::sync::Arc<Surface> {
-        let key = crate::cache::content_hash(text);
+        let key = cache::content_hash(text);
         let mut held = self
             .held
             .lock()
@@ -356,7 +358,7 @@ impl Surfaces {
         if let Some(found) = held.get(&key) {
             return std::sync::Arc::clone(found);
         }
-        let made = std::sync::Arc::new(crate::surface::surface_of(path, text));
+        let made = std::sync::Arc::new(surface::surface_of(path, text));
         held.insert(key, std::sync::Arc::clone(&made));
         made
     }
@@ -481,7 +483,7 @@ impl<'a, R: Reads> Chain<'a, R> {
         self.walked.files += 1;
         let surface = match self.surfaces {
             Some(surfaces) => surfaces.of(path, &text),
-            None => std::sync::Arc::new(crate::surface::surface_of(path, &text)),
+            None => std::sync::Arc::new(surface::surface_of(path, &text)),
         };
         if surface.events.is_empty() {
             return;
@@ -615,16 +617,21 @@ impl<'a, R: Reads> Chain<'a, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FileSummary;
+    use crate::WalkCache;
+    use crate::include;
+    use crate::preprocess;
+    use crate::surface;
     use std::path::Path;
 
     fn surface(text: &str) -> Surface {
-        crate::surface::surface_of(Path::new("/p/a.h"), text)
+        surface::surface_of(Path::new("/p/a.h"), text)
     }
 
     fn table(defines: &[(&str, &str)]) -> Macros {
         let mut macros = Macros::new();
         for (name, body) in defines {
-            let definition = crate::preprocess::macros::parse_define(
+            let definition = preprocess::macros::parse_define(
                 &[
                     Token::new(
                         cpp_parser::CppTokenKind::Identifier,
@@ -884,7 +891,7 @@ mod tests {
         }
         let config = CompilerConfig::default().with_include_path(std::path::PathBuf::from("/p"));
         let indexer = FileIndexer::new(&provider, &config);
-        let mut summaries: std::collections::HashMap<std::path::PathBuf, crate::FileSummary> =
+        let mut summaries: std::collections::HashMap<std::path::PathBuf, FileSummary> =
             std::collections::HashMap::new();
         let mut texts: std::collections::HashMap<std::path::PathBuf, String> =
             std::collections::HashMap::new();
@@ -906,10 +913,10 @@ mod tests {
                     .get(wanted)
                     .map(|summary| (summary, texts.get(wanted).map(String::as_str).unwrap_or("")))
             },
-            &crate::include::graph::Marked::default(),
+            &include::graph::Marked::default(),
             &mut definitions,
             false,
-            &crate::WalkCache::new(),
+            &WalkCache::new(),
         );
 
         // **Every file both sides reach**, and every macro the chain says that file sees.

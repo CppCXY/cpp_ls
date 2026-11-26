@@ -14,6 +14,7 @@
 //! lone comment `N` spaces and leave groups alone) measured 41 → 38: a group member is not a lone comment, and its
 //! target is the group's column. This module computes that column per gap; `render` writes the spaces.
 
+use crate::columns;
 use crate::config::Style;
 use crate::options::StyleOption;
 use crate::tokens::Stream;
@@ -371,7 +372,7 @@ fn split_trailing_comment<'a>(line: &'a str, in_block: &mut bool) -> Option<(&'a
 
 /// The display width of a piece of code (tabs to the next multiple of eight, wide characters two columns).
 fn width(text: &str) -> usize {
-    crate::columns::Columns::new(&Style::default_style()).advance(0, text)
+    columns::Columns::new(&Style::default_style()).advance(0, text)
 }
 
 #[cfg(test)]

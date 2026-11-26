@@ -41,6 +41,10 @@
 //! the analysis quieter. So the flag errs the second way, and a consumer can always tell "no macros are
 //! defined here" apart from "the macros that are defined here are not all of them".
 
+use crate::condition;
+use crate::macros;
+use crate::preprocess;
+use crate::token;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -507,7 +511,7 @@ fn is_probably_a_header(path: &Path) -> bool {
 /// before the `#ifndef`", which a token stream answers.
 pub(crate) struct Directives {
     /// The directives in source order, with the conditions resolved — every reader below takes this.
-    pub(crate) preprocessing: crate::preprocess::FilePreprocessing,
+    pub(crate) preprocessing: preprocess::FilePreprocessing,
     /// The file's own include guard, recognised from the directives and the tokens.
     pub(crate) guard: Guard,
     /// Every name the file `#define`s, in order.
@@ -522,8 +526,8 @@ impl Directives {
     /// directive pass — see [`crate::preprocess::directive::fold_quoted_header_names`] — and it is done here rather
     /// than by the caller so that no caller can forget it.
     pub(crate) fn of(source: &str, tokens: &mut [cpp_parser::CppTokenData]) -> Self {
-        crate::preprocess::directive::fold_quoted_header_names(source, tokens);
-        let preprocessing = crate::preprocess::preprocess(source, tokens);
+        preprocess::directive::fold_quoted_header_names(source, tokens);
+        let preprocessing = preprocess::preprocess(source, tokens);
         let guard = detect_guard_from_tokens(&preprocessing.directives, tokens);
         let defines = preprocessing
             .directives
@@ -867,7 +871,7 @@ struct OpenRegion {
 pub struct BranchAt {
     pub kind: DirectiveKind,
     /// The expression's tokens, for `#if` and `#elif`.
-    pub tokens: Vec<crate::token::Token>,
+    pub tokens: Vec<token::Token>,
     /// The name tested, for `#ifdef` and `#ifndef`.
     pub name: Option<Box<str>>,
 }
@@ -887,7 +891,7 @@ impl BranchAt {
     pub fn decide(&self, state: &Marked) -> Option<bool> {
         match self.kind {
             DirectiveKind::If | DirectiveKind::Elif => {
-                crate::condition::evaluate(&self.tokens, state).is_true()
+                condition::evaluate(&self.tokens, state).is_true()
             }
             DirectiveKind::Ifdef => self.named_status(state),
             DirectiveKind::Ifndef => self.named_status(state).map(|defined| !defined),
@@ -1071,7 +1075,7 @@ pub struct Marked {
     /// handful of entries once this has said the name is there at all.
     mentioned: std::collections::HashSet<Box<str>>,
     /// Definitions from the command line, kept so that a lookup can answer about a *value* as well as a name.
-    command_line: Vec<crate::macros::MacroDef>,
+    command_line: Vec<macros::MacroDef>,
     /// Whether macros this state does not mention might still have been in force.
     ///
     /// A state cannot tell "nothing defined this" apart from "this never saw the file that did", and for a
@@ -1103,7 +1107,7 @@ impl PartialEq for Marked {
 
 impl Eq for Marked {}
 
-impl crate::condition::MacroValues for Marked {
+impl condition::MacroValues for Marked {
     /// **A walk is complete only when it read every file it needed.** See `MacroValues::is_complete`: this is the
     /// one table in the program whose completeness is a runtime fact rather than a property of how it was built.
     fn is_complete(&self) -> bool {
@@ -1125,7 +1129,7 @@ impl crate::condition::MacroValues for Marked {
     /// [`Lookup::Undefined`](crate::Lookup::Undefined), which is the same distinction [`Marked::is_unknown`] makes
     /// for `#ifdef` — and it has to be made here too, or `#if defined(FOO)` in a header analysed on its own would
     /// answer "no" about a macro its includer defines.
-    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
         use crate::condition::Lookup;
 
         // **A builtin operator is defined**, which is what the implementation says about its own predefined macros:
@@ -1137,7 +1141,7 @@ impl crate::condition::MacroValues for Marked {
         // `#ifndef __has_cpp_attribute`, we answered "not defined", and the header then defined
         // `_HAS_MSVC_ATTRIBUTE(x)` as the literal `0` — so `_NO_SPECIALIZATIONS_MSG` was never defined and
         // `[[msvc::no_specializations(...)]]` vanished from `xtr1common:28`.
-        if crate::preprocess::condition::is_a_builtin_operator(name) {
+        if preprocess::condition::is_a_builtin_operator(name) {
             return Lookup::DefinedWithoutAValue;
         }
 
@@ -1159,11 +1163,11 @@ impl crate::condition::MacroValues for Marked {
     /// Without this the walk and the cook would answer the same question differently, which is the defect this file
     /// has already been fixed for once (see `UnitMacros::lookup`): a condition has one answer, and both layers have
     /// to reach it.
-    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<condition::Value> {
         if name == "__has_cpp_attribute" {
             let msvc = self.is_defined("_MSC_VER") && !self.is_defined("__clang__");
-            return crate::preprocess::cooked::attribute_support_in(operand, msvc)
-                .map(crate::condition::Value::Known);
+            return preprocess::cooked::attribute_support_in(operand, msvc)
+                .map(condition::Value::Known);
         }
 
         None
@@ -1293,7 +1297,7 @@ impl Marked {
         self.command_line.push(parsed);
     }
 
-    pub fn define(&mut self, definition: crate::macros::MacroDef) {
+    pub fn define(&mut self, definition: macros::MacroDef) {
         self.bindings.push((definition.name.clone(), true));
         self.mentioned.insert(definition.name.clone());
         self.command_line
@@ -1334,7 +1338,7 @@ impl Marked {
             .is_some_and(|(_, defined)| *defined)
     }
 
-    pub fn get(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+    pub fn get(&self, name: &str) -> Option<&macros::MacroDef> {
         if !self.is_defined(name) {
             return None;
         }
@@ -1380,9 +1384,9 @@ impl Marked {
 }
 
 /// Read one `#define` from a source string, the way a directive's tokens are read.
-fn parse_define_source(source: &str) -> Option<crate::macros::MacroDef> {
+fn parse_define_source(source: &str) -> Option<macros::MacroDef> {
     let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-    let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
+    let preprocessing = preprocess::preprocess(source, tree.get_tokens());
     preprocessing.macros.iter().next().cloned()
 }
 

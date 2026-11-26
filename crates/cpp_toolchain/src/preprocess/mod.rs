@@ -17,6 +17,10 @@
 //! that wants to see it, and for the other branch of an `#if`), and which of them are in force is
 //! answered by position through the guard on the table.
 
+use crate::Lookup;
+use crate::MacroValues;
+use crate::Marked;
+use crate::preprocess;
 use cpp_parser::CppTokenData;
 
 use crate::{
@@ -127,8 +131,8 @@ impl PositionalMacros<'_> {
     }
 }
 
-impl crate::condition::MacroValues for PositionalMacros<'_> {
-    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+impl condition::MacroValues for PositionalMacros<'_> {
+    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
         use crate::condition::Lookup;
 
         self.table
@@ -149,12 +153,12 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
     /// answers a question without a position from the **end of the file** — where `xtr1common:22`'s `#undef msvc`
     /// has already happened, so every `msvc::` attribute read as unsupported and
     /// `[[msvc::no_specializations(...)]]` was missing from the stream while `cl.exe` emitted it 17 times.
-    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<condition::Value> {
         if name == "__has_cpp_attribute" {
             let msvc = self.is_msvc();
-            let answer = crate::preprocess::cooked::attribute_support_in(operand, msvc);
+            let answer = preprocess::cooked::attribute_support_in(operand, msvc);
 
-            return answer.map(crate::condition::Value::Known);
+            return answer.map(condition::Value::Known);
         }
 
         self.table.builtin_operator(name, operand)
@@ -181,13 +185,13 @@ pub fn preprocess(source: &str, tokens: &[CppTokenData]) -> FilePreprocessing {
 pub fn preprocess_with_a_seed(
     source: &str,
     tokens: &[CppTokenData],
-    seed: &crate::Marked,
+    seed: &Marked,
 ) -> FilePreprocessing {
     // **The seed answers for itself.** It was asked through a `MacrosHere` view built over it, and the view's
     // `lookup` for a name the walk has not reached is the seed's own — the view adds a *file's* facts, and there is
     // no file here. One call less on a path that runs for every directive of every file.
     preprocess_using(source, tokens, &mut |name, _offset| {
-        crate::MacroValues::lookup(seed, name) != crate::Lookup::Undefined
+        MacroValues::lookup(seed, name) != Lookup::Undefined
     })
 }
 
@@ -286,7 +290,7 @@ fn preprocess_using(
             // **The branch's verdict**, asked of the compilation rather than of the file's own table: these are
             // questions about names the compiler predefines (`__cplusplus`, `_MSC_VER`), and no directive above them
             // in this file has anything to say about those. `None` leaves the branch exactly as it was.
-            let taken = crate::preprocess::environment::a_branch_is_taken(
+            let taken = preprocess::environment::a_branch_is_taken(
                 is_a_macro,
                 kind,
                 &branch,

@@ -3,6 +3,7 @@
 use crate::file::paths::FileProvider;
 use crate::file::paths::MemoryFiles;
 use crate::include::config::CompilerConfig;
+use crate::index;
 use crate::index::watch::WatchFilter;
 use crate::session::{OpenDocuments, Session, SessionFiles};
 use std::path::{Path, PathBuf};
@@ -84,7 +85,7 @@ impl Drop for Memory<'_> {
 }
 
 /// The paths of a run of steps, for an assertion about the order rather than about the work.
-pub(crate) fn paths(steps: &[crate::index::Step]) -> Vec<String> {
+pub(crate) fn paths(steps: &[index::Step]) -> Vec<String> {
     steps
         .iter()
         .map(|step| step.path.to_string_lossy().replace('\\', "/"))

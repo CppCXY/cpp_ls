@@ -28,6 +28,9 @@
 //! the definite shape — no base names it at all — is reported.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 /// **`final-misplaced`** — see the module documentation.
 pub struct FinalMisplaced;
@@ -40,7 +43,7 @@ impl Check for FinalMisplaced {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Type)
+            .filter(|fact| fact.kind == DeclKind::Type)
             .map(|fact| (fact.name.to_string(), fact.bases().to_vec()))
             .collect();
 
@@ -49,11 +52,11 @@ impl Check for FinalMisplaced {
             .declarations
             .iter()
             .filter(|fact| {
-                fact.kind == crate::DeclKind::Function
-                    && fact.modifiers.contains(crate::DeclModifiers::FINAL)
+                fact.kind == DeclKind::Function
+                    && fact.modifiers.contains(DeclModifiers::FINAL)
                     // **`virtual` written is the legal spelling**, and the fact records it — so the rule has nothing
                     // to say about `virtual void f() final;` without asking a base anything.
-                    && !fact.modifiers.contains(crate::DeclModifiers::VIRTUAL)
+                    && !fact.modifiers.contains(DeclModifiers::VIRTUAL)
                     // A destructor is the one function whose name cannot be compared across the hierarchy — see
                     // [`super::override_nonexistent`] — so `~B() final` is not judged by name.
                     && !fact.is_a_destructor()
@@ -103,7 +106,7 @@ impl Check for FinalMisplaced {
             let mut could_not_read_a_base = false;
             for base in bases {
                 match context.model.members_of(base) {
-                    crate::Known::Yes(list) => {
+                    Known::Yes(list) => {
                         if !list.unlisted.is_empty() {
                             could_not_read_a_base = true;
                         }

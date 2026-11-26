@@ -23,6 +23,9 @@
 //! `bar` is a member of whatever `foo` returns, which the concept has not said.
 
 use super::*;
+use crate::CompletionItem;
+use crate::completion;
+use crate::sema;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **The completion items the concept constraining a parameter requires** — one per the names the concept names
@@ -35,8 +38,8 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         at: usize,
         replace: cpp_parser::SourceRange,
-    ) -> Vec<crate::CompletionItem> {
-        let Some(access) = crate::sema::resolve::member_access_at(&view.root, at) else {
+    ) -> Vec<CompletionItem> {
+        let Some(access) = sema::resolve::member_access_at(&view.root, at) else {
             return Vec::new();
         };
         // Only the empty member: `a.` is the question, `a.foo` is a name the reader already wrote.
@@ -48,7 +51,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // result constraint requires. The chain is walked from the inside out, one call at a time, so a program that
         // states its types in requirements rather than in classes gets as many hops as it wrote.
         let concepts = self.the_concepts_of_an_expression(view, &access.object, 0);
-        let mut items: Vec<crate::CompletionItem> = Vec::new();
+        let mut items: Vec<CompletionItem> = Vec::new();
         for concept in &concepts {
             let Some(required) = self.the_members_the_concept_names(concept, &view.path) else {
                 continue;
@@ -59,12 +62,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 if items.iter().any(|item| item.label == name) {
                     continue;
                 }
-                let mut item = crate::CompletionItem::word(
+                let mut item = CompletionItem::word(
                     &name,
                     if called {
-                        crate::completion::ItemKind::Method
+                        completion::ItemKind::Method
                     } else {
-                        crate::completion::ItemKind::Field
+                        completion::ItemKind::Field
                     },
                     &format!("required by concept `{concept}`"),
                 );
@@ -108,8 +111,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return found;
         }
         let at = usize::from(expression.text_range().start());
-        let Known::Yes(binding) = crate::sema::resolve::definition_at(&view.scopes, &view.root, at)
-        else {
+        let Known::Yes(binding) = sema::resolve::definition_at(&view.scopes, &view.root, at) else {
             return Vec::new();
         };
         the_concepts_constraining(&view.root, binding.name_range.start_offset)
@@ -226,7 +228,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 ) {
                     continue;
                 }
-                let Some(access) = crate::sema::resolve::member_access_of(&node) else {
+                let Some(access) = sema::resolve::member_access_of(&node) else {
                     continue;
                 };
                 if access.member.is_empty() {
@@ -397,7 +399,7 @@ fn the_concepts_a_constraint_names(text: &str) -> Vec<String> {
 /// **The member a call names** — `foo` for `a.foo()`.
 fn the_member_a_call_names(call: &cpp_parser::CppSyntaxNode) -> Option<String> {
     let callee = call.children().next()?;
-    let access = crate::sema::resolve::member_access_of(&callee)?;
+    let access = sema::resolve::member_access_of(&callee)?;
     (!access.member.is_empty()).then_some(access.member.clone())
 }
 

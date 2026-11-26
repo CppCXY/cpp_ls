@@ -521,7 +521,7 @@ pub const READING_FINGERPRINT: u64 = {
     hash = fnv1a(hash, cpp_parser::VERSION.as_bytes());
     hash = fnv1a(hash, env!("CARGO_PKG_VERSION").as_bytes());
     hash = fnv1a(hash, &FORMAT_VERSION.to_le_bytes());
-    hash = fnv1a(hash, &crate::summary_codec::CODEC_VERSION.to_le_bytes());
+    hash = fnv1a(hash, &summary_codec::CODEC_VERSION.to_le_bytes());
     hash
 };
 
@@ -709,6 +709,7 @@ fn a_rendering_key_by(inputs: &[(&std::path::Path, u64)], fingerprint: u64) -> u
 #[cfg(test)]
 mod tests {
     use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
+    use crate::index;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -838,10 +839,9 @@ mod tests {
 
     #[allow(dead_code)]
     fn write(directory: &Path, source: &str, fingerprint_shift: u64) -> PathBuf {
-        let mut summary =
-            crate::index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
+        let mut summary = index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
         summary.key.reading_fingerprint ^= fingerprint_shift;
-        crate::index::write_summary(&summary, directory).expect("the summary is written")
+        index::write_summary(&summary, directory).expect("the summary is written")
     }
 
     // A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.

@@ -43,6 +43,7 @@
 //! is to name a file. It is asked first ([`cpp_code_analysis::Session::header_at`]) because the shape at the cursor
 //! decides which question applies, and there is no position at which both can be true.
 
+use crate::handlers;
 use cpp_code_analysis::{DiskFiles, Known, Session};
 use lsp_types::{
     ClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, Location, OneOf, Range,
@@ -152,8 +153,7 @@ pub async fn on_goto_definition_handler(
         // project declare `_diagnosticStyle` — so a cursor inside one of them was offered all three. The cursor's own
         // class decides which is meant; see `references::narrowed_to_the_cursors_class`, which is the same rule Find
         // References applies and the reason the two answer consistently.
-        let found =
-            crate::handlers::references::narrowed_to_the_cursors_class(&view, offset.get(), found);
+        let found = handlers::references::narrowed_to_the_cursors_class(&view, offset.get(), found);
 
         // **A declaration is not a definition, and this request is the one for definitions.** `class vector<bool,
         // _Alloc>;` forward-declares the specialization `<vector>` then defines it, and both are candidates for the

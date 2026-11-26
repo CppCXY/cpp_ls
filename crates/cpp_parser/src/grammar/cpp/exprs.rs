@@ -1,3 +1,6 @@
+use crate::features;
+use crate::grammar;
+use crate::parser;
 use crate::{
     grammar::{
         ParseResult,
@@ -148,7 +151,7 @@ fn the_alternative_operator(p: &CppParser, token: CppTokenKind) -> Option<CppTok
     // **In C these spellings are ordinary names.** `<iso646.h>` gives a C program macros for the same operators, and
     // the preprocessor expands those; a bare `compl` in C is neovim's "completion" variable
     // (`src/nvim/insexpand.c`: `compl = compl->cp_next;`), which this table read as `~` and made unparsable.
-    if p.language().family() == Some(crate::features::Family::C) {
+    if p.language().family() == Some(features::Family::C) {
         return None;
     }
 
@@ -309,7 +312,7 @@ pub fn parse_call_arguments(p: &mut CppParser) -> ParseResult {
     }
 
     expect_token(p, CppTokenKind::RightParen)?;
-    Ok(crate::parser::CompleteMarker::empty())
+    Ok(parser::CompleteMarker::empty())
 }
 
 /// An expression that must **not** swallow a `{` as a braced initializer, for a constraint.
@@ -456,7 +459,7 @@ enum Level {
 
 /// Read an expression down to `level`, optionally reading a trailing `...` as a pack expansion.
 fn parse_expr_up_to(p: &mut CppParser, level: Level, pack_expansion: bool) -> ParseResult {
-    let _phase = crate::parser::phases::during("expression");
+    let _phase = parser::phases::during("expression");
     let mut expr = parse_assignment_expr_inner(p)?;
 
     if level == Level::Full {
@@ -541,9 +544,7 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         // marker that did so leaves the event stream pointing at an event that no longer exists — which the tree builder
         // reports as `forward parent must point at a NodeStart, found Trivia`.
         if p.peek_next_token() == CppTokenKind::Colon
-            && !p
-                .language()
-                .support(crate::features::Feature::ElvisOperator)
+            && !p.language().support(features::Feature::ElvisOperator)
         {
             return Err(CppParseError::syntax_error_from(
                 &t!("expected an expression between `?` and `:`"),
@@ -1130,7 +1131,7 @@ pub fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
         && p.current_token_index() > before
         && p.current_token() == CppTokenKind::RightParen
     {
-        return Ok(crate::parser::CompleteMarker::empty());
+        return Ok(parser::CompleteMarker::empty());
     }
 
     p.rollback(checkpoint);
@@ -1725,7 +1726,7 @@ fn parse_new_type_and_initializer(p: &mut CppParser) -> ParseResult {
         // distinguished by the whole statement rather than by the parentheses: `new (buf) Widget()` fails here
         // at the type — `(buf) Widget` is not a type — and `new (Widget)(1)` succeeds.
         if parse_a_type_here(p).is_ok() {
-            return Ok(crate::parser::CompleteMarker::empty());
+            return Ok(parser::CompleteMarker::empty());
         }
         p.rollback(checkpoint);
 
@@ -1764,7 +1765,7 @@ fn parse_a_type_here(p: &mut CppParser) -> ParseResult {
         ));
     }
 
-    Ok(crate::parser::CompleteMarker::empty())
+    Ok(parser::CompleteMarker::empty())
 }
 
 /// Are the parentheses at the cursor certainly a placement-argument list rather than the start of a type?
@@ -1856,7 +1857,7 @@ fn parse_new_declarator_suffixes(p: &mut CppParser) -> ParseResult {
         array.complete(p);
     }
 
-    Ok(crate::parser::CompleteMarker::empty())
+    Ok(parser::CompleteMarker::empty())
 }
 
 /// Parse the initializer a `new` expression may carry: `new Widget(1, 2)`, `new int{3}`.
@@ -1885,7 +1886,7 @@ fn parse_new_initializer(p: &mut CppParser) -> ParseResult {
         _ => {}
     }
 
-    Ok(crate::parser::CompleteMarker::empty())
+    Ok(parser::CompleteMarker::empty())
 }
 
 /// 解析后缀表达式 (函数调用、数组访问、成员访问、后增后减等)
@@ -1902,10 +1903,7 @@ fn parse_postfix_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// is how the two would come to disagree about what a suffix is.
 ///
 /// `expr` must be a completed node; it is re-parented by whichever suffix is found.
-fn parse_postfix_suffixes(
-    p: &mut CppParser,
-    mut expr: crate::parser::CompleteMarker,
-) -> ParseResult {
+fn parse_postfix_suffixes(p: &mut CppParser, mut expr: parser::CompleteMarker) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
@@ -2571,7 +2569,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         CppTokenKind::LogicalAnd
             if p.peek_next_token() == CppTokenKind::Identifier
                 && p.language()
-                    .support(crate::features::Feature::LabelsAsValues) =>
+                    .support(features::Feature::LabelsAsValues) =>
         {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // `&&`
@@ -2588,7 +2586,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             if p.current_token_text() == "_Generic"
                 && p.peek_next_token() == CppTokenKind::LeftParen
                 && p.language()
-                    .support(crate::features::Feature::GenericSelection) =>
+                    .support(features::Feature::GenericSelection) =>
         {
             parse_generic_selection(p)
         }
@@ -2988,11 +2986,11 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // compiler given ^(int n) { } reports an error at the ^, which is what this arm does.
         CppTokenKind::Caret => {
             if p.language()
-                .support(crate::features::Feature::BlockLiteral)
+                .support(features::Feature::BlockLiteral)
             {
                 parse_block_literal(p)
             } else {
-                Err(crate::CppParseError::syntax_error_from(
+                Err(CppParseError::syntax_error_from(
                     &t!("a block literal is a Clang extension"),
                     p.current_token_range(),
                 ))
@@ -3039,7 +3037,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             if p.current_token_text() == "_Generic"
                 && p.peek_next_token() == CppTokenKind::LeftParen
                 && p.language()
-                    .support(crate::features::Feature::GenericSelection) =>
+                    .support(features::Feature::GenericSelection) =>
         {
             parse_generic_selection(p)
         }
@@ -3155,10 +3153,9 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     // configuration says the extension exists: `({ … })` in a strict C++23 parse is a `{` where an expression belongs,
     // which is an error rather than a construct (`docs/worklog.md` P3-2, found by the vendor matrix).
     if p.current_token() == CppTokenKind::LeftBrace
-        && p.language()
-            .support(crate::features::Feature::StatementExpression)
+        && p.language().support(features::Feature::StatementExpression)
     {
-        if let Err(err) = crate::grammar::cpp::stats::parse_compound_stat(p) {
+        if let Err(err) = grammar::cpp::stats::parse_compound_stat(p) {
             m.undo(p);
             return Err(err);
         }
@@ -3202,7 +3199,7 @@ fn parse_block_literal(p: &mut CppParser) -> ParseResult {
     p.bump(); // `^`
 
     if p.current_token() == CppTokenKind::LeftParen
-        && let Err(err) = crate::grammar::cpp::decls::parse_parameter_list(p)
+        && let Err(err) = grammar::cpp::decls::parse_parameter_list(p)
     {
         m.undo(p);
         return Err(err);
@@ -3210,13 +3207,13 @@ fn parse_block_literal(p: &mut CppParser) -> ParseResult {
 
     // The same directive seam a lambda body has: `#if` between the head and the body is a real spelling.
     while p.current_token() == CppTokenKind::Hash {
-        if let Err(err) = crate::grammar::cpp::stats::parse_preprocessor_directive(p) {
+        if let Err(err) = grammar::cpp::stats::parse_preprocessor_directive(p) {
             m.undo(p);
             return Err(err);
         }
     }
 
-    if let Err(err) = crate::grammar::cpp::stats::parse_compound_stat(p) {
+    if let Err(err) = grammar::cpp::stats::parse_compound_stat(p) {
         m.undo(p);
         return Err(err);
     }
@@ -3250,8 +3247,8 @@ fn parse_reflect_expression(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
-    let read = if crate::grammar::cpp::types::starts_a_type_id(p) {
-        crate::grammar::cpp::types::parse_type_id(p)
+    let read = if grammar::cpp::types::starts_a_type_id(p) {
+        grammar::cpp::types::parse_type_id(p)
     } else {
         parse_unary_expr(p, false)
     };

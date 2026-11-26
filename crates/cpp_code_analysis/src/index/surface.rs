@@ -25,6 +25,8 @@
 //! ([`crate::effect`]); what is kept here is the condition's own tokens, taken from the file so that evaluating it
 //! later needs no re-lexing.
 
+use crate::preprocess;
+use crate::token;
 use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppTokenData, CppTokenKind, LexerConfig, SourceRange};
@@ -204,7 +206,7 @@ impl Surface {
 fn spellings(tokens: &[Token]) -> String {
     let mut out = String::new();
     for token in tokens {
-        if crate::token::is_trivia(token.kind) {
+        if token::is_trivia(token.kind) {
             continue;
         }
         out.push_str(&token.text);
@@ -238,7 +240,7 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
         // `Whitespace` rather than the macro's name.
         let code: Vec<&CppTokenData> = tokens[at..end]
             .iter()
-            .filter(|token| !crate::token::is_trivia(token.kind))
+            .filter(|token| !token::is_trivia(token.kind))
             .collect();
 
         let word = code.get(1).map(|token| spelling(text, token)).unwrap_or("");
@@ -255,9 +257,7 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
                     .iter()
                     .map(|token| Token::new(token.kind, spelling(text, token), token.range))
                     .collect();
-                if let Some(definition) =
-                    crate::preprocess::macros::parse_define(&from_the_name, range)
-                {
+                if let Some(definition) = preprocess::macros::parse_define(&from_the_name, range) {
                     surface.events.push(Event::Define { definition });
                 }
             }
@@ -364,6 +364,8 @@ pub fn names_in(tokens: &[Token]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SummaryKey;
+    use crate::index;
 
     fn scanned(text: &str) -> Surface {
         surface_of(Path::new("/p/a.h"), text)
@@ -456,8 +458,7 @@ mod tests {
         from_surface.sort();
         from_surface.dedup();
 
-        let summary =
-            crate::index::summarize(Path::new("/p/a.h"), text, crate::SummaryKey::new(0, 0));
+        let summary = index::summarize(Path::new("/p/a.h"), text, SummaryKey::new(0, 0));
         let mut from_parse: Vec<&str> = summary
             .macros
             .iter()

@@ -31,6 +31,10 @@
 //! `test_cpp/main.cpp` writes `auto x = 123;` on line 22 and `auto x = anotherVec[1];` on line 39, in one function —
 //! a program no compiler accepts, and one this analysis reported nothing about until this rule.
 
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::Known;
+use crate::ScopeKind;
 use std::collections::HashMap;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -50,7 +54,7 @@ impl Check for Redefinition {
             // the class body and the file scope.
             if !matches!(
                 scope.kind,
-                crate::ScopeKind::Function | crate::ScopeKind::Block | crate::ScopeKind::Lambda
+                ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda
             ) {
                 continue;
             }
@@ -135,8 +139,8 @@ impl Check for Redefinition {
 /// Only the variables. Everything else the scope tree binds has a second reading — a function name is an overload set,
 /// a class name is a forward declaration and its definition, a `using`-declaration is a synonym — and a rule that
 /// judged those would report code every compiler accepts.
-fn a_kind_that_cannot_be_repeated(kind: crate::BindingKind) -> bool {
-    matches!(kind, crate::BindingKind::Variable)
+fn a_kind_that_cannot_be_repeated(kind: BindingKind) -> bool {
+    matches!(kind, BindingKind::Variable)
 }
 /// **Is the declaration this binding belongs to really a call?**
 ///
@@ -174,6 +178,6 @@ fn the_declaration_is_really_a_call(
     let name = first.text().to_string();
     matches!(
         context.model.index().definition(name.as_str(), context.path),
-        crate::Known::Yes(found) if found.fact.kind == crate::DeclKind::Function
+        Known::Yes(found) if found.fact.kind == DeclKind::Function
     )
 }

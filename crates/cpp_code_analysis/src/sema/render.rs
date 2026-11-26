@@ -1015,6 +1015,9 @@ pub fn attributes_and_specifiers(expanded: &str) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoMacroBodies;
+    use crate::preprocess;
+    use crate::sema;
     use cpp_parser::{CppParser, ParserConfig};
 
     /// **The fact and the node of one declaration in `source`** — what a hover has when the declaring file is at hand.
@@ -1022,10 +1025,10 @@ mod tests {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "the fixture must parse cleanly");
         let root = tree.get_red_root();
-        let scopes = crate::sema::scopes::build_scopes(&root, &crate::NoMacroBodies);
-        let (facts, _) = crate::sema::declarations::build_facts(
+        let scopes = sema::scopes::build_scopes(&root, &NoMacroBodies);
+        let (facts, _) = sema::declarations::build_facts(
             &scopes,
-            &crate::preprocess(source, tree.get_tokens()),
+            &preprocess(source, tree.get_tokens()),
             &root,
             &[],
             true,

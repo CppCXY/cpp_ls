@@ -31,6 +31,10 @@
 //! answer is a type whose member list was read.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::Known;
+use crate::ScopeKind;
+use crate::index;
 use cpp_parser::CppAstNode;
 
 /// **`undefined-field`** — see the module documentation.
@@ -68,7 +72,7 @@ impl Check for UndefinedField {
                 continue;
             }
 
-            let crate::Known::Yes((object, _)) = context.type_of(&access.object) else {
+            let Known::Yes((object, _)) = context.type_of(&access.object) else {
                 continue;
             };
 
@@ -121,9 +125,7 @@ impl Check for UndefinedField {
             // The fact's `parameters` are the template's own, so a class fact that has them is a template —
             // `pattern` is about `auto` and is empty here.
             let is_a_template = context.summary.declarations.iter().any(|fact| {
-                fact.kind == crate::DeclKind::Type
-                    && fact.name == class
-                    && !fact.parameters().is_empty()
+                fact.kind == DeclKind::Type && fact.name == class && !fact.parameters().is_empty()
             });
             if is_a_template {
                 continue;
@@ -145,9 +147,7 @@ impl Check for UndefinedField {
                 .scopes()
                 .scope_with_qualified_name(&class)
                 .and_then(|scope| context.model.scopes().scope(scope))
-                .is_some_and(|scope| {
-                    matches!(scope.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
-                });
+                .is_some_and(|scope| matches!(scope.kind, ScopeKind::Class | ScopeKind::Enum));
             if !declared_here {
                 continue;
             }
@@ -158,7 +158,7 @@ impl Check for UndefinedField {
             // "`Widget` has no member", while the class's own facts had five members from another `Widget` entirely.
             // The index's qualified spelling is the one the facts are filed under, and it is what the completion path
             // already asks for.
-            let resolved = crate::index::project::qualified_from_the_index(
+            let resolved = index::project::qualified_from_the_index(
                 context.model.index(),
                 context.model.path(),
                 &class,
@@ -185,7 +185,7 @@ impl Check for UndefinedField {
                 continue;
             }
 
-            let crate::Known::Yes(members) = context.model.members_of(&resolved) else {
+            let Known::Yes(members) = context.model.members_of(&resolved) else {
                 // Not known to be a class, or known and never read — see the module documentation.
                 continue;
             };

@@ -408,6 +408,7 @@ mod tests {
     /// directory. Each test gets its own, and the process-wide index cache is cleared first because a name reused
     /// across tests would otherwise be answered from another test's tree.
     mod fuzzy_fallback {
+        use crate::config;
         use crate::include::fuzzy;
         use crate::{CompilerConfig, DiskFiles, IncludeResolver};
 
@@ -486,7 +487,7 @@ mod tests {
                 project("shadow", &["named/Widget.h", "elsewhere/named/Widget.h"]);
             config
                 .include_paths
-                .push(crate::config::IncludePath::user(root.join("named")));
+                .push(config::IncludePath::user(root.join("named")));
 
             let found = resolve("Widget.h", &config).expect("the search path found it");
 

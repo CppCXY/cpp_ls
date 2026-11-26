@@ -2,8 +2,10 @@
 
 use crate::file::paths::DiskFiles;
 use crate::include::config::CompilerConfig;
+use crate::index;
 use crate::index::StepOutcome;
 use crate::index::watch::WatchFilter;
+use crate::parse_compile_commands;
 use crate::session::{OpenDocuments, Session, SessionFiles};
 use crate::symbol::Known;
 use std::path::PathBuf;
@@ -649,7 +651,7 @@ pub(crate) fn a_header_that_appears_earlier_on_the_path_moves_the_include() {
 
     // The header the search should have found first, created now.
     project.write("first/x.h", "struct X { int from_the_first; };\n");
-    let answer = session.changed([crate::index::watch::FileEvent::created(
+    let answer = session.changed([index::watch::FileEvent::created(
         project.root.join("first/x.h"),
     )]);
     assert!(
@@ -751,7 +753,7 @@ pub(crate) fn a_source_file_is_validated_with_its_own_compilation() {
     project.write("first/x.h", "struct X { int first; };\n");
     project.write("second/x.h", "struct X { int second; };\n");
     let root = project.root.to_string_lossy().replace('\\', "/");
-    let database = crate::parse_compile_commands(&format!(
+    let database = parse_compile_commands(&format!(
         "[{{\"directory\": \"{root}\", \"file\": \"{root}/main.c\", \
           \"arguments\": [\"gcc\", \"-I{root}/first\", \"-c\", \"{root}/main.c\"]}}]"
     ));

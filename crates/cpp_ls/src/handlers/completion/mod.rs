@@ -47,6 +47,7 @@
 //! The cost of setting it is one request per keystroke while a big namespace is being typed through, which is the
 //! request a client sends anyway when it does not know the answer.
 
+use crate::handlers;
 use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session, detail_of};
 use lsp_types::{
     ClientCapabilities, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
@@ -161,9 +162,8 @@ pub async fn on_completion(
         //
         // Read first, before the index is asked anything, because it needs no index: one token walk of the file.
         if let Some(held) = session.files().held(&view.path)
-            && let Some(items) = crate::handlers::format::complete::format_string_complete(
-                session, &view, held, offset,
-            )
+            && let Some(items) =
+                handlers::format::complete::format_string_complete(session, &view, held, offset)
         {
             log::debug!(
                 "completion: {} format-string item(s) at {}:{}",

@@ -10,6 +10,7 @@
 //! [`CppAstNode::child`] work for expressions, so every node kind that can appear in expression
 //! position has to be listed there.
 
+use crate::syntax;
 use crate::{
     CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
@@ -555,10 +556,8 @@ impl CppCastExpr {
         self.syntax()
             .children_with_tokens()
             .filter_map(|element| element.into_token())
-            .find(|token| !crate::syntax::is_trivia(crate::CppTokenKind::from(token.kind())))
-            .is_some_and(|token| {
-                crate::CppTokenKind::from(token.kind()) == crate::CppTokenKind::LeftParen
-            })
+            .find(|token| !syntax::is_trivia(CppTokenKind::from(token.kind())))
+            .is_some_and(|token| CppTokenKind::from(token.kind()) == CppTokenKind::LeftParen)
     }
 }
 
@@ -612,7 +611,7 @@ impl CppUnaryExpr {
             .syntax()
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find(|token| !crate::syntax::node::traits::is_trivia(token.kind().into()))
+            .find(|token| !syntax::node::traits::is_trivia(token.kind().into()))
         else {
             return true;
         };
@@ -1051,7 +1050,7 @@ impl CppLambdaExpr {
     }
 
     pub fn get_trailing_return_type(&self) -> Option<super::CppTypeId> {
-        crate::syntax::node::traits::first_child_of_kind(
+        syntax::node::traits::first_child_of_kind(
             self.syntax(),
             &[CppSyntaxKind::TrailingReturnType],
         )

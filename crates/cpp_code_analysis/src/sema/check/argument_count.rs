@@ -33,6 +33,11 @@
 //! could be formed. Erring that way is the direction to err in: a default that cannot be used is the compiler's
 //! complaint, and this layer's job is to be quiet when it is not sure.
 
+use crate::BindingKind;
+use crate::DeclKind;
+use crate::Known;
+use crate::file;
+use crate::sema;
 use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -107,11 +112,11 @@ impl Check for ArgumentCount {
             // `std::pair`. The scopes are the authority on what a name in this file means, so they are asked before
             // the index is: a call through a variable is a call of *that object*, and its arity is a question about
             // a lambda or a `std::function`, which this check does not resolve.
-            if let crate::Known::Yes(binding) = crate::sema::resolve::definition_at(
+            if let Known::Yes(binding) = sema::resolve::definition_at(
                 context.scopes(),
                 context.tree(),
                 usize::from(callee.syntax().text_range().start()),
-            ) && binding.kind != crate::BindingKind::Function
+            ) && binding.kind != BindingKind::Function
             {
                 continue;
             }
@@ -160,19 +165,19 @@ impl Check for ArgumentCount {
                     // The engine answers with a parsed `Type` and the file it came from; the resolver ranks spellings,
                     // which is the same information in the form both the file half and the index half of this check
                     // have. An `Unknown` travels with its reason rather than becoming "no type".
-                    let types: Vec<crate::Known<String>> = call
+                    let types: Vec<Known<String>> = call
                         .get_args()
                         .iter()
                         .map(|argument| match context.type_of(argument.syntax()) {
-                            crate::Known::Yes((a_type, _)) => crate::Known::Yes(a_type.to_string()),
-                            crate::Known::No => crate::Known::No,
-                            crate::Known::Unknown(reason) => crate::Known::Unknown(reason),
+                            Known::Yes((a_type, _)) => Known::Yes(a_type.to_string()),
+                            Known::No => Known::No,
+                            Known::Unknown(reason) => Known::Unknown(reason),
                         })
                         .collect();
-                    let candidates: Vec<crate::sema::overload::Candidate> = several
+                    let candidates: Vec<sema::overload::Candidate> = several
                         .iter()
                         .map(|callee| {
-                            crate::sema::overload::Candidate::new(
+                            sema::overload::Candidate::new(
                                 callee.parameters.clone(),
                                 callee.variadic,
                                 callee.parameters.join(", "),
@@ -180,13 +185,13 @@ impl Check for ArgumentCount {
                         })
                         .collect();
 
-                    match crate::sema::overload::choose(&types, &candidates) {
-                        crate::sema::overload::Choice::One(chosen) => &several[chosen],
-                        crate::sema::overload::Choice::None => match closest(several, passed) {
+                    match sema::overload::choose(&types, &candidates) {
+                        sema::overload::Choice::One(chosen) => &several[chosen],
+                        sema::overload::Choice::None => match closest(several, passed) {
                             Some(closest) => closest,
                             None => continue,
                         },
-                        crate::sema::overload::Choice::Ambiguous => continue,
+                        sema::overload::Choice::Ambiguous => continue,
                     }
                 }
             };
@@ -266,7 +271,7 @@ fn callees_in_this_file(
             // different arities produced two candidates whose parameter lists were both **empty**, so the dedupe below
             // kept one of them and every call was judged against it. `text()` is the node's own source text.
             let written_as = parameter.text().to_string();
-            spellings.push(crate::sema::overload::a_type_without_its_name(&written_as));
+            spellings.push(sema::overload::a_type_without_its_name(&written_as));
         }
 
         // **A `...` is a token of the list, not a parameter *node*.** `int count, ...` has one child (`int count`) and
@@ -376,10 +381,10 @@ fn callees_from_the_index(context: &CheckContext<'_>, name: &str) -> Vec<Callee>
     let visible = context.index().include_closure(context.path);
     let mut callees: Vec<Callee> = Vec::new();
     for (file, fact) in context.index().every_fact_named(name) {
-        if fact.kind != crate::DeclKind::Function {
+        if fact.kind != DeclKind::Function {
             continue;
         }
-        let normalized = crate::file::paths::normalize_path(&file, cfg!(windows));
+        let normalized = file::paths::normalize_path(&file, cfg!(windows));
         if !visible.contains(&normalized) {
             continue;
         }
@@ -442,9 +447,7 @@ fn the_callee_in(parameters: &str) -> Option<Callee> {
         }
         // The type, with any default and any parameter name dropped — see `a_type_without_its_name`.
         let without_default = parameter.split('=').next().unwrap_or(parameter).trim();
-        spellings.push(crate::sema::overload::a_type_without_its_name(
-            without_default,
-        ));
+        spellings.push(sema::overload::a_type_without_its_name(without_default));
     };
     for character in inner.chars() {
         match character {
@@ -551,13 +554,13 @@ fn has_an_ellipsis(parameter: &str) -> bool {
 
 /// **Is this name a type as well as a function?** — see the guard that calls this.
 fn names_a_type(context: &CheckContext<'_>, name: &str) -> bool {
-    let crate::Known::Yes(definitions) = context.index().definitions(name, context.path) else {
+    let Known::Yes(definitions) = context.index().definitions(name, context.path) else {
         return false;
     };
     definitions
         .found
         .iter()
-        .any(|definition| definition.fact.kind != crate::DeclKind::Function)
+        .any(|definition| definition.fact.kind != DeclKind::Function)
 }
 
 /// **A member call, judged against the member it names.**
@@ -572,9 +575,9 @@ fn names_a_type(context: &CheckContext<'_>, name: &str) -> bool {
 fn judge_a_member_call(
     context: &mut CheckContext<'_>,
     call: &cpp_parser::CppCallExpr,
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
 ) {
-    let crate::Known::Yes((a_type, _)) = context.type_of(&access.object) else {
+    let Known::Yes((a_type, _)) = context.type_of(&access.object) else {
         return;
     };
     let class = a_type.to_string();
@@ -588,7 +591,7 @@ fn judge_a_member_call(
     // code; an inherited one still takes the old path, so no call is judged differently — only cheaper when the class
     // in front of it is the one that declares the name.
     let mut members: Vec<Callee> = Vec::new();
-    if let crate::Known::Yes(own) = context.model.own_members_of(&class) {
+    if let Known::Yes(own) = context.model.own_members_of(&class) {
         for (_, fact) in &own {
             if fact.name != access.member {
                 continue;
@@ -602,7 +605,7 @@ fn judge_a_member_call(
         }
     }
     if members.is_empty() {
-        let crate::Known::Yes(list) = context.model.members_of(&class) else {
+        let Known::Yes(list) = context.model.members_of(&class) else {
             return;
         };
         members = list

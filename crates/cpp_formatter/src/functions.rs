@@ -17,7 +17,9 @@
 //! parser gives an out-of-line definition no function node at all (measured on `A::A(int x) : x_(x) { … }`: a
 //! `Declaration` with the body as a child).
 
+use crate::config;
 use crate::roles::{BraceKind, Roles};
+use crate::space;
 use crate::tokens::Stream;
 
 /// One function (or lambda) body, with the span of its definition.
@@ -189,13 +191,13 @@ fn single_statement(stream: &Stream<'_>, roles: &Roles, open: usize, close: usiz
 pub fn body_width(
     stream: &Stream<'_>,
     roles: &Roles,
-    style: &crate::config::Style,
+    style: &config::Style,
     definition: &Definition,
 ) -> usize {
     let mut width = 0;
     for index in definition.open..=definition.close {
         if index > definition.open {
-            width += crate::space::between(stream, index, roles, style);
+            width += space::between(stream, index, roles, style);
         }
         width += stream.tokens[index].text.chars().count();
     }
@@ -209,14 +211,14 @@ pub fn body_width(
 pub fn one_line_width(
     stream: &Stream<'_>,
     roles: &Roles,
-    style: &crate::config::Style,
+    style: &config::Style,
     definition: &Definition,
     indent: usize,
 ) -> usize {
     let mut width = indent;
     for index in definition.start..=definition.close {
         if index > definition.start {
-            width += crate::space::between(stream, index, roles, style);
+            width += space::between(stream, index, roles, style);
         }
         width += stream.tokens[index].text.chars().count();
     }
@@ -226,10 +228,12 @@ pub fn one_line_width(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::roles;
+    use crate::tokens;
 
     fn definitions_of(source: &str) -> Vec<Definition> {
-        let stream = crate::tokens::stream(source);
-        let roles = crate::roles::of(source);
+        let stream = tokens::stream(source);
+        let roles = roles::of(source);
         definitions(&stream, &roles)
     }
 

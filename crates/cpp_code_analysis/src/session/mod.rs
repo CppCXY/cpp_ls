@@ -69,6 +69,23 @@
 //! every file it caches — the key already records the whole compilation context, so per-file configurations are
 //! representable and simply not implemented. The store is what carries the single configuration today.
 
+use crate::IndexedRendering;
+use crate::IndexedUnit;
+use crate::MacroDefinitions;
+use crate::MapReport;
+use crate::Marked;
+use crate::ParsedDefinitions;
+use crate::PathPattern;
+use crate::RenderedUnit;
+use crate::ScopeKind;
+use crate::SharedHeaders;
+use crate::TranslationUnit;
+use crate::effect;
+use crate::file;
+use crate::include;
+use crate::index;
+use crate::preprocess;
+use crate::sema;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -84,7 +101,7 @@ use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
     ProjectIndex, ProjectMacro, substituted_members,
 };
-use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
+use crate::index::references::{MacroReferences, macro_references};
 use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::StepOutcome;
@@ -117,11 +134,7 @@ use crate::{PathInterner, cache};
 /// The C++ standard's own rule is the one applied: a translation unit compiled as C has no `__cplusplus`, so a header
 /// that asks is told no. `_MSVC_LANG` goes with it — MSVC's equivalent question — and the `__cpp_*` feature macros
 /// stay: every header gates them on `__cplusplus` first, which is now false.
-pub(crate) fn the_seed_for(
-    config: &CompilerConfig,
-    macros: &crate::Marked,
-    file: &Path,
-) -> MacroTable {
+pub(crate) fn the_seed_for(config: &CompilerConfig, macros: &Marked, file: &Path) -> MacroTable {
     let mut seed = MacroTable::from_marked(macros);
     if config.language_for(file).family() == Some(cpp_parser::features::Family::C) {
         // **An `#undef` at offset 0, inserted after the definition** — the table's lookup reads the last binding at
@@ -138,11 +151,7 @@ pub(crate) fn the_seed_for(
 /// answered while walking, so the seed the walk is given is what puts MSVC's `extern "C++" { template … }` blocks into
 /// a C program's stream. Measured on Lua 5.5.0's `ldebug.c`: 24 of those blocks and **15** parse errors in the program
 /// reading, none in the file's own cook.
-pub(crate) fn the_marked_seed_for(
-    config: &CompilerConfig,
-    macros: &crate::Marked,
-    root: &Path,
-) -> crate::Marked {
+pub(crate) fn the_marked_seed_for(config: &CompilerConfig, macros: &Marked, root: &Path) -> Marked {
     let mut seed = macros.clone();
     if config.language_for(root).family() == Some(cpp_parser::features::Family::C) {
         seed.undefine("__cplusplus");
@@ -588,7 +597,7 @@ pub(crate) struct ViewKey {
     rendering: Option<RenderingId>,
     /// The file's own text, by hash — what a **buffer view** was parsed from.
     text: u64,
-    id: crate::file::paths::FileId,
+    id: file::paths::FileId,
     cuda: bool,
     language: Option<cpp_parser::features::LanguageConfig>,
     open: bool,
@@ -604,7 +613,7 @@ pub(crate) struct ViewKey {
 /// **The key the rendering cache uses** — the normalized spelling, because a caller may hold a canonicalized one.
 fn a_rendering_key(path: &Path, text_hash: u64) -> (PathBuf, u64) {
     (
-        PathBuf::from(crate::file::paths::normalize_path(path, cfg!(windows))),
+        PathBuf::from(file::paths::normalize_path(path, cfg!(windows))),
         text_hash,
     )
 }
@@ -617,7 +626,7 @@ fn buffer_view_key(
     ViewKey {
         path: file.path.clone(),
         rendering: None,
-        text: crate::cache::content_hash(&file.text),
+        text: cache::content_hash(&file.text),
         id: file.id,
         cuda,
         language: None,
@@ -628,7 +637,7 @@ fn buffer_view_key(
 
 /// The identity of a rendering — **by object, held**, see [`ViewKey::rendering`].
 #[derive(Debug, Clone)]
-struct RenderingId(std::sync::Arc<crate::preprocess::cooked::RenderedCooked>);
+struct RenderingId(std::sync::Arc<preprocess::cooked::RenderedCooked>);
 
 impl PartialEq for RenderingId {
     fn eq(&self, other: &Self) -> bool {
@@ -750,7 +759,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Keyed like everything else that names a file ([`queue_key`]) and recorded by [`Session::index_one`], which is
     /// the one place a file's summary enters the index. A file the analysis is holding as a **buffer** has no entry:
     /// the client's text is the text, and the disk's mtime says nothing about it.
-    stamps: HashMap<String, crate::file::FileStamp>,
+    stamps: HashMap<String, file::FileStamp>,
     /// The files this session has **parsed** since the last body pass — the candidates for
     /// [`SummaryStore::re_read_where_a_body_decides`], which may only run once the closure is in hand.
     ///
@@ -800,7 +809,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// into the difference between 4.5 s and 12.7 s for 255 files (measured; the census's own note records the same
     /// effect at 40 s). Invalidated **per path** when a file changes, since the keys are offsets in that file.
     /// **The macro definition cache, behind its own lock** — see [`Session::held_definitions`].
-    definitions: std::sync::Mutex<crate::MacroDefinitions>,
+    definitions: std::sync::Mutex<MacroDefinitions>,
     /// **The project's translation units that have been read as programs** — see [Session::read_the_unit].
     ///
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
@@ -829,7 +838,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// outlive the call) and runs every rule over it — measured **143.4 ms** on `EmmyLuaCodeStyle`, 97 % of it type
     /// inference. The findings themselves are plain data and a function of everything the pull reads, so the *answers*
     /// are what is remembered; the key names the state ([`Session::the_state_of_a_pull`]).
-    checks_memo: std::sync::Mutex<Option<(u64, Vec<crate::sema::check::Finding>)>>,
+    checks_memo: std::sync::Mutex<Option<(u64, Vec<sema::check::Finding>)>>,
     /// **How many pulls were answered from [`Session::checks_memo`] and how many ran the rules** — the two numbers
     /// that say whether the memo is worth its key, and the ones a regression can assert without a clock.
     ///
@@ -878,7 +887,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Because the read that fills it is the expensive half of a unit read — a render, a parse and a sweep — and that
     /// half has to be payable **outside the write lock** ([`Session::prepare_a_unit_reading`]) if a whole program is
     /// ever to be read as one. Same reason, and same shape, as [`Session::units`].
-    unit_index: std::sync::Mutex<Option<(u64, crate::IndexedUnit)>>,
+    unit_index: std::sync::Mutex<Option<(u64, IndexedUnit)>>,
     /// **The last unit this session rendered, and what its inputs were** — one entry, keyed by the *content* of
     /// every file the walk read.
     ///
@@ -896,7 +905,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// for twice in a row, and a map would trade a render for a memory of every stream the session ever built.
     ///
     /// Behind a lock for the same reason [`Session::unit_index`] is.
-    rendered_unit: std::sync::Mutex<Option<(u64, crate::RenderedUnit)>>,
+    rendered_unit: std::sync::Mutex<Option<(u64, RenderedUnit)>>,
     /// **How many items one completion may answer with** — `[completion] max_items` in `.cppls.toml`, clamped.
     ///
     /// A **payload** bound rather than a UI one: the client renders ten rows and receives all of them, and an
@@ -919,7 +928,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// have changed the environment any file reads it in, or the timeline of any unit it is part of — so it drops
     /// neither. See [`crate::preprocess::directive::DirectiveSignature`].
     directive_signatures:
-        std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
+        std::collections::HashMap<String, preprocess::directive::DirectiveSignature>,
     /// **Cooked readings waiting for a debounced disk write.** The commit itself only updates memory and the index;
     /// persistence is a background, delayed action so an edit never pays for redb under the analysis write lock.
     cook_persistence:
@@ -929,7 +938,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a
     /// text the file no longer has: an edit, a close, a filesystem event. It is a read-ahead, never a source of
     /// truth: an entry that is not here is simply read when its turn comes.
-    prefetched: HashMap<String, crate::index::store::Prepared>,
+    prefetched: HashMap<String, index::store::Prepared>,
     /// **The order the prepared slices were made in**, oldest first — what a budget drops from.
     ///
     /// The map has no order, and the order is the whole question a bound asks: the entries made *last* are the ones
@@ -981,9 +990,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// count would be a budget that says nothing about what it holds. Least recently used goes first; a unit larger
     /// than the whole budget is still kept, because the walk that just produced it is the one a query is about to
     /// use and rebuilding it is the most expensive thing this session can do.
-    walked_by_content: std::sync::Mutex<
-        cache::cache_lru::Cache<(u64, u64), std::sync::Arc<crate::TranslationUnit>>,
-    >,
+    walked_by_content:
+        std::sync::Mutex<cache::cache_lru::Cache<(u64, u64), std::sync::Arc<TranslationUnit>>>,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
     /// Built with the session rather than on the first completion, and the reason is the budget rather than the
@@ -993,7 +1001,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Behind a lock because the **project's** half of it grows: [`crate::Session::add_project_files`] re-derives
     /// that half when a build system hands over more translation units, and a completion may be asked for before,
     /// during or after. The search-path half never changes after this field is built.
-    headers: crate::SharedHeaders,
+    headers: SharedHeaders,
     /// **The macros a file's closure defines, remembered by the content they were read from.**
     ///
     /// [`Session::view_with_macros`] walks the file's whole closure and takes a copy of every file's text to build
@@ -1020,7 +1028,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// **The run's parsed macro definitions** — see `ParsedDefinitions`: a body parses once per run, not once per
     /// file that sees it. Keyed by the definition's own text, so it needs no invalidation: the same text is the same
     /// definition, and a file that changed contributes a different one.
-    parsed_definitions: std::sync::Mutex<crate::ParsedDefinitions>,
+    parsed_definitions: std::sync::Mutex<ParsedDefinitions>,
     /// **The `Configuration` a composed cook renders in, cached against the environment it was made from.**
     ///
     /// `cooking_materials` composes an environment from the index and then materialises it as a `Configuration` —
@@ -1032,7 +1040,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
             (String, u64),
             (
                 u64,
-                std::sync::Arc<crate::preprocess::cooked::Configuration>,
+                std::sync::Arc<preprocess::cooked::Configuration>,
                 std::time::Instant,
             ),
         >,
@@ -1055,14 +1063,11 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// keystrokes. Keyed by the **content hash** rather than the path, because a buffer being typed in has a new
     /// text on every keystroke and a rendering of the old text would be a wrong answer rather than a stale one.
     /// **Surfaces already scanned**, shared by every effect walk — see [`crate::effect::Surfaces`].
-    surfaces: std::sync::Mutex<crate::effect::Surfaces>,
+    surfaces: std::sync::Mutex<effect::Surfaces>,
     /// **Effects already computed**, shared by every walk — the other half of what makes a walk hash lookups.
-    effects: std::sync::Mutex<HashMap<u64, crate::effect::Effect>>,
+    effects: std::sync::Mutex<HashMap<u64, effect::Effect>>,
     renderings: std::sync::Mutex<
-        cache::cache_lru::Cache<
-            (PathBuf, u64),
-            std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
-        >,
+        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<preprocess::cooked::RenderedCooked>>,
     >,
     /// **The rendering of each document somebody has open, kept outside the budget.**
     ///
@@ -1075,13 +1080,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// Keyed by [`queue_key`] and validated by the text hash, so a stale entry is inert rather than wrong.
     open_renderings: std::sync::Mutex<
-        HashMap<
-            String,
-            (
-                u64,
-                std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
-            ),
-        >,
+        HashMap<String, (u64, std::sync::Arc<preprocess::cooked::RenderedCooked>)>,
     >,
     /// **Views already built**, by what they were parsed from — the answer to "a pull is a parse per request".
     ///
@@ -1107,9 +1106,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// The value is a [`crate::file::view::ParsedView`] and not a [`FileView`]: a view holds rowan's red root, which is
     /// neither `Send` nor `Sync`, and a session is shared across the server's threads. The root is one allocation,
     /// made per hit — see `FileView::from_parsed`.
-    views: std::sync::Mutex<
-        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
-    >,
+    views:
+        std::sync::Mutex<cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>>,
 
     /// **The parse trees of whole renderings, in a cache of their own** — see [`Cache::rendering_views`].
     ///
@@ -1118,18 +1116,16 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// eight-entry cache let ten buffer views evict the rendering, so **every** request after them re-parsed the
     /// unit: private bytes went 190 MB → 7 500 MB over twelve rounds while the session's own tables stayed near
     /// 40 MB. The dispatch is on the key: `ViewKey::rendering` is `Some` exactly for a rendering.
-    rendering_views: std::sync::Mutex<
-        cache::cache_lru::Cache<ViewKey, std::sync::Arc<crate::file::view::ParsedView>>,
-    >,
+    rendering_views:
+        std::sync::Mutex<cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>>,
     /// **The summary of a rendering**, by `(path, content hash of the rendered text)`.
     ///
     /// A rendering is what the preprocessor resolved, so a declaration a directive splits has one answer there —
     /// `reference` for libstdc++'s `emplace_back` — where the file's own text has two. Reading it needs the *summary*
     /// of the rendered text, which is a parse: measured at **20.2 ms, and 19.1 ms again** on the second ask
     /// (`tests/rendering_real.rs`), because the rendering is cached by the cook path and its summary was not.
-    rendering_summaries: std::sync::Mutex<
-        cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<crate::FileSummary>>,
-    >,
+    rendering_summaries:
+        std::sync::Mutex<cache::cache_lru::Cache<(PathBuf, u64), std::sync::Arc<FileSummary>>>,
     /// **What the compiler has already been asked about `__has_*`**, shared by every file's probe — see
     /// [`crate::session::cook::Session::feature_probe`]. A header can write the same question twenty times, and a
     /// process per question would make the second file pay what the first did.
@@ -1402,7 +1398,7 @@ impl Session<DiskFiles> {
         // **What the project is** — its own file and its build — worked out before anything is
         // asked of a compiler, because the first half decides *which* compiler gets asked (`named_compilers`) and
         // what flags it is asked about.
-        let discovery = crate::project::discover(&files, &root, config_file);
+        let discovery = project::discover(&files, &root, config_file);
         let project_config = discovery.config.clone();
 
         // **The project's own language wins.** `locale = "zh-CN"` in `.cppls.toml` is a statement about this
@@ -1458,7 +1454,7 @@ impl Session<DiskFiles> {
                 .compile
                 .fuzzy_includes
                 .unwrap_or(discovery.database.is_none()),
-            targets: crate::project::targets_for(&project_config.config.compile),
+            targets: project::targets_for(&project_config.config.compile),
             // **The libraries a target may depend on** — `[[library]]`, resolved at the moment the file's config is
             // applied (see `CompilerConfig::for_file`), because that is where a file and its target meet.
             libraries: project_config.config.libraries.clone(),
@@ -1490,7 +1486,7 @@ impl Session<DiskFiles> {
         // `clang++` gets clang's headers, and a project whose build names a compiler gets that one — before
         // `CXX`, before the platform's own, and before anything on `PATH`.
         let environment = Environment::current();
-        let layout = crate::include::msvc::WindowsLayout::current();
+        let layout = include::msvc::WindowsLayout::current();
         let named = discovery.named_compilers();
 
         // **The compiler's answers are cached under the project's own cache**, beside the summaries they are the
@@ -1584,7 +1580,7 @@ impl Session<DiskFiles> {
 pub struct RenderedCook {
     /// `cache::content_hash` of the text the rendering was made from.
     pub text_hash: u64,
-    pub indexed: crate::IndexedRendering,
+    pub indexed: IndexedRendering,
     pub reading: CookedReading,
     revision: SessionRevision,
 }
@@ -1596,13 +1592,13 @@ pub struct CookingMaterials {
     pub key: SummaryKey,
     /// **The timeline whose view answers positionally**, when one covers the file — `FileMacros` over its
     /// definitions, which is what the reading has always used where a unit exists.
-    pub unit: Option<std::sync::Arc<crate::TranslationUnit>>,
+    pub unit: Option<std::sync::Arc<TranslationUnit>>,
     /// **The composed starting state**, for a file no timeline covers: `Over(configuration, seed)`.
     ///
     /// Two fields rather than one because they are not equivalent: a `MacroView` is a **position** in a walk,
     /// so it answers `#define`s that arrive mid-file and directives that split a declaration; a materialised
     /// `Configuration` is the state a file *starts* with. The walk stays preferred wherever it exists.
-    pub configuration: Option<std::sync::Arc<crate::preprocess::cooked::Configuration>>,
+    pub configuration: Option<std::sync::Arc<preprocess::cooked::Configuration>>,
     /// The file's own text.
     pub text: String,
     /// **The hash of that text**, which is what the commit compares the file's text against — see
@@ -1644,29 +1640,29 @@ impl<F: FileProvider + Clone> DetachedCook<F> {
 #[derive(Default)]
 pub struct PreparedWave {
     /// The summaries `Session::commit_a_wave` is about to put into the index.
-    pub prepared: Vec<(PathBuf, crate::index::store::Prepared)>,
+    pub prepared: Vec<(PathBuf, index::store::Prepared)>,
     /// The timelines the second pass reads its environments out of, for the files this wave will parse.
-    pub units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+    pub units: Vec<std::sync::Arc<TranslationUnit>>,
     /// **Refined readings the cache already holds for the slice this wave will drain.**
     ///
     /// The second pass refines a file against its own closure, and its answer is a function of that closure — so a
     /// stored one is served instead of being rebuilt, and the files it covers need no timeline at all. This is what
     /// makes a second start cheap: the pass costs a lookup rather than a parse per file.
-    pub refinements: Vec<crate::FileSummary>,
+    pub refinements: Vec<FileSummary>,
     revision: Option<SessionRevision>,
 }
 
 pub struct FileReadMaterials<F: FileProvider> {
     path: PathBuf,
     revision: SessionRevision,
-    input: crate::index::store::DetachedRead<F>,
+    input: index::store::DetachedRead<F>,
     view: Option<BufferViewMaterials>,
 }
 
 pub struct PreparedFile {
     path: PathBuf,
     revision: SessionRevision,
-    prepared: crate::index::store::Prepared,
+    prepared: index::store::Prepared,
     view: Option<PreparedBufferView>,
 }
 
@@ -1756,7 +1752,7 @@ pub struct Drain {
     files: Vec<PathBuf>,
     /// The timelines that pass reads its environments out of, built for exactly this slice by
     /// [`Session::prepare_a_wave`].
-    units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+    units: Vec<std::sync::Arc<TranslationUnit>>,
     /// The macro environments a query asked for and has not got — up to `MACRO_SLICE` of them.
     environments: Vec<PathBuf>,
     revision: Option<SessionRevision>,
@@ -1776,12 +1772,12 @@ impl Drain {
 #[derive(Default)]
 pub struct PreparedDrain {
     /// The second pass, planned: `None` when the slice's backlog was empty.
-    re_read: Option<crate::index::store::ReRead>,
+    re_read: Option<index::store::ReRead>,
     /// The rendered environments, keyed the way [`Session::known_rendering_of`] looks them up: the file, and the
     /// hash of the text it was rendered from.
     rendered: Vec<(
         (PathBuf, u64),
-        std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+        std::sync::Arc<preprocess::cooked::RenderedCooked>,
     )>,
     revision: Option<SessionRevision>,
     /// What a bounded drain did **not** read — put back on the queues by [`Session::commit_the_drain`].
@@ -1801,7 +1797,7 @@ pub struct PreparedUnitReading {
     revision: SessionRevision,
     /// The hash of the rendering these facts were read from — what the memo and the database file them under.
     program: u64,
-    indexed: crate::IndexedUnit,
+    indexed: IndexedUnit,
     /// **Every file the unit was rendered from** — the module's closure, which is what an importer of it sees.
     ///
     /// Carried out of the read rather than looked up afterwards because the rendering is consumed there: a **cold**
@@ -1841,11 +1837,11 @@ pub struct UnitReadMaterials<F: FileProvider> {
     /// (`RenderedUnit::walked`), so a session that has already walked a program can find the rendering again without
     /// re-walking it. What is missing then is the timeline, and it is only needed to **cook** — a served rendering is
     /// already cooked.
-    unit: Option<std::sync::Arc<crate::TranslationUnit>>,
+    unit: Option<std::sync::Arc<TranslationUnit>>,
     /// The text of every file the walk entered, by path — what the cook reads.
     sources: HashMap<PathBuf, String>,
     /// What the compilation itself defines ([`crate::Marked`]), which no file in the closure knows.
-    macros: crate::Marked,
+    macros: Marked,
     config: CompilerConfig,
     files: F,
     /// The store's own database, for the two rows a program read reads and writes.
@@ -1853,9 +1849,9 @@ pub struct UnitReadMaterials<F: FileProvider> {
     /// The rendering's hash, when the rendering was already in hand.
     program: Option<u64>,
     /// The rendering, when this session or the database already had it.
-    rendered: Option<crate::RenderedUnit>,
+    rendered: Option<RenderedUnit>,
     /// The facts, when they were already read.
-    known: Option<crate::IndexedUnit>,
+    known: Option<IndexedUnit>,
 }
 
 impl<F: FileProvider> UnitReadMaterials<F> {
@@ -1901,7 +1897,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
                 // **The include search, so `__has_include` is answerable.** Without it the operator answers
                 // `Unknown`, which is honest but decides nothing, and `#if __has_include(<span>)` is a shape real
                 // headers are full of. See [`Session::render_the_unit`].
-                let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
+                let search = preprocess::cooked::Search::new(&self.files, &self.config);
                 let mut stream = unit.cook_the_unit(
                     &self.sources,
                     &definitions,
@@ -1931,7 +1927,7 @@ impl<F: FileProvider> UnitReadMaterials<F> {
             }
         };
 
-        let program = crate::cache::content_hash(&stream.text);
+        let program = cache::content_hash(&stream.text);
         if let Some(database) = &self.database
             && let Ok(Some(known)) = database.indexed_unit(program)
         {
@@ -1963,10 +1959,10 @@ impl<F: FileProvider> UnitReadMaterials<F> {
 /// **How the effect chain reads files**: the session`s own provider, and the include graph the index resolved.
 struct SessionReads<'a, F: FileProvider> {
     files: &'a F,
-    index: &'a crate::ProjectIndex,
+    index: &'a ProjectIndex,
 }
 
-impl<F: FileProvider> crate::effect::Reads for SessionReads<'_, F> {
+impl<F: FileProvider> effect::Reads for SessionReads<'_, F> {
     fn read(&self, path: &std::path::Path) -> Option<String> {
         self.files.read(path)
     }
@@ -2002,6 +1998,7 @@ mod diagnostics;
 /// **What a documentation comment refers to** --- the names a hover draws as links.
 pub mod doc;
 mod edits;
+use cpp_toolchain::project;
 pub use edits::ReconcileAnswer;
 /// **The regions a file can hide** --- folds, read from the tree and the directives.
 pub mod folding;
@@ -2075,7 +2072,7 @@ pub struct FileDiagnostic {
     /// Carried rather than derived from the message, because a client needs a *stable* name: `Diagnostic::code`
     /// is what an editor shows and what a settings file turns a rule off by, and a consumer that parsed the
     /// sentence would be reading prose as an identifier.
-    pub code: crate::sema::check::DiagnosticCode,
+    pub code: sema::check::DiagnosticCode,
 }
 
 /// **Something the analysis knows that is not an error** — see [`Session::notes_about_the_modules`].
@@ -2125,7 +2122,7 @@ pub struct FileDiagnostics {
     /// and the language does not. Every entry is a claim the analysis can stand behind — a check reports only
     /// `Known::Yes` or `Known::No`, and never an absence of an answer — so a consumer may show all of them
     /// without hedging, which is the property the layer exists to have.
-    pub checks: Vec<crate::sema::check::Finding>,
+    pub checks: Vec<sema::check::Finding>,
     /// **Were the checks withheld because this file's closure is not read yet?**
     ///
     /// A check reads the *index*, and an index still being built answers absence as if it were a fact — see
@@ -2156,7 +2153,7 @@ pub struct CookedReading {
     /// grammar error inside another file's macro body, or a pasted token that exists nowhere).
     pub unplaced: usize,
     /// How the ranges mapped back into the file; see [`crate::MapReport`].
-    pub mapped: crate::MapReport,
+    pub mapped: MapReport,
 }
 
 /// How many translation units the session keeps in memory.
@@ -2261,19 +2258,14 @@ impl UnitTable {
         self.held.values()
     }
 
-    fn get(&mut self, key: &str) -> Option<(bool, std::sync::Arc<crate::TranslationUnit>)> {
+    fn get(&mut self, key: &str) -> Option<(bool, std::sync::Arc<TranslationUnit>)> {
         self.clock += 1;
         let held = self.held.get_mut(key)?;
         held.used = self.clock;
         Some((held.provisional, held.unit.clone()))
     }
 
-    fn insert(
-        &mut self,
-        key: String,
-        unit: std::sync::Arc<crate::TranslationUnit>,
-        provisional: bool,
-    ) {
+    fn insert(&mut self, key: String, unit: std::sync::Arc<TranslationUnit>, provisional: bool) {
         self.clock += 1;
 
         // **Both budgets, and the byte one is the real one.** A count of sixteen says nothing when a unit is 0.1 MB
@@ -2346,7 +2338,7 @@ impl UnitTable {
     /// for a root and remembered for sharing, which is the common case — so a report that adds
     /// `accounting().1` to the sharing cache's weight counts one allocation twice. This is how that is measured
     /// instead of assumed: the caller compares pointers. See [`Session::memory_report`].
-    fn timelines(&self) -> impl Iterator<Item = &std::sync::Arc<crate::TranslationUnit>> {
+    fn timelines(&self) -> impl Iterator<Item = &std::sync::Arc<TranslationUnit>> {
         self.held.values().map(|held| &held.unit)
     }
 }
@@ -2385,7 +2377,7 @@ struct HeldUnit {
     used: u64,
     /// Built while a file the closure needed was still queued. See this type's documentation.
     provisional: bool,
-    unit: std::sync::Arc<crate::TranslationUnit>,
+    unit: std::sync::Arc<TranslationUnit>,
     /// What this unit costs, in the estimate [`crate::TranslationUnit::heap_bytes`] gives — the number the table's
     /// byte budget is deducted from. Stored rather than recomputed on eviction: the estimate walks every event.
     weight: usize,
@@ -2708,7 +2700,7 @@ fn enclosing_namespace_at(view: &FileView, at: usize) -> Option<String> {
         let Some(data) = view.scopes.scope(id) else {
             continue;
         };
-        if data.kind == crate::ScopeKind::Namespace
+        if data.kind == ScopeKind::Namespace
             && let Some(name) = data.name.as_deref()
         {
             segments.push(name);
@@ -2766,7 +2758,7 @@ fn the_compilation_is_known(toolchain: Option<&Toolchain>) -> bool {
 /// the discovery layer already reports, and a session built from a provider that cannot list directories (an in-memory
 /// project) has nothing to walk.
 fn library_files_to_read(
-    libraries: &[crate::project::LibrarySection],
+    libraries: &[project::LibrarySection],
     workspace: &std::path::Path,
 ) -> Vec<PathBuf> {
     const HEADER_EXTENSIONS: &[&str] = &["h", "hpp", "hxx", "h++", "inl", "ipp"];
@@ -2862,7 +2854,7 @@ fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilt
     let mut filter = filter;
 
     for pattern in &report.config.workspace.exclude {
-        if let Ok(pattern) = crate::PathPattern::new(pattern) {
+        if let Ok(pattern) = PathPattern::new(pattern) {
             filter = filter.ignore_pattern(pattern);
         }
     }
@@ -2891,7 +2883,7 @@ fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilt
             "Saved/**",
             "DerivedDataCache/**",
         ] {
-            if let Ok(pattern) = crate::PathPattern::new(pattern) {
+            if let Ok(pattern) = PathPattern::new(pattern) {
                 filter = filter.ignore_pattern(pattern);
             }
         }

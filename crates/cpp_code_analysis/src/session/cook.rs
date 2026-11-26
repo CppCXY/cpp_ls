@@ -3,6 +3,15 @@
 //! Moved here from `session/mod.rs` without a change.
 
 use super::*;
+use crate::DeclFact;
+use crate::FileSummary;
+use crate::MapReport;
+use crate::SummaryKey;
+use crate::cache;
+use crate::index;
+use crate::preprocess;
+use crate::session;
+use crate::summarize;
 
 /// **One file a cooking slice claimed**, and where its reading will come from.
 ///
@@ -14,8 +23,8 @@ pub enum AClaimedCook {
     /// and closure.
     Stored(
         PathBuf,
-        crate::index::CookedFile,
-        crate::preprocess::cooked::RenderedCooked,
+        index::CookedFile,
+        preprocess::cooked::RenderedCooked,
     ),
     /// This slice must render and parse it.
     Fresh(CookingMaterials),
@@ -27,8 +36,8 @@ pub struct AClaimedSlice {
     /// Readings the disk held; committing one caches its rendering and inserts its facts.
     pub stored: Vec<(
         PathBuf,
-        crate::index::CookedFile,
-        crate::preprocess::cooked::RenderedCooked,
+        index::CookedFile,
+        preprocess::cooked::RenderedCooked,
     )>,
     /// Readings this slice rendered and parsed; committing one checks the text and files it.
     pub fresh: Vec<RenderedCook>,
@@ -170,7 +179,7 @@ impl<F: FileProvider + Clone> Session<F> {
     fn a_configuration_for(
         &self,
         path: &Path,
-    ) -> Option<std::sync::Arc<crate::preprocess::cooked::Configuration>> {
+    ) -> Option<std::sync::Arc<preprocess::cooked::Configuration>> {
         let (fingerprint, environment) = self.store.the_environment(path)?;
         let key = (queue_key(path), self.store.context_hash(path));
         let asked = std::time::Instant::now();
@@ -185,13 +194,11 @@ impl<F: FileProvider + Clone> Session<F> {
                 .parsed_definitions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::sync::Arc::new(
-                crate::preprocess::cooked::configuration_from_environment_and(
-                    &*environment,
-                    true,
-                    &mut parsed,
-                ),
-            )
+            std::sync::Arc::new(preprocess::cooked::configuration_from_environment_and(
+                &*environment,
+                true,
+                &mut parsed,
+            ))
         };
         if let Ok(mut cache) = self.configurations.lock() {
             if cache.len() >= 8
@@ -219,7 +226,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(&path)
             .into_iter()
             .flat_map(|summary| summary.declarations.iter())
-            .map(crate::DeclFact::qualified_name)
+            .map(DeclFact::qualified_name)
             .collect();
 
         // **Not from a provisional timeline.** A rendering made from an environment missing whatever the queue has
@@ -359,8 +366,8 @@ impl<F: FileProvider + Clone> Session<F> {
         };
 
         let text = self.files.read(&path)?;
-        let text_hash = crate::cache::content_hash(&text);
-        let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
+        let text_hash = cache::content_hash(&text);
+        let seed = session::the_seed_for(&self.config, self.store.index().macros(), &path);
 
         let features = self.feature_probe(&path);
 
@@ -438,13 +445,9 @@ impl<F: FileProvider + Clone> Session<F> {
             (Some(unit), _) => {
                 let definitions = unit.definitions();
                 let view = unit.environment_of(path)?;
-                let macros = crate::preprocess::cooked::FileMacros::new(
-                    &view,
-                    &definitions,
-                    Some(seed),
-                    true,
-                );
-                crate::preprocess::cooked::cook_with_file_and_features(
+                let macros =
+                    preprocess::cooked::FileMacros::new(&view, &definitions, Some(seed), true);
+                preprocess::cooked::cook_with_file_and_features(
                     text,
                     &tokens,
                     &macros,
@@ -453,8 +456,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 )
             }
             (None, Some(configuration)) => {
-                let start = crate::preprocess::cooked::Over::new(&configuration.table, seed);
-                crate::preprocess::cooked::cook_with_file_and_features(
+                let start = preprocess::cooked::Over::new(&configuration.table, seed);
+                preprocess::cooked::cook_with_file_and_features(
                     text,
                     &tokens,
                     &start,
@@ -516,9 +519,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         // **The check.** `self.text` is the file's text *now*, and the hash it is compared against is the one the
         // rendering was made from. A file that has become unreadable is the same answer — nothing to file.
-        let current = self
-            .text(&path)
-            .map(|text| crate::cache::content_hash(&text));
+        let current = self.text(&path).map(|text| cache::content_hash(&text));
         if !self.is_current(&revision) || current != Some(text_hash) {
             if Arc::ptr_eq(&self.identity, &revision.session) && self.files.exists(&path) {
                 self.want_cooked_reading(&path);
@@ -546,7 +547,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // because the write borrows the store and the insert needs it mutably; both are cheap.
             // **The rendering, kept beside the facts** --- a record with only the facts is one a hit cannot answer
             // from, because every query that reads the tree needs the text and the spans.
-            let cooked: crate::index::CookedFile = indexed.into();
+            let cooked: index::CookedFile = indexed.into();
 
             // **No disk write here.** Serialising and writing a whole rendering is what made an index-slice commit
             // hold the writer for seconds. Mark the path; the delayed persistence pass writes at most a few records
@@ -685,8 +686,8 @@ impl<F: FileProvider + Clone> Session<F> {
         path: &Path,
     ) -> Option<(
         PathBuf,
-        crate::index::CookedFile,
-        crate::preprocess::cooked::RenderedCooked,
+        index::CookedFile,
+        preprocess::cooked::RenderedCooked,
     )> {
         let resolved = self.store.index().summary(path)?.path.clone();
         match self.store.the_stored_cook_reason(&resolved) {
@@ -782,12 +783,10 @@ impl<F: FileProvider + Clone> Session<F> {
     fn commit_a_stored_cook(
         &mut self,
         path: PathBuf,
-        cooked: crate::index::CookedFile,
-        rendered: crate::preprocess::cooked::RenderedCooked,
+        cooked: index::CookedFile,
+        rendered: preprocess::cooked::RenderedCooked,
     ) -> Option<CookedReading> {
-        let text_hash = self
-            .text(&path)
-            .map(|text| crate::cache::content_hash(&text))?;
+        let text_hash = self.text(&path).map(|text| cache::content_hash(&text))?;
         // **The rendering, where a `view` will look for it** — the reason this record carries one at all. Through
         // `remember_a_rendering`, so an open document's copy is pinned outside the LRU's budget.
         self.remember_a_rendering(&path, text_hash, std::sync::Arc::new(rendered));
@@ -799,7 +798,7 @@ impl<F: FileProvider + Clone> Session<F> {
             .summary(&path)?
             .declarations
             .iter()
-            .map(crate::DeclFact::qualified_name)
+            .map(DeclFact::qualified_name)
             .collect();
         let reading = CookedReading {
             declarations: cooked.declarations.len(),
@@ -811,7 +810,7 @@ impl<F: FileProvider + Clone> Session<F> {
             diagnostics: cooked.diagnostics.len(),
             unplaced: cooked.unplaced,
             // **Not stored, and not claimed.** The map is a property of the parse this slice did not do.
-            mapped: crate::MapReport::default(),
+            mapped: MapReport::default(),
         };
 
         self.stored_cooks
@@ -864,21 +863,21 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn rendering_of(
         &self,
         path: impl AsRef<Path>,
-    ) -> Option<crate::preprocess::cooked::RenderedCooked> {
+    ) -> Option<preprocess::cooked::RenderedCooked> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
         let unit = self.translation_unit_of(&path)?;
         let text = self.files.read(&path)?;
-        let seed = crate::session::the_seed_for(&self.config, self.store.index().macros(), &path);
+        let seed = session::the_seed_for(&self.config, self.store.index().macros(), &path);
         let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();
         let view = unit.environment_of(&path)?;
         let macros =
-            crate::preprocess::cooked::FileMacros::new(&view, &unit_definitions, Some(&seed), true);
+            preprocess::cooked::FileMacros::new(&view, &unit_definitions, Some(&seed), true);
         // **The probe belongs here too**: a rendering rebuilt for a `view` must decide `#if __has_builtin(…)` the
         // way the compiler does, or the text and the facts disagree about which branch was compiled.
         let features = self.feature_probe(&path);
         Some(
-            crate::preprocess::cooked::cook_with_file_and_features(
+            preprocess::cooked::cook_with_file_and_features(
                 &text,
                 &tokens,
                 &macros,
@@ -901,7 +900,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Returns the summary it committed. Costs the cook (a cached rendering is a hash and a lookup) plus the parse of
     /// the rendered text; `tests/rendering_real.rs` measures both halves.
-    pub fn index_the_rendering(&mut self, path: impl AsRef<Path>) -> Option<crate::FileSummary> {
+    pub fn index_the_rendering(&mut self, path: impl AsRef<Path>) -> Option<FileSummary> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
         let unit = self.translation_unit_of(&path)?;
         let environment = unit.environment_of(&path)?;
@@ -931,7 +930,7 @@ impl<F: FileProvider + Clone> Session<F> {
         path: impl AsRef<Path>,
         name: &str,
         scope: Option<&str>,
-    ) -> Option<crate::DeclFact> {
+    ) -> Option<DeclFact> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
         // **The cached rendering first.** `rendering_of` builds one — a unit walk, a lex and a cook — and the session
         // already keeps them by content hash; asking for the artifact it holds is the difference between a lookup and
@@ -943,13 +942,13 @@ impl<F: FileProvider + Clone> Session<F> {
             None => {
                 // Built and **kept**: the key is the one `known_rendering_of` reads, so the next ask is a lookup.
                 let built = std::sync::Arc::new(self.rendering_of(&path)?);
-                self.remember_a_rendering(&path, crate::cache::content_hash(&text), built.clone());
+                self.remember_a_rendering(&path, cache::content_hash(&text), built.clone());
                 built
             }
         };
         // **The summary of the rendered text, cached** — see `rendering_summaries`. A hover on a declaration
         // a directive splits asks this, and before the cache existed every ask paid one parse of the rendering.
-        let key = (path.clone(), crate::cache::content_hash(&rendered.text));
+        let key = (path.clone(), cache::content_hash(&rendered.text));
         let remembered = self
             .rendering_summaries
             .lock()
@@ -958,11 +957,8 @@ impl<F: FileProvider + Clone> Session<F> {
         let summary = match remembered {
             Some(summary) => summary,
             None => {
-                let built = std::sync::Arc::new(crate::summarize(
-                    &path,
-                    &rendered.text,
-                    crate::SummaryKey::new(0, 0),
-                ));
+                let built =
+                    std::sync::Arc::new(summarize(&path, &rendered.text, SummaryKey::new(0, 0)));
                 if let Ok(mut known) = self.rendering_summaries.lock() {
                     let weight = built.declarations.len() + built.macros.len();
                     known.insert(key, built.clone(), weight);

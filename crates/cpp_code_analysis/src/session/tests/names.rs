@@ -1,7 +1,10 @@
 //! **Names** — names, includes, macros, and the memory budget
 
+use crate::completion;
+use crate::file;
 use crate::file::coordinates::ReadingOffset;
 use crate::file::paths::MemoryFiles;
+use crate::sema;
 use crate::symbol::Known;
 use std::path::{Path, PathBuf};
 
@@ -105,9 +108,9 @@ pub(crate) fn a_type_used_without_its_include_is_reported_and_std_is_not() {
         .diagnostics("/p/widget.cpp")
         .expect("the file reads")
         .checks;
-    let missing: Vec<&crate::sema::check::Finding> = found
+    let missing: Vec<&sema::check::Finding> = found
         .iter()
-        .filter(|finding| finding.code == crate::sema::check::DiagnosticCode::MissingInclude)
+        .filter(|finding| finding.code == sema::check::DiagnosticCode::MissingInclude)
         .collect();
     assert!(
         missing
@@ -125,7 +128,7 @@ pub(crate) fn a_type_used_without_its_include_is_reported_and_std_is_not() {
     assert!(
         !outside
             .iter()
-            .any(|finding| finding.code == crate::sema::check::DiagnosticCode::MissingInclude),
+            .any(|finding| finding.code == sema::check::DiagnosticCode::MissingInclude),
         "`String` is declared outside the workspace, so no include is suggested: {outside:?}"
     );
 }
@@ -152,7 +155,7 @@ pub(crate) fn a_name_from_a_nearby_header_is_offered_with_its_include() {
     let path = PathBuf::from("/p/use.cpp");
     let view = session.view_of_the_file(&path).expect("a view");
     let at = source.find("Wid").expect("the fixture") + "Wid".len();
-    let offered = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let offered = session.completions(&view, file::coordinates::FileOffset::new(at));
     let item = offered
         .items
         .iter()
@@ -169,9 +172,7 @@ pub(crate) fn a_name_from_a_nearby_header_is_offered_with_its_include() {
         });
     assert_eq!(
         item.inclusion,
-        Some(crate::completion::Inclusion::Include(
-            "widget.h".to_string()
-        )),
+        Some(completion::Inclusion::Include("widget.h".to_string())),
         "the spelling is the one a compiler searches"
     );
     let (range, text) = item
@@ -346,7 +347,7 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
         .rfind("LSPHandle::RefreshDiagnostic")
         .expect("the qualified call")
         + "LSPHandle::".len();
-    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let set = session.completions(&view, file::coordinates::FileOffset::new(at));
     let mut names: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
     names.sort_unstable();
     names.dedup();
@@ -363,10 +364,7 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
         .rfind("LSPHandle::RefreshDiagnostic")
         .expect("the qualified call")
         + 3;
-    let typed = session.type_at(
-        &view,
-        crate::file::coordinates::ReadingOffset::new(qualifier),
-    );
+    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(qualifier));
     let shown = format!("{typed:?}");
     assert!(
         !shown.contains("LSPHandle(int") && !shown.contains("LSPHandle(int)"),
@@ -380,7 +378,7 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
     let view = session
         .view_of_the_file(std::path::Path::new("/p/LSPHandle.cpp"))
         .expect("a view of the edited source");
-    let set = session.completions(&view, crate::file::coordinates::FileOffset::new(at));
+    let set = session.completions(&view, file::coordinates::FileOffset::new(at));
     let names: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
     assert!(
         names.contains(&"RefreshDiagnostic"),
@@ -414,7 +412,7 @@ pub(crate) fn a_conditional_macros_value_is_folded_when_every_definition_agrees(
         .expect("a view");
     let at = agreeing.find("VALUE = ").expect("the fixture");
     assert_eq!(
-        session.constant_value_at(&view, crate::file::coordinates::ReadingOffset::new(at)),
+        session.constant_value_at(&view, file::coordinates::ReadingOffset::new(at)),
         Some(32),
         "both definitions in force say 0x10"
     );

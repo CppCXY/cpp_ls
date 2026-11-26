@@ -20,6 +20,7 @@
 
 use crate::config::Style;
 use crate::roles::Roles;
+use crate::space;
 use crate::tokens::Stream;
 use cpp_parser::CppTokenKind;
 
@@ -161,7 +162,7 @@ pub fn cell_width(
     let mut width = 0usize;
     for (offset, index) in cell.iter().copied().enumerate() {
         if offset > 0 {
-            width += crate::space::between(stream, index, roles, style);
+            width += space::between(stream, index, roles, style);
         }
         width += stream.tokens[index].text.chars().count();
     }

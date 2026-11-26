@@ -3,6 +3,7 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::features;
 
 /// Consume the qualifiers and specifiers that may follow a function declarator's parameter list.
 ///
@@ -208,7 +209,7 @@ pub(crate) fn ordinary_implementation_keyword(p: &CppParser) -> Option<Implement
         // **GNU's spelling of C99's `restrict`**, and gated for the same reason as the other extensions: a strict
         // C++23 parse has no `__restrict`, and reading it as a qualifier hides that from the reader.
         "__restrict" | "__restrict__"
-            if p.language().support(crate::features::Feature::RestrictGnu) =>
+            if p.language().support(features::Feature::RestrictGnu) =>
         {
             ImplementationKeyword::Qualifier
         }

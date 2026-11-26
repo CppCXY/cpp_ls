@@ -20,6 +20,7 @@
 //! typing in, which no cache can answer because that text has never been seen (`Session::did_change` says the same
 //! thing from the analysis side).
 
+use crate::handlers;
 use std::path::PathBuf;
 
 use lsp_types::{
@@ -69,8 +70,8 @@ pub async fn process_did_open_text_document(
     };
 
     if open_single_file_workspace {
-        crate::handlers::start_analysis(context.clone()).await;
-        crate::handlers::register_files_watch(context.clone()).await;
+        handlers::start_analysis(context.clone()).await;
+        handlers::register_files_watch(context.clone()).await;
     }
 
     apply_buffer_as(&context, path.clone(), text, family).await;
@@ -188,7 +189,7 @@ pub async fn process_did_close_document(
     // **And the decorations for this file are cleared**, which is a message and not a consequence: a notification is
     // not an edit, so nothing on the client side knows the file it dimmed is gone (`vscode-clangd#600`: after a
     // restart the old ranges stayed and code that had become live was still greyed out).
-    crate::handlers::inactive_regions::clear(&context, uri.clone()).await;
+    handlers::inactive_regions::clear(&context, uri.clone()).await;
 
     let Some(path) = uri_to_file_path(&uri) else {
         return Some(());

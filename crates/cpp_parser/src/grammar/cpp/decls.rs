@@ -42,6 +42,9 @@
 //! The cost is one re-parse of a statement whose first token is ambiguous, and a handful of documented
 //! readings given up — `tests/gaps.rs` lists them, and `tests/direct_init.rs` pins the rules themselves.
 
+use crate::features;
+use crate::grammar;
+use crate::parser;
 use crate::{
     grammar::{
         ParseResult,
@@ -646,7 +649,7 @@ fn ends_a_template_parameter(p: &CppParser) -> bool {
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
 /// so the caller can fall back to parsing an expression statement.
 pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
-    let _phase = crate::parser::phases::during("declaration");
+    let _phase = parser::phases::during("declaration");
     // A declaration is the one place a bare template-id may stand where a *name* belongs, and only when the
     // declaration is an **explicit instantiation**: `extern template void f<int>(int);` names the instantiation
     // it asks for, and that name is a template-id. Everywhere else `C<T> x;` gives the arguments to the type.
@@ -2737,10 +2740,8 @@ pub fn parse_function_suffix_or_initializer(
     // block-scope `T x(y) { … }` is a declaration followed by a block.
     let a_definition_is_legal_here = !p.is_inside_a_body()
         || p.is_at_class_member_level()
-        || (p
-            .language()
-            .support(crate::features::Feature::NestedFunction)
-            && p.language().family() == Some(crate::features::Family::C));
+        || (p.language().support(features::Feature::NestedFunction)
+            && p.language().family() == Some(features::Family::C));
 
     if a_definition_is_legal_here {
         let before_the_function_reading = p.checkpoint();
@@ -5257,7 +5258,7 @@ pub(super) fn can_begin_a_declaration(kind: CppTokenKind) -> bool {
 pub(super) fn a_bitint_declaration_starts_here(p: &CppParser) -> bool {
     if p.current_token_text() != "_BitInt"
         || p.peek_next_token() != CppTokenKind::LeftParen
-        || !p.language().support(crate::features::Feature::BitInt)
+        || !p.language().support(features::Feature::BitInt)
     {
         return false;
     }
@@ -5306,7 +5307,7 @@ pub fn starts_declaration(p: &mut CppParser) -> bool {
         // reading when the declaration attempt fails.
         CppTokenKind::Identifier
             if p.current_token_text() == "_Atomic"
-                && p.language().support(crate::features::Feature::Atomic) =>
+                && p.language().support(features::Feature::Atomic) =>
         {
             true
         }
@@ -6588,6 +6589,6 @@ fn starts_a_type_in_a_parameter(p: &CppParser, index: usize) -> bool {
         CppTokenKind::Ellipsis => true,
         // `nullptr` is a value — see `starts_a_type_id` — so it is not one of them.
         CppTokenKind::NullptrKeyword => false,
-        kind => crate::grammar::cpp::types::is_type_specifier_keyword(kind),
+        kind => grammar::cpp::types::is_type_specifier_keyword(kind),
     }
 }

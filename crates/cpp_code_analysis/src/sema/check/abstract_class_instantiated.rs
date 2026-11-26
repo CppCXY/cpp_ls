@@ -37,6 +37,9 @@
 //! does not know as a class is silence: `auto`, a typedef of a standard type, a type from a header nobody read.
 
 use super::{Check, CheckContext, DiagnosticCode};
+use crate::DeclKind;
+use crate::DeclModifiers;
+use crate::Known;
 
 /// **`abstract-class-instantiated`** — see the module documentation.
 pub struct AbstractClassInstantiated;
@@ -54,7 +57,7 @@ impl Check for AbstractClassInstantiated {
             .summary
             .declarations
             .iter()
-            .filter(|fact| fact.kind == crate::DeclKind::Variable)
+            .filter(|fact| fact.kind == DeclKind::Variable)
             .filter_map(|fact| {
                 let class = a_class_name(fact.type_of.as_deref()?)?;
                 Some((class, fact.name.to_string(), fact.name_range))
@@ -63,21 +66,21 @@ impl Check for AbstractClassInstantiated {
 
         for (class, name, name_range) in variables {
             let is_abstract = *known.entry(class.clone()).or_insert_with(|| {
-                let crate::Known::Yes(list) = context.model.members_of(&class) else {
+                let Known::Yes(list) = context.model.members_of(&class) else {
                     return None;
                 };
                 // **Every pure virtual has to be overridden** for the class to be concrete: a class with two and one
                 // override is still abstract.
                 let mut every_pure_is_overridden = true;
                 for member in list.members.iter().filter(|member| {
-                    member.fact.kind == crate::DeclKind::Function
-                        && member.fact.modifiers.contains(crate::DeclModifiers::PURE)
+                    member.fact.kind == DeclKind::Function
+                        && member.fact.modifiers.contains(DeclModifiers::PURE)
                 }) {
                     let overridden = list.members.iter().any(|other| {
-                        other.fact.kind == crate::DeclKind::Function
+                        other.fact.kind == DeclKind::Function
                             && other.fact.name == member.fact.name
                             && other.depth < member.depth
-                            && !other.fact.modifiers.contains(crate::DeclModifiers::PURE)
+                            && !other.fact.modifiers.contains(DeclModifiers::PURE)
                     });
                     if !overridden {
                         every_pure_is_overridden = false;

@@ -58,6 +58,8 @@
 //! that launched the editor exists, which is why this is a machine state and not a mistake. So the names are also
 //! looked for where their installers put them: see `INSTALLED_COMPILER_NAMES`.
 
+use crate::hash;
+use crate::include;
 use std::path::{Path, PathBuf};
 
 use cpp_parser::Dialect;
@@ -201,7 +203,7 @@ impl CachedCommands {
                 bytes.extend_from_slice(value.to_string_lossy().as_bytes());
             }
         }
-        crate::hash::fnv1a64(&bytes)
+        hash::fnv1a64(&bytes)
     }
 
     fn the_file(&self, key: u64) -> std::path::PathBuf {
@@ -966,7 +968,7 @@ pub fn discover(
     statement: BuildStatement<'_>,
     for_file: &Path,
     environment: &Environment,
-    layout: &crate::include::msvc::WindowsLayout,
+    layout: &include::msvc::WindowsLayout,
 ) -> Option<Toolchain> {
     // The database's own compiler is the one candidate this entry point can work out for itself, and it is the
     // first one: the project saying which compiler builds *this* file. A caller that also knows what `.cppls.toml`
@@ -1024,7 +1026,7 @@ pub fn discover_with(
     statement: BuildStatement<'_>,
     for_file: &Path,
     environment: &Environment,
-    layout: &crate::include::msvc::WindowsLayout,
+    layout: &include::msvc::WindowsLayout,
 ) -> Option<Toolchain> {
     // **The standard the compiler is asked about**: what the project says this file is built as, or — when nobody
     // says — the newest the compiler takes. See [`Toolchain::standard`] for why the answer travels back, and
@@ -1171,7 +1173,7 @@ fn ask(
     runner: &impl CommandRunner,
     name: &Path,
     environment: &Environment,
-    layout: &crate::include::msvc::WindowsLayout,
+    layout: &include::msvc::WindowsLayout,
     standard: Option<&str>,
     flags: &[String],
     for_file: &Path,
@@ -1223,7 +1225,7 @@ fn is_msvc(program: &Path) -> bool {
 /// condition naming one of them `Unknown` rather than wrong.
 fn ask_msvc(
     runner: &impl CommandRunner,
-    layout: &crate::include::msvc::WindowsLayout,
+    layout: &include::msvc::WindowsLayout,
     standard: Option<&str>,
     named: Option<PathBuf>,
     for_file: &Path,
@@ -1232,7 +1234,7 @@ fn ask_msvc(
         return None;
     }
 
-    let mut msvc = crate::include::msvc::discover(runner, layout)?;
+    let mut msvc = include::msvc::discover(runner, layout)?;
     if let Some(named) = named {
         msvc.toolset.cl = named;
     }
@@ -1256,7 +1258,7 @@ fn ask_msvc(
             .unwrap_or_default();
 
         if let Some(found) =
-            crate::include::msvc::predefined_macros_with(runner, &msvc, candidate, &fallbacks)
+            include::msvc::predefined_macros_with(runner, &msvc, candidate, &fallbacks)
         {
             asked = candidate;
             macros = Some(found);
@@ -1267,7 +1269,7 @@ fn ask_msvc(
 
     let (builtin_macros, version, note) = match macros {
         Some(macros) => {
-            let version = crate::include::msvc::version_line(&msvc, &macros);
+            let version = include::msvc::version_line(&msvc, &macros);
             let note = assumed.then(|| assumed_standard_note(asked)).flatten();
             (macros, Some(version), note)
         }
@@ -1304,9 +1306,9 @@ fn ask_msvc(
 /// The last resort: header directories a convention promises, with no compiler and no macros.
 fn system_headers_fallback(
     runner: &impl CommandRunner,
-    layout: &crate::include::msvc::WindowsLayout,
+    layout: &include::msvc::WindowsLayout,
 ) -> Option<Toolchain> {
-    let found = crate::include::system_headers::discover(runner, layout)?;
+    let found = include::system_headers::discover(runner, layout)?;
 
     Some(Toolchain {
         compiler: None,

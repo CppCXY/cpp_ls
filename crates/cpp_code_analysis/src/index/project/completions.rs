@@ -4,6 +4,13 @@
 //! are collected under a budget and ordered stably rather than sorted into a perfect list.
 
 use super::*;
+use crate::Binding;
+use crate::DeclKind;
+use crate::FileView;
+use crate::ScopeKind;
+use crate::ScopeTree;
+use crate::completion;
+use crate::sema;
 
 /// What a completion at a member access should offer: the type, its members, and where to put the chosen one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +75,8 @@ pub struct MemberCompletions {
 /// * `Unknown(UnparsableName)` — the cursor is not on a member access at all.
 pub fn member_completions_at(
     index: &ProjectIndex,
-    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
-    scopes: &crate::ScopeTree,
+    declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -85,15 +92,13 @@ pub fn member_completions_at(
     //
     // Two readers of one fact is the shape of every bug in this area; the completion layer owns this question, and
     // every consumer of it — this query, `Session::member_completions`, the log line — goes through it.
-    let crate::completion::CompletionContext::Member(access) =
-        crate::completion::context_at(root, offset)
-    else {
+    let completion::CompletionContext::Member(access) = completion::context_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
     let written = match type_of_expression_memoed(
         &memo,
-        &crate::sema::declarations::ShapeTable::new(),
+        &sema::declarations::ShapeTable::new(),
         index,
         declaring,
         scopes,
@@ -145,16 +150,14 @@ pub fn member_completions_at(
         index
             .files_declaring(bare, path)
             .iter()
-            .any(|found| found.fact.kind == crate::DeclKind::Type && found.fact.type_of.is_none())
+            .any(|found| found.fact.kind == DeclKind::Type && found.fact.type_of.is_none())
     };
     let class = match access.arrow {
-        true => crate::completion::the_class_after_the_operator(
-            index, scopes, root, path, &written, true,
-        )
-        .map(|(class, _)| class)
-        .filter(|class| names_a_class(class))
-        .or_else(|| the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None))
-        .unwrap_or(class),
+        true => completion::the_class_after_the_operator(index, scopes, root, path, &written, true)
+            .map(|(class, _)| class)
+            .filter(|class| names_a_class(class))
+            .or_else(|| the_class_an_arrow_points_at(index, scopes, root, path, &spelled, None))
+            .unwrap_or(class),
         false => class,
     };
 
@@ -189,7 +192,7 @@ pub fn member_completions_at(
 /// not on a character boundary (possible in an identifier with non-ASCII letters) falls back to the whole
 /// spelling, which is the safe direction — a filter that matches too much still shows something.
 pub(crate) fn written_before_the_cursor(
-    access: &crate::sema::resolve::MemberAccess,
+    access: &sema::resolve::MemberAccess,
     offset: usize,
 ) -> String {
     let start = access.member_range.start_offset;
@@ -361,12 +364,12 @@ pub fn names_for_a_doc_comment(
 
 pub fn name_completions_at(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
+    let Some(position) = sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
@@ -480,7 +483,7 @@ pub fn name_completions_at(
             };
             let mut declaration = template.clone();
             declaration.name = name.into();
-            declaration.kind = crate::DeclKind::MacroLike;
+            declaration.kind = DeclKind::MacroLike;
             // Nothing of the template's *declaration* survives: a macro has no type, no return type, no
             // parameters of its own and no bases, and a `#define` is never local.
             declaration.type_of = None;
@@ -530,7 +533,7 @@ pub fn name_completions_at(
 /// asks and the query has several ways to return early.
 pub fn name_completions_traced(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -546,7 +549,7 @@ pub fn name_completions_traced(
 /// function that knows how to list it.
 pub(crate) fn visible_names(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
@@ -583,13 +586,13 @@ pub(crate) fn visible_names(
 
         // The file scope is the global name space, and it is the one scope whose names other files contribute to
         // as well — every included header is written there. It is listed below, once, rather than here.
-        if data.kind == crate::ScopeKind::TranslationUnit {
+        if data.kind == ScopeKind::TranslationUnit {
             continue;
         }
 
         // A **class** in the chain — the cursor is inside a member function of it — brings its members, bases
         // included: `size` is nameable inside `Widget::g` without a qualifier, and so is anything a base declares.
-        if matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
+        if matches!(data.kind, ScopeKind::Class | ScopeKind::Enum)
             && let Some(class) = scopes.qualification_prefix_of(scope)
         {
             let members = match names_of_a_class(index, scopes, root, path, &class) {
@@ -607,7 +610,7 @@ pub(crate) fn visible_names(
         // at file scope is the implementation's, one inside a function is not).
         let body = matches!(
             data.kind,
-            crate::ScopeKind::Block | crate::ScopeKind::Function | crate::ScopeKind::Lambda
+            ScopeKind::Block | ScopeKind::Function | ScopeKind::Lambda
         );
         names.extend(offered(
             // **In a body, only what is declared above the cursor is in scope.** A *scope* holds every binding
@@ -663,7 +666,7 @@ pub(crate) fn visible_names(
 /// the file being edited has been saved, so a list that skipped this step offers every global name twice.
 pub(crate) fn global_offers(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     depth: usize,
@@ -704,7 +707,7 @@ pub(crate) fn a_spelling_names_a_type(index: &ProjectIndex, spelling: &str, path
     };
     let mut any_type = false;
     for declaration in &found.found {
-        if declaration.fact.kind == crate::DeclKind::Type {
+        if declaration.fact.kind == DeclKind::Type {
             any_type = true;
             continue;
         }
@@ -720,7 +723,7 @@ pub(crate) fn a_spelling_names_a_type(index: &ProjectIndex, spelling: &str, path
 /// The names written directly in one `::`-qualified scope.
 pub(crate) fn names_in_a_scope(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     scope: &str,
@@ -734,7 +737,7 @@ pub(crate) fn names_in_a_scope(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn names_in_a_scope_at(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     scope: &str,
@@ -761,7 +764,7 @@ pub(crate) fn names_in_a_scope_at(
     match kind {
         // A class is defined once, so its members come from one place — and the walk over its bases is
         // `members_of`'s job rather than this query's.
-        Some(crate::ScopeKind::Class | crate::ScopeKind::Enum) => {
+        Some(ScopeKind::Class | ScopeKind::Enum) => {
             let members = match names_of_a_class(index, scopes, root, path, spelling) {
                 Known::Yes(members) => members,
                 Known::Unknown(reason) => return Known::Unknown(reason),
@@ -838,7 +841,7 @@ pub(crate) fn names_in_a_scope_at(
                 // the library. `resolve_aliases` is the same resolution `members_of` does for a member's own type,
                 // so the two cannot disagree about what the spelling names.
                 let named = resolve_aliases(
-                    &crate::sema::declarations::ShapeTable::new(),
+                    &sema::declarations::ShapeTable::new(),
                     index,
                     scopes,
                     root,
@@ -865,7 +868,7 @@ pub(crate) fn names_in_a_scope_at(
                     // `std`) and then as written, because which of the two is right depends on the alias's scope.
                     if depth < 4
                         && let Known::Yes(alias) = index.definition(spelling, path)
-                        && alias.fact.kind == crate::DeclKind::Namespace
+                        && alias.fact.kind == DeclKind::Namespace
                         && let Some(target) = alias.fact.type_of.as_deref()
                     {
                         let mut candidates: Vec<String> = Vec::new();
@@ -911,11 +914,11 @@ pub(crate) fn names_in_a_scope_at(
 /// alias.
 pub(crate) fn the_target_of_a_namespace_alias(
     root: &cpp_parser::CppSyntaxNode,
-    scopes: &crate::ScopeTree,
-    id: crate::sema::symbol::ScopeId,
+    scopes: &ScopeTree,
+    id: sema::symbol::ScopeId,
 ) -> Option<String> {
     let scope = scopes.scope(id)?;
-    if scope.kind != crate::ScopeKind::Namespace {
+    if scope.kind != ScopeKind::Namespace {
         return None;
     }
     let range = scope.range?;
@@ -938,11 +941,7 @@ pub(crate) fn the_target_of_a_namespace_alias(
 /// **Where an alias's target is looked up from.** The language looks a target up in the scope the alias is declared
 /// in, so `namespace views = ranges::views;` inside `std` names `std::ranges::views`; a target that already resolves
 /// on its own — `namespace fs = std::filesystem;` at file scope — is used as written.
-pub(crate) fn the_target_in_its_own_scope(
-    scopes: &crate::ScopeTree,
-    alias: &str,
-    target: &str,
-) -> String {
+pub(crate) fn the_target_in_its_own_scope(scopes: &ScopeTree, alias: &str, target: &str) -> String {
     let target = target.trim().trim_start_matches("::");
     if let Some(at) = alias.rfind("::") {
         let nearby = format!("{}::{target}", &alias[..at]);
@@ -1070,7 +1069,7 @@ pub(crate) const POPULAR_NAME: usize = 4096;
 pub(crate) fn bindings_of(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-    bindings: &[crate::Binding],
+    bindings: &[Binding],
     scope: Option<&str>,
     local: bool,
 ) -> Vec<Candidate> {
@@ -1089,7 +1088,7 @@ pub(crate) fn bindings_of(
 /// The names written at **file scope**: this buffer's, and every included file's.
 pub(crate) fn global_names(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     written: &str,
@@ -1293,7 +1292,7 @@ pub(crate) fn provenance_of(
 /// The members of a class, bases included, as names to offer.
 pub(crate) fn names_of_a_class(
     index: &ProjectIndex,
-    scopes: &crate::ScopeTree,
+    scopes: &ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,

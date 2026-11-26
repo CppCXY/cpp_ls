@@ -22,6 +22,12 @@
 //! clang-format prints none. This module turns "line" into "logical line", which is what the breaker will break and
 //! what a measurement should count.
 
+use crate::config;
+use crate::layout;
+use crate::options;
+use crate::roles;
+use crate::space;
+use crate::tokens;
 use std::ops::Range;
 
 use cpp_parser::CppTokenKind;
@@ -39,10 +45,7 @@ pub fn logical_lines(stream: &Stream<'_>) -> Vec<Range<usize>> {
 /// **The logical lines, with an initializer`s braces kept inside their statement**: a brace that opens an initializer
 /// does not end a logical line, so `int v[] = {1, 2};` can be put on one line by the join pass — clang-format writes it
 /// that way when it fits. Without the roles (a caller that has none) every brace splits, which is the old behaviour.
-pub fn logical_lines_with(
-    stream: &Stream<'_>,
-    roles: Option<&crate::roles::Roles>,
-) -> Vec<Range<usize>> {
+pub fn logical_lines_with(stream: &Stream<'_>, roles: Option<&roles::Roles>) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut start = 0usize;
     let mut parens = 0isize;
@@ -314,7 +317,7 @@ pub struct Penalties {
 
 impl Penalties {
     /// The weights of a style, read from its own keys.
-    pub fn of(style: &crate::config::Style) -> Penalties {
+    pub fn of(style: &config::Style) -> Penalties {
         use crate::options::StyleOption;
         Penalties {
             excess_character: style.number(StyleOption::PenaltyExcessCharacter).max(1),
@@ -338,20 +341,20 @@ impl Penalties {
 /// print the line in pieces, one per returned index plus the rest.
 pub fn break_line(
     stream: &Stream<'_>,
-    roles: &crate::roles::Roles,
-    style: &crate::config::Style,
+    roles: &roles::Roles,
+    style: &config::Style,
     line: &Range<usize>,
     start_column: usize,
     // **Room the last piece must leave for something that is not a token** — a trailing comment. clang-format breaks
     // a declaration that would fit because the comment after it would not.
     extra_width: usize,
 ) -> Option<Vec<usize>> {
-    let limit = style.count(crate::options::StyleOption::ColumnLimit);
+    let limit = style.count(options::StyleOption::ColumnLimit);
     if limit == 0 {
         return None;
     }
     let penalties = Penalties::of(style);
-    let continuation = style.count(crate::options::StyleOption::ContinuationIndentWidth);
+    let continuation = style.count(options::StyleOption::ContinuationIndentWidth);
 
     // **The candidate positions**: the first token of the line, plus every token a break may precede.
     let mut positions: Vec<usize> = vec![line.start];
@@ -377,7 +380,7 @@ pub fn break_line(
         let mut column = start_column;
         for index in line.start..line.end {
             if index > line.start {
-                column += crate::space::between(stream, index, roles, style);
+                column += space::between(stream, index, roles, style);
             }
             joined_column[index] = column;
             enclosing[index] = open.last().copied();
@@ -396,9 +399,9 @@ pub fn break_line(
         }
     }
     let aligns = matches!(
-        style.text(crate::options::StyleOption::AlignAfterOpenBracket),
+        style.text(options::StyleOption::AlignAfterOpenBracket),
         "Align" | "AlwaysBreak"
-    ) || style.flag(crate::options::StyleOption::AlignAfterOpenBracket);
+    ) || style.flag(options::StyleOption::AlignAfterOpenBracket);
     // The column a piece starting at `position` gets.
     let indent_at = |position: usize, first: bool| -> usize {
         match enclosing[position] {
@@ -414,7 +417,7 @@ pub fn break_line(
         let mut column = indent;
         for index in a..b {
             if index > a {
-                column += crate::space::between(stream, index, roles, style);
+                column += space::between(stream, index, roles, style);
             }
             column += stream.tokens[index].text.chars().count();
         }
@@ -484,19 +487,19 @@ pub fn break_line(
 /// The token bytes are untouched: the only regions rewritten are the whitespace-only gaps between two tokens, and a gap
 /// with a comment, a directive or a line already starting there is left exactly as it was. A newline inside a
 /// directive would break the macro it belongs to, which is why this scan tracks them the way `render` does.
-pub fn laid_out(source: &str, style: &crate::config::Style) -> String {
-    let stream = crate::tokens::stream(source);
+pub fn laid_out(source: &str, style: &config::Style) -> String {
+    let stream = tokens::stream(source);
     let lines = logical_lines(&stream);
     let mut starts: std::collections::HashSet<usize> =
         lines.iter().skip(1).map(|line| line.start).collect();
-    let ending = crate::tokens::line_ending(source);
+    let ending = tokens::line_ending(source);
     let mut out = String::with_capacity(source.len() + starts.len() * ending.len());
     let mut in_directive = false;
     // **The brace style is a decision of this pass**, and it is the one clang-format makes: `Attach` keeps `{` on the
     // line of what it opens, `} else {` and `} while (0);` stay on the line of the `}` they follow, and every other
     // style starts a line at the brace. `format` alone cannot do it — a file whose braces the author placed keeps
     // them — which is why the layout step has to choose.
-    let attaches = style.text(crate::options::StyleOption::BreakBeforeBraces) == "Attach";
+    let attaches = style.text(options::StyleOption::BreakBeforeBraces) == "Attach";
     for index in 0..stream.tokens.len() {
         let gap = &stream.gaps[index];
         let text = source.get(gap.start..gap.end).unwrap_or("");
@@ -541,8 +544,8 @@ pub fn laid_out(source: &str, style: &crate::config::Style) -> String {
 /// May a break go before the token at `index`?
 pub fn is_breakable(
     stream: &Stream<'_>,
-    roles: &crate::roles::Roles,
-    style: &crate::config::Style,
+    roles: &roles::Roles,
+    style: &config::Style,
     index: usize,
 ) -> bool {
     use CppTokenKind::*;
@@ -559,15 +562,15 @@ pub fn is_breakable(
     // shape clang-format's own output has everywhere. Reading only "before a binary operator" put our breaks on the
     // wrong side of every operator: measured on `AlignAnalyzer.cpp`, clang-format writes
     // `… align_continuous_assign_statement !=` then `ContinuousAlign::None) {`.
-    let break_before = match style.text(crate::options::StyleOption::BreakBeforeBinaryOperators) {
+    let break_before = match style.text(options::StyleOption::BreakBeforeBinaryOperators) {
         "All" => true,
-        "NonAssignment" => crate::layout::is_a_binary_operator(current) && current == Assign,
+        "NonAssignment" => layout::is_a_binary_operator(current) && current == Assign,
         _ => false,
     };
-    if crate::layout::is_a_binary_operator(current) && break_before {
+    if layout::is_a_binary_operator(current) && break_before {
         return !roles.is_declarator(start) && !roles.is_template_angle(start);
     }
-    if crate::layout::is_a_binary_operator(previous)
+    if layout::is_a_binary_operator(previous)
         && !break_before
         && !roles.is_declarator(previous_start)
         && !roles.is_template_angle(previous_start)
@@ -603,12 +606,12 @@ pub fn is_breakable(
 /// help, and leaves every other piece alone.
 pub fn break_over_long_pieces(
     stream: &Stream<'_>,
-    roles: &crate::roles::Roles,
-    style: &crate::config::Style,
+    roles: &roles::Roles,
+    style: &config::Style,
     line: &Range<usize>,
     blocks: &[Option<usize>],
 ) -> Vec<usize> {
-    let limit = style.count(crate::options::StyleOption::ColumnLimit);
+    let limit = style.count(options::StyleOption::ColumnLimit);
     let mut breaks = Vec::new();
     let mut start = line.start;
     for index in line.start..line.end {
@@ -620,7 +623,7 @@ pub fn break_over_long_pieces(
         let mut width = column;
         for inside in start..=index {
             if inside > start {
-                width += crate::space::between(stream, inside, roles, style);
+                width += space::between(stream, inside, roles, style);
             }
             width += stream.tokens[inside].text.chars().count();
         }
@@ -647,6 +650,8 @@ fn break_at(stream: &Stream<'_>, index: usize, penalties: &Penalties) -> i64 {
 mod break_tests {
     use super::*;
     use crate::config::Style;
+    use crate::roles;
+    use crate::tokens;
 
     fn broken(source: &str, limit: &str) -> Option<Vec<String>> {
         let mut style = Style::default_style();
@@ -656,8 +661,8 @@ mod break_tests {
 
     /// The same with the style spelled by the case — an option the break side depends on.
     fn broken_with(style: Style, source: &str) -> Option<Vec<String>> {
-        let stream = crate::tokens::stream(source);
-        let roles = crate::roles::of(source);
+        let stream = tokens::stream(source);
+        let roles = roles::of(source);
         let lines = logical_lines(&stream);
         let line = lines.first().expect("a line").clone();
         let breaks = break_line(&stream, &roles, &style, &line, 0, 0)?;

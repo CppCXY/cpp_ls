@@ -27,6 +27,9 @@
 //! the probe: `EmmyLuaCodeStyle`, roots named by `CPPLS_PROBE_DIRS`, and the first `CPPLS_PROBE_ROOTS` `.cpp` files
 //! walked.
 
+use crate::MacroValues;
+use crate::cache;
+use crate::file;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -196,7 +199,7 @@ fn compare_file(
 fn composition<F: FileProvider + Clone>(
     session: &Session<F>,
     root: &Path,
-    seed: &dyn crate::MacroValues,
+    seed: &dyn MacroValues,
     known: &[PathBuf],
 ) -> UnitComposition {
     // **A resolver for the includes the summary could not resolve**, from the paths the walk reached: a spelling
@@ -434,7 +437,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
 
     let mut session = Session::open(
         root.clone(),
-        SessionFiles::new(OpenDocuments::new(), crate::file::paths::DiskFiles),
+        SessionFiles::new(OpenDocuments::new(), file::paths::DiskFiles),
         WatchFilter::new(&root),
     );
     session.add_project_files(sources.clone());
@@ -617,7 +620,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
         let mut classes: Vec<(String, usize)> = classes.into_iter().collect();
         classes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         println!("  unknown classes: {classes:?}");
-        let over = crate::cache::env::Over::new(Env::empty(), session.index().macros());
+        let over = cache::env::Over::new(Env::empty(), session.index().macros());
         let bit_in_fold = composition.files.iter().find(|file| {
             let name = file.path.to_string_lossy().to_lowercase();
             name.ends_with("/bit") && !name.ends_with("/orbit")
@@ -698,7 +701,7 @@ fn the_fold_and_the_walk_agree_on_a_real_project() {
             session.index().macros().is_defined("__cplusplus"),
             session.index().macros().get("__cplusplus").is_some(),
             session.index().macros().is_incomplete(),
-            crate::MacroValues::lookup(&over, "__cplusplus")
+            MacroValues::lookup(&over, "__cplusplus")
         );
         for (path, offset, what) in composition.unknown.iter().take(20) {
             println!("  undecided {}:{offset}: {what}", path.display());

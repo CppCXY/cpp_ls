@@ -1,5 +1,8 @@
 //! **Config** — the project's own configuration file
 
+use crate::CACHE_DIRECTORY;
+use crate::CompileCommands;
+use crate::DatabaseOrigin;
 use crate::file::paths::DiskFiles;
 use crate::include::config::CompilerConfig;
 use crate::index::watch::WatchFilter;
@@ -195,7 +198,7 @@ pub(crate) fn the_database_can_be_somewhere_no_convention_predicts() {
     let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
 
     assert_eq!(
-        session.compile_database().map(crate::CompileCommands::len),
+        session.compile_database().map(CompileCommands::len),
         Some(1)
     );
     let defines: Vec<&str> = session
@@ -237,7 +240,7 @@ pub(crate) fn the_cache_goes_where_the_project_says_and_the_filter_follows_it() 
         project.root.join(".cppls-cache").display()
     );
     assert!(
-        !project.root.join(crate::CACHE_DIRECTORY).exists(),
+        !project.root.join(CACHE_DIRECTORY).exists(),
         "and the default directory was not created at all"
     );
 }
@@ -325,7 +328,7 @@ pub(crate) fn a_database_in_a_build_directory_is_found_and_its_flags_reach_the_s
     let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
 
     assert_eq!(
-        session.compile_database().map(crate::CompileCommands::len),
+        session.compile_database().map(CompileCommands::len),
         Some(1),
         "the database in the build directory was read"
     );
@@ -335,7 +338,7 @@ pub(crate) fn a_database_in_a_build_directory_is_found_and_its_flags_reach_the_s
             .database
             .as_ref()
             .map(|found| found.origin),
-        Some(crate::DatabaseOrigin::BuildDirectory),
+        Some(DatabaseOrigin::BuildDirectory),
         "and the report says where it was found"
     );
     let per_file = session.config_for(&project.root.join("main.cpp"));

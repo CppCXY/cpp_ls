@@ -42,6 +42,7 @@
 //! pathological input that is neither). All three decline to expand rather than failing, and say which
 //! one fired — see [`Diagnostic`].
 
+use crate::macros;
 use std::path::Path;
 
 use cpp_parser::{CppTokenKind, LexerConfig, SourceRange, is_keyword};
@@ -107,7 +108,7 @@ pub struct MacroInvocation {
     /// reconstruction and a consumer must not show them.
     ///
     /// `call_site` is **always** in the file being cooked: an invocation is written where the reader is.
-    pub written_in: Option<crate::macros::MacroFile>,
+    pub written_in: Option<macros::MacroFile>,
 }
 
 /// A token in an expanded stream.
@@ -220,13 +221,13 @@ impl ExpandedToken {
     ///
     /// The chain is scanned from the inside out, so a token an inherited macro pasted is navigated to the
     /// *innermost definition that can be pointed at* rather than to a hop with no file.
-    pub fn navigation_at(&self) -> Option<(crate::macros::MacroFile, SourceRange)> {
+    pub fn navigation_at(&self) -> Option<(macros::MacroFile, SourceRange)> {
         match &self.origin {
             Origin::Expanded { invocations } => invocations.iter().rev().find_map(|invocation| {
                 invocation.written_in.map(|file| (file, invocation.name_at))
             }),
             // A token the file wrote: its own name is where a reader would look, in the file they are reading.
-            _ => Some((crate::macros::MacroFile::Here, self.token.range)),
+            _ => Some((macros::MacroFile::Here, self.token.range)),
         }
     }
 
@@ -1304,7 +1305,7 @@ fn substitute(
                     .collect()
             };
             let mut group = definition.clone();
-            group.body = crate::macros::MacroBody {
+            group.body = macros::MacroBody {
                 tokens: body_tokens[open + 1..close].to_vec(),
                 stringize: inside(&stringize_at),
                 paste: inside(&paste_at),
@@ -1437,7 +1438,7 @@ fn matching_close(tokens: &[Token], open: usize) -> Option<usize> {
 /// token, and with nothing when the argument is absent or empty. Layout is trimmed first, so `F( )` counts as
 /// empty exactly like `F()`.
 fn variadic_argument_is_empty(
-    params: &[crate::macros::Parameter],
+    params: &[macros::Parameter],
     arguments: &[std::ops::Range<usize>],
     tokens: &[Token],
 ) -> bool {
@@ -1500,7 +1501,7 @@ fn trim_trivia(tokens: Vec<Token>) -> Vec<Token> {
 /// would be `" "`, `"+"`, `" "` — so the paste would join a space with an `=` and produce nothing.
 /// Whitespace between *two* argument tokens is kept, because `#x` is defined on the spelling.
 fn argument_for(
-    params: &[crate::macros::Parameter],
+    params: &[macros::Parameter],
     arguments: &[std::ops::Range<usize>],
     tokens: &[Token],
     name: &str,
@@ -1510,7 +1511,7 @@ fn argument_for(
 
 /// The tokens bound to a parameter, layout included.
 fn argument_range_for(
-    params: &[crate::macros::Parameter],
+    params: &[macros::Parameter],
     arguments: &[std::ops::Range<usize>],
     tokens: &[Token],
     name: &str,
@@ -1694,7 +1695,7 @@ fn lex_fragment(text: &str, _range: SourceRange) -> Option<Vec<Token>> {
 }
 
 /// Is this name a parameter of the macro?
-fn is_parameter(params: &[crate::macros::Parameter], name: &str) -> bool {
+fn is_parameter(params: &[macros::Parameter], name: &str) -> bool {
     params.iter().any(|param| &*param.name == name)
 }
 

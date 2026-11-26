@@ -28,6 +28,7 @@
 //! Nothing is answered while the index is still being read: which call this is depends on where the callee is
 //! declared, and a signature for the wrong declaration would be confidently wrong rather than missing.
 
+use crate::util;
 use lsp_types::{
     ClientCapabilities, Documentation, MarkupContent, MarkupKind, ParameterInformation,
     ParameterLabel, ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
@@ -53,7 +54,7 @@ pub async fn on_signature_help(
         // This handler answered `null` for every call site on a real project before the two steps
         // were done in this order.
         let written = session.view_of_the_file(&path)?;
-        let in_the_file = crate::util::file_offset_at_position(&written, position)?;
+        let in_the_file = util::file_offset_at_position(&written, position)?;
 
         // **A function-like macro is a call, and it exists only in the file's own text.** The engine below reads the
         // *rendering*, where every macro is already expanded (`ADD(1, |)` is `((1) + ())`), so a macro call had no

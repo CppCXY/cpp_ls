@@ -1,5 +1,6 @@
 //! Declaration, type and module nodes.
 
+use crate::syntax;
 use crate::{
     CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
@@ -180,7 +181,7 @@ impl CppDeclaration {
         // target is a second one, nested inside a `TypeId`, which is why this is the *child* search
         // rather than a descendant one.
         if CppSyntaxKind::from(self.syntax.kind()) == CppSyntaxKind::UsingDecl {
-            return crate::syntax::node::traits::first_child_of_kind(
+            return syntax::node::traits::first_child_of_kind(
                 self.syntax(),
                 &[CppSyntaxKind::NameExpr],
             )
@@ -378,7 +379,7 @@ impl CppDeclaration {
         }
 
         // Inside a class, its own name is the constructor's.
-        let enclosing = crate::syntax::node::traits::typed_ancestors::<CppClassDef>(self.syntax())
+        let enclosing = syntax::node::traits::typed_ancestors::<CppClassDef>(self.syntax())
             .next()
             .and_then(|class| class.get_name_text());
         match (enclosing, last) {
@@ -545,7 +546,7 @@ impl CppDeclSpecifierSeq {
             return Some(name);
         }
 
-        let wrapped = crate::syntax::node::traits::first_child_of_kind(
+        let wrapped = syntax::node::traits::first_child_of_kind(
             self.syntax(),
             &[CppSyntaxKind::TemplateType, CppSyntaxKind::NamedType],
         )?;
@@ -610,7 +611,7 @@ impl CppDeclSpecifierSeq {
     /// subtree, because the type itself is a child node (`BuiltinType`, `TemplateType`), not a token
     /// of this node.
     pub fn get_type_text(&self) -> String {
-        crate::syntax::node::traits::subtree_text_spaced(self.syntax())
+        syntax::node::traits::subtree_text_spaced(self.syntax())
     }
 }
 
@@ -641,7 +642,7 @@ impl CppBuiltinType {
     }
 
     pub fn get_type_text(&self) -> String {
-        crate::syntax::node::traits::subtree_text_spaced(self.syntax())
+        syntax::node::traits::subtree_text_spaced(self.syntax())
     }
 
     /// Is this specifier a class-like keyword — `class`, `struct`, `union` or `enum`?
@@ -836,7 +837,7 @@ impl CppDeclarator {
         self.syntax()
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .filter(|token| !crate::syntax::node::traits::is_trivia(token.kind().into()))
+            .filter(|token| !syntax::node::traits::is_trivia(token.kind().into()))
             .map(|token| token.text().to_string())
             .collect::<Vec<_>>()
             .join("")
@@ -884,7 +885,7 @@ impl CppDeclarator {
     /// The returned node is the `TypeId` inside the `TrailingReturnType` wrapper, so its text is the
     /// type as written (`int*`) and does not include the `->`.
     pub fn get_trailing_return_type(&self) -> Option<CppTypeId> {
-        let wrapper = crate::syntax::node::traits::first_child_of_kind(
+        let wrapper = syntax::node::traits::first_child_of_kind(
             self.syntax(),
             &[CppSyntaxKind::TrailingReturnType],
         );
@@ -892,11 +893,10 @@ impl CppDeclarator {
         match wrapper {
             Some(wrapper) => wrapper.children().find_map(CppTypeId::cast),
             // A grammar that puts the `TypeId` directly under the declarator is still understood.
-            None => crate::syntax::node::traits::first_child_of_kind(
-                self.syntax(),
-                &[CppSyntaxKind::TypeId],
-            )
-            .and_then(CppTypeId::cast),
+            None => {
+                syntax::node::traits::first_child_of_kind(self.syntax(), &[CppSyntaxKind::TypeId])
+                    .and_then(CppTypeId::cast)
+            }
         }
     }
 
@@ -937,7 +937,7 @@ impl CppDeclarator {
         self.syntax()
             .parent()
             .and_then(|parent| {
-                crate::syntax::node::traits::first_child_of_kind(
+                syntax::node::traits::first_child_of_kind(
                     &parent,
                     &[CppSyntaxKind::StructuredBinding],
                 )
@@ -1204,7 +1204,7 @@ impl CppArrayType {
 
     /// The array part of a spelling — `[3]`, `[]`, `[N + 1]` — with trivia dropped, so a type reads `int[3]`.
     pub fn get_type_text(&self) -> String {
-        crate::syntax::node::traits::subtree_text(self.syntax())
+        syntax::node::traits::subtree_text(self.syntax())
     }
 }
 
@@ -1366,7 +1366,7 @@ impl CppAstNode for CppRequiresClause {
 impl CppRequiresClause {
     /// The clause **as the file spells it**, keyword included — what a card prints after a signature.
     pub fn get_clause_text(&self) -> String {
-        crate::syntax::node::traits::subtree_text_spaced(self.syntax())
+        syntax::node::traits::subtree_text_spaced(self.syntax())
     }
 }
 
@@ -1526,7 +1526,7 @@ impl CppParam {
                     }
                 }
                 rowan::NodeOrToken::Token(token) => {
-                    if !crate::syntax::node::traits::is_trivia(token.kind().into()) {
+                    if !syntax::node::traits::is_trivia(token.kind().into()) {
                         push_a_spelling(&mut the_type, token.text());
                     }
                 }
@@ -1808,12 +1808,9 @@ impl CppEnumDef {
     /// rather than `child::<N>()`: the body is a `CompoundStat`, the same kind a block statement
     /// uses, so there is no distinct type to ask for.
     pub fn get_enumerators(&self) -> impl Iterator<Item = CppEnumerator> {
-        crate::syntax::node::traits::first_child_of_kind(
-            self.syntax(),
-            &[CppSyntaxKind::CompoundStat],
-        )
-        .into_iter()
-        .flat_map(|body| CppAstChildren::<CppEnumerator>::new(&body))
+        syntax::node::traits::first_child_of_kind(self.syntax(), &[CppSyntaxKind::CompoundStat])
+            .into_iter()
+            .flat_map(|body| CppAstChildren::<CppEnumerator>::new(&body))
     }
 }
 

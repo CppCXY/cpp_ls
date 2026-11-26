@@ -3,6 +3,7 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::parser;
 
 /// Parse a template argument list: `<T, int N, ...>`.
 ///
@@ -24,7 +25,7 @@ pub fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
 }
 
 pub(crate) fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
-    let _phase = crate::parser::phases::during("template-arguments");
+    let _phase = parser::phases::during("template-arguments");
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateArgumentList);
 

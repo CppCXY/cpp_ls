@@ -22,6 +22,13 @@
 //! summary that uses every field rather than by inspecting bytes — a byte-level test would pin the encoding without
 //! saying anything about whether it is *correct*.
 
+use crate::DeclModifiers;
+use crate::DirectiveKind;
+use crate::FORMAT_VERSION;
+use crate::READING_FINGERPRINT;
+use crate::macros;
+use crate::preprocess;
+use crate::summary;
 use smol_str::SmolStr;
 use std::path::PathBuf;
 
@@ -420,8 +427,8 @@ pub fn encode_translation_unit(
 
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, CODEC_VERSION);
-    put_u32(&mut out, crate::FORMAT_VERSION);
-    put_u64(&mut out, crate::READING_FINGERPRINT);
+    put_u32(&mut out, FORMAT_VERSION);
+    put_u64(&mut out, READING_FINGERPRINT);
     // **The closure, and the content hash of every file in it.** This is what makes an entry checkable: a decode
     // is only as good as the claim that these files still say what they said, and the caller re-checks that claim
     // against the filesystem — see `crate::tu_cache`. Without it a cache would serve the macros of a header
@@ -500,10 +507,10 @@ pub fn decode_translation_unit(
     if reader.u32()? != CODEC_VERSION {
         return Err(DecodeError::UnsupportedVersion);
     }
-    if reader.u32()? != crate::FORMAT_VERSION {
+    if reader.u32()? != FORMAT_VERSION {
         return Err(DecodeError::UnsupportedVersion);
     }
-    if reader.u64()? != crate::READING_FINGERPRINT {
+    if reader.u64()? != READING_FINGERPRINT {
         return Err(DecodeError::UnsupportedVersion);
     }
 
@@ -617,8 +624,8 @@ pub fn is_servable(header: &[u8]) -> bool {
         (reader.u32(), reader.u32(), reader.u64(), reader.u64(), reader.u64()),
         (Ok(codec), Ok(format), Ok(_), Ok(_), Ok(fingerprint))
             if codec == CODEC_VERSION
-                && format == crate::FORMAT_VERSION
-                && fingerprint == crate::READING_FINGERPRINT
+                && format == FORMAT_VERSION
+                && fingerprint == READING_FINGERPRINT
     )
 }
 
@@ -1040,13 +1047,13 @@ fn macro_kind_code(kind: MacroKind) -> u8 {
 ///
 /// Only the five that can write one, and a value outside them is a failed read rather than a default: a
 /// `#define` in this position would mean the encoder and the decoder disagree about what a branch is.
-fn conditional_kind_code(kind: crate::DirectiveKind) -> u8 {
+fn conditional_kind_code(kind: DirectiveKind) -> u8 {
     match kind {
-        crate::DirectiveKind::If => 1,
-        crate::DirectiveKind::Ifdef => 2,
-        crate::DirectiveKind::Ifndef => 3,
-        crate::DirectiveKind::Elif => 4,
-        crate::DirectiveKind::Else => 5,
+        DirectiveKind::If => 1,
+        DirectiveKind::Ifdef => 2,
+        DirectiveKind::Ifndef => 3,
+        DirectiveKind::Elif => 4,
+        DirectiveKind::Else => 5,
         // No other kind can reach here — a branch is only ever built from a directive that opens, continues or
         // closes a conditional — and writing a code for one would make the decoder accept a structure the walk
         // cannot produce.
@@ -1054,13 +1061,13 @@ fn conditional_kind_code(kind: crate::DirectiveKind) -> u8 {
     }
 }
 
-fn conditional_kind_from(code: u8) -> Result<crate::DirectiveKind, DecodeError> {
+fn conditional_kind_from(code: u8) -> Result<DirectiveKind, DecodeError> {
     Ok(match code {
-        1 => crate::DirectiveKind::If,
-        2 => crate::DirectiveKind::Ifdef,
-        3 => crate::DirectiveKind::Ifndef,
-        4 => crate::DirectiveKind::Elif,
-        5 => crate::DirectiveKind::Else,
+        1 => DirectiveKind::If,
+        2 => DirectiveKind::Ifdef,
+        3 => DirectiveKind::Ifndef,
+        4 => DirectiveKind::Elif,
+        5 => DirectiveKind::Else,
         _ => return Err(DecodeError::BadDiscriminant),
     })
 }
@@ -1172,8 +1179,11 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
+    use crate::DeclModifiers;
+    use crate::DirectiveKind;
     use crate::cache::SummaryKey;
     use crate::preprocess::directive::IncludeForm;
+    use crate::summary;
     use crate::summary::MacroKind;
     use crate::summary::{
         ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
@@ -1204,7 +1214,7 @@ mod tests {
                     name: "Widget".into(),
                     scope: None,
                     kind: DeclKind::Type,
-                    modifiers: crate::DeclModifiers::default(),
+                    modifiers: DeclModifiers::default(),
                     // A class declares no type in `type_of`'s sense, so the `None` branch is covered here.
                     type_of: None,
                     // A class returns nothing either, so `None` — and the second fact below covers the other value.
@@ -1226,10 +1236,10 @@ mod tests {
                     split_by_a_directive: false,
                     guard: FactGuard::Unconditional,
                     // **The rare half, every field filled at one end or the other** — see [`DeclFact::detail`].
-                    detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                    detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
                         // This declaration has an annotation and the two after it have none, which is what the
                         // presence byte distinguishes.
-                        reflection: Some(crate::summary::ReflectionFact {
+                        reflection: Some(summary::ReflectionFact {
                             macro_name: "UCLASS".to_string(),
                             specifiers: vec![
                                 "Blueprintable".to_string(),
@@ -1263,7 +1273,7 @@ mod tests {
                     name: "make".into(),
                     scope: Some("ns::Widget".into()),
                     kind: DeclKind::Function,
-                    modifiers: crate::DeclModifiers::default(),
+                    modifiers: DeclModifiers::default(),
                     // A function declares no `type_of` — the name has no type — and its `returns` is what a *call*
                     // has. Both halves of that distinction are in this fixture on purpose.
                     type_of: None,
@@ -1282,7 +1292,7 @@ mod tests {
                     guard: FactGuard::Region(3),
                     // The one rare field this fact *has*: a function with no parameters is written `()`, which is an
                     // answer, and `None` would be "nobody looked".
-                    detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                    detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
                         parameter_list: Some("()".to_string()),
                         ..Default::default()
                     }),
@@ -1293,7 +1303,7 @@ mod tests {
                     name: SmolStr::default(),
                     scope: None,
                     kind: DeclKind::Other,
-                    modifiers: crate::DeclModifiers::default(),
+                    modifiers: DeclModifiers::default(),
                     type_of: None,
                     returns: None,
                     access: None,
@@ -1364,13 +1374,13 @@ mod tests {
                     ConditionalRegion {
                         branches: vec![
                             GuardBranch {
-                                kind: crate::DirectiveKind::Ifdef,
+                                kind: DirectiveKind::Ifdef,
                                 condition: Some("_WIN32".into()),
                                 body: range(216, 20),
                                 range: range(200, 12),
                             },
                             GuardBranch {
-                                kind: crate::DirectiveKind::Else,
+                                kind: DirectiveKind::Else,
                                 condition: None,
                                 body: range(252, 0),
                                 range: range(240, 20),
@@ -1381,7 +1391,7 @@ mod tests {
                     },
                     ConditionalRegion {
                         branches: vec![GuardBranch {
-                            kind: crate::DirectiveKind::If,
+                            kind: DirectiveKind::If,
                             condition: Some("__cplusplus >= 201703L".into()),
                             body: range(275, 20),
                             range: range(260, 9),
@@ -1659,7 +1669,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
     let guard = guard_from(reader.u32()?)?;
     let access = access_from(reader.u8()?);
     let exported = reader.u8()? != 0;
-    let modifiers = crate::DeclModifiers::from_bits(reader.u32()?);
+    let modifiers = DeclModifiers::from_bits(reader.u32()?);
     let frees = reader.u64()?.try_into().unwrap_or(u16::MAX);
     let reflection = match reader.u8()? {
         0 => None,
@@ -1670,7 +1680,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
             for _ in 0..count {
                 specifiers.push(reader.string()?);
             }
-            Some(crate::summary::ReflectionFact {
+            Some(summary::ReflectionFact {
                 macro_name,
                 specifiers,
             })
@@ -1697,7 +1707,7 @@ fn get_declaration(reader: &mut Reader<'_>) -> Result<DeclFact, DecodeError> {
         access,
         exported,
         definition,
-        detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+        detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
             in_namespace,
             returns_in_the_class,
             bases,
@@ -1783,7 +1793,7 @@ pub fn encode_the_cooked_reading(reading: &CookedFile) -> Vec<u8> {
 /// facts alone.
 pub fn encode_the_cooked_record(
     reading: &CookedFile,
-    rendered: Option<&crate::preprocess::cooked::RenderedCooked>,
+    rendered: Option<&preprocess::cooked::RenderedCooked>,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 + reading.declarations.len() * 48);
     out.extend_from_slice(COOKED_MAGIC);
@@ -1835,7 +1845,7 @@ fn put_cooked_body(out: &mut Vec<u8>, reading: &CookedFile) {
 /// **One token of a rendering, with where it came from.** The origin is the half a `view` needs for navigation:
 /// a token a macro produced has a call site and a definition, and a hit that dropped them would answer "go to
 /// definition" with nothing for every token the file did not write itself.
-fn put_span(out: &mut Vec<u8>, span: &crate::preprocess::cooked::RenderedSpan) {
+fn put_span(out: &mut Vec<u8>, span: &preprocess::cooked::RenderedSpan) {
     put_range(out, span.cooked);
     match span.written {
         Some(range) => {
@@ -1848,7 +1858,7 @@ fn put_span(out: &mut Vec<u8>, span: &crate::preprocess::cooked::RenderedSpan) {
     put_origin(out, &span.origin);
 }
 
-fn put_origin(out: &mut Vec<u8>, origin: &crate::preprocess::expand::Origin) {
+fn put_origin(out: &mut Vec<u8>, origin: &preprocess::expand::Origin) {
     use crate::preprocess::expand::Origin;
     match origin {
         Origin::Source => put_u8(out, 0),
@@ -1862,8 +1872,8 @@ fn put_origin(out: &mut Vec<u8>, origin: &crate::preprocess::expand::Origin) {
                 put_range(out, invocation.call_site);
                 match invocation.written_in {
                     None => put_u8(out, 0),
-                    Some(crate::macros::MacroFile::Here) => put_u8(out, 1),
-                    Some(crate::macros::MacroFile::Frame(frame)) => {
+                    Some(macros::MacroFile::Here) => put_u8(out, 1),
+                    Some(macros::MacroFile::Frame(frame)) => {
                         put_u8(out, 2);
                         put_u32(out, frame);
                     }
@@ -1887,13 +1897,7 @@ pub fn decode_the_cooked_reading(bytes: &[u8]) -> Result<CookedFile, DecodeError
 
 pub fn decode_the_cooked_record(
     bytes: &[u8],
-) -> Result<
-    (
-        CookedFile,
-        Option<crate::preprocess::cooked::RenderedCooked>,
-    ),
-    DecodeError,
-> {
+) -> Result<(CookedFile, Option<preprocess::cooked::RenderedCooked>), DecodeError> {
     let mut reader = Reader::new(bytes);
     if reader.take(COOKED_MAGIC.len())? != COOKED_MAGIC {
         return Err(DecodeError::NotASummary);
@@ -1939,7 +1943,7 @@ pub fn decode_the_cooked_record(
     let assumed_undefined = reader.u32()? as usize;
     Ok((
         reading,
-        Some(crate::preprocess::cooked::RenderedCooked::from_parts(
+        Some(preprocess::cooked::RenderedCooked::from_parts(
             text,
             spans,
             inactive,
@@ -1948,9 +1952,7 @@ pub fn decode_the_cooked_record(
     ))
 }
 
-fn get_span(
-    reader: &mut Reader<'_>,
-) -> Result<crate::preprocess::cooked::RenderedSpan, DecodeError> {
+fn get_span(reader: &mut Reader<'_>) -> Result<preprocess::cooked::RenderedSpan, DecodeError> {
     let cooked = reader.range()?;
     let written = match reader.u8()? {
         0 => None,
@@ -1958,7 +1960,7 @@ fn get_span(
     };
     let reported = reader.range()?;
     let origin = get_origin(reader)?;
-    Ok(crate::preprocess::cooked::RenderedSpan {
+    Ok(preprocess::cooked::RenderedSpan {
         cooked,
         written,
         reported,
@@ -1966,7 +1968,7 @@ fn get_span(
     })
 }
 
-fn get_origin(reader: &mut Reader<'_>) -> Result<crate::preprocess::expand::Origin, DecodeError> {
+fn get_origin(reader: &mut Reader<'_>) -> Result<preprocess::expand::Origin, DecodeError> {
     use crate::preprocess::expand::Origin;
     Ok(match reader.u8()? {
         0 => Origin::Source,
@@ -1979,10 +1981,10 @@ fn get_origin(reader: &mut Reader<'_>) -> Result<crate::preprocess::expand::Orig
                 let call_site = reader.range()?;
                 let written_in = match reader.u8()? {
                     0 => None,
-                    1 => Some(crate::macros::MacroFile::Here),
-                    _ => Some(crate::macros::MacroFile::Frame(reader.u32()?)),
+                    1 => Some(macros::MacroFile::Here),
+                    _ => Some(macros::MacroFile::Frame(reader.u32()?)),
                 };
-                invocations.push(crate::preprocess::expand::MacroInvocation {
+                invocations.push(preprocess::expand::MacroInvocation {
                     name: name.into_boxed_str(),
                     definition,
                     name_at,
@@ -2029,9 +2031,9 @@ fn a_cooked_reading_round_trips() {
                 exported: true,
                 // A round trip that always wrote one value would not notice a decoder that dropped the byte.
                 definition: true,
-                modifiers: crate::DeclModifiers::default(),
+                modifiers: DeclModifiers::default(),
                 frees: 0,
-                detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
                     returns_in_the_class: None,
                     bases: vec!["Base".to_string()],
                     parameters: vec!["T".to_string()],
@@ -2041,7 +2043,7 @@ fn a_cooked_reading_round_trips() {
                     parameter_list: None,
                     pattern: Some("Widget<T>".to_string()),
                     in_namespace: Some("std".to_string()),
-                    reflection: Some(crate::summary::ReflectionFact {
+                    reflection: Some(summary::ReflectionFact {
                         macro_name: "UPROPERTY".to_string(),
                         specifiers: vec!["EditAnywhere".to_string()],
                     }),
@@ -2064,9 +2066,9 @@ fn a_cooked_reading_round_trips() {
                 exported: false,
                 // A round trip that always wrote one value would not notice a decoder that dropped the byte.
                 definition: false,
-                modifiers: crate::DeclModifiers::default(),
+                modifiers: DeclModifiers::default(),
                 frees: 3,
-                detail: crate::summary::DeclDetail::in_a_box(crate::summary::DeclDetail {
+                detail: summary::DeclDetail::in_a_box(summary::DeclDetail {
                     returns_in_the_class: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
@@ -2080,9 +2082,9 @@ fn a_cooked_reading_round_trips() {
                 }),
             },
         ],
-        macros: vec![crate::summary::MacroFact {
+        macros: vec![summary::MacroFact {
             name: "_STD_BEGIN".to_string(),
-            kind: crate::summary::MacroKind::Definition,
+            kind: summary::MacroKind::Definition,
             function_like: false,
             body: MacroBody::Expression,
             value: Some(Box::from("namespace std {")),
@@ -2175,7 +2177,7 @@ fn a_cooked_record_with_its_rendering_round_trips() {
                         definition: SourceRange::new(10, 5),
                         name_at: SourceRange::new(17, 1),
                         call_site: SourceRange::new(30, 1),
-                        written_in: Some(crate::macros::MacroFile::Frame(3)),
+                        written_in: Some(macros::MacroFile::Frame(3)),
                     }],
                 },
             ),

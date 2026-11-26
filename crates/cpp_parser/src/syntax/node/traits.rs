@@ -24,6 +24,7 @@
 //! structure: `get_name()` on a function returns the first name token it can find, whatever the
 //! rest of the declaration looks like.
 
+use crate::text;
 use std::marker::PhantomData;
 
 use rowan::{TextRange, TextSize, WalkEvent};
@@ -378,8 +379,8 @@ pub fn tokens_range(tokens: &[CppSyntaxToken]) -> Option<TextRange> {
 ///
 /// A free function rather than a `From` impl: `SourceRange` lives in `crate::text` and `TextRange` is
 /// rowan's, so the orphan rule forbids implementing the conversion from either side.
-pub fn source_range(range: TextRange) -> crate::text::SourceRange {
-    crate::text::SourceRange::new(
+pub fn source_range(range: TextRange) -> text::SourceRange {
+    text::SourceRange::new(
         u32::from(range.start()) as usize,
         u32::from(range.end() - range.start()) as usize,
     )

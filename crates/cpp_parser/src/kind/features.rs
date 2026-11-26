@@ -30,6 +30,7 @@
 //! Because the alternative — a standard plus a list of exceptions, or an `if config.standard >= Cpp20 || config.c99` at
 //! every branch — spreads the same knowledge over every call site. A feature whose requirement changes is one line here.
 
+use crate::kind;
 use std::fmt;
 
 /// The language family a standard belongs to.
@@ -819,7 +820,7 @@ impl LanguageConfig {
     ///
     /// `GnuCpp` and `MsvcCpp` carry no version — that was the conflation this module exists to end — so they map to a
     /// C++17 baseline with the vendor, which is the mode those two spellings were used for.
-    pub fn from_language_level(level: crate::kind::CppLanguageLevel) -> Self {
+    pub fn from_language_level(level: kind::CppLanguageLevel) -> Self {
         use crate::kind::CppLanguageLevel;
         let standard = match level {
             CppLanguageLevel::Cpp11 => Standard::Cpp11,
@@ -843,7 +844,7 @@ impl LanguageConfig {
     }
 
     /// **The old-style level this config is closest to**, for the two call sites that still take one.
-    pub fn to_language_level(self) -> crate::kind::CppLanguageLevel {
+    pub fn to_language_level(self) -> kind::CppLanguageLevel {
         use crate::kind::CppLanguageLevel;
         match self.standards().max_by_key(|standard| standard.rank()) {
             Some(Standard::Cpp11) => CppLanguageLevel::Cpp11,

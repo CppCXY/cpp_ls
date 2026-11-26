@@ -3,9 +3,12 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::features;
+use crate::grammar;
+use crate::parser;
 
 pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
-    let _phase = crate::parser::phases::during("specifiers");
+    let _phase = parser::phases::during("specifiers");
     parse_decl_specifier_seq_with(p, true, true)
 }
 
@@ -738,7 +741,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
         CppTokenKind::Identifier
             if p.current_token_text() == "_BitInt"
                 && p.peek_next_token() == CppTokenKind::LeftParen
-                && p.language().support(crate::features::Feature::BitInt) =>
+                && p.language().support(features::Feature::BitInt) =>
         {
             let m = p.mark(CppSyntaxKind::BuiltinType);
             p.bump(); // `_BitInt`
@@ -756,7 +759,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
         // `_Atomic ( type-name )` — so the group is read with the type-id rule, not as a call's arguments.
         CppTokenKind::Identifier
             if p.current_token_text() == "_Atomic"
-                && p.language().support(crate::features::Feature::Atomic) =>
+                && p.language().support(features::Feature::Atomic) =>
         {
             let m = p.mark(CppSyntaxKind::BuiltinType);
             p.bump(); // `_Atomic`
@@ -831,7 +834,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
         // `__interface I : IUnknown { … };` reported ``expected `;` after expression`` at the `:`.
         CppTokenKind::Identifier
             if p.current_token_text() == THE_KEYWORD_INTERFACE_IS_SPELLED
-                && p.language().support(crate::features::Feature::Interface)
+                && p.language().support(features::Feature::Interface)
                 && a_body_follows_the_class_head(p) =>
         {
             return parse_class_like_head(p);
@@ -908,8 +911,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
                 // specifier, an elaborated specifier (`struct`, `union`, `enum`, `class`), or a cv-qualifier. A name,
                 // a literal and a `(` all begin expressions and stay on that side.
                 if p.current_token() == CppTokenKind::AutoKeyword
-                    || (p.language().support(crate::features::Feature::Typeof)
-                        && starts_a_type_id(p))
+                    || (p.language().support(features::Feature::Typeof) && starts_a_type_id(p))
                 {
                     parse_type_id(p)?;
                 } else {
@@ -969,7 +971,7 @@ pub(crate) fn parse_one_decl_specifier_inner(
                 && p.peek_next_token() == CppTokenKind::Colon
             {
                 *name_allowed = false;
-                if let Err(err) = crate::grammar::cpp::exprs::parse_splice_expression(p) {
+                if let Err(err) = grammar::cpp::exprs::parse_splice_expression(p) {
                     p.close_marks_above(base);
                     return Err(err);
                 }

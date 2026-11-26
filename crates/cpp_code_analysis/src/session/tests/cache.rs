@@ -1,6 +1,8 @@
 //! **Cache** — what the session keeps: a rendering, a refinement, the sharing file
 
+use crate::UnknownReason;
 use crate::file::paths::MemoryFiles;
+use crate::session;
 use crate::symbol::Known;
 use std::path::{Path, PathBuf};
 
@@ -88,7 +90,7 @@ pub(crate) fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
             found.fact.range.start_offset, alone,
             "and a query answers the branch this file has when nothing defines `FROM_THE_SOURCE`"
         ),
-        Known::Unknown(crate::UnknownReason::Ambiguous(_)) => {}
+        Known::Unknown(UnknownReason::Ambiguous(_)) => {}
         other => {
             panic!("`Live` is declared in the header, and not as `main.cpp` read it: {other:?}")
         }
@@ -237,7 +239,7 @@ fn a_rendering_is_asked_for_once_per_text() {
     session.did_open("/p/a.cpp", source);
     session.index_everything();
 
-    let asks = |session: &crate::session::Session<MemoryFiles>| asks_of(session);
+    let asks = |session: &session::Session<MemoryFiles>| asks_of(session);
 
     // **What eviction looks like now.** The rendering the index had built is dropped from the in-memory table — and
     // the *stored* record answers instead, because a rendering is persisted with the cooked reading (that is what a
@@ -264,7 +266,7 @@ fn a_rendering_is_asked_for_once_per_text() {
 }
 
 /// How many renderings a query has asked for, for a session of any provider.
-fn asks_of(session: &crate::session::Session<MemoryFiles>) -> usize {
+fn asks_of(session: &session::Session<MemoryFiles>) -> usize {
     session
         .renderings_asked
         .lock()

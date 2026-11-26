@@ -273,6 +273,7 @@ impl<F: FileProvider> SummaryStore<F> {
 #[cfg(test)]
 mod tests {
     use super::{Priority, StepOutcome, Worklist};
+    use crate::Known;
     use crate::file::paths::MemoryFiles;
     use crate::include::config::CompilerConfig;
     use crate::index::store::SummaryStore;
@@ -469,7 +470,7 @@ mod tests {
         assert!(
             matches!(
                 store.index().definition("Leaf", Path::new("/p/tu.cpp")),
-                crate::Known::Yes(_)
+                Known::Yes(_)
             ),
             "the discovered header is visible from the unit that includes it"
         );

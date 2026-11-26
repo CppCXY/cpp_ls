@@ -31,6 +31,9 @@
 //! text does, and the VFS is what knows about that. See [`crate::file::vfs`]: the text and its index are made
 //! together and replaced together, so a view's index can never be one edit behind its text.
 
+use crate::CompilerConfig;
+use crate::preprocess;
+use crate::sema;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -173,7 +176,7 @@ pub struct FileView {
     ///
     /// Empty exactly when [`FileView::written`] is `None`. It is an `Arc<[_]>` rather than a `Vec` because a view is
     /// cloned per request — every handler takes one — and a header's rendering is hundreds of thousands of tokens.
-    reading: Arc<[crate::preprocess::cooked::RenderedSpan]>,
+    reading: Arc<[preprocess::cooked::RenderedSpan]>,
 }
 
 /// **A parsed view without its red root** — what a session can cache, and why the split exists.
@@ -194,7 +197,7 @@ pub struct ParsedView {
     pub open: bool,
     pub written: Option<Arc<str>>,
     pub written_lines: Option<Arc<LineIndex>>,
-    pub reading: Arc<[crate::preprocess::cooked::RenderedSpan]>,
+    pub reading: Arc<[preprocess::cooked::RenderedSpan]>,
 }
 
 impl FileView {
@@ -292,7 +295,7 @@ impl FileView {
         let token_end = token_start + spelling.len();
         let before = written_context_before(written_text, token_start);
         let after = written_context_after(written_text, token_end);
-        let mut contextual: Option<&crate::preprocess::cooked::RenderedSpan> = None;
+        let mut contextual: Option<&preprocess::cooked::RenderedSpan> = None;
         for span in self.reading.iter() {
             if let Some(written_range) = span.written
                 && written_range.contain(written)
@@ -570,7 +573,7 @@ impl FileView {
     /// The spans are in stream order, so their `cooked` ranges are sorted and do not overlap — which is what makes
     /// this a search rather than a scan. A rendering of a standard-library header is a few hundred thousand tokens
     /// and a query about a position is answered per keystroke, so a scan would be the wrong shape.
-    fn span_at(&self, in_the_reading: usize) -> Option<&crate::preprocess::cooked::RenderedSpan> {
+    fn span_at(&self, in_the_reading: usize) -> Option<&preprocess::cooked::RenderedSpan> {
         let at = self
             .reading
             .partition_point(|span| span.cooked.end_offset() <= in_the_reading);
@@ -952,7 +955,7 @@ impl FileView {
         }
         let tree = cpp_parser::CppParser::parse(&source, config);
         let root = tree.get_red_root();
-        let scopes = crate::sema::scopes::build_scopes(&root, macros);
+        let scopes = sema::scopes::build_scopes(&root, macros);
 
         FileView {
             file: file.id,
@@ -991,7 +994,7 @@ impl FileView {
     /// the worse of the two failures — so the mapping is on the struct rather than a convention.
     pub fn parse_rendering(
         file: &VfsFile,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
     ) -> FileView {
         Self::parse_rendering_with_cuda(file, rendered, false)
     }
@@ -1001,7 +1004,7 @@ impl FileView {
     /// the index was built from.
     pub fn parse_rendering_with_cuda(
         file: &VfsFile,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
         cuda: bool,
     ) -> FileView {
         Self::parse_rendering_with_the_files_own_language(file, rendered, cuda, None)
@@ -1018,8 +1021,8 @@ impl FileView {
     /// project said — which is the same answer [`crate::CompilerConfig::language_for`] gives the lexer.
     pub fn parse_rendering_in(
         file: &VfsFile,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
-        config: &crate::CompilerConfig,
+        rendered: &preprocess::cooked::RenderedCooked,
+        config: &CompilerConfig,
     ) -> FileView {
         Self::parse_rendering_with_the_files_own_language(
             file,
@@ -1031,7 +1034,7 @@ impl FileView {
 
     fn parse_rendering_with_the_files_own_language(
         file: &VfsFile,
-        rendered: &crate::preprocess::cooked::RenderedCooked,
+        rendered: &preprocess::cooked::RenderedCooked,
         cuda: bool,
         language: Option<cpp_parser::features::LanguageConfig>,
     ) -> FileView {
@@ -1045,7 +1048,7 @@ impl FileView {
         let root = tree.get_red_root();
         // **No macro bodies**, and the answer is the point rather than a simplification: the text being parsed has
         // no invocations in it, so a body reader would be consulted for names that were already replaced.
-        let scopes = crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies);
+        let scopes = sema::scopes::build_scopes(&root, &sema::scopes::NoMacroBodies);
 
         FileView {
             file: file.id,

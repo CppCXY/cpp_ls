@@ -40,6 +40,7 @@
 //! stops earlier on its own: the second entry's `#ifndef` is false, so the body that includes it again is not
 //! entered.
 
+use crate::FactGuard;
 use std::path::Path;
 
 use crate::Visibility;
@@ -83,8 +84,8 @@ pub const UNKNOWN_EXAMPLES: usize = 64;
 /// **The condition a directive is under, as text** — the attribution a probe needs: a name says *what* was lost,
 /// this says *why*. The region chain is printed outermost first, joined by  && , because a fact is in force only
 /// when every enclosing region is.
-fn guard_text(guards: &SummaryGuards, guard: crate::FactGuard) -> String {
-    let crate::FactGuard::Region(region) = guard else {
+fn guard_text(guards: &SummaryGuards, guard: FactGuard) -> String {
+    let FactGuard::Region(region) = guard else {
         return "unconditional".to_string();
     };
     let mut parts: Vec<String> = Vec::new();

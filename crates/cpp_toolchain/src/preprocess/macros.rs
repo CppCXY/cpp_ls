@@ -16,6 +16,9 @@
 //!
 //! So the body is a `Vec<Token>`, with the two operators and the parameters identifiable in it.
 
+use crate::Marked;
+use crate::condition;
+use crate::token;
 use cpp_parser::{CppTokenKind, SourceRange};
 
 use crate::token::{Token, is_trivia};
@@ -259,7 +262,7 @@ pub trait MacroBindings {
     /// position is the one thing this trait's methods are not given. It is a free function taking an offset —
     /// [`crate::preprocess::cooked::attribute_support`] — and [`crate::preprocess::PositionalMacros`], which has the
     /// offset, is the layer that calls it.
-    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<condition::Value> {
         let _ = (name, operand);
         None
     }
@@ -338,7 +341,7 @@ impl MacroTable {
     /// and this is the one-way door between them: a name `Marked` holds a **body** for becomes a binding, and one it
     /// only knows the *definedness* of is left out — a name with no replacement list expands to nothing, which is
     /// not something a table can paste.
-    pub fn from_marked(marked: &crate::Marked) -> Self {
+    pub fn from_marked(marked: &Marked) -> Self {
         let mut table = MacroTable::new();
         for name in marked.defined_names() {
             if let Some(definition) = marked.get(&name) {
@@ -568,7 +571,7 @@ fn could_be_a_macro_name(kind: CppTokenKind) -> bool {
     kind == CppTokenKind::Identifier
         || kind == CppTokenKind::TrueKeyword
         || kind == CppTokenKind::FalseKeyword
-        || crate::token::is_keyword_like(kind)
+        || token::is_keyword_like(kind)
 }
 
 /// Read a parameter list starting at `index`, if one is there.

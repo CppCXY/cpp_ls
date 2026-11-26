@@ -23,6 +23,8 @@
 //! Steps 6 to 8 are what make this a *language server* rather than a query engine: the session is usable the moment
 //! step 4 returns, and everything after it makes the answers better without making the editor wait.
 
+use crate::context;
+use crate::handlers;
 mod client_config;
 
 use std::path::PathBuf;
@@ -922,7 +924,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // them. The loop's idle branch is not enough — a slice ends with `continue`, so an iteration that cooked
             // never reaches it — and waiting for one that does would leave a file opened and left alone undimmed.
             if cooked > 0 {
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
             }
 
             // **The pull's answer, computed while nobody is waiting.** A first pull for a new reading is the expensive
@@ -1027,7 +1029,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     })
                     .await
                 {
-                    crate::context::RequestOutcome::Ready(counts) => counts,
+                    context::RequestOutcome::Ready(counts) => counts,
                     _ => (pending, 0, 0, 0),
                 };
                 let message = if to_read_as_a_program > 0 {
@@ -1147,7 +1149,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // **The first load's inactive regions**, sent beside the diagnostics it just published: the client
                 // opened its files before the project was read, so nothing had a rendering to answer from at
                 // `didOpen` — and unlike a request, a notification is never asked for again.
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
 
                 // **The lenses, once — not on every edit.** A code lens is a count of files read, so the count
                 // published before this file's closure was ready can be low; one refresh here asks for the settled
@@ -1189,7 +1191,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 // A file's dead branches become answerable only when its cook lands (the per-file cook of the file's
                 // own closure), which is after `didOpen` and after every `didChange`; nothing asks a server to repeat
                 // a notification, so this is where the second answer goes out.
-                crate::handlers::inactive_regions::publish_all(&context).await;
+                handlers::inactive_regions::publish_all(&context).await;
             }
             let revision = context
                 .analysis()

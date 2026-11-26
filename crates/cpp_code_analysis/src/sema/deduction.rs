@@ -280,6 +280,7 @@ fn the_name_in(parameter: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sema;
 
     fn yes(spelling: &str) -> Known<String> {
         Known::Yes(spelling.to_string())
@@ -350,7 +351,7 @@ mod tests {
                 &names(&["T"]),
                 &parameters(&["T", "const T&"]),
                 &[
-                    Known::Unknown(crate::sema::symbol::UnknownReason::DependentName),
+                    Known::Unknown(sema::symbol::UnknownReason::DependentName),
                     yes("int")
                 ],
             ),
