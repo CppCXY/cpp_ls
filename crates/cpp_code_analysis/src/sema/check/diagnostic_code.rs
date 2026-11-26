@@ -151,6 +151,12 @@ pub enum DiagnosticCode {
     /// **A class that implements some of its base`s pure virtual functions but not all**, and is still abstract — see
     /// [`super::pure_virtual_not_overridden`].
     PureVirtualNotOverridden,
+    /// A heap allocation (`new`/`delete`) inside an AI Core kernel — see [`super::ascend_kernel`].
+    AscendDynamicAllocation,
+    /// A C++ exception construct (`try`/`catch`/`throw`) inside an AI Core kernel — see [`super::ascend_kernel`].
+    AscendException,
+    /// A standard-library type used inside an AI Core kernel — see [`super::ascend_kernel`].
+    AscendStdType,
 }
 
 impl DiagnosticCode {
@@ -160,7 +166,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 43] = [
+    pub const ALL: [DiagnosticCode; 46] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -204,6 +210,9 @@ impl DiagnosticCode {
         DiagnosticCode::OverrideOfFinal,
         DiagnosticCode::AbstractClassInstantiated,
         DiagnosticCode::PureVirtualNotOverridden,
+        DiagnosticCode::AscendDynamicAllocation,
+        DiagnosticCode::AscendException,
+        DiagnosticCode::AscendStdType,
     ];
 
     /// **The code a client is shown**, and the spelling a config file uses: kebab case, and the module's file name
@@ -256,6 +265,9 @@ impl DiagnosticCode {
             DiagnosticCode::OverrideOfFinal => "override-of-final",
             DiagnosticCode::AbstractClassInstantiated => "abstract-class-instantiated",
             DiagnosticCode::PureVirtualNotOverridden => "pure-virtual-not-overridden",
+            DiagnosticCode::AscendDynamicAllocation => "ascend-dynamic-allocation",
+            DiagnosticCode::AscendException => "ascend-exception",
+            DiagnosticCode::AscendStdType => "ascend-std-type",
         }
     }
 
@@ -327,6 +339,12 @@ impl DiagnosticCode {
             // **A warning, not an error**: being abstract is legal, and what this reports is the shape that reads as an
             // oversight — some overrides written, the rest forgotten.
             DiagnosticCode::PureVirtualNotOverridden => RuleSeverity::Warning,
+            // **Ascend C's device restrictions.** `new`/`delete` and exceptions are not available on the AI Core;
+            // the standard library's containers are a warning rather than an error because the same spelling can be
+            // host-side code in the same translation unit, which the check's kernel scope is what separates.
+            DiagnosticCode::AscendDynamicAllocation => RuleSeverity::Error,
+            DiagnosticCode::AscendException => RuleSeverity::Error,
+            DiagnosticCode::AscendStdType => RuleSeverity::Warning,
             // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
             DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
@@ -426,6 +444,9 @@ impl DiagnosticCode {
                 | DiagnosticCode::OverrideOfFinal
                 | DiagnosticCode::AbstractClassInstantiated
                 | DiagnosticCode::PureVirtualNotOverridden
+                | DiagnosticCode::AscendDynamicAllocation
+                | DiagnosticCode::AscendException
+                | DiagnosticCode::AscendStdType
         )
     }
 
@@ -442,6 +463,19 @@ impl DiagnosticCode {
                 | DiagnosticCode::UeGeneratedHeader
                 | DiagnosticCode::UeMacroScope
                 | DiagnosticCode::UeSpecifier
+        )
+    }
+
+    /// **Does this rule only make sense in an Ascend C project?**
+    ///
+    /// The family switch is the same idea as [`DiagnosticCode::is_unreal_only`]: a project that is not Ascend C has
+    /// no AI Core kernel for these restrictions to be about, and the checks are skipped before they walk the tree.
+    pub fn is_ascend_only(self) -> bool {
+        matches!(
+            self,
+            DiagnosticCode::AscendDynamicAllocation
+                | DiagnosticCode::AscendException
+                | DiagnosticCode::AscendStdType
         )
     }
 }

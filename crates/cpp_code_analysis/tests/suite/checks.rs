@@ -3280,6 +3280,9 @@ fn the_cpp_only_rules_are_known_by_name() {
             DiagnosticCode::OverrideOfFinal,
             DiagnosticCode::AbstractClassInstantiated,
             DiagnosticCode::PureVirtualNotOverridden,
+            DiagnosticCode::AscendDynamicAllocation,
+            DiagnosticCode::AscendException,
+            DiagnosticCode::AscendStdType,
         ]
     );
 }

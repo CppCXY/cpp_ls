@@ -190,7 +190,7 @@ This is the "understands C++" layer, and the base every completion, hover and ch
 
 ## 6. Diagnostics
 
-Forty-three codes, each with a fixed severity; `[diagnostics].disable` turns one off by name. The registry is
+Forty-six codes, each with a fixed severity; `[diagnostics].disable` turns one off by name. The registry is
 [`DiagnosticCode`](../crates/cpp_code_analysis/src/sema/check/diagnostic_code.rs), and the C subset is
 [`c-support.md`](c-support.md) §6 — a C++-only rule is skipped for a C file rather than run and silenced.
 
@@ -225,6 +225,9 @@ Forty-three codes, each with a fixed severity; `[diagnostics].disable` turns one
 | `override-of-final` | Error | an override of a function the base declares `final` |
 | `abstract-class-instantiated` | Error | a by-value object whose class still has an unoverridden `= 0` virtual function |
 | `pure-virtual-not-overridden` | Warning | a class that overrides some of its base's pure virtual functions and leaves the rest — it is still abstract |
+| `ascend-dynamic-allocation` | Error | `new`/`delete` inside an AI Core kernel — **Ascend C** (`[compile.ascend]`) |
+| `ascend-exception` | Error | `try`/`catch`/`throw` inside an AI Core kernel — **Ascend C** (`[compile.ascend]`) |
+| `ascend-std-type` | Warning | a standard-library container inside an AI Core kernel — **Ascend C** (`[compile.ascend]`) |
 | `macro-redefined` | Warning | the same macro is redefined with a different body |
 | `unnecessary-branch` | Warning | a branch that cannot run (`if constexpr`/`if consteval` are not reported) |
 | `assignment-in-condition` | Warning | an assignment inside a condition |

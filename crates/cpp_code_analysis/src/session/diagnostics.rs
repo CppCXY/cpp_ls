@@ -517,6 +517,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 .unreal
                 .as_ref()
                 .is_some_and(|unreal| unreal.is_on()),
+            // **Whether this file belongs to the Ascend C family** — the switch its AI Core restriction rules turn
+            // on. Read from the file's own configuration, because the family can come from the toolchain as well as
+            // from `[compile.ascend]`.
+            self.config_for_file(key).config.ascend_c(),
             // **Which files this project may add an `#include` for** — the workspace root and the directories the
             // project's own files are in. (The second half is not redundancy: a session over a *virtual* filesystem —
             // a test, a remote client — has paths that do not start with its root, and the rule must work there too.)

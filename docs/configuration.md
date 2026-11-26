@@ -187,9 +187,13 @@ args = ["-DASCENDC_CPU_DEBUG"]                 # extra flags, appended to whatev
 
 Ascend C is C++ plus Huawei's AICore kernel vocabulary: `__aicore__`, `__global__`, `__gm__`, `__ubuf__`,
 `__cbuf__`, `__fbuf__`, `__ca__`, `__cb__`, `__cc__`, and the `AscendC::TPipe` / `GlobalTensor` / `LocalTensor` names
-from `kernel_operator.h`. `enable` is the escape hatch for a project with no compile database; `toolkit` adds the
+from `kernel_operator.h`. `.cce` and `.asc` are the Ascend compiler's kernel suffixes and join the project scan in this
+family. `enable` is the escape hatch for a project with no compile database; `toolkit` adds the
 installation's `compiler/tikcpp/tikcfw` and `interface` header directories, which is what makes
 `#include "kernel_operator.h"` resolve.
+
+The family also turns on three AI Core restrictions — `ascend-dynamic-allocation`, `ascend-exception` and
+`ascend-std-type` — which are reported only inside a function carrying `__aicore__`/`__global__`.
 
 **A project belongs to exactly one family.** `[compile.cuda]`, `[unreal]` and `[compile.ascend]` are mutually
 exclusive: enabling two is a configuration error and none of them is applied until only one is on. The analysis holds

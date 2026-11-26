@@ -103,6 +103,7 @@ use crate::{FileSummary, ProjectIndex};
 pub mod abstract_class_instantiated;
 pub mod access_invisible;
 pub mod argument_count;
+pub mod ascend_kernel;
 pub mod assign_type_check;
 pub mod assignment_in_condition;
 // pub mod assign_type_check;
@@ -202,6 +203,12 @@ pub fn run_check<T: Check>(context: &mut CheckContext<'_>) {
     if !context.unreal && T::CODES.iter().all(|code| code.is_unreal_only()) {
         return;
     }
+    // **An Ascend C rule costs nothing outside Ascend C.** The family replaces Unreal's boolean here because it is
+    // the grammar and the project rules the restrictions belong to; a CUDA or plain C++ file is skipped before the
+    // tree walk.
+    if !context.ascend_c && T::CODES.iter().all(|code| code.is_ascend_only()) {
+        return;
+    }
     if T::CODES.iter().any(|code| context.config.is_enabled(*code)) {
         // **Which rule costs what**, at `CPPLS_TRACE_DIAGNOSTICS=1`. A pull on the reader'"'"'s project takes seconds to
         // answer zero findings, and the table is the only way to say which rule spends them rather than guess.
@@ -279,6 +286,8 @@ pub struct CheckContext<'a> {
     /// **Is this project Unreal Engine code?** — the switch that makes the two engine rules run, and the reason they
     /// are not on for an ordinary C++ project: `class Widget` would be reported as a missing `A`/`U`/`F` prefix.
     pub unreal: bool,
+    /// **Is this file in the Ascend C family?** — the switch the AI Core restriction rules turn on.
+    pub ascend_c: bool,
     /// **The directories whose files this project may add an `#include` for** — the workspace root, and (once libraries
     /// exist) each library's own path.
     ///
@@ -314,6 +323,7 @@ impl<'a> CheckContext<'a> {
         config: CheckConfig,
         language: cpp_parser::features::LanguageConfig,
         unreal: bool,
+        ascend_c: bool,
         inside: &'a [std::path::PathBuf],
     ) -> Self {
         CheckContext {
@@ -328,6 +338,7 @@ impl<'a> CheckContext<'a> {
             config,
             language,
             unreal,
+            ascend_c,
             inside,
             findings: Vec::new(),
             nodes: std::cell::OnceCell::new(),
@@ -1754,6 +1765,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<ue_generated_header::UeGeneratedHeader>(&mut context);
     run_check::<ue_macro_scope::UeMacroScope>(&mut context);
     run_check::<ue_specifier::UeSpecifier>(&mut context);
+    run_check::<ascend_kernel::AscendKernel>(&mut context);
 
     context.into_findings()
 }

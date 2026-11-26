@@ -38,7 +38,16 @@ pub(super) fn codes_of(source: &str) -> Vec<DiagnosticCode> {
 /// declared elsewhere, a forward declaration in an included header. `files` is `(path, text)`, and `asking` is the
 /// file the findings are asked of.
 pub(super) fn codes_in(files: &[(&str, &str)], asking: &str) -> Vec<DiagnosticCode> {
-    session_with(files, asking)
+    codes_in_family(files, asking, crate::ProjectLanguage::Cpp)
+}
+
+/// The codes one file produces when the project is read as `family`.
+pub(super) fn codes_in_family(
+    files: &[(&str, &str)],
+    asking: &str,
+    family: crate::ProjectLanguage,
+) -> Vec<DiagnosticCode> {
+    session_with_family(files, asking, family)
         .diagnostics(std::path::Path::new(asking))
         .map(|found| {
             found
@@ -87,6 +96,14 @@ pub(super) fn assert_reported(codes: &[DiagnosticCode], code: DiagnosticCode, wh
 
 /// The session every fixture is asked through — indexed, with the asking file's rendering built.
 fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
+    session_with_family(files, asking, crate::ProjectLanguage::Cpp)
+}
+
+fn session_with_family(
+    files: &[(&str, &str)],
+    asking: &str,
+    family: crate::ProjectLanguage,
+) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
     for (path, text) in files {
         memory = memory.with_file(*path, *text);
@@ -96,7 +113,7 @@ fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
         "/p",
         providers,
         WatchFilter::new("/p"),
-        CompilerConfig::default(),
+        CompilerConfig::default().with_language_family(family),
     );
     session.add_project_files(
         files
@@ -111,6 +128,7 @@ fn session_with(files: &[(&str, &str)], asking: &str) -> Session<MemoryFiles> {
 mod abstract_class_instantiated;
 mod access_invisible;
 mod argument_count;
+mod ascend_kernel;
 mod assign_type_check;
 mod assignment_in_condition;
 mod braces_around_statements;
