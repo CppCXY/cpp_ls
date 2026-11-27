@@ -20,11 +20,16 @@ use crate::summary;
 pub struct InactiveRegions {
     /// The dead regions, in source order, in the file's own coordinates.
     pub spans: Vec<cpp_parser::SourceRange>,
+    /// The subset of [`InactiveRegions::spans`] whose branch decisions were exact — what a client may paint.
+    ///
+    /// A file can mix both: nine branches decided by definitions and one by an assumption. The one guess must not
+    /// suppress the nine, which is why this is a list rather than only the count below.
+    pub exact_spans: Vec<cpp_parser::SourceRange>,
     /// Branches decided by C's "an undefined identifier is `0`" rule rather than by a definition the walk held.
     ///
-    /// Zero means every span was decided from a definition the cook actually had. Non-zero means the project's
+    /// Zero means every span was decided from a definition the cook had. Non-zero means the project's
     /// configuration is incomplete — no compile database, an include nobody resolved — and a span may cover code the
-    /// user's real build compiles.
+    /// user's real build compiles. [`InactiveRegions::exact_spans`] is the part that is still safe to paint.
     pub assumed_undefined: usize,
 }
 
@@ -219,6 +224,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Some(rendered) = self.known_rendering_of(&file.path, &file.text) {
             return Some(InactiveRegions {
                 spans: rendered.inactive.clone(),
+                exact_spans: rendered.inactive_exact.clone(),
                 assumed_undefined: rendered.assumed_undefined,
             });
         }

@@ -519,6 +519,14 @@ async fn apply_text_batch(
         .diagnostics()
         .schedule_open_files(snapshot.clone())
         .await;
+    // **The edit's own inactive regions, after the applied sequence is published.** The writer cooked the file above;
+    // the pump only publishes when a *slice* cooked something, and an edit normally takes the direct `Session::cook`
+    // path. Without this task, a change that moves every range leaves the client's old decoration in place until some
+    // unrelated slice happens to cook a file. The task waits for `when_caught_up`, so it cannot deadlock the applier.
+    let publications = snapshot.clone();
+    tokio::spawn(async move {
+        crate::handlers::inactive_regions::publish_all(&publications).await;
+    });
 }
 
 /// Apply one event: the whole of what a notification does to the analysis.

@@ -208,7 +208,59 @@ fn a_warm_start_answers_the_spans_the_record_carries() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **A branch decided by an assumed-undefined name is a guess, and the answer says so.**
+/// **One guessed branch does not hide the exact ones.**
+///
+/// A file can have a `#if ON` branch decided by a definition and a `#if UNDEF` branch decided by assumption. The
+/// second must not suppress the first: the client is sent the exact subset and the count still says one branch was a
+/// guess. This is the difference between "no answer" and "one answer withheld".
+#[test]
+fn a_guess_does_not_hide_the_exact_regions() {
+    let source = "\
+#define ON 1
+#if ON
+int live;
+#else
+int exact_dead;
+#endif
+#if UNDEFINED_ANYWHERE
+int guessed_dead;
+#endif
+";
+    let (mut session, root) = session_of(&[("a.cpp", source)]);
+    let path = root.join("a.cpp");
+    session.index_everything();
+    session.cook(&path);
+    let answer = session
+        .inactive_regions(&path)
+        .expect("the cooked file answers");
+    assert!(
+        answer.assumed_undefined >= 1,
+        "the second branch used the undefined-is-zero rule: {answer:?}"
+    );
+    assert!(!answer.is_exact(), "the whole answer is not exact");
+    assert!(
+        !answer.exact_spans.is_empty(),
+        "but the branch decided by ON is still paintable: {answer:?}"
+    );
+    let exact_dead = source.find("int exact_dead;").expect("the exact branch");
+    let guessed_dead = source
+        .find("int guessed_dead;")
+        .expect("the guessed branch");
+    let covered = |spans: &[cpp_parser::SourceRange], at: usize| {
+        spans
+            .iter()
+            .any(|span| span.start_offset <= at && at < span.end_offset())
+    };
+    assert!(
+        covered(&answer.exact_spans, exact_dead),
+        "the exact branch is in the paintable subset"
+    );
+    assert!(
+        !covered(&answer.exact_spans, guessed_dead),
+        "the guessed branch is not"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
 ///
 /// This is the gate the plan puts before the protocol: `#if SOMETHING` with no definition anywhere is C's rule that
 /// an undefined identifier is `0`, and the branch is chosen **by a guess about the configuration**. A client that

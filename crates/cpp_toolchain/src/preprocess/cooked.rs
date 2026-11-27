@@ -84,6 +84,9 @@ pub struct CookedStream {
     pub counters: usize,
     /// The spans of the regions that were **not** compiled, in source order.
     pub inactive: Vec<SourceRange>,
+    /// The subset of [`CookedStream::inactive`] whose branch decisions were exact. This is what a client may paint:
+    /// one uncertain branch must not suppress the other nine.
+    pub inactive_exact: Vec<SourceRange>,
     /// How many conditional branches were decided by **C's rule that an identifier which is not defined
     /// evaluates to `0`**, rather than by a definition this file has.
     ///
@@ -235,6 +238,7 @@ impl CookedStream {
             text,
             spans,
             inactive: self.inactive.clone(),
+            inactive_exact: self.inactive_exact.clone(),
             assumed_undefined: self.assumed_undefined,
             written_order: std::sync::OnceLock::new(),
         }
@@ -299,6 +303,10 @@ pub struct RenderedCooked {
     /// Empty for a file with no conditionals, and empty for a rendering read back from a record written before this
     /// field existed; the record's version is what tells those apart (`COOKED_VERSION`).
     pub inactive: Vec<SourceRange>,
+    /// **The subset of [`RenderedCooked::inactive`] safe to paint.** A branch decided by an assumed-undefined name is
+    /// still a dead branch; it is just not a claim about the configuration. Keeping the two lists means one guess does
+    /// not hide every other region of the file.
+    pub inactive_exact: Vec<SourceRange>,
     /// **How many branches were decided by C's "an undefined identifier is `0`" rule**, rather than by a definition
     /// the walk held — copied from [`CookedStream::assumed_undefined`].
     ///
@@ -334,12 +342,14 @@ impl RenderedCooked {
         text: String,
         spans: Vec<RenderedSpan>,
         inactive: Vec<SourceRange>,
+        inactive_exact: Vec<SourceRange>,
         assumed_undefined: usize,
     ) -> Self {
         RenderedCooked {
             text,
             spans,
             inactive,
+            inactive_exact,
             assumed_undefined,
             written_order: std::sync::OnceLock::new(),
         }
@@ -546,6 +556,12 @@ impl RenderedCooked {
                 .copied()
                 .filter(|range| range.end_offset() <= written_end)
                 .collect(),
+            inactive_exact: self
+                .inactive_exact
+                .iter()
+                .copied()
+                .filter(|range| range.end_offset() <= written_end)
+                .collect(),
             // A branch decided in the prefix is still decided by the same directives; the suffix's count is added by
             // [`RenderedCooked::join`] when its own render is available.
             assumed_undefined: self.assumed_undefined,
@@ -574,10 +590,13 @@ impl RenderedCooked {
         }));
         let mut inactive = prefix.inactive.clone();
         inactive.extend(suffix.inactive);
+        let mut inactive_exact = prefix.inactive_exact.clone();
+        inactive_exact.extend(suffix.inactive_exact);
         RenderedCooked {
             text,
             spans,
             inactive,
+            inactive_exact,
             assumed_undefined: prefix.assumed_undefined + suffix.assumed_undefined,
             written_order: std::sync::OnceLock::new(),
         }
@@ -615,6 +634,14 @@ struct Region {
     taken: bool,
     /// Are the tokens of the current branch compiled?
     live: bool,
+    /// Is the current branch's liveness an exact answer? It includes the certainty of every region around it.
+    certain: bool,
+    /// When a branch has been taken, was that decision exact? This is what says whether the `#else`/`#elif` branches
+    /// after it are dead for a reason a client may paint.
+    taken_certain: bool,
+    /// Has a condition already evaluated to false without an exact answer? If so, a later branch could still have been
+    /// the one the compiler takes, and its liveness is not exact either.
+    uncertain_false: bool,
 }
 
 /// Cook one file, with nothing defined before it — the architecture's **level 0**.
@@ -1748,6 +1775,7 @@ pub fn cook_with_search_and_state_and_features(
         }
         let spanned = &directives[directive_index];
         let was_live = is_live(&regions);
+        let was_certain = is_certain(&regions);
 
         // Everything before the directive is one run of ordinary tokens. No `#define` can take effect
         // inside a run, so the table is constant across it, and the lookup offset is the run's start.
@@ -1765,7 +1793,7 @@ pub fn cook_with_search_and_state_and_features(
                 );
             } else {
                 let span = span_of(tokens, run_from, token_index);
-                merge_span(&mut out.inactive, span);
+                mark_inactive(&mut out, span, was_certain);
             }
         }
 
@@ -1783,14 +1811,27 @@ pub fn cook_with_search_and_state_and_features(
                     line_base,
                     presumed_file.as_deref(),
                 );
+                let assumed = holds.is_none()
+                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens);
+                let decision_certain = !assumed;
+                let taken = holds == Some(true);
                 regions.push(Region {
                     outer_is_live: was_live,
-                    taken: holds == Some(true),
-                    live: was_live && holds == Some(true),
+                    taken,
+                    live: was_live && taken,
+                    certain: if was_live {
+                        was_certain && decision_certain
+                    } else {
+                        was_certain
+                    },
+                    taken_certain: if !was_live {
+                        was_certain
+                    } else {
+                        was_certain && taken && decision_certain
+                    },
+                    uncertain_false: was_live && !taken && !decision_certain,
                 });
-                if holds.is_none()
-                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens)
-                {
+                if assumed {
                     out.assumed_undefined += 1;
                 }
             }
@@ -1806,22 +1847,45 @@ pub fn cook_with_search_and_state_and_features(
                     line_base,
                     presumed_file.as_deref(),
                 );
+                let assumed = holds.is_none()
+                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens);
+                let decision_certain = !assumed;
                 if let Some(region) = regions.last_mut() {
+                    let branch_certain = if !region.outer_is_live {
+                        region.certain
+                    } else if region.taken {
+                        region.taken_certain
+                    } else {
+                        !region.uncertain_false && decision_certain
+                    };
                     region.live = region.outer_is_live && !region.taken && holds == Some(true);
+                    region.certain = branch_certain;
                     if holds == Some(true) {
-                        region.taken = true;
+                        if !region.taken {
+                            region.taken = true;
+                            region.taken_certain = branch_certain;
+                        }
+                    } else if region.outer_is_live && !region.taken && !decision_certain {
+                        region.uncertain_false = true;
                     }
                 }
-                if holds.is_none()
-                    || rests_on_an_undefined_name(&spanned.directive, &live, token_index, tokens)
-                {
+                if assumed {
                     out.assumed_undefined += 1;
                 }
             }
             DirectiveKind::Else => {
                 if let Some(region) = regions.last_mut() {
+                    let branch_certain = if !region.outer_is_live {
+                        region.certain
+                    } else if region.taken {
+                        region.taken_certain
+                    } else {
+                        !region.uncertain_false
+                    };
                     region.live = region.outer_is_live && !region.taken;
+                    region.certain = branch_certain;
                     region.taken = true;
+                    region.taken_certain = branch_certain;
                 }
             }
             DirectiveKind::Endif => {
@@ -1963,7 +2027,12 @@ pub fn cook_with_search_and_state_and_features(
         // and the `#endif` that closes it are part of the span a consumer greys out, which is also what
         // makes the pieces of one dead branch join into a single range.
         if !was_live || !is_live(&regions) {
-            merge_span(&mut out.inactive, spanned.range);
+            let exact = if !was_live {
+                was_certain
+            } else {
+                is_certain(&regions)
+            };
+            mark_inactive(&mut out, spanned.range, exact);
         }
 
         directive_index += 1;
@@ -1985,7 +2054,7 @@ pub fn cook_with_search_and_state_and_features(
             );
         } else {
             let span = span_of(tokens, run_from, tokens.len());
-            merge_span(&mut out.inactive, span);
+            mark_inactive(&mut out, span, is_certain(&regions));
         }
     }
 
@@ -2001,6 +2070,11 @@ pub fn cook_with_search_and_state_and_features(
 /// Are the tokens of the innermost region compiled?
 fn is_live(regions: &[Region]) -> bool {
     regions.last().is_none_or(|region| region.live)
+}
+
+/// Is the innermost region's liveness an exact answer?
+fn is_certain(regions: &[Region]) -> bool {
+    regions.last().is_none_or(|region| region.certain)
 }
 
 /// **Handle `#pragma push_macro("x")` / `#pragma pop_macro("x")` against the macro table.**
@@ -2143,6 +2217,14 @@ fn span_of(tokens: &[CppTokenData], from: usize, to: usize) -> SourceRange {
                 .saturating_sub(first.range.start_offset),
         ),
         _ => SourceRange::new(0, 0),
+    }
+}
+
+/// Add a dead span to both lists: every dead region, and the subset a client may paint.
+fn mark_inactive(out: &mut CookedStream, span: SourceRange, exact: bool) {
+    merge_span(&mut out.inactive, span);
+    if exact {
+        merge_span(&mut out.inactive_exact, span);
     }
 }
 

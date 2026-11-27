@@ -773,8 +773,10 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
                 .ok_or_else(|| format!("{} could not be cooked", opened.file.display()))?
         }
     };
-    let exact = answer.is_exact();
+    let exact_count = answer.exact_spans.len();
     let assumed = answer.assumed_undefined;
+    let all_exact = assumed == 0;
+    let exact_spans = answer.exact_spans;
     let mut spans = answer.spans;
     spans.sort_by_key(|span| span.start_offset);
 
@@ -783,15 +785,16 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
         "{} inactive region(s) in {}{}\n",
         spans.len(),
         opened.file.display(),
-        match exact {
+        match all_exact {
             true => String::new(),
             false => format!(
-                " — **{assumed} branch(es) were decided by an assumed-undefined name**, so these spans are a guess and must not be painted"
+                " — {exact_count} paintable; **{assumed} branch(es) were decided by an assumed-undefined name**, so the other spans are a guess"
             ),
         }
     );
     let mut regions = Vec::with_capacity(spans.len());
     for span in &spans {
+        let exact = exact_spans.contains(span);
         let start = at_a_place(text, span.start_offset);
         let end = at_a_place(text, span.end_offset());
         let first_line = text
@@ -800,8 +803,9 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
             .unwrap_or("")
             .trim();
         report.push_str(&format!(
-            "  {start}..{end}  {} byte(s)  {first_line}\n",
-            span.length
+            "  {start}..{end}  {} byte(s)  {first_line}{}\n",
+            span.length,
+            if exact { "" } else { "  (not painted)" }
         ));
         let (line, character) = line_col(text, span.start_offset);
         let (end_line, end_character) = line_col(text, span.end_offset());
@@ -809,12 +813,14 @@ pub fn the_inactive(opened: &mut Opened) -> Result<Answer, String> {
             "start": { "line": line.saturating_sub(1), "character": character.saturating_sub(1) },
             "end": { "line": end_line.saturating_sub(1), "character": end_character.saturating_sub(1) },
             "bytes": span.length,
+            "exact": exact,
         }));
     }
+
     let value = json!({
         "file": opened.file.display().to_string(),
         "assumed_undefined": assumed,
-        "exact": exact,
+        "exact": all_exact,
         "regions": regions,
     });
     Ok(Answer::new(report, value))

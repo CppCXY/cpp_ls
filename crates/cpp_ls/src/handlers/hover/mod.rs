@@ -162,17 +162,14 @@ pub async fn on_hover(
             return Some(markdown(header_markdown(&header)));
         }
 
-        // **A hover inside a region this configuration does not compile says so.**
-        //
-        // The dimming raises the question, and a card that answers a name in dead code without mentioning it is a
-        // confident answer about text the compiler never saw. Both gates are the ones the notification uses:
-        // `is_exact` (every branch was decided from a definition the cook held) and the cursor being inside a span —
-        // an inexact reading is not a claim, so it gets no note rather than a wrong one.
+        // **A hover inside a region this configuration does not compile says so.** The dimming raises the question,
+        // and a card that answers a name in dead code without mentioning it is a confident answer about text the
+        // compiler never saw. Only spans whose branch decisions were exact qualify; a guessed span gets no note rather
+        // than a wrong one, and an exact span is still worth the note when another branch of the file was guessed.
         let inside_inactive_code = session.inactive_regions(&path).is_some_and(|answer| {
-            answer.is_exact()
-                && answer.spans.iter().any(|span| {
-                    span.start_offset <= in_the_file.get() && in_the_file.get() < span.end_offset()
-                })
+            answer.exact_spans.iter().any(|span| {
+                span.start_offset <= in_the_file.get() && in_the_file.get() < span.end_offset()
+            })
         });
 
         let card = hover(session, &view, offset, in_the_file);

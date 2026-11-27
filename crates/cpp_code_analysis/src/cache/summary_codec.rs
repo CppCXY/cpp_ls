@@ -1776,7 +1776,10 @@ const COOKED_MAGIC: &[u8; 8] = b"CPPLSCKR";
 ///
 /// 4: and **how many of those branches were decided by C's undefined-is-zero rule** (`assumed_undefined`). A consumer
 /// that paints the spans must not paint a guess, and a warm start that lost the count would paint one silently.
-const COOKED_VERSION: u32 = 4;
+///
+/// 5: the **exact subset** of those spans. A file can have nine branches decided by definitions and one decided by an
+/// assumption; the count alone can only suppress all ten, while the subset is what a client may paint.
+const COOKED_VERSION: u32 = 5;
 
 /// **The record has its rendering with it** — see [`COOKED_VERSION`].
 const COOKED_HAS_A_RENDERING: u8 = 1;
@@ -1817,6 +1820,11 @@ pub fn encode_the_cooked_record(
         // the file the rendering *dropped*, so nothing in `text` names them.
         put_u32(&mut out, rendered.inactive.len() as u32);
         for span in &rendered.inactive {
+            put_range(&mut out, *span);
+        }
+        // **The subset safe to paint**, separately from the branches an assumption decided.
+        put_u32(&mut out, rendered.inactive_exact.len() as u32);
+        for span in &rendered.inactive_exact {
             put_range(&mut out, *span);
         }
         // And **how many of them were a guess** — the number that decides whether a client may paint them.
@@ -1940,6 +1948,10 @@ pub fn decode_the_cooked_record(
     for _ in 0..reader.count()? {
         inactive.push(reader.range()?);
     }
+    let mut inactive_exact = Vec::new();
+    for _ in 0..reader.count()? {
+        inactive_exact.push(reader.range()?);
+    }
     let assumed_undefined = reader.u32()? as usize;
     Ok((
         reading,
@@ -1947,6 +1959,7 @@ pub fn decode_the_cooked_record(
             text,
             spans,
             inactive,
+            inactive_exact,
             assumed_undefined,
         )),
     ))
@@ -2196,6 +2209,8 @@ fn a_cooked_record_with_its_rendering_round_trips() {
         ],
         // **And the regions this configuration did not compile**, which no rendering text can answer for.
         vec![SourceRange::new(7, 9), SourceRange::new(20, 4)],
+        // The subset whose decisions were exact, so one guess does not hide the others.
+        vec![SourceRange::new(7, 9)],
         // With the count of branches that were a guess, so a warm start paints the same answer a cold one does.
         3,
     );
@@ -2213,6 +2228,10 @@ fn a_cooked_record_with_its_rendering_round_trips() {
     assert_eq!(
         rendering.inactive, rendered.inactive,
         "the inactive regions are the half a rendering cannot derive, so a warm start must get them back"
+    );
+    assert_eq!(
+        rendering.inactive_exact, rendered.inactive_exact,
+        "and the subset that is safe to paint is a separate answer"
     );
     assert_eq!(
         rendering.assumed_undefined, rendered.assumed_undefined,

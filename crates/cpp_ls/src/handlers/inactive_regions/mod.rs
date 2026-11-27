@@ -84,13 +84,10 @@ async fn publish(context: &ServerContextSnapshot, uri: Uri, version: i32) -> boo
         return true;
     };
 
-    // **A guess is not painted.** The spans are still real — a branch was dropped — but the configuration may not be
-    // the one the user builds with (`assumed_undefined` counts branches decided by C's undefined-is-zero rule), and
-    // the client is told "nothing" instead of told a lie.
-    let regions = match answer.is_exact() {
-        true => ranges_of(&text, &answer.spans),
-        false => Vec::new(),
-    };
+    // **A guess is not painted, but it does not hide its neighbours.** The spans of branches decided by an
+    // undefined-is-zero name are in `spans` and absent from `exact_spans`; the client gets the exact ones, which is
+    // the difference between a file with one uncertain branch and a file with no answer at all.
+    let regions = ranges_of(&text, &answer.exact_spans);
 
     // **The gates the diagnostics channel already uses**, and for the same reason — the two stores are updated in two
     // steps (`didChange` writes the buffer, then the session), so a publication can otherwise pair one version's

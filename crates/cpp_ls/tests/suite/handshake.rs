@@ -7899,6 +7899,71 @@ int live;
     let _ = server.wait_for_exit();
 }
 
+/// **One guessed branch does not suppress the exact branch beside it.**
+///
+/// A file with `#if ON` (exact) and `#if UNDEFINED` (the undefined-is-zero assumption) has one paintable region and
+/// one withheld one. The notification carries the paintable region; sending an empty list would lose the answer the
+/// configuration did know.
+#[test]
+fn inactive_regions_keep_the_exact_spans_when_another_branch_is_a_guess() {
+    const SOURCE: &str = "\
+#define ON 1
+#if ON
+int live;
+#else
+int exact_dead;
+#endif
+#if UNDEFINED_ANYWHERE
+int guessed_dead;
+#endif
+";
+    let project = Project::new("inactive-regions-mixed-exactness");
+    project.write("a.cpp", SOURCE);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "initializationOptions": { "inactiveRegions": true },
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let sent = server.wait_for_within(Duration::from_secs(60), |message| {
+        message["method"] == json!("textDocument/inactiveRegions")
+            && message["params"]["regions"]
+                .as_array()
+                .is_some_and(|regions| regions.len() == 1)
+    });
+    let regions = sent["params"]["regions"]
+        .as_array()
+        .expect("regions is a list");
+    assert_eq!(regions.len(), 1, "the exact branch is painted: {sent}");
+    assert_eq!(
+        regions[0]["start"]["line"],
+        json!(3),
+        "the exact `#else` branch is the one painted: {sent}"
+    );
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
 /// **A hover inside code this configuration does not compile says so, and a hover beside it does not.**
 ///
 /// The dimming raises the question ("why is this grey?"), and a card that answers a name in dead code without
