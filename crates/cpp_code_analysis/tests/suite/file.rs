@@ -71,10 +71,6 @@ fn a_comment_is_the_trees_spelling_not_the_lexers() {
         kinds.iter().any(|kind| kind == "DocText"),
         "and so is the comment's text, as its own token: {kinds:?}"
     );
-    assert!(
-        !kinds.iter().any(|kind| kind == "Identifier" && false),
-        "sanity"
-    );
 }
 
 /// The tokens tile the file: contiguous, in order, covering every byte.

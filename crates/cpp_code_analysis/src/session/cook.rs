@@ -713,23 +713,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     return Some(AClaimedCook::Stored(path, cooked, rendered));
                 }
                 let built = self.cooking_materials(&path);
-                // **A claimed file that yields no materials is a file that is now neither queued nor cooked.**
-                // `claim_cooking` popped it and this answered `None`, so it is gone from both places and the loop
-                // that decides whether there is work left reads `cooked == 0` as "nothing to do". Naming the reason
-                // is what separates "the summary is not in the index yet" (a state) from "the unit is provisional"
-                // (also a state) from a defect.
-                if built.is_none() && false {
-                    let indexed = self.store.index().summary(&path).is_some();
-                    let (unit, provisional) = match self.unit_and_state_of(&path) {
-                        Some((_, provisional)) => ("held", provisional),
-                        None => ("none", false),
-                    };
-                    eprintln!(
-                        "cooking: {} yields no materials | summary indexed {indexed} | unit {unit} \
-                         provisional {provisional}",
-                        path.display()
-                    );
-                }
                 built.map(AClaimedCook::Fresh)
             })
             .collect()

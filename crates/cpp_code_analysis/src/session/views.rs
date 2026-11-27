@@ -414,6 +414,38 @@ impl<F: FileProvider + Clone> Session<F> {
         ))
     }
 
+    /// **The rendering view, built now when it has not been read yet.**
+    ///
+    /// [`Session::view`] deliberately answers `None` for a file whose rendering is not built: a rendering is a unit
+    /// walk and a preprocess, and a query must not pay that. A completion is the exception, and the reason is a
+    /// client's own caching: the answer to a request is what the client shows, and a *provisional* list marked
+    /// complete is cached and reused for every further character typed at the same word — so a reader gets no list
+    /// at all until some later request happens to find the rendering ready (reported from an editor: typing `k` in
+    /// `channel_all_info` showed nothing until `kvec`). Measured on `channel.c`: the writer's cook of this file is
+    /// **3 ms** when its environment is warm and **194 ms** for the first one after an edit, which is work the pump
+    /// is doing anyway — doing it here is what makes the first answer after an edit the compiler's reading.
+    pub fn view_of_the_rendering_now(&self, path: impl AsRef<Path>) -> Option<FileView> {
+        let file = self.vfs.held(path.as_ref())?.clone();
+        let rendered = match self.known_rendering_of(&file.path, &file.text) {
+            Some(known) => known,
+            None => {
+                let built = std::sync::Arc::new(self.rendering_of(&file.path)?);
+                // Remembered, so the next `view` — which cannot build one — finds it.
+                self.remember_a_rendering(
+                    &file.path,
+                    cache::content_hash(&file.text),
+                    std::sync::Arc::clone(&built),
+                );
+                built
+            }
+        };
+        Some(FileView::parse_rendering_in(
+            &file,
+            &rendered,
+            &self.config_for(&file.path),
+        ))
+    }
+
     /// **Whether a rendering for this text is in memory**, without consulting the disk — see
     /// [`Session::view_of_the_file`], which wants to know only whether to ask for one.
     pub(crate) fn a_rendering_is_known_in_memory(&self, path: &Path, text: &str) -> bool {

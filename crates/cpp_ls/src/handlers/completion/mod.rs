@@ -48,6 +48,7 @@
 //! request a client sends anyway when it does not know the answer.
 
 use crate::handlers;
+use cpp_code_analysis::file::coordinates::ReadingOffset;
 use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session, detail_of};
 use lsp_types::{
     ClientCapabilities, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
@@ -71,51 +72,12 @@ pub async fn on_completion(
     let snippets = snippets_of(context.lsp_features().supports_snippets());
     let requested_path = uri_to_file_path(&uri);
 
-    // **Every request, whether or not anything goes wrong with it.** The report is "补全时有时无" — sometimes there,
-    // sometimes not — and a log that records only the empty answers cannot tell "the client asked and got nothing"
-    // from "the client never asked", which have nothing in common as fixes. This line and the one at the answer are
-    // the pair that separates them.
+    // **No request-side catch-up.** The update queue's writer owns the index impact of an edit — it calls
+    // `Session::catch_up` and `cook` for the changed files before the barrier releases — and `didOpen` does the same
+    // for a newly opened buffer. A completion that drained nine unread includes here would repeat that work on the
+    // keystroke path, without a cancellation token, and could hold the session's write lock after the client has
+    // already superseded the request. The first answer may be provisional; the writer and the pump make it current.
 
-    // Read in first, under the write lock, so the query itself can be a read — the same boundary every handler has.
-    //
-    // **Two steps, and the second is the one that makes the answer about the text the user sees.** `prepare` puts the
-    // file in the table; `catch_up` makes its **summary** current, because an edit replaces the text *and* drops the
-    // summary, and the summary is rebuilt later by the pump. A completion asked inside that window gets the new text
-    // with the old facts: `full.` cannot find the type of `full`, the member query declines, and the client is shown
-    // the names in scope — a list of things that cannot follow a `.`. Measured on a user's file: the popup after
-    // `myName.firstName.` was `printf`, `full`, `sum`, `main` and the keywords.
-    //
-    // It is one parse of **one file**, and nothing at all when there is no edit waiting — see [`Session::catch_up`],
-    // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
-    // include closure, which for a file that includes `<string>` is thousands of headers).
-    if let Some(_path) = requested_path.as_ref() {
-        // **Read-only by contract.** The event queue has already applied this document's text; a completion asks
-        // the analysis what it knows and never loads, catches up, cooks or queues anything.
-        let _ = &context;
-    }
-
-    // **And then the query, which no longer waits for the index to drain.**
-    //
-    // It used to: `settle` asked the session whether the *project's* indexing queue was empty, with a two-second
-    // budget, and waited when it was not. The reason was real and is worth keeping on the record — the list is built
-    // to degrade rather than lie, so an index that is still filling gives **fewer** items and never wrong ones, and
-    // opening a file used to show a popup of nothing but keywords while hover worked.
-    //
-    // What the wait was actually buying is the answer to a question about **one file**, and it was
-    // the wrong question to ask the whole project. clangd's design states the rule this now
-    // follows, in as many words: *"we don't wait for it to be up-to-date. Since completion is
-    // extremely time sensitive, it just uses whichever is immediately available."*
-    //
-    // The work that makes the immediate answer a good one happens **before** this point and it is about this file:
-    // `AnalysisState::prepare` puts the file's text in reach, `AnalysisState::catch_up` reads the file and the
-    // includes of it the index has never read, and `read_the_modules` reads the interface units it imports. After
-    // those three the index holds what a completion about *this* cursor needs, and the global question is not a
-    // prerequisite for anything.
-    //
-    // Measured over the wire on the fixture `crates/cpp_ls/tests/latency.rs` uses, twelve completions fired from
-    // `didOpen`: the wait was **988 / 536 / 1443 / 877 / 542 / 734 / 584 / 1479 / 532 / 728 / 353 / 4 ms** and is now
-    // **11 / 8 / 4 / 9 / 0 … 7 ms**, with the list the same length or longer at every attempt.
-    let asked_at = std::time::Instant::now();
     // **The reading a semantic answer comes from.** The file's own view keeps the positions and the prefix; the
     // rendering owns bindings, types and members. Asking for the current buffer's rendering here is what makes a
     // macro-declared local (`kvec_t(int64_t) ids`) visible on the **first** completion after an edit, instead of
@@ -132,25 +94,10 @@ pub async fn on_completion(
         }
         None => None,
     };
-    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
+
+    snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        // **The file's own tokens, and not the compiler's rendering.**
-        //
-        // A completion is about what a reader is **typing**, and that is the text in front of them. The rendering is
-        // the parser's input, built for resolving macros and types — and it is built by *deleting the line breaks*,
-        // so a file that reads as twenty lines becomes one. A cursor reader cannot survive that: measured on a live
-        // server, a plain identifier inside a function was read as a **qualified name in scope `std`**, because with
-        // everything on one line the recovery glued the `std::` of `std::string name;` to the `local_` being typed.
-        // The answer was `std`'s two hundred members while the variables in the function and the file's own globals
-        // were missing — the wrong scope, in a list that looks like a full one.
-        //
-        // **The offset and the view are taken together, from that one reading.** Resolving the position through
-        // `view_and_offset_at` — which prefers the rendering — and then querying the file's own view is the exact
-        // mixing this replaced, and it was, for one build: measured, the same client position resolved to offset 53
-        // before an edit and 26 after it, because the first came from one reading and the answer from the other.
-        let viewing = std::time::Instant::now();
         let view = session.view_of_the_file(&path)?;
-        let viewed = viewing.elapsed().as_millis();
         let offset = file_offset_at_position(&view, position)?;
 
         // **Inside a format string the vocabulary is the grammar's, not the language's.**
@@ -165,12 +112,6 @@ pub async fn on_completion(
             && let Some(items) =
                 handlers::format::complete::format_string_complete(session, &view, held, offset)
         {
-            log::debug!(
-                "completion: {} format-string item(s) at {}:{}",
-                items.len(),
-                position.line,
-                position.character
-            );
             return Some(CompletionResponse::List(lsp_types::CompletionList {
                 // **Complete**, unlike the language's own list: the grammar's vocabulary is closed, so a client may
                 // filter it without asking again. An empty one says "nothing may go here", which is a fact and not a
@@ -180,18 +121,7 @@ pub async fn on_completion(
             }));
         }
 
-        let finding = std::time::Instant::now();
         let found = from_the_rendering.unwrap_or_else(|| session.completions(&view, offset));
-        // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
-        // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
-        // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether
-        // it was the file's parse or the walk over the index.
-        log::debug!(
-            "completion: view {viewed} ms, completions {} ms, {} item(s)",
-            finding.elapsed().as_millis(),
-            found.items.len()
-        );
-
         log_a_member_that_produced_no_members(
             session,
             &view,
@@ -200,13 +130,44 @@ pub async fn on_completion(
             &found.items,
         );
 
+        // **A list that cannot match what was typed is not a complete answer.** The flag is the protocol's one
+        // way of saying "ask again"; clearing it unconditionally is what makes a client that trusts it show
+        // **nothing** for every keystroke until some later answer happens to match the prefix, with the server idle
+        // in between (reported from an editor: typing `k` in `channel_all_info` showed no list until `kvec`).
+        //
+        // Three reasons, one flag, and each is honest here:
+        //
+        // * `found.incomplete` — the analysis itself is provisional (the rendering of this text is not read yet, or
+        //   a class it needs is not in the index). See `CompletionSet::incomplete`.
+        // * **nothing in the list starts with the typed prefix** — the answer is not about this word. That happens
+        //   when the list was built for a *different* reading of the file (a stale rendering, a cursor at the edge of
+        //   a token), and a client that filters it shows an empty menu.
+        // * **no prefix at all.** The answer to "what can be written here" is not the answer to "what word am I
+        //   typing", and the difference matters because a client caches a *complete* answer and reuses it while the
+        //   reader keeps typing: measured from the same report, an empty-prefix answer (`1000` names at a blank line)
+        //   was cached by blink.cmp and **no request was sent at all** for `k`, `kv`, `kve` — the server's own log of
+        //   that session holds one completion request, at `kvec`. Marked provisional, the empty-prefix answer is
+        //   re-asked the moment a character is typed, which is exactly when its answer changes.
+        //
+        // `truncated` is deliberately **not** part of this: a capped list is re-asking for the same capped list,
+        // which is the case `CompletionSet::truncated` documents.
+        let answers_the_prefix = found.prefix.is_empty()
+            || found.items.iter().any(|item| {
+                item.label.starts_with(&found.prefix)
+                    || item
+                        .filter
+                        .as_deref()
+                        .is_some_and(|filter| filter.starts_with(&found.prefix))
+            });
+        let is_incomplete = found.incomplete || found.prefix.is_empty() || !answers_the_prefix;
+
         Some(CompletionResponse::List(lsp_types::CompletionList {
             // **Never ask the client to keep re-querying a list it can filter.** `isIncomplete: true` makes the
             // frontend treat the answer as a provisional page: it filters/re-requests instead of showing the names
             // it already has, and on a big file that is every keystroke. The server answers with the names it knows;
-            // the next keystroke is a new request anyway. The analysis' own "stopped short" flag remains available
-            // in `found`, but it is not the client's filter contract.
-            is_incomplete: false,
+            // the next keystroke is a new request anyway — unless the answer is provisional or about another word,
+            // which is what the computation above distinguishes.
+            is_incomplete,
             items: found
                 .items
                 .iter()
@@ -215,20 +176,7 @@ pub async fn on_completion(
                 .collect(),
         }))
     })
-    .await;
-
-    log::debug!(
-        "completion: the query took {} ms (answer {})",
-        asked_at.elapsed().as_millis(),
-        match &answer {
-            RequestOutcome::Ready(_) => "ready",
-            RequestOutcome::Cancelled(_) => "cancelled",
-            RequestOutcome::Missing => "missing",
-            RequestOutcome::Failed { .. } => "failed",
-        }
-    );
-
-    answer
+    .await
 }
 
 /// **Why a `.` produced no members** — the one diagnosis in this handler worth a log line.
@@ -286,7 +234,7 @@ fn log_a_member_that_produced_no_members(
             format!("{found:?}")
         });
 
-    log::info!(
+    log::debug!(
         "completion at {}:{offset} (asked line {} character {}, on {landed_on}) — the line is {line_body:?} — \
              the index holds {} files with {} still queued — has no members: {}",
         view.path.display(),
@@ -301,7 +249,7 @@ fn log_a_member_that_produced_no_members(
             &view.path,
             // `offset` is the rendering's throughout this report — the lines above slice `view.source` with it — and
             // the query reads `view.root`, so it is the same number in the same numbering.
-            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+            ReadingOffset::new(offset),
         )
     );
 }
@@ -417,14 +365,8 @@ fn text_edit(
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: lsp_types::Range::new(
-            position_at_offset(
-                view,
-                cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.start_offset),
-            )?,
-            position_at_offset(
-                view,
-                cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.end_offset()),
-            )?,
+            position_at_offset(view, ReadingOffset::new(replace.start_offset))?,
+            position_at_offset(view, ReadingOffset::new(replace.end_offset()))?,
         ),
         new_text,
     }))

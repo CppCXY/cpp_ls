@@ -501,7 +501,7 @@ async fn apply_text_batch(
                 let caught = phase.elapsed();
                 let phase = std::time::Instant::now();
                 session.cook(path);
-                log::info!(
+                log::debug!(
                     "writer phase: {} catch_up {:?}, cook {:?}",
                     path.display(),
                     caught,
@@ -510,7 +510,7 @@ async fn apply_text_batch(
             }
         })
         .await;
-    log::info!(
+    log::debug!(
         "writer phase: one content batch took {:?}",
         started.elapsed()
     );

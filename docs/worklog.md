@@ -1545,3 +1545,68 @@ from and dropped when the index changes — a cache, which is what they are.
 same request measured 704–916 ms; with 1.2 s it measured 104–194 ms. That is the write batch re-cooking the file,
 which is the barrier's cost and not this query's — the probe (`target/bench/edit_probe.py`) separates the two.
 
+
+## Why `k` showed no completion until `kvec`: a provisional answer reported as final
+
+Reported from an editor on `channel.c`, `channel_all_info`, before the `return`: typing `k` showed nothing until
+`kvec`, with the CPU at zero in between — so the server had answered, and the answer was the problem.
+
+The server's own log of that session shows the six completion requests were answered in **62–104 ms**, with the
+prefix reaching the analysis (`written: "k"`). The answer's *contract* was wrong in three places:
+
+1. **A completion answered from the file's own text was reported as complete.** `completion_from_a_rendering`
+   answered `session.view(&path)` — the *rendering* — and fell back to the file's own reading, marking that
+   `incomplete`; the handler then **hardcoded `is_incomplete: false`** and dropped the flag. A client that trusts the
+   flag caches that list. blink.cmp's LSP source does exactly this (`sources/lsp/cache.lua`): a response with
+   `is_incomplete_forward = false` is reused for every further character typed at the same word, and the server is
+   not asked again. One provisional list, a whole word without a menu.
+2. **A rendering that is not read yet is not a reason to answer from another reading.** The rendering is built by
+   the pump's idle tail, which runs *outside* the content batch the request waits for, so the first completion after
+   an edit can land in that window. `Session::view_of_the_rendering_now` now cooks it in the query (3 ms warm, 194 ms
+   for the first cook after an edit — work the pump does anyway), so the first answer is the compiler's reading.
+3. **A list that cannot match the typed prefix was reported as complete.** Measured: `kq` answered `0 item(s)` with
+   `isIncomplete: false` — a complete answer saying "nothing", which a client caches. The handler now computes
+   `found.incomplete || !answers_the_prefix`; the item count and both flags are deliberately not logged on every
+   keystroke, because that path is the completion hot path. The protocol answer is the evidence.
+
+Verified over the protocol (`target/bench/complete_probe.py`, the reported position): `k` → 94 items with `kvec_t`
+among them, `kv` → 40, `kve` → 19 (`kvec_t` first), `kvec` → 5; `kq` → 0 items with **`isIncomplete: true`**.
+Suites: 914 + 1164 + 197 + 118 green, clippy clean.
+
+**Not verified end-to-end**: driving insert mode inside `nvim --headless` did not take (`mode` stayed `n`), so the
+client half is established from blink's own source rather than from a recorded failure at its menu.
+
+
+## The `k` that never reached the server: a cached empty-prefix answer
+
+The report — typing `k` in `channel_all_info` showed nothing until `kvec` — is **not** the server declining to
+answer. Its own log of that session (`%LOCALAPPDATA%\cpp_ls\logs\e_neovim.log`, 00:43) holds **one** completion
+request, at `"  kvec"`; there is no request for `k`, `kv` or `kve` at all.
+
+The client did not ask because it had cached a *complete* answer from an earlier request at the same place:
+
+* the cursor landed on the blank line before `return ret;`, and a completion request there has an **empty prefix** —
+  1000 names, answered with `isIncomplete: false`;
+* blink.cmp caches a response with `isIncomplete = false` and reuses it while the reader types forward at the same
+  word (`sources/lsp/cache.lua`: `if not entry.response.is_incomplete_forward and entry.context.cursor[2] > context.cursor[2] then return end`);
+* so `k`, `kv`, `kve` filtered that stale list locally and never reached the server. At `kvec` a new completion
+  session started and the request finally went out.
+
+An empty-prefix answer is **not** the answer to "what word am I typing": the moment a character is typed the answer
+changes. It now reports itself provisional (`isIncomplete: true`) and the client asks again at the first keystroke.
+
+Reproduced at the protocol level with `target/bench/blink_sim.py --prime-empty`, which models the client's cache,
+its `$/cancelRequest` of the superseded request, and its own fuzzy filter:
+
+```text
+before (bd9d49c6)          after (c294805e)
+prime: 1000 items, false   prime: 1000 items, true
+k:   cached 1000 -> 99     k:   94 items, false -> menu 94
+kv:  cached 1000 -> 40     kv:  40
+kve: cached 1000 -> 19     kve: 19
+kvec:cached 1000 -> 5      kvec:5
+```
+
+Note what the "before" column shows: **no request is sent** for any of the four characters — the whole word is
+answered from the one cached list, which is exactly the shape the server's log records.
+

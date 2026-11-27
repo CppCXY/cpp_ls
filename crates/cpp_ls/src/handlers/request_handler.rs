@@ -38,7 +38,7 @@ use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
-    CodeActionRequest, CodeLensRequest, Completion, DocumentDiagnosticRequest,
+    CodeActionRequest, CodeLensRequest, CodeLensResolve, Completion, DocumentDiagnosticRequest,
     DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
     Formatting, GotoDefinition, GotoImplementation, GotoTypeDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, RangeFormatting, References, Rename,
@@ -52,7 +52,7 @@ use crate::context::ServerContext;
 use super::{
     call_hierarchy::{on_incoming_calls, on_outgoing_calls, on_prepare_call_hierarchy},
     code_action::on_code_action,
-    code_lens::on_code_lens,
+    code_lens::{on_code_lens, on_code_lens_resolve},
     completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
@@ -136,6 +136,14 @@ macro_rules! dispatch_request {
                                     // 2. a newer request for **the same method and document** arrived, which is the
                                     //    client telling us the answer it wants is a different one.
                                     let answer = if cancel_token.is_cancelled() {
+                                        // **A request the client cancelled before it was even asked.** Reported,
+                                        // because a client that cancels its own newest request shows its reader
+                                        // nothing no matter what the server answers — and the server's log cannot
+                                        // tell that apart from "the query returned no items" without this line.
+                                        log::debug!(
+                                            "request {}: cancelled by the client before it ran",
+                                            id
+                                        );
                                         crate::context::RequestOutcome::Cancelled(
                                             crate::context::CancelSource::Client,
                                         )
@@ -210,6 +218,7 @@ pub async fn on_request_handler(
     CallHierarchyOutgoingCalls => on_outgoing_calls,
     CodeActionRequest => on_code_action,
     CodeLensRequest => on_code_lens,
+    CodeLensResolve => on_code_lens_resolve,
     Completion => on_completion,
     ResolveCompletionItem => on_completion_resolve,
     DocumentHighlightRequest => on_document_highlight,

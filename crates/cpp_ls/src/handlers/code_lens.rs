@@ -40,9 +40,11 @@
 //!
 //! # What the client is told
 //!
-//! A lens with no command is drawn as nothing by several clients, so each carries `editor.action.showReferences` —
-//! the editor's own "show me them" — with the places the count was made of. A client that does not know the command
-//! still draws the title.
+//! **In two steps, like rust-analyzer.** `textDocument/codeLens` returns one anchor per function with its range and a
+//! `data` payload, and **no command**: producing that list needs the declaration, not the reference index. The client
+//! sends `codeLens/resolve` for the lenses it actually draws; only that request asks [`super::references::places_of`]
+//! and attaches `editor.action.showReferences` (or `cppls.showReferences` on VS Code), with the places the count was
+//! made of. A client that does not know the command still draws the title once resolved.
 
 use crate::context;
 use cpp_code_analysis::{DeclKind, Known};
@@ -56,40 +58,130 @@ use super::RegisterCapabilities;
 use crate::context::{ClientId, RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{path_to_uri, position_in_file, uri_to_file_path};
 
+/// **What a lens needs in order to resolve its count later.** The first request returns anchors only; the client asks
+/// for the visible ones with this payload.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CodeLensData {
+    uri: String,
+    name_start: usize,
+    name_end: usize,
+}
+
 pub async fn on_code_lens(
     context: ServerContextSnapshot,
     params: CodeLensParams,
     cancel_token: CancellationToken,
 ) -> RequestOutcome<Vec<CodeLens>> {
     let uri = params.text_document.uri;
-    let client = context.lsp_features().client_id();
 
+    // **The first answer is anchors, not counts.** Rust-analyzer's shape: `textDocument/codeLens` returns one lens per
+    // function with a `data` payload and no command; the client resolves the lenses it actually draws. Nothing here
+    // depends on `places_of`, so a reference index that is still filling cannot turn this list into a partial one or
+    // `ContentModified`.
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference
-        // about the editor rather than about the analysis — so it is answered here, at the edge, before any query is
-        // made: the point of the switch is not to pay for a count nobody will read. The capability is still
-        // advertised, because a client asks for it once at `initialize` and cannot be told later that the provider
-        // went away; an empty list is what "no lenses" looks like on the wire.
         if session.project_config().config.code_lens.enable == Some(false) {
             return Some(Vec::new());
         }
         let view = session.view_of_the_file(&path)?;
-        complete_lenses_of(session, &view, &uri, client)
+        anchor_lenses_of(session, &view, &uri)
     })
     .await;
 
     match answer {
-        // **A partial list is not an answer.** LSP has no "keep what you have": a code-lens response replaces the
-        // client's list. Returning the functions whose counts are known while another is still `Unknown` makes the
-        // visible lines change on every keystroke, and returning an empty list clears them. `ContentModified` says
-        // the request could not be answered for the document as it is; the client keeps what it is showing, and the
-        // refresh after a load is what asks again once the answer exists.
         RequestOutcome::Missing => {
             RequestOutcome::Cancelled(context::CancelSource::ContentModified)
         }
         other => other,
     }
+}
+
+/// **The lens list without counts** — one anchor per eligible function, with the data [`on_code_lens_resolve`] needs.
+fn anchor_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    uri: &Uri,
+) -> Option<Vec<CodeLens>> {
+    let held = session.files().held(&view.path)?;
+    let summary = session.index().summary(&view.path)?;
+    let mut lenses = Vec::new();
+    for fact in eligible_functions(&summary.declarations) {
+        let (Some(start), Some(end)) = (
+            position_in_file(held, fact.name_range.start_offset),
+            position_in_file(held, fact.name_range.end_offset()),
+        ) else {
+            continue;
+        };
+        let data = serde_json::to_value(CodeLensData {
+            uri: uri.to_string(),
+            name_start: fact.name_range.start_offset,
+            name_end: fact.name_range.end_offset(),
+        })
+        .ok();
+        lenses.push(CodeLens {
+            range: Range::new(start, end),
+            command: None,
+            data,
+        });
+    }
+    Some(lenses)
+}
+
+/// **Resolve one visible lens into its command.** This is the only code-lens path that asks for references.
+pub async fn on_code_lens_resolve(
+    context: ServerContextSnapshot,
+    mut lens: CodeLens,
+    cancel_token: CancellationToken,
+) -> RequestOutcome<CodeLens> {
+    let Some(data) = lens
+        .data
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<CodeLensData>(value.clone()).ok())
+    else {
+        return RequestOutcome::Ready(lens);
+    };
+    let client = context.lsp_features().client_id();
+    let uri = data.uri.parse::<Uri>().ok();
+
+    let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
+        let uri = uri.clone()?;
+        let path = uri_to_file_path(&uri)?;
+        let summary = session.index().summary(&path)?;
+        let fact = eligible_functions(&summary.declarations).find(|fact| {
+            fact.name_range.start_offset == data.name_start
+                && fact.name_range.end_offset() == data.name_end
+        })?;
+        let Known::Yes(places) = super::references::places_of(session, fact, path.clone(), false)
+        else {
+            // Unknown is not a reason to erase a lens: the anchor is still valid, and the next refresh asks again.
+            return Some(lens);
+        };
+        let places = locations_of(session, &places);
+        lens.command = the_command(client, &uri, lens.range.start, places.clone(), places.len());
+        lens.data = None;
+        Some(lens)
+    })
+    .await;
+
+    match resolved {
+        RequestOutcome::Missing => {
+            RequestOutcome::Cancelled(context::CancelSource::ContentModified)
+        }
+        other => other,
+    }
+}
+
+/// The functions a lens is drawn over. One predicate for the first request and the resolve, so a lens cannot be
+/// resolved against a declaration the initial list would not have shown.
+fn eligible_functions(
+    declarations: &[cpp_code_analysis::DeclFact],
+) -> impl Iterator<Item = &cpp_code_analysis::DeclFact> {
+    declarations.iter().filter(|fact| {
+        fact.kind == DeclKind::Function
+            && !fact.local
+            && !fact.is_a_destructor()
+            && !fact.is_an_operator()
+    })
 }
 
 /// **One lens per function this file declares or defines**, with the number of places that use it.
@@ -110,7 +202,9 @@ pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     complete_lenses_of(session, view, uri, client).unwrap_or_default()
 }
 
-/// The complete answer, or `None` when one of its counts is not known yet.
+/// The complete answer, or `None` when one of its counts is not known yet — the test-side helper for the old
+/// synchronous shape. Production goes through [`anchor_lenses_of`] and [`on_code_lens_resolve`].
+#[cfg(test)]
 fn complete_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
     view: &cpp_code_analysis::FileView,
@@ -259,7 +353,7 @@ pub struct CodeLensCapabilities;
 impl RegisterCapabilities for CodeLensCapabilities {
     fn register_capabilities(server: &mut ServerCapabilities, _client: &ClientCapabilities) {
         server.code_lens_provider = Some(lsp_types::CodeLensOptions {
-            resolve_provider: Some(false),
+            resolve_provider: Some(true),
         });
     }
 }

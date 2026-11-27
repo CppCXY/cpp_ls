@@ -318,15 +318,8 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
     let region = span_of(tokens);
     expander.expand_into(&marked, region, None);
-    let expansion = expander.finish();
-    if expansion.exhausted && false {
-        eprintln!(
-            "expand: exhausted after {} pushed token(s) from {} input token(s)",
-            expansion.tokens.len(),
-            tokens.len()
-        );
-    }
-    expansion
+
+    expander.finish()
 }
 
 /// **Expand a file's run with the position-dependent predefined macros answered** — `__LINE__`, `__COUNTER__` and
