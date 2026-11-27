@@ -295,10 +295,10 @@ pub struct RenderedCooked {
     /// **The regions of the file this configuration does not compile**, in file coordinates — the answer behind the
     /// editor's grey text.
     ///
-    /// Copied from [`CookedStream::inactive`], which the walk fills while it decides branches: one span per dead
-    /// branch, the directive lines included on purpose so the pieces of one branch are one range. Every offset is an
-    /// offset into the **file's own text** — not into `text`, whose offsets mean nothing outside this value — which is
-    /// what makes an LSP range a line-index lookup rather than a mapping.
+    /// Copied from [`CookedStream::inactive`], which the walk fills while it decides branches: one span per dead run of
+    /// ordinary tokens. Directive lines and the trivia after them are structure, not code, and are not included. Every
+    /// offset is an offset into the **file's own text** — not into `text`, whose offsets mean nothing outside this
+    /// value — which is what makes an LSP range a line-index lookup rather than a mapping.
     ///
     /// Empty for a file with no conditionals, and empty for a rendering read back from a record written before this
     /// field existed; the record's version is what tells those apart (`COOKED_VERSION`).
@@ -2023,17 +2023,11 @@ pub fn cook_with_search_and_state_and_features(
             _ => {}
         }
 
-        // A directive belongs to the region it is written in: the `#if` that opens a branch nobody takes
-        // and the `#endif` that closes it are part of the span a consumer greys out, which is also what
-        // makes the pieces of one dead branch join into a single range.
-        if !was_live || !is_live(&regions) {
-            let exact = if !was_live {
-                was_certain
-            } else {
-                is_certain(&regions)
-            };
-            mark_inactive(&mut out, spanned.range, exact);
-        }
+        // **The directive line itself is not part of an inactive region.** `#if`, `#else` and `#endif` are the
+        // structure of the file; greying them makes the visible range begin on a line the reader still needs, and
+        // `spanned.range` also reaches through the trivia after the directive — the measured case that greyed a
+        // comment block and the function below an `#endif`. Only the ordinary tokens of a dead branch are marked,
+        // by the run handling above and below this match.
 
         directive_index += 1;
         run_from = token_index_after(tokens, spanned.range.end_offset());
@@ -2230,8 +2224,8 @@ fn mark_inactive(out: &mut CookedStream, span: SourceRange, exact: bool) {
 
 /// Add a span to a list of them, joining it to the previous one when they touch.
 ///
-/// A region is dropped in as many pieces as it has directives in it, and a consumer showing "this was not
-/// compiled" wants one range per branch rather than one per line.
+/// A dead run is dropped in as many pieces as it has directives in it, and a consumer showing "this was not compiled"
+/// wants one range per run of code rather than one per line.
 fn merge_span(spans: &mut Vec<SourceRange>, span: SourceRange) {
     match spans.last_mut() {
         Some(last) if last.end_offset() >= span.start_offset => {

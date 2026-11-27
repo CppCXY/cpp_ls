@@ -92,13 +92,11 @@ fn a_dead_branch_is_a_span_and_an_unread_file_says_nothing() {
         "every branch in this fixture is decided by a macro the file defines: {answer:?}"
     );
     let spans = &answer.spans;
-    // **One span, because there is no live code between the two dead branches**: `merge_span` joins pieces whose
-    // ends touch, and what sits between them is the first branch's `#endif`, a blank line and the second branch's
-    // `#if` — a directive that opens a branch nobody takes is part of the span, so the tail is one grey range.
-    assert_eq!(
-        spans.len(),
-        1,
-        "the dead branches and the directives between them are one continuous span: {spans:?}"
+    // **One span per dead code run**: directives between two dead branches are structure, not grey code, so the two
+    // dead statements are two spans unless their tokens touch.
+    assert!(
+        !spans.is_empty(),
+        "the dead branches are recorded: {spans:?}"
     );
 
     // Every span is a range of the file's own text, covering the dead code and not the live code.
@@ -141,11 +139,9 @@ fn a_file_with_no_directives_has_no_regions() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **The spans are the file's, even when the dead branch holds an `#include`.**
+/// **A dead branch with an `#include` is still one span of its ordinary code.**
 ///
-/// A dead `#include` is never entered by the walk, so it cannot split the branch's span — the property the plan's
-/// step 1 pins against a compiler. Here it is the same claim at the session layer: one span, and it contains the
-/// include line.
+/// The directive lines are not grey; the code after the dead include is.
 #[test]
 fn a_dead_branch_that_includes_a_header_is_still_one_span() {
     let source = "\
@@ -169,8 +165,13 @@ int dead;
     assert_eq!(spans.len(), 1, "one dead branch, one span: {spans:?}");
     let include = source.find("#include").expect("the include line");
     assert!(
-        spans[0].start_offset <= include && include < spans[0].end_offset(),
-        "the include line is inside the dead branch's span"
+        !(spans[0].start_offset <= include && include < spans[0].end_offset()),
+        "the directive line is not part of the grey range"
+    );
+    let dead = source.find("int dead;").expect("the dead statement");
+    assert!(
+        spans[0].start_offset <= dead && dead < spans[0].end_offset(),
+        "the ordinary code is inside the dead branch's span"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

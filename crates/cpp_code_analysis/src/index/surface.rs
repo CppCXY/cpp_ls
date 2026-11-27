@@ -247,13 +247,27 @@ pub fn surface_of(path: &Path, text: &str) -> Surface {
         let range = tokens[at].range;
         match word {
             "define" => {
+                // **The first token after the directive name, not `tokens[at + 2]`.** A directive may spell the gap
+                // between `#`, `define` and the macro's name with any amount of whitespace (`#   define X 1` is what
+                // the CRT and neovim's headers write), and those whitespace tokens are in `tokens` even though they
+                // are removed from `code`. Starting the definition at a fixed offset therefore handed
+                // `parse_define` whitespace as the macro's name and dropped the definition from the index — visible
+                // as a missing hover card on every use of the macro.
+                let mut word_at = at + 1;
+                while word_at < end && token::is_trivia(tokens[word_at].kind) {
+                    word_at += 1;
+                }
+                let mut name_at = word_at.saturating_add(1);
+                while name_at < end && token::is_trivia(tokens[name_at].kind) {
+                    name_at += 1;
+                }
                 // `parse_define` wants the tokens **from the name on**, and the whole directive's range — the same
                 // reader the preprocessor uses, so a definition here is the definition a cook would get.
                 // **Trivia is kept here, unlike everywhere else in this module.** `parse_body` keeps whitespace
                 // because it is load-bearing: `#define F(x) +x` and `#define F(x) + x` expand differently, and the
                 // body`s text is what a condition reads as a value. The `code` list above is for *finding* the name;
                 // this one is for reading the body.
-                let from_the_name: Vec<Token> = tokens[at + 2..end]
+                let from_the_name: Vec<Token> = tokens[name_at.min(end)..end]
                     .iter()
                     .map(|token| Token::new(token.kind, spelling(text, token), token.range))
                     .collect();
@@ -369,6 +383,18 @@ mod tests {
 
     fn scanned(text: &str) -> Surface {
         surface_of(Path::new("/p/a.h"), text)
+    }
+
+    #[test]
+    fn a_define_with_space_after_its_hash_is_indexed() {
+        // neovim's CRT headers write `#   define`; the definition still has to reach the index, or every use of the
+        // macro answers without a card.
+        let surface = scanned("#   define SPACED 1\n#  define FUNCTION_LIKE(x) ((x) + 1)\n");
+        assert_eq!(
+            surface.exports(),
+            vec!["SPACED", "FUNCTION_LIKE"],
+            "the names survive the whitespace between `#`, `define` and the name"
+        );
     }
 
     #[test]

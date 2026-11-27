@@ -134,19 +134,20 @@ fn a_conditional_inside_a_dead_branch_is_dead_too() {
 }
 
 #[test]
-fn the_dead_branch_is_reported_as_one_span() {
-    // A consumer greys out a region, so the pieces of one dead branch have to join: the runs of tokens
-    // between its directives and the directives themselves are one range.
+fn the_dead_branch_is_reported_as_spans_of_its_code() {
+    // A consumer greys out code, not the directives that structure it. The two dead runs around the `#define` are
+    // separate spans; neither includes a directive line or its trailing newline.
     let source = "int a;\n#if 0\nint b;\n#define M 1\nint c;\n#endif\nint d;\n";
     let stream = cooked(source);
     assert_eq!(words(&stream), ["int", "a", ";", "int", "d", ";"]);
 
-    assert_eq!(stream.inactive.len(), 1, "{:?}", stream.inactive);
-    let dead = &stream.inactive[0];
-    assert_eq!(
-        &source[dead.start_offset..dead.end_offset()],
-        "#if 0\nint b;\n#define M 1\nint c;\n#endif\n"
-    );
+    assert_eq!(stream.inactive.len(), 2, "{:?}", stream.inactive);
+    let texts: Vec<&str> = stream
+        .inactive
+        .iter()
+        .map(|dead| &source[dead.start_offset..dead.end_offset()])
+        .collect();
+    assert_eq!(texts, vec!["int b;\n", "int c;\n"]);
 }
 
 #[test]

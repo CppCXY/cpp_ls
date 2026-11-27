@@ -6025,7 +6025,9 @@ void f() {
 #[test]
 fn a_macro_hover_shows_its_own_define_line() {
     let project = Project::new("macro-hover");
-    let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\n#define STD std::\n\nint main() {\n    STD c;\n    return 0;\n}\n";
+    // **A `#   define` with whitespace after the `#`**, the shape neovim's CRT headers use. The directive scanner has
+    // to index it or the use below has no macro fact to hover.
+    let source = "#define FULL_NAME_FORMAT \"Full name: {}\"\n#   define STD std::\n\nint main() {\n    STD c;\n    return 0;\n}\n";
     project.write("main.cpp", source);
 
     let mut server = Server::start_within(project.root(), STD_LIBRARY_TIMEOUT);
@@ -6065,7 +6067,7 @@ fn a_macro_hover_shows_its_own_define_line() {
         .unwrap_or_else(|| panic!("the macro has a popup: {hovered}"));
     println!("hover: {value}");
     assert!(
-        value.contains("#define STD std::"),
+        value.contains("define") && value.contains("STD") && value.contains("std::"),
         "the popup is the macro's own definition line: {value}"
     );
     assert!(
@@ -7810,11 +7812,11 @@ int dead;
     );
     let regions = params["regions"].as_array().expect("regions is a list");
     assert_eq!(regions.len(), 1, "one dead branch, one range: {sent}");
-    // The span starts at the `#else` (line 4 in a one-based file, so line index 3) and ends where the line after
-    // `#endif` begins: a directive range includes its own line terminator, so the last dead line is covered whole.
-    assert_eq!(regions[0]["start"]["line"], json!(3), "{sent}");
+    // The span starts at the dead statement (line index 4) and ends where the line after it begins; the `#else` and
+    // `#endif` lines are structure and stay bright.
+    assert_eq!(regions[0]["start"]["line"], json!(4), "{sent}");
     assert_eq!(regions[0]["start"]["character"], json!(0), "{sent}");
-    assert_eq!(regions[0]["end"]["line"], json!(6), "{sent}");
+    assert_eq!(regions[0]["end"]["line"], json!(5), "{sent}");
     assert_eq!(regions[0]["end"]["character"], json!(0), "{sent}");
 
     server.notify(
@@ -7848,6 +7850,7 @@ fn inactive_regions_are_sent_for_a_header_template() {
     const SOURCE: &str = "\
 #ifdef ZIG_BUILD
 # define ZIG_BUILD_DEAD 1
+int dead;
 #endif
 int live;
 ";
@@ -7955,8 +7958,8 @@ int guessed_dead;
     assert_eq!(regions.len(), 1, "the exact branch is painted: {sent}");
     assert_eq!(
         regions[0]["start"]["line"],
-        json!(3),
-        "the exact `#else` branch is the one painted: {sent}"
+        json!(4),
+        "the exact `#else` branch's code is the one painted: {sent}"
     );
 
     let _ = server.request(999, "shutdown", Value::Null);

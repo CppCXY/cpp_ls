@@ -89,6 +89,35 @@ int c;
     );
 }
 
+/// **A dead range is the code, not the directives around it — and not the comment after `#endif`.**
+///
+/// The directive range includes its terminator and the trivia that follows it. Using that range for a grey span put
+/// the comment block below an `#endif` — and the declaration after it — into the inactive region. Only the ordinary
+/// tokens the branch dropped are marked now.
+#[test]
+fn a_dead_range_does_not_include_directives_or_trailing_comments() {
+    let source = "\
+#ifdef UNDEF
+int dead;
+#endif
+// a comment after the endif
+void live() {}
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let stream = cook_with(source, &tokens, &MacroTable::new());
+    assert_eq!(stream.inactive.len(), 1, "{:?}", stream.inactive);
+    let span = &stream.inactive[0];
+    let covered = |at: usize| span.start_offset <= at && at < span.end_offset();
+    let dead = source.find("int dead;").expect("the dead statement");
+    assert!(covered(dead), "the statement the branch dropped is painted");
+    let directive = source.find("#endif").expect("the directive");
+    assert!(!covered(directive), "the directive itself is not");
+    let comment = source.find("// a comment").expect("the trailing comment");
+    assert!(!covered(comment), "nor the comment after it");
+    let live = source.find("void live").expect("the live declaration");
+    assert!(!covered(live), "nor the live code after that");
+}
+
 /// **The hedley shape**, which is what the rule was written for: a builtin question, a version check as a known
 /// truth, and the definitions after it.
 #[test]

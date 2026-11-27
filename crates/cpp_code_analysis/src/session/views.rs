@@ -12,8 +12,9 @@ use crate::summary;
 /// **The regions of a file this configuration does not compile**, with the one fact a caller that paints them must
 /// respect — the answer to "may I paint these?" in one value.
 ///
-/// The spans are the preprocessor's own by-product: one range per dead branch, in the file's coordinates, directive
-/// lines included on purpose so one dead branch is one range. `assumed_undefined` is what says whether the
+/// The spans are the preprocessor's own by-product: one range per dead run of ordinary tokens. Directive lines and
+/// the trivia after them are structure, not code, and are deliberately **not** included. `assumed_undefined` is what
+/// says whether the
 /// configuration *knew* when it decided them — a branch nobody defined a name for is a branch that was **guessed**,
 /// and a guess painted grey is the failure this feature must not have (`docs/inactive-regions.md` §8).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

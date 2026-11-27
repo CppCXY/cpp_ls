@@ -481,12 +481,11 @@ MARK_DEAD_ELSE_IN_DEAD
 #endif
 ";
 
-/// **One dead branch is one span, and an `#include` inside it is never read.**
+/// **One dead branch is one code span, and an `#include` inside it is never read.**
 ///
 /// The include names a header that does not exist: a compiler that entered the branch would fail the fixture, so the
-/// compiler's own success is the proof of the property the plan turns on (`docs/inactive-regions.md` §2.4). On this
-/// side, the span must cover both the `#include` line and the marker after it, which is what makes a dead branch one
-/// range a client can grey out.
+/// compiler's own success is the proof of the property the plan turns on. The directive lines themselves are structure,
+/// not grey code, so the span covers the ordinary tokens of the branch and not the `#include` spelling.
 #[test]
 fn one_dead_branch_is_one_span_and_its_include_is_never_read() {
     let Some(compiler) = the_compiler() else {
@@ -506,16 +505,16 @@ fn one_dead_branch_is_one_span_and_its_include_is_never_read() {
     assert_eq!(
         spans.len(),
         1,
-        "one dead branch is one span, not a piece per line: {spans:?}"
+        "one dead branch is one span of its ordinary tokens: {spans:?}"
     );
     let span = &spans[0];
     assert!(
-        covers(DEAD_INCLUDE, span, "#include"),
-        "the span covers the include line: {span:?}"
+        !covers(DEAD_INCLUDE, span, "#include"),
+        "a directive line is not part of the grey range: {span:?}"
     );
     assert!(
         covers(DEAD_INCLUDE, span, "MARK_DEAD_AFTER_THE_INCLUDE"),
-        "and the code after it: {span:?}"
+        "the code after the include is: {span:?}"
     );
     for live in ["MARK_LIVE_BEFORE", "MARK_LIVE_AFTER"] {
         let at = DEAD_INCLUDE.find(live).unwrap();
