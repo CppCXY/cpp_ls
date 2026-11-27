@@ -2599,7 +2599,6 @@ fn expand_run(
     );
 }
 
-
 /// **What a branch nobody compiles contributes to `inactive`** — the spans a diagnostic is filtered by.
 ///
 /// Only the *runs* between directives were marked, so a dead branch made of directives alone recorded **no span at
@@ -2649,7 +2648,10 @@ mod tests {
     fn a_dead_branch_of_statements_is_inactive_too() {
         let stream = cook("#ifdef NEVER\nint xxx = 1;\n#endif\n");
         assert_eq!(stream.inactive.len(), 1, "{:?}", stream.inactive);
-        assert_eq!(stream.inactive[0].start_offset, 13, "`#ifdef NEVER` is twelve characters and a newline");
+        assert_eq!(
+            stream.inactive[0].start_offset, 13,
+            "`#ifdef NEVER` is twelve characters and a newline"
+        );
     }
 
     #[test]
@@ -2672,4 +2674,3 @@ mod tests {
         );
     }
 }
-

@@ -384,7 +384,7 @@ fn a_function_pointer_signature(
     let Known::Yes((type_of, _)) = context.type_of(callee) else {
         return None;
     };
-        let mut type_of = &type_of;
+    let mut type_of = &type_of;
     while let sema::types::Type::Qualified { of, .. } = type_of {
         type_of = of;
     }
@@ -400,5 +400,3 @@ fn a_function_pointer_signature(
         _ => None,
     }
 }
-
-

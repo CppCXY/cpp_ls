@@ -115,13 +115,22 @@ fn a_target_that_cannot_be_written_is_reported() {
 #[test]
 fn a_writable_target_is_silent() {
     let sources = [
-        ("through a pointer", "void f(int *pointer) {\n    *pointer = 1;\n}\n"),
-        ("through an index", "void f(void) {\n    char buffer[8];\n    buffer[0] = 'x';\n}\n"),
+        (
+            "through a pointer",
+            "void f(int *pointer) {\n    *pointer = 1;\n}\n",
+        ),
+        (
+            "through an index",
+            "void f(void) {\n    char buffer[8];\n    buffer[0] = 'x';\n}\n",
+        ),
         (
             "through a member",
             "struct point { int x; };\nvoid f(point *p) {\n    p->x = 1;\n}\n",
         ),
-        ("through a reference", "void f(int &value) {\n    value = 1;\n}\n"),
+        (
+            "through a reference",
+            "void f(int &value) {\n    value = 1;\n}\n",
+        ),
         (
             "a pointer to const data is still a pointer that can move",
             "void f(const char *text) {\n    text = 0;\n}\n",

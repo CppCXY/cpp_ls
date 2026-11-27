@@ -91,7 +91,6 @@ fn a_repeat_in_another_scope_is_a_shadow() {
     );
 }
 
-
 /// **A conflicting declaration at file scope is an error in C, and an overload in C++.**
 ///
 /// The rule skips the file scope because of C++: two functions of one name there are an overload set, and
@@ -122,10 +121,12 @@ fn a_c_file_cannot_declare_one_function_twice_with_different_types() {
         "the return types agree, and the rule decides on those alone: {in_c:?}"
     );
 
-    let same_again = codes_in_c(&[("/p/d.c", "int same(void);\nint same(void);\n")], "/p/d.c");
+    let same_again = codes_in_c(
+        &[("/p/d.c", "int same(void);\nint same(void);\n")],
+        "/p/d.c",
+    );
     assert!(
         !same_again.contains(&DiagnosticCode::Redefinition),
         "one declaration written twice is legal C: {same_again:?}"
     );
 }
-

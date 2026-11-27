@@ -10,30 +10,21 @@ use crate::DiagnosticCode;
 #[test]
 fn a_number_is_not_dereferenceable() {
     let codes = codes_of("int f(void) {\n    int value = 1;\n    return *value;\n}\n");
-    assert!(
-        codes.contains(&DiagnosticCode::DerefTypeCheck),
-        "{codes:?}"
-    );
+    assert!(codes.contains(&DiagnosticCode::DerefTypeCheck), "{codes:?}");
 }
 
 /// **`void` is not an object type**: `*memory = 1` through a `void *` has no size to write.
 #[test]
 fn a_void_pointer_has_nothing_behind_it() {
     let codes = codes_of("int f(void *memory) {\n    *memory = 1;\n    return 0;\n}\n");
-    assert!(
-        codes.contains(&DiagnosticCode::DerefTypeCheck),
-        "{codes:?}"
-    );
+    assert!(codes.contains(&DiagnosticCode::DerefTypeCheck), "{codes:?}");
 }
 
 /// **A reference is peeled**: in C++ `*r` is an error when `r` is an `int &`, and fine when it is an `int *&`.
 #[test]
 fn a_reference_to_a_number_is_not_dereferenceable() {
     let codes = codes_of("int f(int &number) {\n    return *number;\n}\n");
-    assert!(
-        codes.contains(&DiagnosticCode::DerefTypeCheck),
-        "{codes:?}"
-    );
+    assert!(codes.contains(&DiagnosticCode::DerefTypeCheck), "{codes:?}");
 
     let through = codes_of("int f(int *&pointer) {\n    return *pointer;\n}\n");
     assert_silent_about(

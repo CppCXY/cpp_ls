@@ -23,7 +23,9 @@ fn eat_array_declarator_qualifiers(p: &mut CppParser) {
     loop {
         if matches!(
             p.current_token(),
-            CppTokenKind::StaticKeyword | CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+            CppTokenKind::StaticKeyword
+                | CppTokenKind::ConstKeyword
+                | CppTokenKind::VolatileKeyword
         ) {
             p.bump();
             continue;

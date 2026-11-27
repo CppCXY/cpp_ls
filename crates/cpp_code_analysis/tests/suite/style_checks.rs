@@ -505,4 +505,3 @@ fn a_template_argument_is_not_a_cast() {
         "a cast is still a cast: {still:?}"
     );
 }
-
