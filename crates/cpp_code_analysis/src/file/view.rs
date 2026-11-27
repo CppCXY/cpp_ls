@@ -1029,7 +1029,7 @@ impl FileView {
         rendered: &preprocess::cooked::RenderedCooked,
         family: cpp_parser::ProjectLanguage,
     ) -> FileView {
-        Self::parse_rendering_with_the_files_own_language(file, rendered, family, None)
+        Self::parse_rendering_with_the_files_own_language(file, rendered, family, None, None)
     }
 
     /// **A rendering parsed as the language the file is**, which is not a detail: the parser's feature set decides
@@ -1051,6 +1051,7 @@ impl FileView {
             rendered,
             config.language(),
             Some(config.language_for(&file.path)),
+            Some(config.dialect()),
         )
     }
 
@@ -1059,10 +1060,17 @@ impl FileView {
         rendered: &preprocess::cooked::RenderedCooked,
         family: cpp_parser::ProjectLanguage,
         language: Option<cpp_parser::features::LanguageConfig>,
+        dialect: Option<cpp_parser::Dialect>,
     ) -> FileView {
         let source: Arc<str> = Arc::from(rendered.text.as_str());
         let line_index = Arc::new(LineIndex::parse(&source));
         let mut parser_config = cpp_parser::ParserConfig::default().with_language_family(family);
+        if let Some(dialect) = dialect {
+            // **The compiler's reserved spellings are part of the reading.** The index's parse passes the dialect
+            // explicitly; this view — the one a diagnostics pass and a hover read — did not, so a MinGW header read
+            // as C23 without GNU's vendor turned `FILE * __restrict__` into a parameter named `__restrict__`.
+            parser_config = parser_config.with_dialect(dialect);
+        }
         if let Some(language) = language {
             parser_config = parser_config.with_language(language);
         }

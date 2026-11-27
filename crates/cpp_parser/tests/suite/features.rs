@@ -1048,26 +1048,26 @@ fn a_strict_standard_refuses_every_vendor_extension() {
     );
 }
 
-/// **A strict parse of `int* __restrict__ p` is a declaration with a name, not an error** — the one row the error-based
-/// matrix above cannot express, kept apart so the difference is stated rather than hidden.
+/// **`__restrict__` is a qualifier when the compiler's dialect is named.**
 ///
-/// `__restrict` is gated (`Feature::RestrictGnu`), so a strict C++23 parse does not read it as a qualifier; but two
-/// identifiers in a parameter list are still a declaration, so the strict reading is a **silently wrong tree** — the
-/// parameter is named `__restrict__` and `p` has no type. That is the declaration heuristic's business rather than the
-/// feature gate's, and it is recorded here because a matrix that only asks "does it error" would have called this row
-/// green.
+/// It remains gated with the other GNU extensions for a parse that names only a standard; the fix for MinGW headers
+/// is to pass the compiler's dialect through `ParserConfig::with_dialect`, not to make the spelling unconditional.
+/// `__restrict__` is a reserved GNU spelling, so a GNU dialect always reads it as the qualifier it means.
 #[test]
-fn a_strict_parse_reads_gnu_restrict_as_a_name() {
-    use cpp_parser::features::{LanguageConfig, Standard, Vendor};
-    use cpp_parser::{CppParser, ParserConfig};
+fn gnu_restrict_is_a_qualifier_when_the_dialect_is_named() {
+    use cpp_parser::features::{LanguageConfig, Standard};
+    use cpp_parser::{CppParser, Dialect, ParserConfig};
 
     let source = "void f(int* __restrict__ p) { }\n";
-
-    let strict = CppParser::parse(
+    let parsed = CppParser::parse(
         source,
-        ParserConfig::default().with_language(LanguageConfig::new().with_standard(Standard::Cpp23)),
+        ParserConfig::default()
+            .with_dialect(Dialect::Gnu)
+            .with_language(LanguageConfig::new().with_standard(Standard::Cpp23)),
     );
-    let names_in_the_strict_tree: Vec<String> = strict
+    assert!(!parsed.has_syntax_errors(), "{:?}", parsed.get_errors());
+    assert_eq!(parsed.to_source_text(), source, "the tree stays lossless");
+    let names: Vec<String> = parsed
         .get_red_root()
         .descendants()
         .filter_map(|node| {
@@ -1077,23 +1077,30 @@ fn a_strict_parse_reads_gnu_restrict_as_a_name() {
         .filter_map(|declaration| declaration.get_name_text())
         .collect();
     assert!(
-        !names_in_the_strict_tree.is_empty(),
-        "it is read as a declaration, which is what makes it silent"
+        !names.iter().any(|name| name == "__restrict__"),
+        "with the GNU dialect it is a qualifier, not a name: {names:?}"
     );
+}
 
-    let gnu = CppParser::parse(
+/// **The MinGW shape**: unnamed `__restrict__` parameters in a strict C23 parse with the GNU dialect.
+///
+/// `stdio.h` writes `FILE * __restrict__ ,` and the qualifier has no name after it. If the parser reads the keyword
+/// as a declarator name, every prototype contributes a parameter called `__restrict__` and the redefinition check
+/// fires across the header.
+#[test]
+fn an_unnamed_gnu_restrict_parameter_is_a_qualifier() {
+    use cpp_parser::features::{LanguageConfig, Standard};
+    use cpp_parser::{CppParser, Dialect, ParserConfig};
+
+    let source = "void f(FILE * __restrict__ , const char * __restrict__ );\n";
+    let parsed = CppParser::parse(
         source,
-        ParserConfig::default().with_language(
-            LanguageConfig::new()
-                .with_standard(Standard::Cpp23)
-                .with_vendor(Vendor::Gnu),
-        ),
+        ParserConfig::default()
+            .with_dialect(Dialect::Gnu)
+            .with_language(LanguageConfig::new().with_standard(Standard::C23)),
     );
-    assert!(!gnu.has_syntax_errors(), "{:?}", gnu.get_errors());
-    assert_eq!(gnu.to_source_text(), source, "the tree stays lossless");
-    // The difference is what the declaration **names**: with the vendor it is the qualifier it means, so no declaration
-    // is called __restrict__; strict, the same tokens are a declaration of that name.
-    let gnu_names: Vec<String> = gnu
+    assert!(!parsed.has_syntax_errors(), "{:?}", parsed.get_errors());
+    let names: Vec<String> = parsed
         .get_red_root()
         .descendants()
         .filter_map(|node| {
@@ -1103,7 +1110,7 @@ fn a_strict_parse_reads_gnu_restrict_as_a_name() {
         .filter_map(|declaration| declaration.get_name_text())
         .collect();
     assert!(
-        !gnu_names.iter().any(|name| name == "__restrict__"),
-        "with the vendor named it is a qualifier, not a name: {gnu_names:?}"
+        !names.iter().any(|name| name == "__restrict__"),
+        "the qualifier is not a parameter name: {names:?}"
     );
 }
