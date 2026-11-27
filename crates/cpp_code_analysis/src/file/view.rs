@@ -32,6 +32,8 @@
 //! together and replaced together, so a view's index can never be one edit behind its text.
 
 use crate::CompilerConfig;
+use crate::MacroInvocation;
+use crate::Origin;
 use crate::preprocess;
 use crate::sema;
 use std::path::PathBuf;
@@ -331,13 +333,9 @@ impl FileView {
     /// compiler actually made, instead of rebuilding a candidate list from summaries. The call site is not always
     /// the token's own range (an argument can be substituted into a body), but the invocation's call site is
     /// always a range in this file; the offset only has to fall inside it.
-    pub fn macro_invocation_at(
-        &self,
-        written: usize,
-        name: &str,
-    ) -> Option<&crate::MacroInvocation> {
+    pub fn macro_invocation_at(&self, written: usize, name: &str) -> Option<&MacroInvocation> {
         self.reading.iter().find_map(|span| {
-            let crate::Origin::Expanded { invocations } = &span.origin else {
+            let Origin::Expanded { invocations } = &span.origin else {
                 return None;
             };
             invocations.iter().find(|invocation| {

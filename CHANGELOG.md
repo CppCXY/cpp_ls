@@ -5,8 +5,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.5.0]
 
-fix many parser and toolchain bug
-
 ### Removed
 
 - **The global allocator's byte counter.** `cpp_ls` installed a `Counting` wrapper around `MiMalloc` so
