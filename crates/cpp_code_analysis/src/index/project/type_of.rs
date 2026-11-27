@@ -1064,15 +1064,19 @@ pub(crate) fn type_of_expression_inner(
         );
         return match operand_type {
             Known::Yes((type_of, file)) => {
-                // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
-                // *element* — C++'s own rule, and the reason this is not simply "wrap it in a pointer".
-                let pointed_at = type_of.decay();
-                Known::Yes((
-                    Type::Pointer {
-                        to: Arc::new(pointed_at),
-                    },
-                    file,
-                ))
+                // **`&x` is a pointer to `x`, and an array does not decay here.** `&arr` on `int arr[4]` is
+                // `int (*)[4]` — a pointer to the array — while the decay this used to apply first made it `int **`,
+                // which matched nothing. A *function* is the one that does decay: `&f` and `f` are both pointers to
+                // the function, so the wrap would give a pointer to a pointer.
+                Known::Yes(match type_of {
+                    Type::Function { .. } => (type_of.decay(), file),
+                    other => (
+                        Type::Pointer {
+                            to: Arc::new(other),
+                        },
+                        file,
+                    ),
+                })
             }
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),

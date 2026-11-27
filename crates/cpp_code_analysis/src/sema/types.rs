@@ -1155,6 +1155,23 @@ fn parse_type_spelling_without_a_trailing_qualifier(written: &str) -> Type {
         .map(str::trim_start)
         .unwrap_or(trimmed);
 
+    // **A pointer to an array** — `double (*)[4]`, the spelling a declarator writes for `&array` and for a parameter
+    // of that type. The `*` is **inside parentheses**, so the trailing-operator peel below cannot see it, and the
+    // array peel would take `[4]` as an extent of a head named `double (*)` — a type nobody declares. The pointer
+    // binds *last*: the type is a pointer to `double[4]`.
+    //
+    // Measured on a C corpus: `double (*pointer)[4] = &values;` was silent because neither side of the comparison
+    // was a type this layer could read.
+    if let Some(pointer) = trimmed.find("(*)") {
+        let head = trimmed[..pointer].trim();
+        let rest = trimmed[pointer + 3..].trim();
+        if !head.is_empty() && rest.starts_with('[') {
+            return Type::Pointer {
+                to: Arc::new(parse_type_spelling(&format!("{head}{rest}"))),
+            };
+        }
+    }
+
     // **Array extents, from the right.** `int[4]` is an array of four; `int[2][3]` is an array of two arrays of
     // three, and the *last* bracket pair belongs to the innermost array — so peeling from the right builds the
     // nesting in the order the type was written.

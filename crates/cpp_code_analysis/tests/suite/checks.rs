@@ -4490,3 +4490,40 @@ static int caller(struct point p) { int value = p.x; return value + LOG_NORMAL; 
         codes_of_a_file("/p/b.c", declared)
     );
 }
+
+/// **`&array` is a pointer to the array, and `double (*)[4]` is a type this layer reads.**
+///
+/// Both halves were missing: the address-of typed `&values` through a *decay* (`int **`), and the spelling
+/// `double (*)[4]` put the `*` inside parentheses where the trailing-operator peel could not see it, so it became an
+/// array of a name called `double (*)`. Together they are why `double (*pointer)[4] = &values;` was silent — one
+/// side was not a type, and the other was the wrong one.
+#[test]
+fn a_pointer_to_an_array_is_not_a_pointer_to_its_element() {
+    let wrong = "\
+static int caller(void)
+{
+    int values[4] = {0};
+    double (*pointer)[4] = &values;
+    return (int)(*pointer)[0];
+}
+";
+    assert!(
+        codes_of_a_file("/p/a.c", wrong).contains(&DiagnosticCode::AssignTypeCheck),
+        "an `int (*)[4]` is not a `double (*)[4]`: {:?}",
+        codes_of_a_file("/p/a.c", wrong)
+    );
+
+    let right = "\
+static int caller(void)
+{
+    int values[4] = {0};
+    int (*pointer)[4] = &values;
+    return (int)(*pointer)[0];
+}
+";
+    assert!(
+        !codes_of_a_file("/p/b.c", right).contains(&DiagnosticCode::AssignTypeCheck),
+        "the same type on both sides converts: {:?}",
+        codes_of_a_file("/p/b.c", right)
+    );
+}
