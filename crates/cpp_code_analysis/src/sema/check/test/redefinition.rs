@@ -5,8 +5,9 @@
 //! there — while two variables of one name in one scope cannot both exist. The rule also leaves the scopes a reader
 //! does not write a declaration in, which is why a class body and a file are quiet below.
 
-use super::{assert_reported, assert_silent_about, codes_of};
+use super::{assert_reported, assert_silent_about, codes_in_c, codes_in_family, codes_of};
 use crate::DiagnosticCode;
+use crate::ProjectLanguage;
 
 /// **The plain case**: two variables of one name in one function body. `auto` is the spelling the sample project
 /// wrote, and the type does not matter — the name does.
@@ -89,3 +90,42 @@ fn a_repeat_in_another_scope_is_a_shadow() {
         "the rule judges function bodies, blocks and lambdas, and a class body is none of them",
     );
 }
+
+
+/// **A conflicting declaration at file scope is an error in C, and an overload in C++.**
+///
+/// The rule skips the file scope because of C++: two functions of one name there are an overload set, and
+/// `extern int value;` followed by `int value = 0;` is one entity. C has neither reading, and a C compiler refuses
+/// `int same(void); double same(void);` — which the rule was silent about until a C project with one deliberate
+/// defect per file asked it. The comparison is the **return type** alone: `()` and `(void)` are the same function
+/// written two ways, so a parameter list is not evidence.
+#[test]
+fn a_c_file_cannot_declare_one_function_twice_with_different_types() {
+    let conflicting = codes_in_c(
+        &[("/p/a.c", "int same(void);\ndouble same(void);\n")],
+        "/p/a.c",
+    );
+    assert!(
+        conflicting.contains(&DiagnosticCode::Redefinition),
+        "a C file has no overloads: {conflicting:?}"
+    );
+
+    let overloads = "int take(int);\nint take(double);\n";
+    let in_cpp = codes_in_family(&[("/p/b.cpp", overloads)], "/p/b.cpp", ProjectLanguage::Cpp);
+    assert!(
+        !in_cpp.contains(&DiagnosticCode::Redefinition),
+        "two declarations that differ in their parameters are an overload set in C++: {in_cpp:?}"
+    );
+    let in_c = codes_in_c(&[("/p/c.c", overloads)], "/p/c.c");
+    assert!(
+        !in_c.contains(&DiagnosticCode::Redefinition),
+        "the return types agree, and the rule decides on those alone: {in_c:?}"
+    );
+
+    let same_again = codes_in_c(&[("/p/d.c", "int same(void);\nint same(void);\n")], "/p/d.c");
+    assert!(
+        !same_again.contains(&DiagnosticCode::Redefinition),
+        "one declaration written twice is legal C: {same_again:?}"
+    );
+}
+

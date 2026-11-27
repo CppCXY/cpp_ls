@@ -105,17 +105,35 @@ fn session_with_family(
     asking: &str,
     family: ProjectLanguage,
 ) -> Session<MemoryFiles> {
+    session_with_language(files, asking, family, None)
+}
+
+/// **The codes one file produces when the project is read as C17** — what `CheckContext::is_c` reads.
+///
+/// The language comes from the **compilation configuration**, and `CompilerConfig::language_for` deliberately refuses
+/// to guess it from the extension: a `.c` file with no `-std=` is "not told", and a rule that only makes sense for C
+/// stays quiet. So a test about one states the standard the way a project does.
+pub(super) fn codes_in_c(files: &[(&str, &str)], asking: &str) -> Vec<DiagnosticCode> {
+    let session = session_with_language(files, asking, ProjectLanguage::Cpp, Some("c17"));
+    codes_of_session(session, asking)
+}
+
+fn session_with_language(
+    files: &[(&str, &str)],
+    asking: &str,
+    family: ProjectLanguage,
+    standard: Option<&str>,
+) -> Session<MemoryFiles> {
     let mut memory = MemoryFiles::new();
     for (path, text) in files {
         memory = memory.with_file(*path, *text);
     }
     let providers = SessionFiles::new(OpenDocuments::new(), memory);
-    let mut session = Session::with_config(
-        "/p",
-        providers,
-        WatchFilter::new("/p"),
-        CompilerConfig::default().with_language_family(family),
-    );
+    let mut config = CompilerConfig::default().with_language_family(family);
+    if let Some(standard) = standard {
+        config = config.with_standard(standard);
+    }
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), config);
     session.add_project_files(
         files
             .iter()
@@ -124,6 +142,21 @@ fn session_with_family(
     session.want_cooked_reading(std::path::Path::new(asking));
     session.index_everything();
     session
+}
+
+/// **What a session says about one file**, in the order a client is given it — the collection both entries share.
+fn codes_of_session(session: Session<MemoryFiles>, asking: &str) -> Vec<DiagnosticCode> {
+    session
+        .diagnostics(std::path::Path::new(asking))
+        .map(|found| {
+            found
+                .checks
+                .iter()
+                .map(|finding| finding.code)
+                .chain(found.errors.iter().map(|error| error.code))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 mod abstract_class_instantiated;

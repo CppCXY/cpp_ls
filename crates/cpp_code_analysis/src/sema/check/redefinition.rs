@@ -131,6 +131,60 @@ impl Check for Redefinition {
                 t!("`%{name}` is already declared in this scope", name = name),
             );
         }
+
+        // **A conflicting declaration at file scope, in C.** C++ reads a second function of one name as an
+        // *overload* and `extern int x; int x = 0;` as one entity written twice, which is why the file scope is not
+        // walked above. C has neither reading: two declarations of one function with different return types are a
+        // program no compiler builds.
+        //
+        // The comparison is the **return type** the facts recorded, and only that. A parameter list may be written
+        // `()` and `(void)` for the same function, so comparing the whole signature would be a false positive on
+        // correct C — while `int same(void); double same(void);` differs in exactly the field a C compiler refuses,
+        // and two overloads that differ only in their parameters share a return type and stay silent.
+        //
+        // Measured on a C project of twenty-five files with one defect each: `int same(void); double same(void);`
+        // was silent, and is an error in every compiler.
+        if context.is_c() {
+            let mut returns: HashMap<&str, (&str, cpp_parser::SourceRange)> = HashMap::new();
+            let mut conflicts: Vec<(cpp_parser::SourceRange, String, String, String)> = Vec::new();
+            for fact in &context.summary.declarations {
+                // Only this file's own file-scope functions: a local, a member and a declaration another file
+                // contributed are different questions.
+                if fact.local || fact.scope.is_some() || fact.kind != DeclKind::Function {
+                    continue;
+                }
+                let Some(written) = fact.returns.as_deref().map(str::trim) else {
+                    continue;
+                };
+                match returns.get(fact.name.as_str()) {
+                    Some((first, _)) if *first != written => {
+                        conflicts.push((
+                            fact.name_range,
+                            fact.name.to_string(),
+                            (*first).to_string(),
+                            written.to_string(),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        returns.insert(fact.name.as_str(), (written, fact.name_range));
+                    }
+                }
+            }
+            for (range, name, first, second) in conflicts {
+                context.add_in_the_file(
+                    DiagnosticCode::Redefinition,
+                    range,
+                    name.clone(),
+                    t!(
+                        "`%{name}` is declared `%{first}` and again `%{second}` — a C file has no overloads",
+                        name = name,
+                        first = first,
+                        second = second
+                    ),
+                );
+            }
+        }
     }
 }
 
