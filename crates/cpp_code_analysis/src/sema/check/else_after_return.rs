@@ -10,15 +10,58 @@
 //!
 //! # How it is found
 //!
-//! Over an `if` whose then-branch **contains** a `return` and which has an `else`. Containment rather than "ends in" for the
-//! first version: a branch with a return in it and an `else` after it is the shape the rule is about, and the stricter
-//! reading (the *last* statement) is a refinement that can land without changing the finding's shape.
+//! Over an `if` whose then-branch **leaves the function on every path** and which has an `else`.
+//!
+//! The first version asked only whether the branch *contained* a `return`, and that is a false positive on the
+//! commonest shape a C program writes:
+//!
+//! ```c
+//! if (at < 0x20) {
+//!     if (!sb_addf(out, "\\u%04x", at)) {
+//!         return 0;                      // returns on *one* path
+//!     }
+//! }
+//! else if (!sb_append_char(out, at)) {   // reported, and dropping the `else` would not compile
+//!     return 0;
+//! }
+//! ```
+//!
+//! Measured on a C project of six files: that was the only finding at `--min-severity=hint`, on correct code, and
+//! acting on it is a syntax error. The rule is about *early* returns, so the branch has to actually leave the
+//! function before the `else` is redundant.
 
 use cpp_parser::CppAstNode;
+use cpp_parser::CppStat;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
 pub struct ElseAfterReturn;
+
+/// **Does every path through this statement leave the function?**
+///
+/// Only the shapes that certainly do: a `return`, a `throw`, a block whose **last** statement does, and an `if`
+/// whose branches both do. Everything else — a loop that may end, a `switch` with a `break`, a call that might
+/// return — is `false`, and a `false` here only costs a finding whose advice would have been wrong.
+fn leaves_the_function(statement: &CppStat) -> bool {
+    match statement {
+        CppStat::ReturnStat(_) | CppStat::ThrowStat(_) => true,
+        CppStat::CompoundStat(block) => block
+            .get_stats()
+            .last()
+            .is_some_and(|last| leaves_the_function(&last)),
+        CppStat::IfStat(if_statement) => {
+            let then_leaves = if_statement
+                .get_then_branch()
+                .is_some_and(|branch| leaves_the_function(&branch));
+            let else_leaves = if_statement
+                .get_else_branch()
+                .and_then(|branch| branch.get_stat())
+                .is_some_and(|branch| leaves_the_function(&branch));
+            then_leaves && else_leaves
+        }
+        _ => false,
+    }
+}
 
 impl Check for ElseAfterReturn {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::ElseAfterReturn];
@@ -35,11 +78,10 @@ impl Check for ElseAfterReturn {
             // query — `descendants::<CppReturnStat>()`. It used to be `node_text(..).contains("return")`, which is true of a
             // branch that only mentions the word: a comment, a string, a `return` inside a nested lambda, or a variable named
             // `returns`. The typed query cannot see any of those.
-            if then_branch
-                .descendants::<cpp_parser::CppReturnStat>()
-                .next()
-                .is_none()
-            {
+            //
+            // **Every path, not any path** — see the module documentation: `if (a) { if (b) return; } else …` contains a
+            // return and is not a branch that returns.
+            if !leaves_the_function(&then_branch) {
                 continue;
             }
 

@@ -32,10 +32,17 @@ fn an_else_after_a_returning_branch_is_reported() {
     );
 }
 
-/// **A branch *containing* a return is enough** — the rule asks `descendants`, not "ends in", which is the refinement
-/// its module says can land later without changing the finding's shape.
+/// **Only a branch that leaves the function on every path makes the `else` redundant.** A `return` nested inside
+/// the branch is not one: this `if (a) { if (b) return; g(); }` falls through to `h()` when `b` is false, so
+/// dropping the `else` would change the program — and the `g()` after the return is unreachable only in the path
+/// that already left.
+///
+/// The first version of the rule asked whether the branch **contained** a return, and the module recorded the
+/// stricter reading as "a refinement that can land later". Measured on an ordinary C file — a `switch` arm writing
+/// `if (at < 0x20) { if (!emit(...)) return 0; } else if (!push_char(...)) return 0;` — that finding was the only
+/// one in the whole project, on correct code, and acting on it is a syntax error.
 #[test]
-fn a_return_that_is_not_the_branches_last_statement_is_still_a_return() {
+fn a_return_on_one_path_is_not_a_branch_that_returns() {
     let codes = codes_of(
         "void g();\n\
          void h();\n\
@@ -48,10 +55,23 @@ fn a_return_that_is_not_the_branches_last_statement_is_still_a_return() {
              }\n\
          }\n",
     );
-    assert_reported(
+    assert_silent_about(
         &codes,
         DiagnosticCode::ElseAfterReturn,
-        "the outer then-branch contains a return, even though `g()` follows it",
+        "the then-branch falls through to `h()` when `b` is false",
+    );
+
+    // …and a branch that really does end in the return still is one, with work before it.
+    let ends_in_a_return = codes_of(
+        "void g();\n\
+         void f(int a) {\n\
+             if (a) { g(); return; } else { g(); }\n\
+         }\n",
+    );
+    assert_reported(
+        &ends_in_a_return,
+        DiagnosticCode::ElseAfterReturn,
+        "the last statement of the then-branch is the return",
     );
 }
 
