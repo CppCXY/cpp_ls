@@ -46,6 +46,8 @@ pub enum DiagnosticCode {
     ParamTypeCheck,
     /// A value does not convert to the type it is assigned to or initialised as — see [`super::assign_type_check`].
     AssignTypeCheck,
+    /// `*` applied to something that is not a pointer to an object — see [`super::deref_type_check`].
+    DerefTypeCheck,
     /// A member access on a type that does not declare that member — see [`super::undefined_field`].
     UndefinedField,
     /// A name nothing declares is read at this position — see [`super::undefined_name`].
@@ -166,10 +168,11 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 46] = [
+    pub const ALL: [DiagnosticCode; 47] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
+        DiagnosticCode::DerefTypeCheck,
         DiagnosticCode::UndefinedField,
         DiagnosticCode::UndefinedName,
         DiagnosticCode::Redefinition,
@@ -225,6 +228,7 @@ impl DiagnosticCode {
             DiagnosticCode::SyntaxError => "syntax-error",
             DiagnosticCode::ParamTypeCheck => "param-type-check",
             DiagnosticCode::AssignTypeCheck => "assign-type-check",
+            DiagnosticCode::DerefTypeCheck => "deref-type-check",
             DiagnosticCode::UndefinedField => "undefined-field",
             DiagnosticCode::UndefinedName => "unresolved-call-or-receiver",
             DiagnosticCode::Redefinition => "redefinition",
@@ -304,6 +308,7 @@ impl DiagnosticCode {
             DiagnosticCode::IncludeNotFound => RuleSeverity::Warning,
             DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
             DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
+            DiagnosticCode::DerefTypeCheck => RuleSeverity::Error,
             DiagnosticCode::UndefinedField => RuleSeverity::Error,
             DiagnosticCode::UndefinedName => RuleSeverity::Error,
             DiagnosticCode::Redefinition => RuleSeverity::Error,

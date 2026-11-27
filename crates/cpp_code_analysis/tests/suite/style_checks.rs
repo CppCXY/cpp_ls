@@ -34,7 +34,7 @@ fn the_style_codes_are_named_and_round_trip() {
     }
     assert_eq!(
         DiagnosticCode::ALL.len(),
-        46,
+        47,
         "every code is in the list, `redefinition` and `missing-include` included"
     );
 }
@@ -505,3 +505,4 @@ fn a_template_argument_is_not_a_cast() {
         "a cast is still a cast: {still:?}"
     );
 }
+

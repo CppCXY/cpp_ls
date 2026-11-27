@@ -138,6 +138,7 @@ mod contract_placement;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;
+mod deref_type_check;
 mod else_after_return;
 mod final_hierarchy;
 mod final_misplaced;

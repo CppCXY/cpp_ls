@@ -120,6 +120,7 @@ pub mod contract_placement;
 mod cstyle_cast;
 mod dangling_field;
 mod dangling_return;
+pub mod deref_type_check;
 mod else_after_return;
 pub mod final_hierarchy;
 pub mod final_misplaced;
@@ -1749,6 +1750,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<argument_count::ArgumentCount>(&mut context);
     run_check::<param_type_check::ParamTypeCheck>(&mut context);
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
+    run_check::<deref_type_check::DerefTypeCheck>(&mut context);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
     // The rule that needs an expression origin: `return s;` is a defect or not depending on whether `s` is a local, a
     // parameter or a static - a question about the scope tree rather than about the spelling.
