@@ -71,6 +71,25 @@ pub fn check_files(
         session.catch_up(file);
         let catch_up_time = caught.elapsed();
         run.stages.catch_up += catch_up_time;
+        // **The file's own includes are read before the render, not after it.** `cook` refuses a file whose direct
+        // includes are not all read (`cooking_materials`: a rendering made from a half-read closure leaves macros
+        // unexpanded, and that wrong reading is then *stored*), and `catch_up` reads at most **eight** includes per
+        // call by design — the rest are queued for the pump. So a file with nine `#include`s was reported as "no
+        // reading" and its checks were never asked. Measured on a bare C directory: a file including nine standard
+        // headers answered `no_reading: 1` and no findings, the same file with eight answered every rule.
+        //
+        // The pump therefore runs *here*, before the render. It is the same bounded loop the closure gate below uses,
+        // and the bound is the same kind: a header that cannot be read at all must not stall the run.
+        let prepared = Instant::now();
+        let mut prepared_rounds = 0usize;
+        while !session.is_locally_ready(file) && prepared_rounds < 64 {
+            if session.advance(256).is_empty() {
+                break;
+            }
+            prepared_rounds += 1;
+        }
+        run.stages.pump += prepared.elapsed();
+        run.stages.pump_rounds += prepared_rounds;
         let cooked_at = Instant::now();
         let cooked = session.cook(file);
         let cook_time = cooked_at.elapsed();
