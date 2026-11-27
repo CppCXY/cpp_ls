@@ -418,6 +418,9 @@ impl Type {
     ///   arithmetic to arithmetic               -> Yes     `double` to `int`, `char` to `long`
     ///   array or function to pointer           -> Yes     `int[4]` to `int*`
     ///   pointer to arithmetic, or the reverse  -> No      `const char*` to `int`
+    ///   any object pointer to `void*`          -> Yes     `int*` to `void*`, `Widget*` to `void*`
+    ///   a pointer that drops `const` into it   -> No      `const char*` to `void*`
+    ///   `void*` to an object pointer           -> Unknown C converts it and C++ does not; the language is not known here
     ///   anything to `void`, or `void` to it    -> No      no object has type `void`
     ///   anything named, or a template parameter-> Unknown `S` may have a converting constructor
     ///   pointer to a different pointee         -> Unknown `Derived*` to `Base*` is a real conversion
@@ -501,12 +504,34 @@ impl Type {
             // `std::println("…")`: `println(ostream&)` (a pointer does not bind to a non-const reference — the rule
             // above) and `println(FILE*)` (this rule) were offered as meanings of the call, while the one overload that
             // takes a format string was one candidate among three. Class-to-class stays `Unknown` (a derived pointer
-            // converts), and a `void` pointee stays `Unknown` (the qualification rules around `void*` are their own).
+            // converts), and a `void` pointee is decided by the arm below.
             (Type::Pointer { to: from_pointee }, Type::Pointer { to: to_pointee }) => {
                 let (from_core, from_qualified) = a_pointee_without_its_qualifiers(from_pointee);
                 let (to_core, to_qualified) = a_pointee_without_its_qualifiers(to_pointee);
                 let is_void = |type_of: &Type| matches!(type_of, Type::Builtin { spelling } if spelling == "void");
-                if is_void(from_core) || is_void(to_core) {
+                if is_void(to_core)
+                    && !is_void(from_core)
+                    && !matches!(from_core, Type::Function { .. })
+                {
+                    // **`T*` to `void*` is a standard conversion** — C11 6.3.2.3p1 and [conv.ptr] both say so — and
+                    // it is the conversion `malloc`, `free`, `memcpy`, `qsort` and every generic container in C is
+                    // written with: `takes_void_star(&number)` is correct code. The relation answered `Unknown` here,
+                    // which was safe and left the one thing a `void*` can get wrong unreported: **dropping `const`**.
+                    // `const char *p` into a `void *` is a discarded qualifier in both languages, and every compiler
+                    // warns about it; measured on a C project of twenty-five files, `takes_void_star(constant)` was
+                    // the one defect of its file that nothing reported.
+                    //
+                    // A **function pointer** stays `Unknown`: the standard does not convert one to `void*`, POSIX
+                    // does, and a project using the second is not making a mistake.
+                    if from_qualified && !to_qualified {
+                        Known::No
+                    } else {
+                        Known::Yes(())
+                    }
+                } else if is_void(from_core) || is_void(to_core) {
+                    // **`void*` to `T*`** — the other direction — is the language's own C/C++ split: C converts it
+                    // implicitly and C++ needs a cast. This relation does not know which language it is answering
+                    // for, so it declines; `int *p = malloc(n)` is left alone in a C file, as it must be.
                     Known::Unknown(sema::symbol::UnknownReason::UnknownType(Box::from(
                         "a conversion through `void*` is not decided here",
                     )))
@@ -3372,9 +3397,23 @@ mod tests {
         assert!(
             matches!(
                 string_pointer.convertible_to(&parse_type_spelling("void*")),
-                Known::Unknown(_)
+                Known::No
             ),
-            "the `void*` rules are their own"
+            "`const char*` into a `void*` drops the `const`, which is not a conversion in either language"
+        );
+        assert!(
+            matches!(
+                parse_type_spelling("char*").convertible_to(&parse_type_spelling("void*")),
+                Known::Yes(())
+            ),
+            "an object pointer converts to `void*`: that is what `memcpy` and `qsort` are written with"
+        );
+        assert!(
+            matches!(
+                string_pointer.convertible_to(&parse_type_spelling("const void*")),
+                Known::Yes(())
+            ),
+            "…and so does a pointer to const data, into a pointer to const void"
         );
     }
 

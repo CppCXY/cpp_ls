@@ -198,6 +198,13 @@ fn check_the_arguments(
             continue;
         };
 
+        // **`0` is the null pointer constant**, and it converts to every pointer type — the same exemption
+        // `assign-type-check` keeps. Without it the argument met a `void *` parameter as a number against a
+        // pointer (which the relation refuses) and a correct `takes_void_star(0)` was reported.
+        if super::a_literal_zero(argument.syntax()) {
+            continue;
+        }
+
         // **The candidates that can take an argument in this position.** A list with fewer parameters is a call
         // the arity check owns, not a disagreement about this one.
         let mut disagreed_with: Option<&String> = None;

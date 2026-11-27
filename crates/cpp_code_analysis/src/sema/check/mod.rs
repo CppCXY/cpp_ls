@@ -1423,7 +1423,12 @@ fn is_a_char_pointer_spelling(written: &str) -> bool {
         spelling.push_str(word);
     }
     // A reference or an array is not a pointer target: `char *&` and `char[]` are different questions.
-    spelling == "char*"
+    //
+    // **`void *` is the same question in C.** A literal is `char[]` there — `char *` converts to `void *` — while
+    // the type layer spells the literal `const char *` in both languages. Without this arm
+    // `static void takes(void *); takes("text");` was refused as a discarded qualifier the C program does not
+    // have, on a file whose whole point is that a `void *` takes any object pointer (`probes/void_star.c`).
+    spelling == "char*" || spelling == "void*"
 }
 
 pub fn a_class_can_be_built_from(
