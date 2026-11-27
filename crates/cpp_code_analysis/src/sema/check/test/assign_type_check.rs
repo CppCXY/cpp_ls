@@ -144,3 +144,33 @@ fn a_writable_target_is_silent() {
         );
     }
 }
+
+/// **A designated initialiser names the member it initialises**, so the member`s own type is the comparison:
+/// `struct point p = {.y = "text"}` is `int = "text"`, not `struct point = {…}`.
+///
+/// `assign-type-check` skips `InitListExpr` on purpose — an aggregate is judged element by element against the
+/// target`s own type, and the parser does not build per-field values — and a *designated* element is the one shape
+/// where the field is written down. Measured on a C corpus: `{.y = "text"}` was silent, and gcc refuses it.
+#[test]
+fn a_designated_member_is_judged_by_its_own_type() {
+    let source = "\
+struct point { int x; int y; };
+static struct point origin = {.x = 5, .y = \"text\"};
+";
+    let codes = codes_of(source);
+    assert!(
+        codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "a string literal is not a member of type `int`: {codes:?}"
+    );
+
+    // …and the same initialiser with a value that fits is silent, including the `const char *` member beside it.
+    let fine = "\
+struct named { const char *name; int count; };
+static struct named one = {.name = \"one\", .count = 1};
+";
+    let codes = codes_of(fine);
+    assert!(
+        !codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "both initialisers fit their members: {codes:?}"
+    );
+}

@@ -262,6 +262,42 @@ impl Check for AssignTypeCheck {
             report_if_it_does_not_convert(context, right.syntax(), written, &name, "assigned");
         }
 
+        // **A designated initialiser names the member it initialises**, so the question is *that member's* type:
+        // `struct point p = {.y = "text"}` is `int = "text"` even though the declaration's type is `struct point`.
+        // The loop above skips `InitListExpr` on purpose — an aggregate is judged element by element against the
+        // target's own type, and the parser does not build per-field values — and a *designated* element is the one
+        // shape where the field is written down.
+        //
+        // Measured on a C corpus: `{.y = "text"}` was silent, and gcc refuses it.
+        for designated in context
+            .own::<cpp_parser::CppDesignatedInitExpr>()
+            .collect::<Vec<_>>()
+        {
+            let Some(member) = designated.get_designator() else {
+                continue;
+            };
+            let Some(value) = designated.get_value() else {
+                continue;
+            };
+            let Some(aggregate) = the_aggregate_of(&designated) else {
+                continue;
+            };
+            let Known::Yes(members) = context.model.members_of(&aggregate) else {
+                continue;
+            };
+            let name = member.get_name_text().to_string();
+            let Some(declared) = members
+                .members
+                .iter()
+                .find(|found| found.fact.name.as_str() == name)
+                .and_then(|found| found.fact.type_of.as_deref())
+            else {
+                continue;
+            };
+            let written = declared.to_string();
+            report_if_it_does_not_convert(context, value.syntax(), &written, &name, "initialised");
+        }
+
         // **The object an assignment writes to has to be writable at all.** The loop above judges the *value*
         // against the declared type, and it only asks when the left side is a bare name — but `*value = 1` and
         // `buffer = "text"` are assignments too, and both are errors of the *target* rather than of the value:
@@ -440,4 +476,29 @@ fn constructs_the_written_type(expression: &cpp_parser::CppSyntaxNode, written: 
     };
     let target = written.rsplit("::").next().unwrap_or(written).trim();
     spelled.trim() == written.trim() || spelled.trim() == target
+}
+/// **The aggregate a designated initialiser belongs to** — the class name of the declaration's own type.
+///
+/// `static struct point origin = {.x = 5, …}` declares a `struct point`, and the designator names a member of it. The
+/// walk climbs to the declaration and asks it for its specifiers — the type as written — and `class_name()` answers
+/// the class under the storage words and the tag.
+fn the_aggregate_of(designated: &cpp_parser::CppDesignatedInitExpr) -> Option<String> {
+    // The climb is a **typed** cast at every step: the shape between an initialiser and its declaration is the
+    // parser's (`InitListExpr`, `Initializer`, `InitDeclarator`), and counting the levels is how the first version
+    // answered `None` for the shape it was written for.
+    let mut node = designated.syntax().parent()?;
+    let declaration = loop {
+        if let Some(declaration) = cpp_parser::CppDeclaration::cast(node.clone()) {
+            break declaration;
+        }
+        node = node.parent()?;
+    };
+    let specifiers = declaration.get_decl_specifiers()?;
+    // **The class the declaration names**, which is the `StructDef` inside the specifiers — `static struct point`
+    // spells its storage class beside the tag, so the *text* of the sequence is not the class name. A builtin type
+    // writes no name expression at all, which is the `None` that keeps `int x = {…}` out of this rule.
+    let name = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(specifiers.syntax())
+        .last()?
+        .get_name_text()?;
+    (!name.is_empty()).then_some(name)
 }
