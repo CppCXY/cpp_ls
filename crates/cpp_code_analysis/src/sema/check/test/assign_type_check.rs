@@ -90,3 +90,48 @@ int f(void) {\n\
         "the conditional's branches are `int`, and `m` is `int`: {codes:?}"
     );
 }
+
+/// **The object an assignment writes to has to be writable at all** — a `const` pointee and an array are both
+/// refused by every compiler, and neither is a question about the value.
+///
+/// Measured on a C project of twenty-five files with one deliberate defect each, both silent:
+/// `*value = 1` through a `const int *`, and `buffer = "text"` on a local array.
+#[test]
+fn a_target_that_cannot_be_written_is_reported() {
+    let through_a_const_pointer = codes_of("void f(const int *value) {\n    *value = 1;\n}\n");
+    assert!(
+        through_a_const_pointer.contains(&DiagnosticCode::AssignTypeCheck),
+        "the pointee is const: {through_a_const_pointer:?}"
+    );
+
+    let on_an_array = codes_of("void f(void) {\n    char buffer[8];\n    buffer = \"text\";\n}\n");
+    assert!(
+        on_an_array.contains(&DiagnosticCode::AssignTypeCheck),
+        "an array is not assignable: {on_an_array:?}"
+    );
+}
+
+/// **…and every writable target stays silent**: the ordinary `*p = 1`, an element, a member, and a reference.
+#[test]
+fn a_writable_target_is_silent() {
+    let sources = [
+        ("through a pointer", "void f(int *pointer) {\n    *pointer = 1;\n}\n"),
+        ("through an index", "void f(void) {\n    char buffer[8];\n    buffer[0] = 'x';\n}\n"),
+        (
+            "through a member",
+            "struct point { int x; };\nvoid f(point *p) {\n    p->x = 1;\n}\n",
+        ),
+        ("through a reference", "void f(int &value) {\n    value = 1;\n}\n"),
+        (
+            "a pointer to const data is still a pointer that can move",
+            "void f(const char *text) {\n    text = 0;\n}\n",
+        ),
+    ];
+    for (what, source) in sources {
+        let codes = codes_of(source);
+        assert!(
+            !codes.contains(&DiagnosticCode::AssignTypeCheck),
+            "{what}: {codes:?}"
+        );
+    }
+}

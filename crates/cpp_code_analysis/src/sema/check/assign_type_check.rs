@@ -261,6 +261,78 @@ impl Check for AssignTypeCheck {
 
             report_if_it_does_not_convert(context, right.syntax(), written, &name, "assigned");
         }
+
+        // **The object an assignment writes to has to be writable at all.** The loop above judges the *value*
+        // against the declared type, and it only asks when the left side is a bare name — but `*value = 1` and
+        // `buffer = "text"` are assignments too, and both are errors of the *target* rather than of the value:
+        //
+        // ```c
+        // const int *value = &number;
+        // *value = 1;          // the pointee is const
+        // char buffer[8];
+        // buffer = "text";     // an array is not an object that can be assigned
+        // ```
+        //
+        // Measured on a C project of twenty-five files with one defect each: both were silent, and both are errors
+        // in every compiler. The type is the model's — the same `type_of` the value check uses, asked of the left
+        // side whatever shape it has, which is what makes `*p` answerable at all.
+        for assignment in context
+            .own::<cpp_parser::CppBinaryExpr>()
+            .collect::<Vec<_>>()
+        {
+            if assignment.get_operator_text().as_deref() != Some("=") {
+                continue;
+            }
+            let Some(left) = assignment.get_lhs() else {
+                continue;
+            };
+            let Known::Yes((type_of, _)) = context.type_of(left.syntax()) else {
+                continue;
+            };
+            let Some(why) = not_assignable(&type_of) else {
+                continue;
+            };
+            let name = context.node_text(left.syntax()).to_string();
+            let message = match why {
+                NotAssignable::Const => t!(
+                    "`%{name}` is `const`, so it cannot be assigned to",
+                    name = name
+                ),
+                NotAssignable::AnArray => t!(
+                    "`%{name}` is an array, and an array is not assignable — copy its elements instead",
+                    name = name
+                ),
+            };
+            context.add(
+                DiagnosticCode::AssignTypeCheck,
+                cpp_parser::source_range(left.syntax().text_range()),
+                name,
+                message,
+            );
+        }
+    }
+}
+
+/// **Why an assignment cannot write to this type**, or `None` when it can.
+///
+/// Only the two shapes the model answers certainly: a top-level `const`, and an array. A pointer *to* a `const`
+/// is a writable pointer (`const char *p; p = q;` is legal), which is why the qualifier has to be at the top and
+/// not anywhere inside.
+#[derive(Clone, Copy)]
+enum NotAssignable {
+    /// A `const` object: the language's own refusal.
+    Const,
+    /// An array: it is not an assignable lvalue, and the fix is to copy the elements.
+    AnArray,
+}
+
+fn not_assignable(type_of: &sema::types::Type) -> Option<NotAssignable> {
+    match type_of {
+        sema::types::Type::Qualified { qualifiers, .. } if qualifiers.is_const() => {
+            Some(NotAssignable::Const)
+        }
+        sema::types::Type::Array { .. } => Some(NotAssignable::AnArray),
+        _ => None,
     }
 }
 
