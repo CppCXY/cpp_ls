@@ -4368,3 +4368,71 @@ int *find(int n) {
         "`int` does not convert to `int *`"
     );
 }
+
+/// **In C a record is nobody else's type.** `struct second` is not a `struct first`, and `int *` is not a
+/// `struct point *`: C has no inheritance, no converting constructor and no overload, so the pair is decided from
+/// the two spellings and the tag keyword C writes for it.
+///
+/// The negative half is the point of the language gate: in C++ the same pair is a *hierarchy* question — a base
+/// pointer converts, and a converting constructor may exist — so it stays `Unknown` there, as it did before.
+#[test]
+fn a_record_is_not_another_record_in_c() {
+    let through_a_pointer = "\
+struct point { int x; int y; };
+static void takes_point(struct point *point);
+static void caller(void) { int number = 0; takes_point(&number); }
+";
+    assert!(
+        codes_of_a_file("/p/a.c", through_a_pointer).contains(&DiagnosticCode::ParamTypeCheck),
+        "an `int *` is not a `struct point *`: {:?}",
+        codes_of_a_file("/p/a.c", through_a_pointer)
+    );
+
+    let by_value = "\
+struct first { int a; };
+struct second { int b; };
+static int take(struct first value) { return value.a; }
+static int caller(void) { struct second other = {0}; return take(other); }
+";
+    assert!(
+        codes_of_a_file("/p/b.c", by_value).contains(&DiagnosticCode::ParamTypeCheck),
+        "a `struct second` is not a `struct first`: {:?}",
+        codes_of_a_file("/p/b.c", by_value)
+    );
+    assert!(
+        !codes_of_a_file("/p/c.cpp", by_value).contains(&DiagnosticCode::ParamTypeCheck),
+        "in C++ the same pair is a hierarchy question, and this layer does not guess at one: {:?}",
+        codes_of_a_file("/p/c.cpp", by_value)
+    );
+}
+
+/// **The tag is the evidence, not the name.** A `typedef` that hides a builtin is not a record — `size_t` is an
+/// `unsigned long long` — and a `void *` converts to any object pointer in C.
+///
+/// Measured doing it the other way: the first version asked the index "is this name a class?", and `members_of`
+/// answers `Yes` for a typedef's underlying type, so `takes_size_t(1)` was reported as a record conversion. The
+/// spelling `struct …` cannot be written by a typedef, which is why the rule reads the *spelling*.
+#[test]
+fn a_typedef_and_a_void_pointer_are_not_refused_as_records() {
+    let typedef_hidden = "\
+typedef unsigned long long size_t;
+static void takes(size_t count);
+static void caller(void) { takes(1); }
+";
+    assert!(
+        !codes_of_a_file("/p/a.c", typedef_hidden).contains(&DiagnosticCode::ParamTypeCheck),
+        "an `int` converts to a typedef of `unsigned long long`: {:?}",
+        codes_of_a_file("/p/a.c", typedef_hidden)
+    );
+
+    let from_void = "\
+struct point { int x; int y; };
+static void takes_point(struct point *point);
+static void caller(void *memory) { takes_point(memory); }
+";
+    assert!(
+        !codes_of_a_file("/p/b.c", from_void).contains(&DiagnosticCode::ParamTypeCheck),
+        "C converts `void *` to any object pointer: {:?}",
+        codes_of_a_file("/p/b.c", from_void)
+    );
+}

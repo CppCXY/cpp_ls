@@ -853,7 +853,7 @@ pub(crate) fn a_candidate_that_can_be_called_this_way(
         .iter()
         .zip(argument_types)
         .all(|(parameter, argument)| {
-            !sema::convert::conversion(argument, parameter, |_| None).is_refused()
+            !sema::convert::conversion(argument, parameter, None, |_| None).is_refused()
         })
 }
 

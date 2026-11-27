@@ -2991,23 +2991,26 @@ fn a_template_parameter_target_is_not_a_refusal() {
 
     let an_int = Type::builtin("int");
     assert_eq!(
-        conversion(&an_int, "_Ty2&&", |_| None),
+        conversion(&an_int, "_Ty2&&", None, |_| None),
         Conversion::Unknown,
         "an unread template parameter is cannot-tell, not a refusal"
     );
     assert_eq!(
-        conversion(&an_int, "T", |_| None),
+        conversion(&an_int, "T", None, |_| None),
         Conversion::Unknown,
         "and so is a bare `T`"
     );
     // **A class the index knows still refuses**: `int` cannot be built into a `Widget` that has no such constructor.
     assert_eq!(
-        conversion(&an_int, "const Widget&", |_| Some(false)),
+        conversion(&an_int, "const Widget&", None, |_| Some(false)),
         Conversion::Refused,
     );
     // **And an unread class on the *source* side is cannot-tell too**, not a refusal.
     let a_string = parse_type_spelling("std::string");
-    assert_eq!(conversion(&a_string, "int", |_| None), Conversion::Unknown);
+    assert_eq!(
+        conversion(&a_string, "int", None, |_| None),
+        Conversion::Unknown
+    );
 }
 
 /// **A member's deduced return type, through the header that declares it** — `auto copy_of() const { return value_; }`.

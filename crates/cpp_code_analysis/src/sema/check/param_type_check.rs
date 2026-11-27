@@ -271,9 +271,12 @@ fn check_the_arguments(
                 // `const std::string&` parameter is `Reference { to: Named(..) }`, and `class_name()` answers `None` for a
                 // reference) and asks the index only for the class question, so a class nobody has read stays quiet.
                 Known::Unknown(_) => {
-                    let conversion = sema::convert::conversion(&from, parameter, |class| {
-                        super::a_class_can_be_built_from(context, class, &from)
-                    });
+                    let conversion = sema::convert::conversion(
+                        &from,
+                        parameter,
+                        context.language.family(),
+                        |class| super::a_class_can_be_built_from(context, class, &from),
+                    );
                     if !conversion.is_refused() {
                         every_candidate_disagrees = false;
                         break;

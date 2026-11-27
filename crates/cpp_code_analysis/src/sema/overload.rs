@@ -537,6 +537,13 @@ pub(crate) fn a_type_without_its_name(parameter: &str) -> String {
                 .to_string();
         }
     }
+    // **A name written inside parentheses** — `int (*callback)(int)`, `double (*row)[4]`. The declarator puts the
+    // name between `(*` and its `)`, and the type is the same spelling with the name taken out: `int (*)(int)`,
+    // `double (*)[4]`. Left in, the whole spelling is a `Named` that no comparison can use — the same failure the
+    // pointer case above records, for the shape a C header uses for every callback parameter.
+    if let Some(without) = a_pointer_to_a_named_thing(parameter) {
+        return without;
+    }
     let is_a_name = is_an_identifier(last);
     if is_a_name {
         return parameter[..parameter.len() - last.len()]
@@ -544,6 +551,22 @@ pub(crate) fn a_type_without_its_name(parameter: &str) -> String {
             .to_string();
     }
     parameter.to_string()
+}
+
+/// **The same spelling with a parenthesised declarator's name taken out** — `int (*callback)(int)` →
+/// `int (*)(int)`, `double (*row)[4]` → `double (*)[4]`.
+///
+/// `None` when the parentheses hold something that is not one identifier (`(*)(int)` needs nothing, and
+/// `(*a, b)` is not a declarator).
+fn a_pointer_to_a_named_thing(parameter: &str) -> Option<String> {
+    let open = parameter.find("(*")?;
+    let rest = &parameter[open + 2..];
+    let close = rest.find(')')?;
+    let name = rest[..close].trim();
+    if !is_an_identifier(name) {
+        return None;
+    }
+    Some(format!("{}(*){}", &parameter[..open], &rest[close + 1..]))
 }
 
 /// Is this the spelling of one identifier — a parameter's own name?
@@ -769,11 +792,18 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
     assert_eq!(a_type_without_its_name("const char *text"), "const char *");
     assert_eq!(a_type_without_its_name("int &value"), "int &");
     assert_eq!(a_type_without_its_name("void *"), "void *");
+    // **A name inside parentheses comes out too**, and the type it leaves is a type-id a spelling parser reads:
+    // `int (*)(int)` is a pointer to a function, `double (*)[4]` a pointer to an array. The name had stayed in, which
+    // made the whole spelling a `Named` no comparison could use — every callback parameter of a header-declared
+    // function answered `Unknown`.
     assert_eq!(
         a_type_without_its_name("int (*callback)(int)"),
-        "int (*callback)(int)",
-        "a function-pointer parameter keeps its whole spelling: the name is inside parentheses, and guessing is the \
-         direction that costs a false finding"
+        "int (*)(int)"
+    );
+    assert_eq!(a_type_without_its_name("double (*row)[4]"), "double (*)[4]");
+    assert_eq!(
+        a_type_without_its_name("void (*handler)(int, const char *)"),
+        "void (*)(int, const char *)"
     );
     // **A pack keeps its element type.** The test used to assert an empty list here, which is what made every pack
     // candidate compare equal to every other one — see `parameters_in`'s note on `make_unique`.

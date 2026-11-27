@@ -380,7 +380,7 @@ fn report_if_it_does_not_convert(
     if context.a_string_literal_in_a_char_pointer_position(expression, written) {
         return;
     }
-    if sema::convert::conversion(&from, written, |class| {
+    if sema::convert::conversion(&from, written, context.language.family(), |class| {
         super::a_class_can_be_built_from(context, class, &from)
     }) == sema::convert::Conversion::Refused
     {

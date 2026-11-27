@@ -274,7 +274,7 @@ impl Concept {
                     Known::No => Some(false),
                     Known::Yes(()) => Some(true),
                     Known::Unknown(_) => Some(!matches!(
-                        sema::convert::conversion(passed, &target.to_string(), |_| None),
+                        sema::convert::conversion(passed, &target.to_string(), None, |_| None),
                         sema::convert::Conversion::Refused
                     )),
                 }

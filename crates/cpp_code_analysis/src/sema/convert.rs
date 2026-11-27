@@ -65,9 +65,21 @@ pub fn strip_references(parameter: &str) -> &str {
 ///
 /// `written` is the **spelling** the declaring file wrote, not a parsed type: the class question needs the name under the
 /// reference, and a pointer is a different question from a reference to the same type.
+///
+/// `family` is the language **this file** is compiled as, which the checks know per file — a project mixes C and C++,
+/// and a header's language is the language of the source that compiles it (see
+/// [`cpp_toolchain::include::config::CompilerConfig::language_for`]). `None` is "not told", and it takes the same
+/// path as C++: only what is certain in both languages is refused.
+///
+/// `is_a_record` answers "is this name a struct/class this project declares?", and it is the second half of the C
+/// rule below: **in C a record is nobody else's type** — there is no inheritance, no converting constructor and no
+/// overload, so `struct first` and `struct second` are two types and `struct point *` is not an `int *`. The
+/// question goes to the index because a *name* is not a type: `typedef int point;` makes the two above the same,
+/// so a refusal needs evidence rather than a difference of spelling.
 pub fn conversion(
     from: &sema::types::Type,
     written: &str,
+    family: Option<cpp_parser::features::Family>,
     answer_the_class_question: impl FnOnce(&str) -> Option<bool>,
 ) -> Conversion {
     let target = sema::types::parse_type_spelling(written);
@@ -83,6 +95,22 @@ pub fn conversion(
     ) && a_pointer(from)
     {
         return Conversion::Implicit;
+    }
+
+    // **A record written with its tag is a type of its own, in C.** `struct point *` and `struct first` say "a
+    // record" in the language's own syntax, and C has no inheritance, no converting constructor and no overload:
+    // what is not that record does not convert. The evidence is the *spelling*, because a name alone is not a type
+    // — `typedef int point;` makes a name a builtin in disguise, and the index cannot tell the two apart (a summary
+    // records both as `DeclKind::Type`). A parameter written `point *` after such a typedef therefore stays
+    // `Unknown`, which is the safe direction.
+    //
+    // A `void *` is exempt on the source side: C converts it to any object pointer (`int *p = malloc(n)`), and
+    // refusing that would be a false positive on the commonest allocation in the language.
+    if family == Some(cpp_parser::features::Family::C)
+        && let Some(record) = a_tagged_record(written)
+        && !the_value_is_that_record(from, &record)
+    {
+        return Conversion::Refused;
     }
 
     // **The relation first.** It is exact for arithmetic, pointers and plain names, and it is the only half that knows about
@@ -117,8 +145,43 @@ pub fn conversion(
     }
 }
 
-/// Is this spelling the convention for a template parameter — `T`, `Ts`, `_Ty2`, `_Up`?
-/// **Is this spelling a template parameter, as a check sees one?** — the class rule applied to a whole type.
+/// **The record a spelling writes with its tag** — `struct point *` and `union value` answer the name; everything
+/// else answers `None`.
+///
+/// C's own syntax: `struct`/`union` before a name is a tag, and no typedef can write one. `enum` is deliberately not
+/// here — an enumeration *is* an arithmetic type in C, and `enum colour c = 3;` is ordinary code.
+fn a_tagged_record(written: &str) -> Option<String> {
+    let mut words = written
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|word| !word.is_empty());
+    while let Some(word) = words.next() {
+        if matches!(word, "struct" | "union") {
+            return words.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// **Is this value that record?** — through any qualifiers, pointers and array bounds, because `struct point **` and
+/// `struct point[4]` are still made of `struct point`.
+///
+/// A `void` pointee answers `true`: C converts `void *` to any object pointer, so `struct point *p = malloc(n);` is
+/// correct and the tag rule must not report it.
+fn the_value_is_that_record(type_of: &sema::types::Type, record: &str) -> bool {
+    match type_of {
+        sema::types::Type::Qualified { of, .. } => the_value_is_that_record(of, record),
+        sema::types::Type::Named { name, .. } => {
+            name == record || name.rsplit("::").next() == Some(record)
+        }
+        sema::types::Type::Pointer { to } => {
+            matches!(&**to, sema::types::Type::Builtin { spelling } if spelling == "void")
+                || the_value_is_that_record(to, record)
+        }
+        sema::types::Type::Array { of, .. } => the_value_is_that_record(of, record),
+        _ => false,
+    }
+}
+/// Is this spelling the convention for a template parameter — `T`, `Ts`, `_Ty2`, `_Up`?/// **Is this spelling a template parameter, as a check sees one?** — the class rule applied to a whole type.
 ///
 /// `_Tp&&` and `const _U&` are the same question as `_Tp`, and a check that asks it of a *type* rather than of a
 /// class has to strip the operators first: a parameter is never a reference or a pointer, and the spelling around it

@@ -543,6 +543,29 @@ impl Type {
                     } else {
                         Known::Yes(())
                     }
+                } else if let (
+                    Type::Array {
+                        of: from_element, ..
+                    },
+                    Type::Array { of: to_element, .. },
+                ) = (from_core, to_core)
+                {
+                    // **Two arrays are one shape only when their elements are.** `int (*)[4]` does not convert to
+                    // `double (*)[4]` in either language — there is no array covariance — and the relation answered
+                    // `Unknown` for every such pair because the two pointees are both `Array` and it compared their
+                    // *names*. Measured on a C project: `double (*pointer)[4] = &int_values;` was silent, and gcc
+                    // refuses it.
+                    let (from_element, _) = a_pointee_without_its_qualifiers(from_element);
+                    let (to_element, _) = a_pointee_without_its_qualifiers(to_element);
+                    if matches!(from_element, Type::Builtin { .. })
+                        && matches!(to_element, Type::Builtin { .. })
+                    {
+                        Known::No
+                    } else {
+                        Known::Unknown(sema::symbol::UnknownReason::UnknownType(Box::from(
+                            "a conversion between two arrays of named elements is not decided here",
+                        )))
+                    }
                 } else if matches!(from_core, Type::Builtin { .. })
                     && matches!(to_core, Type::Builtin { .. })
                 {
