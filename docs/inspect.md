@@ -137,16 +137,3 @@ platform's fault and must be named as such rather than counted as defects.
 The answer is the same `Session::diagnostics` the server answers a pull with, so a number here and a squiggle there are
 the same claim; what the sweep adds is that a **project** is measured rather than a file. On redis 8.x it answers 222
 files and 1 429 findings in **74 s** — the same work the probe did in 77 s, without a second client.
-
-## 7. Why this exists
-
-
-
-Every question here used to be a `tests/tmp_*.rs` probe: write it, compile it, read four lines, delete it — and the
-compile dominated. The workspace's `#[ignore]`d probe tests were deleted for the same reason (each cost a link in every
-gate); see `docs/worklog.md` and `c-support.md` §8.4's record. A question is an argument now.
-
-**Nothing else measures the analysis now.** The two probe tests the worklog's earlier numbers came from —
-`cpp_ls/tests/c_diagnostics_probe.rs` (a whole project's findings, over the LSP protocol) and
-`cpp_code_analysis/tests/c_name_lookup_probe.rs` (one name's visibility) — were deleted once `sweep`, `facts` and
-`define` answered the same questions here. Every crate now has exactly **one** test target, which is what a gate links.
