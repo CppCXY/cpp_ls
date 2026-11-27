@@ -414,10 +414,13 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = self.rendering_of(&file.path)?;
         // Remembered, so the next `view` — which cannot build one — finds it.
         self.known_rendering_of(&file.path, &file.text);
+        // **The per-file configuration**, whose language is the one this session worked out: the parser must read
+        // the file as the same language the checks are told, or a C header is parsed as C++ and the syntax errors of
+        // that reading are reported on correct code.
         Some(FileView::parse_rendering_in(
             &file,
             &rendered,
-            &self.config_for(&file.path),
+            &self.config_for_file(&file.path).config,
         ))
     }
 
@@ -449,7 +452,7 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(FileView::parse_rendering_in(
             &file,
             &rendered,
-            &self.config_for(&file.path),
+            &self.config_for_file(&file.path).config,
         ))
     }
 

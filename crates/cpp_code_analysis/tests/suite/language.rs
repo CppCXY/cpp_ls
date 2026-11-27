@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use cpp_code_analysis::include::config::CompilerConfig;
+use cpp_code_analysis::parse_compile_commands;
 use cpp_parser::features::{Feature, Standard, Vendor};
 
 /// **A command line's `-std=` is the answer**, and the last one wins, because that is what a compiler does.
@@ -79,4 +80,57 @@ fn a_separated_standard_flag_is_read() {
         config.language_for(Path::new("/p/a.cpp")).describe(),
         "c++17"
     );
+}
+
+/// **A header's language is the language of the source that compiles it.**
+///
+/// A build lists its *sources*; a header appears nowhere in the database, so the lookup fell to the project-wide
+/// `[compile] standard` — the editor's default `c++23` — and a C target's headers were read as C++. That is the
+/// mixed-project case: the same directory holds `a.c` and `b.cpp`, and `a.h` is compiled by `a.c`.
+#[test]
+fn a_header_inherits_the_language_of_the_source_beside_it() {
+    let database = parse_compile_commands(
+        r#"[
+            {"directory": "/p", "file": "/p/a.c", "arguments": ["cc", "-std=c17", "-c", "a.c"]},
+            {"directory": "/p", "file": "/p/b.cpp", "arguments": ["c++", "-std=c++20", "-c", "b.cpp"]}
+        ]"#,
+    );
+    let config = CompilerConfig {
+        database: Some(std::sync::Arc::new(database)),
+        ..CompilerConfig::default()
+    };
+
+    // The neighbour is the alphabetically first source in the directory — `a.c` — so `/p/a.h` is C. A header whose
+    // implementation is `b.cpp` would be C++: the point of the test is that the *database* decides, not the
+    // project-wide default, which is what it used to do.
+    let header = config.language_for(Path::new("/p/a.h"));
+    assert_eq!(
+        header.family(),
+        Some(cpp_parser::features::Family::C),
+        "the source beside it is C: {header:?}"
+    );
+    assert!(header.support(Feature::CompoundLiterals));
+
+    // **A `.hpp` states its own family**: it is a C++ header even beside a `.c` file.
+    let cpp_header = config.language_for(Path::new("/p/types.hpp"));
+    assert_ne!(
+        cpp_header.family(),
+        Some(cpp_parser::features::Family::C),
+        "a `.hpp` is C++ by its extension: {cpp_header:?}"
+    );
+}
+
+/// **With nothing in the database, the project's own configuration is the assumption** — the fallback the
+/// user asked for: "or assume one from the configuration".
+#[test]
+fn a_header_with_no_source_beside_it_takes_the_project_standard() {
+    let config = CompilerConfig::default().with_standard("c17");
+    assert_eq!(
+        config.language_for(Path::new("/p/lonely.h")).family(),
+        Some(cpp_parser::features::Family::C)
+    );
+
+    // …and with no configuration at all a header stays permissive rather than being guessed.
+    let unstated = CompilerConfig::default().language_for(Path::new("/p/lonely.h"));
+    assert_eq!(unstated.family(), None, "not told is not C");
 }

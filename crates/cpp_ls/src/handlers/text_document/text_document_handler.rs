@@ -216,11 +216,17 @@ pub async fn process_did_close_document(
 /// extension, and `DiagnosticCode::is_cpp_only`'s rule is "not told is not C" — which put C++ rules on a C project's
 /// headers (measured on redis 8.x: **73 `cstyle-cast` findings, every one in a `.h`**; `docs/c-support.md` §8).
 ///
-/// Anything that is not plainly C maps to `None`, which changes nothing: a client saying `cpp` is not a statement
-/// this session has any use for.
+/// Anything that is not one of these maps to `None`, which changes nothing: naming a family is the client's answer
+/// to a question the analysis cannot answer for itself.
+///
+/// **Both families are mapped, and C++ is the one that became load-bearing.** A header's language is now inferred
+/// from the translation unit that includes it (`Session::config_for_file`), so a header a `.c` file includes is read
+/// as C — and a reader who opens it as a C++ header is telling the session something the include graph cannot see.
+/// Before the inference existed, "a client saying `cpp` changes nothing" was true.
 fn family_of(language_id: &str) -> Option<cpp_parser::features::Family> {
     match language_id.to_ascii_lowercase().as_str() {
         "c" | "objective-c" => Some(cpp_parser::features::Family::C),
+        "cpp" | "c++" | "objective-cpp" | "cuda-cpp" => Some(cpp_parser::features::Family::Cpp),
         _ => None,
     }
 }

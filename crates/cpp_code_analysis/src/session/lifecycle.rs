@@ -236,7 +236,7 @@ impl<F: FileProvider + Clone> Session<F> {
             cooked_or_wanted: std::sync::Mutex::new(std::collections::HashSet::new()),
             renderings_asked: std::sync::Mutex::new(std::collections::HashSet::new()),
             focused_document: std::sync::Mutex::new(None),
-            client_says_c: std::sync::Mutex::new(std::collections::HashSet::new()),
+            client_language: std::sync::Mutex::new(std::collections::HashMap::new()),
             stored_cooks: std::sync::atomic::AtomicUsize::new(0),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
@@ -327,21 +327,56 @@ impl<F: FileProvider + Clone> Session<F> {
         // (`docs/c-support.md` §8). What the client said when it opened the document is a statement about the file,
         // and it is used only where the project said nothing.
         let mut language = config.language_for(file);
-        // **The client's language mode, when the project has not stated this file's.** A header is the case this is
-        // for: with no `-std=` of its own it inherits the project-wide default (`c++23` in the editor's settings),
-        // so an unconfigured C project's `.h` files are read as C++ and "not told is not C" turns C++ rules on —
-        // measured on redis 8.x: **73 `cstyle-cast` findings, every one in a `.h`** (`docs/c-support.md` §8).
+        // **A header takes the language of the unit the index says compiles it.** The database lists sources, so a
+        // header has no entry of its own — and the project-wide default is the editor's `c++23`, which makes a C
+        // header be read as C++: `_Static_assert`, `restrict` and `_Generic` are then errors or names, and every
+        // C++-only rule fires. `the_unit_that_reads` is the same answer the cook uses for a header's environment:
+        // breadth-first over the include graph to the file the build actually hands a compiler.
         //
-        // The database's own command is a fact and wins: a header it names has a stated language. The project-wide
-        // default is not a fact about this file, and the editor's mode for the document the reader has open is.
+        // Only a file the database does *not* name and whose extension states no family of its own (`.c`, `.cpp`,
+        // `.hpp`) is asked: those are facts about the file rather than about the program it belongs to. A mixed
+        // project — `a.c` and `b.cpp` in one directory — is exactly the case this exists for, and the directory's
+        // alphabetically first source is not an answer to it.
         if !config.is_in_the_database(file)
-            && self
-                .client_says_c
-                .lock()
-                .is_ok_and(|said| said.contains(&queue_key(file)))
+            && !CompilerConfig::states_its_own_family(file)
+            && let Some(root) = self.the_unit_that_reads(file)
+            && root != *file
         {
-            language = cpp_parser::features::LanguageConfig::c();
+            language = config.language_for(&root);
         }
+        // **The client's language mode outranks the inference.** A header is the case this is for: with no `-std=`
+        // of its own it inherits the project-wide default (`c++23` in the editor's settings), so an unconfigured C
+        // project's `.h` files are read as C++ and "not told is not C" turns C++ rules on — measured on redis 8.x:
+        // **73 `cstyle-cast` findings, every one in a `.h`** (`docs/c-support.md` §8). The reverse matters just as
+        // much now that a header's language comes from the unit that includes it: a header a `.c` file includes
+        // would be read as C even when the reader opened it as C++, and the editor's mode is a statement about the
+        // document in front of them.
+        //
+        // The database's own command is a fact and wins: a header it names has a stated language.
+        let stated = self
+            .client_language
+            .lock()
+            .ok()
+            .and_then(|said| said.get(&queue_key(file)).copied())
+            .filter(|_| !config.is_in_the_database(file));
+        if let Some(family) = stated {
+            language = match family {
+                cpp_parser::features::Family::C => cpp_parser::features::LanguageConfig::c(),
+                // A file the configuration read as C, and the client says C++: the permissive reading accepts the
+                // C++ the reader is writing without refusing the C headers it includes.
+                cpp_parser::features::Family::Cpp
+                    if language.family() != Some(cpp_parser::features::Family::Cpp) =>
+                {
+                    cpp_parser::features::LanguageConfig::permissive()
+                }
+                _ => language,
+            };
+        }
+        // **The answer goes back into the file's configuration**, so that everything reading this file agrees: the
+        // parser that builds its tree (`Indexer`), the cook that renders it, and the checks. Before this the
+        // session's answer and the parser's were two — a header the session had decided was C was *parsed* as C++
+        // — and the syntax errors of that reading were reported on correct code.
+        let config = std::sync::Arc::new((*config).clone().with_language(language));
         let worked_out = std::sync::Arc::new(PerFileConfig {
             language,
             family: config.language(),

@@ -193,17 +193,14 @@ impl<F: FileProvider + Clone> Session<F> {
     ) {
         let path = path.as_ref();
         if let Some(family) = family
-            && let Ok(mut said) = self.client_says_c.lock()
+            && let Ok(mut said) = self.client_language.lock()
         {
-            // **Only C is recorded**: it is the answer that turns rules off, and a client saying `cpp` changes
-            // nothing this session would otherwise do. The key is the session's own normalization — the same one
-            // `config_for_file` is asked with, which is a `Path` the store handed out rather than the client's string.
+            // **The key is the session's own normalization** — the same one `config_for_file` is asked with, which
+            // is a `Path` the store handed out rather than the client's string. Both families are recorded: a
+            // header's language is inferred from the unit that includes it, and the client's mode for the document
+            // they are reading outranks that inference.
             let key = queue_key(path);
-            if family == cpp_parser::features::Family::C {
-                said.insert(key);
-            } else {
-                said.remove(&key);
-            }
+            said.insert(key, family);
         }
         // The language was just decided differently from whatever the memo answered before it, so the memo's entry
         // goes: see [`Session::config_for_file`], which is where the client's answer is read.
@@ -254,7 +251,7 @@ impl<F: FileProvider + Clone> Session<F> {
         self.forget_refinement(path);
         // **The client's language mode goes with the document** — a closed file is not one the reader is looking at,
         // and the next question about it is a project question again.
-        if let Ok(mut said) = self.client_says_c.lock() {
+        if let Ok(mut said) = self.client_language.lock() {
             said.remove(&queue_key(path));
         }
         if let Ok(mut known) = self.config_for_file.lock() {

@@ -140,6 +140,19 @@ pub struct CompilerConfig {
     /// only wrong to reject if the configuration says a standard that lacks them.
     pub standard: Option<Box<str>>,
 
+    /// **This file's language, when a caller has already worked it out** — the per-file answer a session derives
+    /// and everything that reads the file then agrees on.
+    ///
+    /// [`CompilerConfig::language_for`] answers from the command line, the project's standard and the extension, and
+    /// that is all a configuration can know. It cannot know that a header is compiled as part of the `.c` file that
+    /// includes it, or that the client said the open document is C — both are facts about the *program*, held by the
+    /// session (`Session::config_for_file`). Without this field those two answers were the session's and the
+    /// **parser's was not**: a header was read as C++ by the parse (the project default) while the checks were told
+    /// it was C, and the syntax errors from the wrong reading were reported on correct code.
+    ///
+    /// `None` is "nobody has worked it out", and the lookup below answers.
+    pub stated_language: Option<cpp_parser::features::LanguageConfig>,
+
     /// `--target`, or `-m32`/`-m64`.
     ///
     /// Kept separate from the standard because the two answer different questions, and because the target
@@ -263,6 +276,12 @@ impl CompilerConfig {
     }
 
     pub fn language_for(&self, file: &Path) -> cpp_parser::features::LanguageConfig {
+        // **An answer already worked out wins**, and it is the only one that knows about the *program*: which
+        // translation unit compiles a header, and what the client said the open document is. See
+        // [`CompilerConfig::language`].
+        if let Some(stated) = self.stated_language {
+            return stated;
+        }
         let from_the_command = self
             .database
             .as_ref()
@@ -291,6 +310,31 @@ impl CompilerConfig {
                 _ => true,
             }
         };
+        // **A header's language is the language of the file that compiles it.** A build lists its *sources*; a
+        // header is compiled as part of one of them and appears nowhere in the database, so `command_for` answers
+        // `None` for it and the answer fell to the project-wide `[compile] standard` — the editor's default
+        // `c++23` — even when the target that includes it is C. That is the same evidence `for_file_with` already
+        // trusts for a header's `-I` paths ("the command of a source beside it"), applied to the field where a
+        // wrong answer is silent: every C++-only rule fires in a C header, and every C-only construct is read as
+        // C++.
+        //
+        // Only a **stated family** is taken from it: a neighbouring command with no `-std=` says nothing about the
+        // language, and the project's own configuration is the next answer. A file whose extension states its own
+        // family — `.c`, `.cpp`, `.hpp` — is not asked: `a.hpp` beside a `.c` is a C++ header, whatever the C file
+        // in its directory says.
+        let from_a_neighbour = if Self::states_its_own_family(file) {
+            None
+        } else {
+            self.database
+                .as_ref()
+                .and_then(|database| database.a_command_for_a_header(file))
+                .and_then(|command| {
+                    cpp_parser::features::LanguageConfig::from_command_line(
+                        command.arguments.iter(),
+                    )
+                })
+                .filter(|language| language.family().is_some() && agrees_with_the_file(language))
+        };
         from_the_command
             // **The project's own `-std=`**, which is where `[compile] standard` and a `-std=` inside
             // `[compile] args` end up (see `project_config_from_flags`). It was missing here, so a project that
@@ -307,6 +351,12 @@ impl CompilerConfig {
                 cpp_parser::features::LanguageConfig::from_command_line(self.extra_args.iter())
                     .filter(agrees_with_the_file)
             })
+            // **…and the source beside it only after the project has said nothing.** A configured project's standard
+            // is a statement about its files; a neighbouring command is a guess about a header that has no entry of
+            // its own, and a mixed project's directory holds both a `.c` and a `.cpp`. The guess still beats
+            // `permissive` for an unconfigured project, which is where it was measured: a C project with no
+            // `[compile]` section read its `.h` files as *not told*, and every C++-only rule fired in them.
+            .or(from_a_neighbour)
             // **A `.c` file is C.** When nothing above has said what the file is — no database entry, no
             // `[compile] standard`, no `-std=` — the extension is what every compiler decides by, and it is what the
             // *editor* decided too when it opened the file. Without this the family was unknown, `is_c()` answered
@@ -328,6 +378,19 @@ impl CompilerConfig {
 
     pub fn for_file(&self, file: &Path) -> CompilerConfig {
         self.for_file_with(file, &mut |path| std::fs::read_to_string(path).ok())
+    }
+
+    /// **Does this file's extension state its language by itself?**
+    ///
+    /// `.c` is C and `.cpp`/`.hpp` are C++, whatever a neighbouring command says — a compiler decides by the
+    /// extension too. Everything else (`.h`, `.inl`, `.inc`, a file with no extension) is compiled *as part of*
+    /// something, and that something is the evidence
+    /// [`CompilerConfig::language_for`] looks for when the database names the file itself nowhere.
+    pub fn states_its_own_family(file: &Path) -> bool {
+        matches!(
+            file.extension().and_then(|extension| extension.to_str()),
+            Some("c" | "i" | "cpp" | "cc" | "cxx" | "c++" | "mpp" | "hpp" | "hxx" | "hh" | "h++")
+        )
     }
 
     /// **[`CompilerConfig::for_file`] with the file reads the caller's**, which is what a test needs and what a
@@ -585,6 +648,13 @@ impl CompilerConfig {
 
     pub fn with_define(mut self, definition: CommandLineMacro) -> Self {
         self.defines.push(definition);
+        self
+    }
+
+    /// **State this file's language** — see [`CompilerConfig::language`], and `Session::config_for_file`, which is the
+    /// one caller that can work it out.
+    pub fn with_language(mut self, language: cpp_parser::features::LanguageConfig) -> Self {
+        self.stated_language = Some(language);
         self
     }
 

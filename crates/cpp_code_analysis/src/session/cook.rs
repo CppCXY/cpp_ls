@@ -152,7 +152,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if name.starts_with("cl") && !name.starts_with("clang") {
             return None;
         }
-        let language = self.config.language_for(path);
+        let language = self.config_for_file(path).language;
         let probe_language = match language.family() {
             Some(cpp_parser::features::Family::C) => cpp_toolchain::ProbeLanguage::C,
             _ => cpp_toolchain::ProbeLanguage::Cpp,
@@ -405,7 +405,11 @@ impl<F: FileProvider + Clone> Session<F> {
         if !self.is_current(&materials.revision) {
             return None;
         }
-        Self::render_cook(&self.files, &self.config, materials)
+        // **The file's own configuration**, whose language is the one this session worked out for it — see
+        // Session::config_for_file. The parser inside ender_cook reads the file, and it must read it as the
+        // language the checks are told.
+        let config = self.config_for_file(&materials.path);
+        Self::render_cook(&self.files, &config.config, materials)
     }
 
     pub(crate) fn render_cook(

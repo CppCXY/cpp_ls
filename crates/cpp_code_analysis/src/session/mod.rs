@@ -1201,9 +1201,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// rule then fires in a C project's headers: measured on redis 8.x, **73 `cstyle-cast` findings, every one of
     /// them in a `.h`** (`docs/c-support.md` §8).
     ///
-    /// Only the C answer is kept: it is the one that turns rules *off*, and a client saying `cpp` changes nothing
-    /// this session would otherwise do.
-    client_says_c: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Both answers are kept now, and the reason is the include graph: a header takes the language of the unit the
+    /// index says compiles it (`Session::config_for_file`), and a header a `.c` file includes would be read as C
+    /// **even when the reader opened it as C++**. The client's mode for the document in front of them is a
+    /// statement about that document, and it outranks an inference from the program.
+    client_language:
+        std::sync::Mutex<std::collections::HashMap<String, cpp_parser::features::Family>>,
     /// **How many cooks the disk answered** --- a cook that rendered, parsed and indexed nothing, because the file's
     /// record was already on the disk with its rendering. The number the per-file cache is judged by.
     stored_cooks: std::sync::atomic::AtomicUsize,
