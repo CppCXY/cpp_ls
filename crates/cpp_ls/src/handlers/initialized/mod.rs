@@ -165,6 +165,11 @@ pub async fn initialized_handler(
 /// Called once at `initialized` and again on every workspace reload (`WorkspaceManager`), which is why it takes the
 /// context and asks the state where the workspace is rather than being handed a root.
 pub async fn start_analysis(context: ServerContextSnapshot) {
+    // **A reload starts a new document set.** The one-slot lens answer belongs to the document the client was
+    // editing in the old workspace; do not use it for a same-named file in the new one.
+    if let Ok(mut held) = context.last_code_lens().lock() {
+        *held = None;
+    }
     let Some((root, version, load)) = open_session(&context).await else {
         return;
     };

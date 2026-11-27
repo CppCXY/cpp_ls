@@ -8,6 +8,9 @@ use super::{
     status_bar::StatusBar, workspace_manager::WorkspaceManager,
 };
 
+/// The last complete code-lens answer: the document URI and the lenses the client was given.
+pub type LastCodeLens = (String, Vec<lsp_types::CodeLens>);
+
 #[derive(Clone)]
 pub struct ServerContextSnapshot {
     inner: Arc<ServerContextInner>,
@@ -46,6 +49,12 @@ impl ServerContextSnapshot {
         &self.inner.native_watcher
     }
 
+    /// **The last complete lens list for the document currently being asked about.** One entry, not one per open
+    /// file: the list is a guard against replacing a drawn lens with a partial one, not an index.
+    pub fn last_code_lens(&self) -> &std::sync::Arc<std::sync::Mutex<Option<LastCodeLens>>> {
+        &self.inner.last_code_lens
+    }
+
     /// The client's pending notifications, applied by one worker before request barriers complete.
     pub fn inbox(&self) -> &UpdateInbox {
         &self.inner.inbox
@@ -70,4 +79,7 @@ pub struct ServerContextInner {
     pub inbox: UpdateInbox,
     pub diagnostics: DiagnosticService,
     pub native_watcher: NativeFileWatcher,
+    /// The last complete code-lens list and its document URI. A single slot is deliberate: it is a request boundary,
+    /// not a cache of every tab, and a complete answer for another document replaces it.
+    pub last_code_lens: std::sync::Arc<std::sync::Mutex<Option<LastCodeLens>>>,
 }
