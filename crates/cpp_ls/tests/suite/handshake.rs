@@ -2462,6 +2462,112 @@ fn a_completion_sees_a_change_to_an_included_header() {
     server.notify("exit", Value::Null);
 }
 
+/// **The keystroke that asked for the completion is the one the answer is about.**
+///
+/// A client sends `didChange` and then the request, with nothing in between: neovim flushes its pending changes
+/// before every request (`vim.lsp.Client:request` → `changetracking.flush`, "so that the server doesn't operate on
+/// a stale state"). The notification only *queues* the edit, so everything rides on the request's barrier —
+/// `record_request` (the queue's position when the request was dispatched) and `catch_up_upto` (wait until that
+/// position is applied), which run before the handler's first line.
+///
+/// The assertion is the **replace range**: one character, columns 2..3. An answer computed from the text before
+/// the keystroke has an empty range at the cursor and no prefix at all — which is the shape reported from an
+/// editor as "typing `k` shows nothing".
+#[test]
+fn a_completion_sees_the_keystroke_that_asked_for_it() {
+    let source = "\
+#define kvec_make(T) struct { T *items; int size; }
+void f() {
+  
+}
+";
+    let project = Project::new("completion-sees-its-own-keystroke");
+    project.write("a.c", source);
+    let uri = uri_of(&project.root().join("a.c"));
+
+    let mut server = Server::start(project.root());
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": source }
+        }),
+    );
+
+    let (line, character) = (2u32, 2u32);
+    let ask = |id: i64| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    };
+    server.ask_until_it(100, ask, |response| {
+        response["result"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["label"] == json!("kvec_make")))
+    });
+
+    // **The keystroke, and the request with nothing in between.**
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character },
+                },
+                "text": "k",
+            }],
+        }),
+    );
+    let answer = server.request(
+        200,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character + 1 },
+        }),
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+    let item = items
+        .iter()
+        .find(|item| item["label"] == json!("kvec_make"))
+        .unwrap_or_else(|| {
+            let labels: Vec<&str> = items.iter().filter_map(|item| item["label"].as_str()).collect();
+            panic!("the macro the file declares, from a list about the text that has the `k` in it: {labels:?}")
+        });
+    let range = &item["textEdit"]["range"];
+    assert_eq!(
+        range["start"],
+        json!({ "line": line, "character": character }),
+        "the edit starts at the `k` the reader typed: {item}"
+    );
+    assert_eq!(
+        range["end"],
+        json!({ "line": line, "character": character + 1 }),
+        "and covers exactly that one character — an empty range at the cursor is an answer from the old text: {item}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
 /// **A `.` at the end of a body, on a `std::string` variable, offers the members.**
 ///
 /// The third report of the same symptom — "No suggestions" under `full2.` — and the one that shows how narrow the

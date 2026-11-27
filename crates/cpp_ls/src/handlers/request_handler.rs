@@ -136,6 +136,14 @@ macro_rules! dispatch_request {
                                     // 2. a newer request for **the same method and document** arrived, which is the
                                     //    client telling us the answer it wants is a different one.
                                     let answer = if cancel_token.is_cancelled() {
+                                        // **A request the client cancelled before it was even asked.** Reported,
+                                        // because a client that cancels its own newest request shows its reader
+                                        // nothing no matter what the server answers — and the server's log cannot
+                                        // tell that apart from "the query returned no items" without this line.
+                                        log::debug!(
+                                            "request {}: cancelled by the client before it ran",
+                                            id
+                                        );
                                         crate::context::RequestOutcome::Cancelled(
                                             crate::context::CancelSource::Client,
                                         )

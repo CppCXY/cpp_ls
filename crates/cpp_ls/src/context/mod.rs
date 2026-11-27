@@ -21,6 +21,7 @@ use lsp_types::ClientCapabilities;
 pub use native_watcher::NativeFileWatcher;
 pub use query_runner::{CancelSource, RequestOutcome, snapshot_query};
 pub use snapshot::ServerContextSnapshot;
+pub use status_bar::LoadIndicator;
 pub use status_bar::ProgressTask;
 pub use status_bar::StatusBar;
 use std::{collections::HashMap, future::Future, sync::Arc};
@@ -221,6 +222,40 @@ impl ServerContext {
                         "internal error".to_string(),
                     )
                 }
+            };
+            // **A request that was superseded while it ran answers "cancelled", never with its result.**
+            //
+            // The client starts a newer request about the same document — the next keystroke — and cancels this
+            // one; the handler cannot be stopped inside a blocking query (measured: 1.42 s after its cancellation),
+            // so the answer exists and used to be sent. Two requests about one word then answer **out of order**:
+            // measured in a real session, `kvec`, `kve`, `kv` and `k` were answered in that order within one second,
+            // and the client's menu was left showing whichever arrived last.
+            //
+            // **The slot being gone is supersession too, and that is the half this check first missed.** The newer
+            // request releases the slot when *its* answer is sent — so by the time an older request finishes, the
+            // slot is usually empty rather than naming somebody else, and `is_some_and(current != me)` read "empty"
+            // as "still mine" and sent the stale list anyway. A request only keeps the right to answer if the slot
+            // still names **it**.
+            let superseded = match &slot {
+                Some(key) => {
+                    let slots = slots.lock().await;
+                    slots.get(key) != Some(&req_id)
+                }
+                None => false,
+            };
+            let response = if superseded {
+                // **The answer exists and nobody wants it.** Said out loud because a menu that shows nothing is
+                // indistinguishable, from the client's side of the log, from a list the server never sent.
+                log::debug!(
+                    "request {req_id:?}: superseded while it ran, the computed answer is dropped"
+                );
+                Response::new_err(
+                    req_id.clone(),
+                    ErrorCode::RequestCanceled as i32,
+                    "superseded by a newer request".to_string(),
+                )
+            } else {
+                response
             };
             client.send_response(response);
 

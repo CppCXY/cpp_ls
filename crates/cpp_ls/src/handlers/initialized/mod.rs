@@ -24,6 +24,7 @@
 //! step 4 returns, and everything after it makes the answers better without making the editor wait.
 
 use crate::context;
+use crate::context::LoadIndicator;
 use crate::handlers;
 mod client_config;
 
@@ -164,7 +165,7 @@ pub async fn initialized_handler(
 /// Called once at `initialized` and again on every workspace reload (`WorkspaceManager`), which is why it takes the
 /// context and asks the state where the workspace is rather than being handed a root.
 pub async fn start_analysis(context: ServerContextSnapshot) {
-    let Some((root, version)) = open_session(&context).await else {
+    let Some((root, version, load)) = open_session(&context).await else {
         return;
     };
 
@@ -263,7 +264,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
         Some(format!("Indexing {}", root.display())),
     );
 
-    index_in_background(context.clone(), version).await;
+    index_in_background(context.clone(), version, load).await;
     context
         .diagnostics()
         .schedule_open_files(context.clone())
@@ -274,7 +275,7 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
 ///
 /// `None` when the client has named no folder: there is nothing to open over, and every query answers "no analysis"
 /// until it does — which is the honest state rather than an empty project.
-async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64)> {
+async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64, LoadIndicator)> {
     let (root, filter, config_file, version, generation) = {
         let workspace_manager = context.workspace_manager().lock().await;
         if workspace_manager.is_closing() {
@@ -289,10 +290,11 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64)>
         )
     };
 
-    context
-        .status_bar()
-        .create_progress_task(ProgressTask::LoadWorkspace)
-        .await;
+    // **The bar is a guard, not a pair of calls.** It ends when this value is dropped, whichever way the load
+    // stops: a session superseded while it was being built (the `return None` below), a pump that returns because
+    // the workspace was reloaded, or a panic. Both of the first two used to leave the reader's bar frozen at its
+    // last report with the server idle.
+    let load = context.status_bar().begin_load();
 
     let session = context
         .analysis()
@@ -312,7 +314,7 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<(PathBuf, i64)>
     report_a_missing_formatter(context);
 
     log::info!("analysing {}", root.display());
-    Some((root, version))
+    Some((root, version, load))
 }
 
 async fn install_prepared_session(
@@ -483,7 +485,7 @@ fn report_project_configuration(context: &ServerContextSnapshot) {
 /// A server that pumped the queue only at startup would answer about an empty index for the rest of the session —
 /// every query in a file the user has typed in would be "not read yet" — so the pump is what makes an edit visible
 /// again, and it is one task rather than a rule every handler would have to remember.
-async fn index_in_background(context: ServerContextSnapshot, version: i64) {
+async fn index_in_background(context: ServerContextSnapshot, version: i64, load: LoadIndicator) {
     tokio::spawn(async move {
         let mut first_pass = true;
         let mut last_diagnostic_revision = None;
@@ -510,18 +512,8 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
         // **The bar's rate** — see the report below, which is per slice.
         const PROGRESS_REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
         let mut last_report = std::time::Instant::now();
-
-        // **How fast the loop is going**, under the trace: a pump that waits shows ~8 rounds a second (the
-        // idle timeout); one that spins shows thousands, which is what the `containers.cpp` report measured.
-        let mut rounds = 0u64;
-        let rounds_started = std::time::Instant::now();
         let mut last_applied = context.inbox().applied();
         loop {
-            rounds += 1;
-
-            if rounds.is_multiple_of(1000) && false {
-                eprintln!("[rounds] {rounds} in {:?}", rounds_started.elapsed());
-            }
             // **Do not index while the reader is typing.**
             //
             // The pump's slices hold the session's read lock for 170–360 ms at a time (a stored record's decode was
@@ -538,12 +530,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 tokio::time::sleep(A_QUIET_MOMENT).await;
                 continue;
             }
-            // **The pump's own heartbeat, at `trace`.** A bar stuck at "re-reading N" with no CPU means the loop is
-            // parked on an `await`, and which one is invisible from the outside: every step of a slice is silent when
-            // the slice finds nothing to do. These five lines are the only way to tell "blocked on the workspace
-            // manager" from "blocked on the analysis" from "blocked in the drain", and they cost nothing when the
-            // level is not `trace`.
-            log::trace!("pump: round");
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
             // the write lock, because its idea of what the project is is the one that was replaced.
             if context.workspace_manager().lock().await.workspace_version() != version {
@@ -555,11 +541,6 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                 .analysis()
                 .with_snapshot(|session| session.next_open_file_to_read())
                 .flatten();
-            if let Some(path) = &open_file
-                && false
-            {
-                eprintln!("[read] next open file to read: {}", path.display());
-            }
             if let Some(path) = open_file
                 && context.analysis().read_queued_file(&path).await
             {
@@ -1284,7 +1265,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                                 })
                                 .unwrap_or(false);
                         if !still_owed {
-                            finish_the_load(&context);
+                            finish_the_load(&context, &load);
                             settling_the_load = false;
                         }
                     }
@@ -1293,7 +1274,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
                     // A deferred program is work for a later idle moment, not work the current load indicator
                     // should wait for; the reader has stopped typing and the bar can retire.
                     if settling_the_load {
-                        finish_the_load(&context);
+                        finish_the_load(&context, &load);
                         settling_the_load = false;
                     }
                     context.analysis().wait_for_work(wait).await;
@@ -1304,7 +1285,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
             // **The load settles when no program is owed and nothing is pending.** A deferred program (wait > 0)
             // has its own idle moment; the next edit will schedule it and no progress bar can wait for typing.
             if settling_the_load {
-                finish_the_load(&context);
+                finish_the_load(&context, &load);
                 settling_the_load = false;
             }
 
@@ -1322,11 +1303,13 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64) {
 }
 
 /// End the load indicator only once the pump has nothing left that it started — see `settling_the_load`.
-fn finish_the_load(context: &ServerContextSnapshot) {
-    context.status_bar().finish_progress_task(
-        ProgressTask::LoadWorkspace,
-        Some("the workspace is indexed".to_string()),
-    );
+///
+/// **The guard is what makes this safe to miss.** The pump has several exits, and two of them used to leave the
+/// reader's bar frozen at its last report (a session superseded while it was being built, a pump that stopped
+/// because the workspace was reloaded): neither called this. `LoadIndicator` ends the bar when it is dropped, and
+/// this retires it early for the ordinary "the load is settled, the rest is idle work" case.
+fn finish_the_load(context: &ServerContextSnapshot, load: &crate::context::LoadIndicator) {
+    load.retire();
     log::info!(
         "the workspace is indexed — the longest an update held the analysis was {} ms",
         context.analysis().worst_write_hold()

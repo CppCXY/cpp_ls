@@ -131,6 +131,30 @@ pub struct AnalysisState {
     worst_write_hold: Arc<std::sync::atomic::AtomicU64>,
     /// "The queue has work in it" — how an edit reaches the task that reads.
     work: Arc<Notify>,
+    /// **The rendered answer of the previous keystroke, while the only change is a longer word.**
+    ///
+    /// Measured on neovim's `channel.c`: reading the rendered view's list costs **66–68 ms on every keystroke**, and
+    /// between two keystrokes of one word the only thing that changes is which names match the longer prefix — the
+    /// scope the list is read from is the same one. A reader typing `kvec` paid that four times for one word, while
+    /// an editor's completion popup is competing with whatever else answers on the same keystroke. The answer is kept
+    /// and filtered, and the guard is the file's own text: it is reused only when the current text is the cached text
+    /// with the cached word replaced by the longer one, so any other edit falls through to the real query.
+    last_rendered: Arc<std::sync::Mutex<Option<LastRenderedCompletion>>>,
+}
+
+/// The previous rendered completion, and the text it was read from — see [`AnalysisState::last_rendered`].
+struct LastRenderedCompletion {
+    path: std::path::PathBuf,
+    /// Where the typed word starts, in file offsets.
+    prefix_start: usize,
+    /// What had been typed when the answer was built.
+    prefix: String,
+    /// The file's text at that moment. Reuse is guarded by rebuilding it from the current text and comparing.
+    source: Arc<str>,
+    /// How many files the index held. A caught-up include adds a file, which the text guard cannot see; this is the
+    /// one index change the completion path can produce while the current file's text is otherwise unchanged.
+    files: usize,
+    set: cpp_code_analysis::CompletionSet,
 }
 
 /// **How long an update may hold the analysis before it is a defect.**
@@ -155,6 +179,28 @@ pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 /// after `std::` collects thousands of declarations), and the point of the line is to make that visible rather than
 /// to bound it.
 pub const QUERY_BUDGET: Duration = Duration::from_millis(50);
+
+/// **The list's own matching rule: the typed characters, in order, somewhere in the label.**
+///
+/// Not a prefix match — measured through the server on neovim's `channel.c`, the answer at `kve` holds `kv_A`,
+/// `kv_ensure_space` and `KVI_INITIAL_VALUE`, none of which start with it, and a prefix filter would cut the list from
+/// nineteen items to two. The analysis matches the typed characters as a subsequence, so the reuse path has to match
+/// them the same way or it answers a different question.
+fn matches_the_word(label: &str, typed: &str) -> bool {
+    let mut characters = typed.chars();
+    let mut wanted = characters.next();
+    for character in label.chars() {
+        if let Some(next) = wanted
+            && character == next
+        {
+            wanted = characters.next();
+            if wanted.is_none() {
+                break;
+            }
+        }
+    }
+    wanted.is_none()
+}
 
 /// The identifier ending at `offset`, or the empty string when the cursor is not after one.
 fn identifier_before(text: &str, offset: usize) -> String {
@@ -182,6 +228,7 @@ impl AnalysisState {
             file_read_gate: Arc::new(Mutex::new(())),
             worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
+            last_rendered: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -246,14 +293,69 @@ impl AnalysisState {
         position: lsp_types::Position,
     ) -> Option<cpp_code_analysis::CompletionSet> {
         let path = path.to_path_buf();
+        // The closure handed to `run_blocking` is `'static`; the cache is shared rather than borrowed.
+        let last_rendered = Arc::clone(&self.last_rendered);
         self.run_blocking("a completion's reading", move |session| {
             let editable = session.view_of_the_file(&path)?;
             let offset = util::file_offset_at_position(&editable, position)?;
             let typed = identifier_before(&editable.source, offset.get());
+
+            // **A keystroke that only lengthens the word reuses the last answer.** See `last_rendered`: the list is
+            // the same scope read with a longer filter, and reading it again costs 66–68 ms on a large file.
+            if !typed.is_empty() {
+                let prefix_start = offset.get().saturating_sub(typed.len());
+                let reused = last_rendered.lock().ok().and_then(|cached| {
+                    let cached = cached.as_ref()?;
+                    if cached.path != path
+                        || cached.prefix_start != prefix_start
+                        || typed.len() <= cached.prefix.len()
+                        || session.index().len() != cached.files
+                    {
+                        return None;
+                    }
+                    let lower = typed.to_ascii_lowercase();
+                    let cached_lower = cached.prefix.to_ascii_lowercase();
+                    if !lower.starts_with(&cached_lower) {
+                        return None;
+                    }
+                    // The cached text is the current text with the longer word put back: anything else that changed
+                    // (another line, another word, a closing brace) must go to the real query.
+                    let mut previous = String::with_capacity(editable.source.len());
+                    previous.push_str(&editable.source[..prefix_start]);
+                    previous.push_str(&cached.prefix);
+                    previous.push_str(&editable.source[offset.get()..]);
+                    if previous.as_str() != &*cached.source {
+                        return None;
+                    }
+                    Some(cached.set.clone())
+                });
+                if let Some(mut set) = reused {
+                    // **The list's own matching rule, applied again to the longer word.** It is not a prefix match:
+                    // measured on neovim's `channel.c`, the answer at `kve` holds `kv_A`, `kv_ensure_space` and
+                    // `KVI_INITIAL_VALUE`, none of which start with it, and a prefix filter cut the list from nineteen
+                    // items to two. The analysis matches the typed characters as a subsequence, so the reuse path
+                    // matches them the same way or it answers a different question.
+                    let lower = typed.to_ascii_lowercase();
+                    set.items
+                        .retain(|item| matches_the_word(&item.label.to_ascii_lowercase(), &lower));
+                    set.prefix = typed.clone();
+                    set.replace = cpp_parser::SourceRange::new(prefix_start, typed.len());
+                    return Some(set);
+                }
+            }
+
             let has_the_prefix = |set: &cpp_code_analysis::CompletionSet| {
                 !typed.is_empty() && set.items.iter().any(|item| item.label.starts_with(&typed))
             };
-            let Some(rendered) = session.view(&path) else {
+            let Some(rendered) = session
+                .view(&path)
+                // **And when it is not read yet, read it now.** A completion is asked once and its answer is what
+                // the client draws; a provisional list is drawn as nothing, and the reader sits in front of an empty
+                // popup until a later keystroke finds the rendering ready. The cook of an open document measured
+                // 3–10 ms on `channel.c` (`writer phase: … cook 3.0987ms`), which is the right price for the first
+                // answer after an edit being the compiler's reading.
+                .or_else(|| session.view_of_the_rendering_now(&path))
+            else {
                 // **No rendering is a temporary state, and it is stated as one.** The file's own text, parsed with
                 // whatever environment is known for it, is offered and marked incomplete so the client asks again —
                 // the writer cooks this file on every edit, so the next request has the compiler's reading.
@@ -309,6 +411,18 @@ impl AnalysisState {
                         end.get().saturating_sub(start.get()),
                     );
                 }
+            }
+            // **Keep this answer for the next keystroke**, now that its replace range is in file offsets; see
+            // `last_rendered`.
+            if let Ok(mut cached) = last_rendered.lock() {
+                *cached = Some(LastRenderedCompletion {
+                    path: path.clone(),
+                    prefix_start: offset.get().saturating_sub(typed.len()),
+                    prefix: typed.clone(),
+                    source: editable.source.clone(),
+                    files: session.index().len(),
+                    set: found.clone(),
+                });
             }
             Some(found)
         })
