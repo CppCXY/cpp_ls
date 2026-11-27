@@ -48,7 +48,9 @@ pub enum DiagnosticCode {
     AssignTypeCheck,
     /// `*` applied to something that is not a pointer to an object — see [`super::deref_type_check`].
     DerefTypeCheck,
-    /// A member access on a type that does not declare that member — see [`super::undefined_field`].
+    /// A bitfield wider than the type it is declared with — see [super::bitfield_width].
+    BitfieldWidth,
+    /// A member access on a type that does not declare that member — see [super::undefined_field].
     UndefinedField,
     /// A name nothing declares is read at this position — see [`super::undefined_name`].
     UndefinedName,
@@ -168,11 +170,12 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 47] = [
+    pub const ALL: [DiagnosticCode; 48] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
         DiagnosticCode::DerefTypeCheck,
+        DiagnosticCode::BitfieldWidth,
         DiagnosticCode::UndefinedField,
         DiagnosticCode::UndefinedName,
         DiagnosticCode::Redefinition,
@@ -228,6 +231,7 @@ impl DiagnosticCode {
             DiagnosticCode::SyntaxError => "syntax-error",
             DiagnosticCode::ParamTypeCheck => "param-type-check",
             DiagnosticCode::AssignTypeCheck => "assign-type-check",
+            DiagnosticCode::BitfieldWidth => "bitfield-width",
             DiagnosticCode::DerefTypeCheck => "deref-type-check",
             DiagnosticCode::UndefinedField => "undefined-field",
             DiagnosticCode::UndefinedName => "unresolved-call-or-receiver",
@@ -309,6 +313,7 @@ impl DiagnosticCode {
             DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
             DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
             DiagnosticCode::DerefTypeCheck => RuleSeverity::Error,
+            DiagnosticCode::BitfieldWidth => RuleSeverity::Error,
             DiagnosticCode::UndefinedField => RuleSeverity::Error,
             DiagnosticCode::UndefinedName => RuleSeverity::Error,
             DiagnosticCode::Redefinition => RuleSeverity::Error,

@@ -106,6 +106,7 @@ pub mod argument_count;
 pub mod ascend_kernel;
 pub mod assign_type_check;
 pub mod assignment_in_condition;
+pub mod bitfield_width;
 // pub mod assign_type_check;
 pub mod config;
 pub mod diagnostic_code;
@@ -1796,6 +1797,7 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<argument_count::ArgumentCount>(&mut context);
     run_check::<param_type_check::ParamTypeCheck>(&mut context);
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
+    run_check::<bitfield_width::BitfieldWidth>(&mut context);
     run_check::<deref_type_check::DerefTypeCheck>(&mut context);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
     // The rule that needs an expression origin: `return s;` is a defect or not depending on whether `s` is a local, a

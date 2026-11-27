@@ -226,7 +226,10 @@ fn the_declaration_is_a_value(context: &CheckContext<'_>, name: &str, at: usize)
                 if !from_anywhere && binding.name_range.start_offset > at {
                     continue;
                 }
-                return matches!(binding.kind, BindingKind::Variable | BindingKind::Enumerator);
+                return matches!(
+                    binding.kind,
+                    BindingKind::Variable | BindingKind::Enumerator
+                );
             }
         }
     }
@@ -236,7 +239,11 @@ fn the_declaration_is_a_value(context: &CheckContext<'_>, name: &str, at: usize)
     match context.model.index().definitions(name, context.path) {
         Known::Yes(found) => {
             let mut is_a_value = false;
-            for declaration in found.found.iter().filter(|entry| entry.file != context.path) {
+            for declaration in found
+                .found
+                .iter()
+                .filter(|entry| entry.file != context.path)
+            {
                 if declaration.fact.kind == DeclKind::Function {
                     return false;
                 }
@@ -518,5 +525,3 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
         Known::No => false,
     }
 }
-
-

@@ -165,6 +165,7 @@ mod argument_count;
 mod ascend_kernel;
 mod assign_type_check;
 mod assignment_in_condition;
+mod bitfield_width;
 mod braces_around_statements;
 mod concept_not_satisfied;
 mod contract_placement;
