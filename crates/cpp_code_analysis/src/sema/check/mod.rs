@@ -1431,6 +1431,47 @@ fn is_a_char_pointer_spelling(written: &str) -> bool {
     spelling == "char*" || spelling == "void*"
 }
 
+/// **A type written back as a spelling** — for a message, and only for the shapes a call's parameter list holds.
+///
+/// `param-type-check` compares an argument against a *spelling*, because that is what a declaration writes and what a
+/// message has to quote. A signature the model answers as a type — the parameters of a function pointer, see
+/// `param_type_check` — has to come back to that form, and this is the one place that writes one.
+///
+/// `None` for anything this cannot write **exactly**: a template parameter, a pack, a class written with arguments, a
+/// nested function type. A caller that gets `None` stays silent, which is the direction a message must fail in.
+pub fn a_spelling_of(type_of: &sema::types::Type) -> Option<String> {
+    use sema::types::Type;
+    Some(match type_of {
+        Type::Builtin { spelling } => spelling.clone(),
+        Type::Named { name, arguments } if arguments.is_empty() => name.clone(),
+        Type::Named { .. }
+        | Type::TemplateParameter { .. }
+        | Type::Pack { .. }
+        | Type::Function { .. } => return None,
+        Type::Pointer { to } => format!("{} *", a_spelling_of(to)?),
+        Type::Reference { to, rvalue } => format!(
+            "{} {}",
+            a_spelling_of(to)?,
+            if *rvalue { "&&" } else { "&" }
+        ),
+        Type::Qualified { of, qualifiers } => {
+            let mut spelling = String::new();
+            if qualifiers.is_const() {
+                spelling.push_str("const ");
+            }
+            if qualifiers.is_volatile() {
+                spelling.push_str("volatile ");
+            }
+            spelling.push_str(&a_spelling_of(of)?);
+            spelling
+        }
+        Type::Array { of, extent } => match extent {
+            Some(extent) => format!("{}[{extent}]", a_spelling_of(of)?),
+            None => format!("{}[]", a_spelling_of(of)?),
+        },
+    })
+}
+
 pub fn a_class_can_be_built_from(
     context: &CheckContext<'_>,
     class: &str,

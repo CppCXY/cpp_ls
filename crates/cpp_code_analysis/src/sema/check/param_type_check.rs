@@ -133,7 +133,30 @@ impl Check for ParamTypeCheck {
                 Some(None) => continue,
                 None => match the_index_declares_one(context, name.as_str()) {
                     Some(parameters) => parameters,
-                    None => continue,
+                    None => {
+                        // **A call through a function pointer.** `int (*callback)(int)` called with `"text"` names
+                        // no function declaration — the callee is a **variable** whose type *is* the signature — so
+                        // both tables above answer nothing and the call went unchecked. The model answers the
+                        // variable's type, and its parameters are `Type`s; they are written back as spellings so
+                        // that this is the same comparison, with the same exemptions, as every other call.
+                        //
+                        // A type this cannot write — a template parameter, a pack, a nested function type — skips the
+                        // call rather than guessing at a spelling.
+                        if let Some(parameters) = a_function_pointer_signature(context, &callee)
+                            && let Some(spellings) = parameters
+                                .iter()
+                                .map(super::a_spelling_of)
+                                .collect::<Option<Vec<String>>>()
+                        {
+                            check_the_arguments(
+                                context,
+                                &call,
+                                &name,
+                                std::slice::from_ref(&spellings),
+                            );
+                        }
+                        continue;
+                    }
                 },
             };
             check_the_arguments(context, &call, &name, std::slice::from_ref(&parameters));
@@ -348,3 +371,34 @@ fn the_index_declares_one(context: &CheckContext<'_>, name: &str) -> Option<Vec<
     let (parameters, _variadic) = sema::overload::parameters_in(&written[0]);
     Some(parameters)
 }
+
+/// **The parameter types of a function pointer**, when the callee's type is one.
+///
+/// `int (*callback)(int)` is a *variable*, so no table of functions holds it and `by_name` cannot answer — the
+/// signature is the variable's own type. A pointer to anything else, a `Named` this layer has not resolved, and
+/// `Unknown` all answer `None`, which leaves the call unchecked rather than guessed at.
+fn a_function_pointer_signature(
+    context: &CheckContext<'_>,
+    callee: &cpp_parser::CppSyntaxNode,
+) -> Option<Vec<sema::types::Type>> {
+    let Known::Yes((type_of, _)) = context.type_of(callee) else {
+        return None;
+    };
+        let mut type_of = &type_of;
+    while let sema::types::Type::Qualified { of, .. } = type_of {
+        type_of = of;
+    }
+    // **Two shapes, because the model answers both**: `Pointer { to: Function }` is the type this is looking for, and
+    // a bare `Function` is what the declaration reader answers for `int (*callback)(int)` — measured, and the reason
+    // the first version of this function returned `None` for the case it was written for. The parameter list is the
+    // same either way, and that is all a call needs.
+    if let sema::types::Type::Pointer { to } = type_of {
+        type_of = to;
+    }
+    match type_of {
+        sema::types::Type::Function { parameters, .. } => Some(parameters.clone()),
+        _ => None,
+    }
+}
+
+
