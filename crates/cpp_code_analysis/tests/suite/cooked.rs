@@ -136,18 +136,22 @@ fn a_conditional_inside_a_dead_branch_is_dead_too() {
 #[test]
 fn the_dead_branch_is_reported_as_spans_of_its_code() {
     // A consumer greys out code, not the directives that structure it. The two dead runs around the `#define` are
-    // separate spans; neither includes a directive line or its trailing newline.
+    // **A dead directive is dead text.** The runs on either side of the `#define` merge into one span, because the
+    // directive between them is inside the branch too: it is never executed, a consumer greys it like the code
+    // around it, and the diagnostic filter uses the same list — an `#include` inside `#if 0` must not be reported
+    // as a missing file. The three *region* directives (`#if`, `#else`, `#endif`) are the branch's own edges and
+    // stay outside it.
     let source = "int a;\n#if 0\nint b;\n#define M 1\nint c;\n#endif\nint d;\n";
     let stream = cooked(source);
     assert_eq!(words(&stream), ["int", "a", ";", "int", "d", ";"]);
 
-    assert_eq!(stream.inactive.len(), 2, "{:?}", stream.inactive);
+    assert_eq!(stream.inactive.len(), 1, "{:?}", stream.inactive);
     let texts: Vec<&str> = stream
         .inactive
         .iter()
         .map(|dead| &source[dead.start_offset..dead.end_offset()])
         .collect();
-    assert_eq!(texts, vec!["int b;\n", "int c;\n"]);
+    assert_eq!(texts, vec!["int b;\n#define M 1\nint c;\n"]);
 }
 
 #[test]

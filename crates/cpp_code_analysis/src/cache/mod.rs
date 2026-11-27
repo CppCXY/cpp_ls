@@ -473,7 +473,15 @@ use std::path::{Path, PathBuf};
 /// and `main` into one declaration; the `#else` side is an `OldStyleParameterList`, and walking it for modifiers found
 /// a body-local `static`. Summaries written before this record `nvim_main` as `static`; the content hash cannot see a
 /// reader change, so only the version reaches them.
-pub const FORMAT_VERSION: u32 = 63;
+///
+/// # Why this moved to 64
+///
+/// **A stored rendering's `inactive` spans were missing a shape.** The cook marked only the *runs* between directives,
+/// so a dead branch made of directives alone — `#ifdef HAVE_ACL` / `#include <sys/acl.h>` / `#endif`, the commonest
+/// shape in a real header — recorded no span, and a finding on that line was drawn on text no compiler reads. The
+/// spans are part of the record (`put_u32(rendered.inactive.len())`), and a cached rendering is served for the same
+/// content and configuration, so a warmed cache keeps the empty list until the version moves.
+pub const FORMAT_VERSION: u32 = 64;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

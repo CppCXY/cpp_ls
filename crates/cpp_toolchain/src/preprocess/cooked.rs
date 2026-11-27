@@ -1798,6 +1798,37 @@ pub fn cook_with_search_and_state_and_features(
         }
 
         let kind = spanned.directive.kind();
+
+        // **A directive inside a branch nobody compiles is not part of the program either.**
+        //
+        // Only the *runs* between directives were marked inactive, so a dead branch made of directives alone — the
+        // commonest shape there is:
+        //
+        // ```c
+        // #ifdef HAVE_ACL
+        // #include <sys/acl.h>
+        // #endif
+        // ```
+        //
+        // — recorded **no span at all**: the `#include` is consumed as a directive (and not expanded, because the
+        // region is dead), and the run at the `#endif` is empty. A finding placed on that line (`include-not-found`,
+        // or a `unused` name in a dead declaration) was therefore drawn on text no compiler reads.
+        //
+        // The three region directives are excluded: `#if`, `#else` and `#endif` are the *edges* of an inactive
+        // region rather than part of it, and painting them grey would grey the reader's own preprocessor control.
+        if !was_live
+            && !matches!(
+                kind,
+                DirectiveKind::If
+                    | DirectiveKind::Ifdef
+                    | DirectiveKind::Ifndef
+                    | DirectiveKind::Elif
+                    | DirectiveKind::Else
+                    | DirectiveKind::Endif
+            )
+        {
+            mark_inactive(&mut out, spanned.range, was_certain);
+        }
         match kind {
             DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
                 let holds = decide_a_condition(
@@ -2567,3 +2598,78 @@ fn expand_run(
             .filter(|token| !is_trivia(token.token.kind)),
     );
 }
+
+
+/// **What a branch nobody compiles contributes to `inactive`** — the spans a diagnostic is filtered by.
+///
+/// Only the *runs* between directives were marked, so a dead branch made of directives alone recorded **no span at
+/// all**: the `#include` is consumed as a directive and never expanded, and the run at the `#endif` is empty. The
+/// finding on that line (`include-not-found`, and the `unused` in a dead declaration) was then drawn on text no
+/// compiler reads. Measured through the session — `#ifdef NEVER_DEFINED_ANYWHERE` around an `#include` — the
+/// `include-not-found` test that asserted silence failed with the cook reporting zero regions.
+///
+/// The three region directives are not marked: `#if`, `#else` and `#endif` are the edges of a region rather than
+/// part of it, and a client that greys an inactive region must not grey the reader's own preprocessor control.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration that defines nothing: every `#ifdef` is false, which is what the standard says.
+    struct Nothing;
+
+    impl macros::MacroBindings for Nothing {
+        fn definition(&self, _name: &str) -> Option<&macros::MacroDef> {
+            None
+        }
+
+        fn definition_at(&self, _name: &str, _offset: usize) -> Option<&macros::MacroDef> {
+            None
+        }
+    }
+
+    fn cook(source: &str) -> CookedStream {
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        cook_with(source, &tokens, &Nothing)
+    }
+
+    #[test]
+    fn a_dead_branch_of_directives_only_is_still_inactive() {
+        let stream = cook("#if 0\n#include <vectr>\n#endif\nint main(void) { return 0; }\n");
+        assert_eq!(
+            stream.inactive,
+            vec![SourceRange {
+                start_offset: 6,
+                length: 17
+            }],
+            "the `#include` line is the dead region"
+        );
+    }
+
+    #[test]
+    fn a_dead_branch_of_statements_is_inactive_too() {
+        let stream = cook("#ifdef NEVER\nint xxx = 1;\n#endif\n");
+        assert_eq!(stream.inactive.len(), 1, "{:?}", stream.inactive);
+        assert_eq!(stream.inactive[0].start_offset, 13, "`#ifdef NEVER` is twelve characters and a newline");
+    }
+
+    #[test]
+    fn a_live_branch_contributes_no_span() {
+        let stream = cook("#if 1\n#include <vectr>\n#endif\n");
+        assert!(stream.inactive.is_empty(), "{:?}", stream.inactive);
+    }
+
+    #[test]
+    fn the_region_directives_are_not_part_of_the_region() {
+        let stream = cook("#if 0\nint xxx = 1;\n#endif\n");
+        let span = stream.inactive[0];
+        assert_eq!(
+            span.start_offset, 6,
+            "the span starts at the statement, not at the `#if` line"
+        );
+        assert!(
+            span.end_offset() <= 24,
+            "and ends before the `#endif` line, which is 24: {span:?}"
+        );
+    }
+}
+

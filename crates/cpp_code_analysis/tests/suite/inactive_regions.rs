@@ -139,9 +139,11 @@ fn a_file_with_no_directives_has_no_regions() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// **A dead branch with an `#include` is still one span of its ordinary code.**
+/// **A dead branch with an `#include` is one span, and the include line is inside it.**
 ///
-/// The directive lines are not grey; the code after the dead include is.
+/// The directive is dead text: the cook never expands it, so it is not part of the program — and that is what
+/// silences `include-not-found` on such a line, through the same list a client greys. The three *region* directives
+/// (`#if`, `#else`, `#endif`) are the branch's own edges and stay outside the span.
 #[test]
 fn a_dead_branch_that_includes_a_header_is_still_one_span() {
     let source = "\
@@ -165,8 +167,8 @@ int dead;
     assert_eq!(spans.len(), 1, "one dead branch, one span: {spans:?}");
     let include = source.find("#include").expect("the include line");
     assert!(
-        !(spans[0].start_offset <= include && include < spans[0].end_offset()),
-        "the directive line is not part of the grey range"
+        spans[0].start_offset <= include && include < spans[0].end_offset(),
+        "the dead `#include` is part of the region — that is what silences `include-not-found`"
     );
     let dead = source.find("int dead;").expect("the dead statement");
     assert!(

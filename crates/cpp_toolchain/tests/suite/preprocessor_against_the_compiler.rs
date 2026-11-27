@@ -509,8 +509,8 @@ fn one_dead_branch_is_one_span_and_its_include_is_never_read() {
     );
     let span = &spans[0];
     assert!(
-        !covers(DEAD_INCLUDE, span, "#include"),
-        "a directive line is not part of the grey range: {span:?}"
+        covers(DEAD_INCLUDE, span, "#include"),
+        "the dead `#include` is part of the region — that is what silences `include-not-found`: {span:?}"
     );
     assert!(
         covers(DEAD_INCLUDE, span, "MARK_DEAD_AFTER_THE_INCLUDE"),
@@ -537,3 +537,4 @@ MARK_DEAD_AFTER_THE_INCLUDE
 
 MARK_LIVE_AFTER
 ";
+
