@@ -59,6 +59,36 @@ fn unknown_with_unknown_takes_the_else_branch() {
     assert!(text.contains("skipped"), "{text}");
 }
 
+/// **An undefined `#ifdef` is an exact answer; an undefined `#if` expression is a guess.**
+///
+/// `#ifdef NAME` and `#ifndef NAME` ask whether a name is defined. C's undefined-is-zero rule is not involved, so the
+/// branch is exact even when the name is absent. `#if NAME` is the other case: the evaluator assumed zero, and a
+/// consumer that paints inactive regions must not paint that span. `defined(NAME)` is a definedness question again.
+#[test]
+fn an_undefined_ifdef_is_exact_but_an_undefined_if_is_a_guess() {
+    let source = "\
+#ifdef UNDEF
+int a;
+#endif
+#if UNDEF
+int b;
+#endif
+#if defined(ALSO_UNDEF)
+int c;
+#endif
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let stream = cook_with(source, &tokens, &MacroTable::new());
+    assert_eq!(
+        stream.assumed_undefined, 1,
+        "only `#if UNDEF` used the undefined-is-zero rule"
+    );
+    assert!(
+        !stream.inactive.is_empty(),
+        "the dead branches are still recorded"
+    );
+}
+
 /// **The hedley shape**, which is what the rule was written for: a builtin question, a version check as a known
 /// truth, and the definitions after it.
 #[test]

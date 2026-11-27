@@ -7838,6 +7838,67 @@ int dead;
     let _ = server.wait_for_exit();
 }
 
+/// **A header template's `#ifdef` branch is painted too.**
+///
+/// `#ifdef NAME` asks a definedness question; an absent name is an exact answer, not C's undefined-is-zero
+/// assumption. A CMake template such as neovim's `cmake.config/versiondef.h.in` is opened as C++, and its
+/// `#ifdef ZIG_BUILD` branch is inactive when the project does not define `ZIG_BUILD`.
+#[test]
+fn inactive_regions_are_sent_for_a_header_template() {
+    const SOURCE: &str = "\
+#ifdef ZIG_BUILD
+int dead;
+#endif
+int live;
+";
+    let project = Project::new("inactive-regions-header-template");
+    project.write("versiondef.h.in", SOURCE);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("versiondef.h.in"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "initializationOptions": { "inactiveRegions": true },
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "cpp",
+                "version": 1,
+                "text": SOURCE,
+            }
+        }),
+    );
+
+    let sent = server.wait_for_within(Duration::from_secs(60), |message| {
+        message["method"] == json!("textDocument/inactiveRegions")
+            && message["params"]["regions"]
+                .as_array()
+                .is_some_and(|regions| !regions.is_empty())
+    });
+    assert_eq!(
+        sent["params"]["textDocument"]["version"],
+        json!(1),
+        "the template's regions name its version: {sent}"
+    );
+
+    let _ = server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+    let _ = server.wait_for_exit();
+}
+
 /// **A hover inside code this configuration does not compile says so, and a hover beside it does not.**
 ///
 /// The dimming raises the question ("why is this grey?"), and a card that answers a name in dead code without

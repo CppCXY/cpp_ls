@@ -2336,12 +2336,41 @@ fn rests_on_an_undefined_name(
     let unknown = |name: &str| live.definition_at(name, offset).is_none();
 
     match directive {
-        Directive::Ifdef { name, .. } => unknown(name),
-        Directive::Conditional { condition, .. } => condition.iter().any(|token| {
-            token.is_identifier()
-                && !matches!(token.text(), "defined" | "true" | "false")
-                && unknown(token.text())
-        }),
+        // **`#ifdef` asks whether a name is defined, not what it evaluates to.** An undefined name is the exact
+        // answer "not defined"; C's undefined-is-zero rule is not involved. The same applies to `#ifndef`.
+        Directive::Ifdef { .. } => false,
+        Directive::Conditional { condition, .. } => {
+            // **`defined(NAME)` is also a definedness question**, so its operand is not a name being evaluated. A
+            // condition that asks only about definedness is exact even when the name is absent.
+            let mut index = 0;
+            while index < condition.len() {
+                let token = &condition[index];
+                if token.text() == "defined" {
+                    index += 1;
+                    while condition
+                        .get(index)
+                        .is_some_and(|token| token.text() == "(")
+                    {
+                        index += 1;
+                    }
+                    if condition
+                        .get(index)
+                        .is_some_and(|token| token.is_identifier())
+                    {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if token.is_identifier()
+                    && !matches!(token.text(), "true" | "false")
+                    && unknown(token.text())
+                {
+                    return true;
+                }
+                index += 1;
+            }
+            false
+        }
         _ => false,
     }
 }
