@@ -518,19 +518,42 @@ pub(crate) fn a_type_without_its_name(parameter: &str) -> String {
     if last == parameter {
         return parameter.to_string();
     }
-    let is_a_name = last
+    // **A name the pointer operators are attached to** — `char *text` is how most C writes a parameter, and the
+    // whitespace split leaves `*text` as the last token: not an identifier, so the existing test below failed, the
+    // name survived, and the spelling became a type *containing* a name. `parse_type_spelling("char *text")`
+    // answers a `Named` that no comparison can use, so every call through such a declaration answered `Unknown`:
+    // measured on a C project, `void takes(char *text);` declared and never defined — the ordinary header shape —
+    // made `param-type-check` blind to `takes(42)`. The operators stay with the type: `char *text` minus `text` is
+    // `char *`.
+    let operators = last
         .chars()
-        .all(|character| character.is_alphanumeric() || character == '_')
-        && last
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_alphabetic() || character == '_');
+        .take_while(|character| *character == '*' || *character == '&')
+        .count();
+    if operators > 0 {
+        let name = &last[operators..];
+        if is_an_identifier(name) {
+            return parameter[..parameter.len() - name.len()]
+                .trim_end()
+                .to_string();
+        }
+    }
+    let is_a_name = is_an_identifier(last);
     if is_a_name {
         return parameter[..parameter.len() - last.len()]
             .trim_end()
             .to_string();
     }
     parameter.to_string()
+}
+
+/// Is this the spelling of one identifier — a parameter's own name?
+fn is_an_identifier(text: &str) -> bool {
+    text.chars()
+        .next()
+        .is_some_and(|character| character.is_alphabetic() || character == '_')
+        && text
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
 }
 
 /// **How many parameters of a `parameter_list` spelling have a default argument** — the arguments a call may leave
@@ -730,11 +753,27 @@ fn a_template_argument_pack_inside_a_parameter_is_not_the_parameter_pack() {
         parameters_in("(int a, double b)"),
         (vec!["int".to_string(), "double".to_string()], false)
     );
+    // **The parameter's name is not part of its type, even with no space in front of it.** `const char *format` is
+    // how most C writes a parameter: the whitespace split leaves `*format` as the last token, which is not an
+    // identifier, so the name used to survive — and a spelling that contains a name is a `Named` no comparison can
+    // use, which made `param-type-check` blind to every function *declared* (rather than defined) with a pointer
+    // parameter. Measured on a C project: `static void takes(char *text);` with `takes(42)` was silent.
     assert_eq!(
         parameters_in("(const char *format, ...)"),
-        (vec!["const char *format".to_string()], true),
-        "a C-style variadic still ends the list: {:?}",
+        (vec!["const char *".to_string()], true),
+        "a C-style variadic still ends the list, and the name goes: {:?}",
         parameters_in("(const char *format, ...)")
+    );
+    assert_eq!(a_type_without_its_name("char *text"), "char *");
+    assert_eq!(a_type_without_its_name("char **text"), "char **");
+    assert_eq!(a_type_without_its_name("const char *text"), "const char *");
+    assert_eq!(a_type_without_its_name("int &value"), "int &");
+    assert_eq!(a_type_without_its_name("void *"), "void *");
+    assert_eq!(
+        a_type_without_its_name("int (*callback)(int)"),
+        "int (*callback)(int)",
+        "a function-pointer parameter keeps its whole spelling: the name is inside parentheses, and guessing is the \
+         direction that costs a false finding"
     );
     // **A pack keeps its element type.** The test used to assert an empty list here, which is what made every pack
     // candidate compare equal to every other one — see `parameters_in`'s note on `make_unique`.
