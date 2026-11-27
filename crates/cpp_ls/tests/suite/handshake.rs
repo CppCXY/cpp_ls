@@ -686,8 +686,14 @@ int f() { return grow(1) + grow(2); }
             None => {
                 let titles: Vec<String> = items
                     .iter()
-                    .filter_map(|lens| lens["command"]["title"].as_str())
-                    .map(str::to_string)
+                    .enumerate()
+                    .filter_map(|(index, lens)| {
+                        let resolved =
+                            server.request(400 + index as i64, "codeLens/resolve", lens.clone());
+                        resolved["result"]["command"]["title"]
+                            .as_str()
+                            .map(str::to_string)
+                    })
                     .collect();
                 assert_eq!(
                     titles,
@@ -7448,12 +7454,22 @@ int f() { return grow(1) + grow(2); }
     let result = lenses["result"]
         .as_array()
         .unwrap_or_else(|| panic!("a lens list was expected, got {lenses}"));
-    let titles: Vec<&str> = result
+    assert!(
+        result.iter().all(|lens| lens["command"].is_null()),
+        "the first request returns anchors, not counts: {lenses}"
+    );
+    let titles: Vec<String> = result
         .iter()
-        .filter_map(|lens| lens["command"]["title"].as_str())
+        .enumerate()
+        .filter_map(|(index, lens)| {
+            let resolved = server.request(200 + index as i64, "codeLens/resolve", lens.clone());
+            resolved["result"]["command"]["title"]
+                .as_str()
+                .map(str::to_string)
+        })
         .collect();
     assert!(
-        titles.contains(&"2 references"),
+        titles.iter().any(|title| title == "2 references"),
         "`grow` has two calls and neither its definition nor the header's declaration is counted: {titles:?}"
     );
 }
@@ -8233,15 +8249,14 @@ int f() { return grow(1); }
         !listed.is_empty(),
         "the fixture has a function to count: {lenses}"
     );
-    let command = listed
-        .iter()
-        .filter_map(|lens| lens["command"].as_object())
-        .map(|command| command["command"].as_str().unwrap_or_default().to_string())
-        .next()
+    let first = listed.first().expect("a lens").clone();
+    let resolved = server.request(300, "codeLens/resolve", first);
+    let command = resolved["result"]["command"]["command"]
+        .as_str()
         .unwrap_or_default();
     assert_eq!(
         command, "cppls.showReferences",
-        "`--editor vscode` is the identity the command is chosen with, whatever the client calls itself: {lenses}"
+        "`--editor vscode` is the identity the command is chosen with, whatever the client calls itself: {resolved}"
     );
 
     let _ = server.request(200, "shutdown", Value::Null);
