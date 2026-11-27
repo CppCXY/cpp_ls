@@ -989,11 +989,41 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 p.bump(); // `...`
             }
 
-            if p.current_token() == CppTokenKind::LeftParen {
+            if counts_a_pack {
+                // `sizeof...(Ts)`: the parentheses belong to the pack, and this is the only place they are
+                // consumed.
+                if p.current_token() == CppTokenKind::LeftParen {
+                    p.bump(); // consume '('
+                    parse_type_id_or_expression(p)?;
+                    expect_token(p, CppTokenKind::RightParen)?;
+                }
+            } else if p.current_token() == CppTokenKind::LeftParen {
+                // **A parenthesised operand does not end at its `)`.** [expr.sizeof] makes the operand a
+                // `unary-expression`, and `sizeof (values)[0]` — the array-count idiom
+                // `sizeof (values) / sizeof (values)[0]` — is `sizeof ((values)[0])`: the index sits *inside*
+                // the operand. Reading `( payload )` and stopping there left the `[` with no rule to consume it,
+                // and the file was reported `expected ), but get [`. Measured on a C project: an `ARRAY_LEN`
+                // written the ordinary way was a **syntax error on correct C**, which stops every rule in the
+                // file.
+                //
+                // The type reading is still tried first — it is the one that can be refused, and `sizeof (int)`
+                // and `sizeof (unsigned long)` are the shapes it exists for — but a `[` after the `)` refuses it:
+                // nothing can be taken from a type's `sizeof`, so the parentheses held an expression, and the
+                // operand is the whole unary expression that starts with them.
+                let checkpoint = p.checkpoint();
+                let opened = p.current_token_index();
                 p.bump(); // consume '('
-                parse_type_id_or_expression(p)?;
-                expect_token(p, CppTokenKind::RightParen)?;
-            } else if !counts_a_pack {
+                let reads_a_type = types::parse_type_id(p).is_ok()
+                    && p.current_token() == CppTokenKind::RightParen
+                    && p.current_token_index() > opened + 1
+                    && p.peek_next_token() != CppTokenKind::LeftBracket;
+                if reads_a_type {
+                    p.bump(); // consume ')'
+                } else {
+                    p.rollback(checkpoint);
+                    parse_unary_expr(p, fold_operand)?;
+                }
+            } else {
                 // `sizeof x` — the operand of the unparenthesised form is an expression, never a type.
                 parse_unary_expr(p, fold_operand)?;
             }

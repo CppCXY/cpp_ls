@@ -358,3 +358,48 @@ int after_the_shapes(void);
 ";
     assert_eq!(errors_in(source, LanguageConfig::c()), Vec::<String>::new());
 }
+
+/// **The two C shapes a C project wrote that this grammar refused**, and both are correct C11:
+///
+/// ```c
+/// sizeof (values) / sizeof (values)[0]     the array-count idiom: the index belongs *inside* the operand
+/// const int values[static count]           C11 6.7.6.2's `[ type-qualifier-list? static? expr? ]`
+/// ```
+///
+/// The first was read as `(sizeof (values)) [0]`, and the `[` had no rule left — `expected ), but get [`. The
+/// second was read as a bound written `static count`, and the expression rule refused the keyword — `expected
+/// primary expression`. Both are parse errors on correct C, which stops every rule in the file, so the failure is
+/// not cosmetic.
+#[test]
+fn an_array_count_and_a_qualified_parameter_array_parse() {
+    let sources: [(&str, &str); 6] = [
+        (
+            "the array-count idiom",
+            "static int values[4]; unsigned long count(void) { return sizeof (values) / sizeof (values)[0]; }",
+        ),
+        (
+            "a static bound",
+            "int sum_all(unsigned long count, const int values[static count]) { return values[0]; }",
+        ),
+        (
+            "a qualified static bound",
+            "int take(const int values[static const 4]) { return values[0]; }",
+        ),
+        (
+            "a restrict bound",
+            "int take(int values[restrict 4]) { return values[0]; }",
+        ),
+        (
+            "a sizeof of a type is still a type",
+            "unsigned long size(void) { return sizeof (unsigned long); }",
+        ),
+        (
+            "a sizeof of an index",
+            "unsigned long size(int *values) { return sizeof (values[0]); }",
+        ),
+    ];
+    for (name, source) in sources {
+        let errors = errors_in(source, c11());
+        assert!(errors.is_empty(), "{name}: {errors:?}\n{source}");
+    }
+}

@@ -3,7 +3,41 @@
 //! Moved here from `types.rs` without a change.
 
 use super::*;
+use crate::features;
 use crate::parser;
+
+/// **The qualifiers and the `static` a parameter array may write before its bound** — C11 6.7.6.2:
+/// `[ type-qualifier-list? static? assignment-expression? ]`.
+///
+/// `int values[static n]`, `const int values[static n]`, `int values[const 4]` and `char *values[restrict n]`
+/// are all ordinary C parameter declarators. The suffix rule reads the bound with the **expression** rule, and
+/// none of these keywords can begin an expression: `parse_expr` refused the `static`, the declarator failed, and
+/// the declaration that owned it went with it. Measured on a C project of six files: the only parse error in it
+/// was `static int sum_all(size_t count, const int values[static count])`, which is correct C11 — and a parse
+/// error stops every rule in the file.
+///
+/// `restrict` is an ordinary *identifier* in this lexer (C99's standard spelling, unlike the compiler's own
+/// `__restrict`), so it is matched by text and only where the language has the feature: a C++ file may have a
+/// variable called `restrict`, and eating it would lose the bound.
+fn eat_array_declarator_qualifiers(p: &mut CppParser) {
+    loop {
+        if matches!(
+            p.current_token(),
+            CppTokenKind::StaticKeyword | CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        ) {
+            p.bump();
+            continue;
+        }
+        if p.current_token() == CppTokenKind::Identifier
+            && p.current_token_text() == "restrict"
+            && p.language().support(features::Feature::Restrict)
+        {
+            p.bump();
+            continue;
+        }
+        return;
+    }
+}
 
 /// Does the `(` at the cursor open a *parenthesised abstract declarator* rather than a parameter list or a
 /// parenthesized name?
@@ -550,7 +584,9 @@ pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
-                // The bound is optional: `void (*[])()`.
+                // The bound is optional: `void (*[])()` — and so is the `static` and the qualifiers in front of
+                // it, which is the only place C writes them.
+                eat_array_declarator_qualifiers(p);
                 if p.current_token() != CppTokenKind::RightBracket
                     && !p.is_eof()
                     && let Err(err) = super::super::exprs::parse_expr(p)
@@ -810,7 +846,8 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                 CppTokenKind::LeftBracket => {
                     let array = p.mark(CppSyntaxKind::ArrayType);
                     p.bump();
-                    // The bound is optional: `int a[]`.
+                    // The bound is optional: `int a[]` — and so is `[static n]`'s `static`.
+                    eat_array_declarator_qualifiers(p);
                     if p.current_token() != CppTokenKind::RightBracket
                         && !p.is_eof()
                         && let Err(err) = super::super::exprs::parse_expr(p)
@@ -1053,6 +1090,7 @@ pub fn parse_declarator_function_suffixes(
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
+                eat_array_declarator_qualifiers(p);
                 if p.current_token() != CppTokenKind::RightBracket
                     && !p.is_eof()
                     && let Err(err) = super::super::exprs::parse_expr(p)
