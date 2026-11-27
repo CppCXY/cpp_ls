@@ -7847,7 +7847,7 @@ int dead;
 fn inactive_regions_are_sent_for_a_header_template() {
     const SOURCE: &str = "\
 #ifdef ZIG_BUILD
-int dead;
+# define ZIG_BUILD_DEAD 1
 #endif
 int live;
 ";
