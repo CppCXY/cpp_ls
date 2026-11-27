@@ -4436,3 +4436,29 @@ static void caller(void *memory) { takes_point(memory); }
         codes_of_a_file("/p/b.c", from_void)
     );
 }
+
+/// **A value is not a function**, and in C there is no `operator()` that could make one callable:
+/// `int value = 0; value();` is an error in every compiler, and it was silent because the name *is* declared.
+///
+/// The negative half is what a C project writes first: a call through a **typedef of a function pointer** is a call
+/// through a `Named` this layer cannot see through, and a `false` there reported every callback parameter of every
+/// dispatch table.
+#[test]
+fn a_call_through_a_value_is_not_a_call_in_c() {
+    let source = "static int caller(void) { int value = 0; return value(); }\n";
+    assert!(
+        codes_of_a_file("/p/a.c", source).contains(&DiagnosticCode::UndefinedName),
+        "`value()` where `value` is an int: {:?}",
+        codes_of_a_file("/p/a.c", source)
+    );
+
+    let through_a_typedef = "\
+typedef void (*visit_fn)(int);
+static void walk(visit_fn visit) { visit(1); }
+";
+    assert!(
+        !codes_of_a_file("/p/b.c", through_a_typedef).contains(&DiagnosticCode::UndefinedName),
+        "a typedef of a function pointer cannot be seen through, so nothing is claimed: {:?}",
+        codes_of_a_file("/p/b.c", through_a_typedef)
+    );
+}

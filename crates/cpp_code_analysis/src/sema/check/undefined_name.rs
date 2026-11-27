@@ -163,6 +163,24 @@ impl Check for UndefinedName {
                 continue;
             }
             if a_declaration_is_visible(context, &name, at) {
+                // **Declared as a value, and called.** In C a variable can be called only when its type is a pointer
+                // to a function — there is no `operator()` — so `int value = 0; value();` is an error in every
+                // compiler, and it was silent here because the name *is* declared. C++ is not asked: a class with
+                // `operator()` is called exactly this way, and deciding it needs the member list.
+                if context.is_c()
+                    && the_declaration_is_a_value(context, &name, at)
+                    && matches!(context.type_of(&callee), Known::Yes((type_of, _)) if whether_it_can_be_called(&type_of) == Some(false))
+                {
+                    context.add(
+                        DiagnosticCode::UndefinedName,
+                        cpp_parser::source_range(token.text_range()),
+                        name.clone(),
+                        t!(
+                            "`%{name}` is not a function: this file declares it as a value",
+                            name = name
+                        ),
+                    );
+                }
                 continue;
             }
             if an_argument_may_take_part_in_adl(context, &call_node) {
@@ -179,6 +197,80 @@ impl Check for UndefinedName {
                 ),
             );
         }
+    }
+}
+
+/// **Is every declaration of this name, visible here, an object rather than a function?**
+///
+/// The two sources `a_declaration_is_visible` reads, asked for the *kind* instead of the existence: the file's own
+/// scope tree ([`BindingKind`]) and the index ([`DeclKind`]). `false` as soon as one of them is a function, a
+/// constructor or an operator — a name that can be a call is not this question's.
+fn the_declaration_is_a_value(context: &CheckContext<'_>, name: &str, at: usize) -> bool {
+    use crate::BindingKind;
+    use crate::DeclKind;
+
+    // **The innermost binding decides.** `scopes_visible_from` walks from the scope the use is in outwards, which is
+    // the language's own lookup order: a local `value` shadows a file-scope `void value(void)`, and a call through it
+    // is a call through a value.
+    let scopes = context.model.scopes();
+    if let Some(scope) = scopes.scope_at(at) {
+        for id in scopes.scopes_visible_from(scope) {
+            let Some(data) = scopes.scope(id) else {
+                continue;
+            };
+            let from_anywhere = matches!(data.kind, ScopeKind::Class | ScopeKind::Enum);
+            for binding in &data.bindings {
+                if binding.name.identifier_text() != Some(name) {
+                    continue;
+                }
+                if !from_anywhere && binding.name_range.start_offset > at {
+                    continue;
+                }
+                return matches!(binding.kind, BindingKind::Variable | BindingKind::Enumerator);
+            }
+        }
+    }
+
+    // **A name the scope tree does not hold is the index's question** — a file-scope variable of this file, or a
+    // declaration in a header. Only a definite answer is used: an unread header may declare the function this calls.
+    match context.model.index().definitions(name, context.path) {
+        Known::Yes(found) => {
+            let mut is_a_value = false;
+            for declaration in found.found.iter().filter(|entry| entry.file != context.path) {
+                if declaration.fact.kind == DeclKind::Function {
+                    return false;
+                }
+                is_a_value = true;
+            }
+            is_a_value
+        }
+        Known::Unknown(_) => false,
+        Known::No => false,
+    }
+}
+
+/// **Can a value of this type be called?** — `Some(true)` for a function or a pointer to one, `Some(false)` for a value
+/// that certainly cannot be, and `None` for everything this layer cannot settle.
+///
+/// The `None` is load-bearing: `map_visit_fn visit` is a **typedef** of a function pointer, and the type layer answers
+/// a `Named` for it — a `false` there reported every call through a typedef'd callback, which is the first thing a C
+/// project writes (measured: two findings in this very corpus). Only a `Builtin` — a number — and a pointer to one are
+/// certainly not callable. Both shapes of a callable are real: the model answers `Pointer { to: Function }` for
+/// `int (*p)(int)` in some places and a bare `Function` in others (see `param_type_check`'s note on it).
+fn whether_it_can_be_called(type_of: &crate::sema::types::Type) -> Option<bool> {
+    match type_of {
+        crate::sema::types::Type::Qualified { of, .. } => whether_it_can_be_called(of),
+        crate::sema::types::Type::Reference { to, .. } => whether_it_can_be_called(to),
+        crate::sema::types::Type::Function { .. } => Some(true),
+        // A pointer to a function is the one callable pointer; a pointer to a *name* may be one through a typedef, and
+        // this layer cannot see through it.
+        crate::sema::types::Type::Pointer { to } => whether_it_can_be_called(to),
+        crate::sema::types::Type::Builtin { spelling }
+            if !matches!(spelling.as_str(), "void" | "auto" | "decltype(auto)") =>
+        {
+            Some(false)
+        }
+        _ => None,
     }
 }
 
@@ -426,3 +518,5 @@ fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -
         Known::No => false,
     }
 }
+
+
