@@ -4462,3 +4462,31 @@ static void walk(visit_fn visit) { visit(1); }
         codes_of_a_file("/p/b.c", through_a_typedef)
     );
 }
+
+/// **A bare name that nothing declares**, in C: `return missing_symbol;` is the third position a name appears in,
+/// and it was silent while `missing_function()` was reported.
+///
+/// The care is in what is *not* a read: a declarator's own name, a parameter, a type in a specifier sequence and a
+/// designated member are all `NameExpr` nodes too — and an **enumerator** is bound in its enumeration's scope, which
+/// is not on the chain a use outside it walks (measured: `LOG_NORMAL` read one line after the `enum` that declares
+/// it was reported undeclared, the first run of this rule).
+#[test]
+fn a_bare_name_nothing_declares_is_reported_in_c() {
+    let source = "static int caller(void) { return missing_symbol; }\n";
+    assert!(
+        codes_of_a_file("/p/a.c", source).contains(&DiagnosticCode::UndefinedName),
+        "nothing declares `missing_symbol`: {:?}",
+        codes_of_a_file("/p/a.c", source)
+    );
+
+    let declared = "\
+enum log_level { LOG_NORMAL };
+struct point { int x; };
+static int caller(struct point p) { int value = p.x; return value + LOG_NORMAL; }
+";
+    assert!(
+        !codes_of_a_file("/p/b.c", declared).contains(&DiagnosticCode::UndefinedName),
+        "a parameter, a member, a local and an enumerator are all declared: {:?}",
+        codes_of_a_file("/p/b.c", declared)
+    );
+}

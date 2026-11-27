@@ -25,7 +25,7 @@
 //! x64 ABI, so an `int` is 32 bits and a `long` is 32 bits on Windows and 64 on Linux — measured, not guessed at by
 //! the C standard's minimums.
 
-use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
+use cpp_parser::{CppAstNode, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
 

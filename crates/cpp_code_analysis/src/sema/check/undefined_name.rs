@@ -197,10 +197,89 @@ impl Check for UndefinedName {
                 ),
             );
         }
+        // **A bare name read**, which is the third position a name can appear in and the one the module
+        // documentation says this code does *not* answer — `return missing_symbol;` was silent while
+        // `missing_function()` was reported. It is asked only in C, where a name that no declaration and no macro
+        // names is a name nothing declares; in C++ a dependent context or a `using` this layer has not read can make
+        // the same words correct, and the guards below are narrower than that.
+        if context.is_c() {
+            for name_node in context.own::<cpp_parser::CppNameExpr>().collect::<Vec<_>>() {
+                let node = name_node.syntax().clone();
+                let Some(token) = a_bare_name(&node) else {
+                    continue;
+                };
+                if CppTokenKind::from(token.kind()) != CppTokenKind::Identifier {
+                    continue;
+                }
+                // **A name that declares rather than reads** — a declarator's own name, a parameter, a type in a
+                // specifier sequence, a designated member: all of them are `NameExpr` nodes too, and none of them
+                // is a read of a name.
+                if !a_read_and_not_a_declaration(&node) {
+                    continue;
+                }
+                let name = token.text().to_string();
+                let at = usize::from(token.text_range().start());
+                if in_a_template(&node) || in_a_lambda(context, at) {
+                    continue;
+                }
+                if a_macro_is_visible(context, &name, at) {
+                    continue;
+                }
+                if context.model.names_a_template_parameter(&name, at) {
+                    continue;
+                }
+                if a_declaration_is_visible(context, &name, at) {
+                    continue;
+                }
+                context.add(
+                    DiagnosticCode::UndefinedName,
+                    cpp_parser::source_range(token.text_range()),
+                    name.clone(),
+                    t!(
+                        "`%{name}` is not declared: nothing this file can see names it",
+                        name = name
+                    ),
+                );
+            }
+        }
     }
 }
 
-/// **Is every declaration of this name, visible here, an object rather than a function?**
+/// **Is this `NameExpr` a read of a name, rather than the name a declaration writes?**
+///
+/// The node kinds below are the ones a *name* appears in without being read: a declarator's id, a parameter, a type
+/// in a specifier sequence, a designated initialiser's member, a class or enum tag. Every one of them is a
+/// `NameExpr`, so a walk that asked only "is this an identifier nothing declares" reported the declarations
+/// themselves.
+///
+/// A callee and a member access's object are *reads*, but they are the two positions this check already answers
+/// from its own loops — with an ADL guard and a receiver rule the walk does not have — so they are left to those.
+fn a_read_and_not_a_declaration(node: &cpp_parser::CppSyntaxNode) -> bool {
+    if let Some(parent) = node.parent() {
+        // The callee of a call, and the object of a member access, are those loops' questions.
+        if cpp_parser::CppCallExpr::cast(parent.clone()).is_some() {
+            return false;
+        }
+    }
+    let mut above = node.parent();
+    while let Some(current) = above {
+        if cpp_parser::CppDeclarator::cast(current.clone()).is_some()
+            || cpp_parser::CppParam::cast(current.clone()).is_some()
+            || cpp_parser::CppDesignatedInitExpr::cast(current.clone()).is_some()
+            || cpp_parser::CppTypeId::cast(current.clone()).is_some()
+        {
+            return false;
+        }
+        // A specifier sequence is a type, and the name inside it is not read.
+        if cpp_parser::CppSyntaxKind::from(current.kind())
+            == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+        {
+            return false;
+        }
+        above = current.parent();
+    }
+    true
+}
 ///
 /// The two sources `a_declaration_is_visible` reads, asked for the *kind* instead of the existence: the file's own
 /// scope tree ([`BindingKind`]) and the index ([`DeclKind`]). `false` as soon as one of them is a function, a
@@ -467,6 +546,18 @@ fn a_macro_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -> bool
 /// answer means "not read" rather than "not declared".
 fn a_declaration_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -> bool {
     let scopes = context.model.scopes();
+    // **An enumerator is bound in its enumeration scope**, which is not on the chain a use outside it walks — a
+    // file-scope `enum log_level { LOG_NORMAL }` then read as undeclared one line later. Measured: `LOG_NORMAL`
+    // in this corpus` own `main.c`.
+    if context
+        .summary
+        .declarations
+        .iter()
+        .any(|fact| fact.enumerator && !fact.local && fact.name == name)
+    {
+        return true;
+    }
+
     if let Some(scope) = scopes.scope_at(at) {
         // **An unnamed namespace's members are visible here too** — see [`ScopeTree::scopes_visible_from`], which
         // is the chain plus every unnamed namespace hanging off it. Without it every call to a file-local helper read
