@@ -823,6 +823,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **Whether the focused document's program may be read again.** True for a fresh session (the load's one read)
+    /// and false once the load has settled. Module interface units are not affected: they are dependencies named by
+    /// `import`, not a re-read of the file being edited.
+    ///
+    /// A whole-program read is the compiler's reading of the file's translation unit, but it costs 12–19 s on a real
+    /// project, holds the analysis for seconds while it prepares its per-file records, and any edit during it makes
+    /// the result stale. Nothing a keystroke asks for needs it: the edited file is rebuilt by `catch_up` + `cook`.
+    read_focused_programs: bool,
     /// **Translation units the session has been told to read as programs** that are not open documents — the module
     /// interface units, in practice.
     ///

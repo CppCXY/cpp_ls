@@ -693,3 +693,38 @@ pub(crate) fn the_focused_document_gets_its_program() {
         "the file that was just typed into is the one whose program is next"
     );
 }
+
+/// **After the load, an edit does not queue the focused document's whole-program read again.**
+///
+/// The load's read is the compiler's reading of the file the reader opened; a later edit is rebuilt by `catch_up` +
+/// `cook`, and a program read would be 12–19 s of work that the next keystroke discards.
+#[test]
+pub(crate) fn after_the_load_an_edit_does_not_queue_the_focused_program() {
+    let main = "#include \"api.h\"\nApi a;\n";
+    let files = MemoryFiles::new()
+        .with_file("/p/api.h", "struct Api { int x; };\n")
+        .with_file("/p/main.cpp", main);
+    let fixture = Memory::new("after-the-load-no-focused-program", &files);
+    let mut session = fixture.session();
+    session.did_open("/p/main.cpp", main);
+    session.index_everything();
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+
+    assert_eq!(
+        session.the_program_to_read().as_deref(),
+        Some(Path::new("/p/main.cpp")),
+        "the load still has its one program to read"
+    );
+    session.stop_reading_focused_programs();
+    assert!(
+        session.the_program_to_read().is_none(),
+        "after the load the focused document is not scheduled again"
+    );
+
+    session.did_change("/p/main.cpp", "#include \"api.h\"\nApi b;\n");
+    session.pretend_a_pause(std::time::Duration::from_millis(1_100));
+    assert!(
+        session.the_program_to_read().is_none(),
+        "an edit does not put it back on the schedule"
+    );
+}

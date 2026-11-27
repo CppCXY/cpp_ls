@@ -1325,6 +1325,14 @@ impl<F: FileProvider + Clone> Session<F> {
             .unwrap_or_else(std::time::Instant::now);
     }
 
+    /// **Stop scheduling the focused document's program after the load.** The first read is the compiler's reading of
+    /// the file the reader opened; every later one would be a re-read of a translation unit that `catch_up` + `cook`
+    /// already rebuilt from the current text. Module interface units stay schedulable — they are dependencies, not a
+    /// re-read.
+    pub fn stop_reading_focused_programs(&mut self) {
+        self.read_focused_programs = false;
+    }
+
     pub fn the_wait_before_a_program_may_be_read(&self) -> Option<std::time::Duration> {
         // **One clock.** An open file becomes readable one second after the reader stops typing, and nothing else is
         // read as a program at all — see [`UNTIL_A_UNIT_MAY_BE_READ`].
@@ -1368,6 +1376,13 @@ impl<F: FileProvider + Clone> Session<F> {
         wanted.sort();
         if let Some(unit) = wanted.into_iter().next() {
             return Some(unit);
+        }
+
+        // **A focused document's program is read once, while the load settles.** After that, an edit rebuilds the
+        // file through `catch_up` + `cook`; a second whole-program read costs seconds and is discarded by the next
+        // keystroke. See [`Session::stop_reading_focused_programs`].
+        if !self.read_focused_programs {
+            return None;
         }
 
         // **The focused document, and only it.** Every open document used to be a candidate, and twenty files open was

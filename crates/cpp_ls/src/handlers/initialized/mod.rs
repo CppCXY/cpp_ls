@@ -1265,7 +1265,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
                                 })
                                 .unwrap_or(false);
                         if !still_owed {
-                            finish_the_load(&context, &load);
+                            finish_the_load(&context, &load).await;
                             settling_the_load = false;
                         }
                     }
@@ -1274,7 +1274,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
                     // A deferred program is work for a later idle moment, not work the current load indicator
                     // should wait for; the reader has stopped typing and the bar can retire.
                     if settling_the_load {
-                        finish_the_load(&context, &load);
+                        finish_the_load(&context, &load).await;
                         settling_the_load = false;
                     }
                     context.analysis().wait_for_work(wait).await;
@@ -1285,7 +1285,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
             // **The load settles when no program is owed and nothing is pending.** A deferred program (wait > 0)
             // has its own idle moment; the next edit will schedule it and no progress bar can wait for typing.
             if settling_the_load {
-                finish_the_load(&context, &load);
+                finish_the_load(&context, &load).await;
                 settling_the_load = false;
             }
 
@@ -1308,12 +1308,14 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
 /// reader's bar frozen at its last report (a session superseded while it was being built, a pump that stopped
 /// because the workspace was reloaded): neither called this. `LoadIndicator` ends the bar when it is dropped, and
 /// this retires it early for the ordinary "the load is settled, the rest is idle work" case.
-fn finish_the_load(context: &ServerContextSnapshot, load: &crate::context::LoadIndicator) {
+async fn finish_the_load(context: &ServerContextSnapshot, load: &crate::context::LoadIndicator) {
+    // **The load's one program read is over.** A later edit is rebuilt by its own cook; it must not queue another
     load.retire();
     log::info!(
         "the workspace is indexed — the longest an update held the analysis was {} ms",
         context.analysis().worst_write_hold()
     );
+    context.analysis().stop_reading_focused_programs().await;
 }
 
 /// The folders the client opened.

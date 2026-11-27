@@ -675,6 +675,16 @@ impl AnalysisState {
         self.work.notify_one();
     }
 
+    /// **Stop scheduling a focused document's whole-program read after the load.** See
+    /// [`cpp_code_analysis::Session::stop_reading_focused_programs`]; a reload starts a fresh session, whose flag is
+    /// true again.
+    pub async fn stop_reading_focused_programs(&self) {
+        self.update_session("stop reading focused programs", |session| {
+            session.stop_reading_focused_programs();
+        })
+        .await;
+    }
+
     /// **Read one whole program — the one part of a slice whose cost must not be paid under any lock.**
     ///
     /// A program read is a walk, a cook of every file in include order, a parse of the whole program and a sweep of

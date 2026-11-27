@@ -199,6 +199,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
             units_read: std::collections::HashSet::new(),
+            read_focused_programs: true,
             programs_wanted: std::collections::HashSet::new(),
             units_attempted: std::collections::HashMap::new(),
             checks_memo: std::sync::Mutex::new(None),
