@@ -15,7 +15,7 @@ mod diagnostics_stable;
 mod formatter_choice;
 #[path = "suite/global_allocator.rs"]
 mod global_allocator;
-#[path = "suite/handshake.rs"]
+#[path = "suite/handshake/mod.rs"]
 mod handshake;
 #[path = "suite/hover_attributes.rs"]
 mod hover_attributes;
