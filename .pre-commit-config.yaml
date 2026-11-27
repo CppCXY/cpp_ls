@@ -13,9 +13,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: |
-          ^docs/
-          handshake.rs
+        exclude: ^docs/
       - id: end-of-file-fixer
         exclude: ^docs/
       - id: fix-byte-order-marker

@@ -2481,12 +2481,14 @@ fn a_completion_sees_a_change_to_an_included_header() {
 /// editor as "typing `k` shows nothing".
 #[test]
 fn a_completion_sees_the_keystroke_that_asked_for_it() {
-    let source = "\
-#define kvec_make(T) struct { T *items; int size; }
-void f() {
-  
-}
-";
+    // The blank line is two spaces, spelled inside a concatenation: a literal line of trailing spaces is removed by
+    // the repository's whitespace hook, and the cursor position below depends on those two spaces.
+    let source = concat!(
+        "#define kvec_make(T) struct { T *items; int size; }\n",
+        "void f() {\n",
+        "  \n",
+        "}\n",
+    );
     let project = Project::new("completion-sees-its-own-keystroke");
     project.write("a.c", source);
     let uri = uri_of(&project.root().join("a.c"));
