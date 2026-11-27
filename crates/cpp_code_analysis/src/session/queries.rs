@@ -16,6 +16,7 @@ use crate::header_at;
 use crate::index;
 use crate::paths;
 use crate::preprocess;
+use crate::preprocess::macros::MacroFile;
 use crate::sema;
 use crate::session;
 
@@ -27,6 +28,15 @@ pub struct WrittenAttribute {
     pub written: String,
     /// What a macro invocation expands to, when the file defines it — one line, whitespace collapsed.
     pub expansion: Option<String>,
+}
+
+/// **The `#define` a cooked use was actually expanded from**, with the text and file to show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroInvocationSite {
+    pub name: String,
+    pub file: PathBuf,
+    pub definition: String,
+    pub definition_start: usize,
 }
 
 impl<F: FileProvider + Clone> Session<F> {
@@ -435,6 +445,39 @@ impl<F: FileProvider + Clone> Session<F> {
             return Known::Unknown(UnknownReason::UnparsableName);
         };
         self.store.index().macro_definition(&name, &view.path, at)
+    }
+
+    /// **The `#define` the cook actually expanded at this use.**
+    ///
+    /// [`FileView::macro_invocation_at`] reads the provenance the expander already wrote on every rendered token:
+    /// the invocation's call site, the definition's range, and which file that range is in. Resolving the frame to a
+    /// path is the only step the view cannot do alone. This is exact for a use the rendering contains, including the
+    /// `#if !defined(NAME)` guard: the cook decided that condition when it made the expansion.
+    pub fn macro_invocation_at_a_file_offset(
+        &self,
+        view: &FileView,
+        offset: file::coordinates::FileOffset,
+    ) -> Option<MacroInvocationSite> {
+        let written = view.the_written_text()?;
+        let (name, at) = macro_name_at_a_file_offset(&written, offset)?;
+        let invocation = view.macro_invocation_at(at, &name)?;
+        let file = match invocation.written_in? {
+            MacroFile::Here => view.path.clone(),
+            MacroFile::Frame(frame) => self
+                .translation_unit_of(&view.path)?
+                .frame_file(frame)?
+                .to_path_buf(),
+        };
+        let text = self.text(&file)?;
+        let definition = text
+            .get(invocation.definition.start_offset..invocation.definition.end_offset())?
+            .to_string();
+        Some(MacroInvocationSite {
+            name,
+            file,
+            definition,
+            definition_start: invocation.definition.start_offset,
+        })
     }
 
     /// **The same name and position, with the strictness removed only for a display.**

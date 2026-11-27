@@ -568,6 +568,7 @@ fn a_failed_card_may_need_the_rendering(hover: &Hover) -> bool {
         || text.contains("members could not be read")
         || text.contains("The type of")
         || text.contains("whose `#define` is inside a conditional block")
+        || text.contains("This definition is inside a conditional block.")
 }
 
 /// **A macro that expands to its own name** — the self-identical definition a platform compatibility header writes.
@@ -678,6 +679,14 @@ fn hover_of_the_program(
         cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset.get())
     {
         return Some(markdown(member_markdown(session, view, &access)));
+    }
+
+    // **The cook already answered which `#define` this use took.** The expansion's provenance is on every rendered
+    // token ([`cpp_toolchain::Origin::Expanded`]), and the view carries the spans; the index's candidate list is only
+    // needed when the file has no rendering. This is the answer that makes `#if !defined(NAME)` / `<assert.h>` exact
+    // rather than a "could be conditional" caveat.
+    if let Some(found) = session.macro_invocation_at_a_file_offset(view, in_the_file) {
+        return Some(markdown(macro_invocation_markdown(session, view, &found)));
     }
 
     // **The macro question, asked in the file's coordinates.** A macro use has no footprint in the rendering — the cook
@@ -1623,6 +1632,20 @@ fn the_expansion_as_lines(expanded: &str) -> String {
 fn documentation_text_from_the_lines(comment: &str) -> Option<String> {
     let text = comment.trim();
     (!text.is_empty()).then(|| render_documentation(text))
+}
+
+/// A macro use answered from the cook's own expansion provenance: the exact `#define` the invocation took.
+fn macro_invocation_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    found: &cpp_code_analysis::session::MacroInvocationSite,
+) -> String {
+    format!(
+        "{}\n\n`{}` — the `#define` this use was expanded from, at {}\n",
+        code_block(found.definition.trim()),
+        found.name,
+        where_clause(session, Some(view), &found.file, found.definition_start),
+    )
 }
 
 fn macro_markdown(

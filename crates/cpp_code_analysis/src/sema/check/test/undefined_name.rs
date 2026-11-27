@@ -5,7 +5,7 @@
 //! negatives below are the reasons it stays quiet: a name the file declares, a keyword or an expression that is not a
 //! name, a body where the declaration is not this file's to see, and a call an argument's type may find by ADL.
 
-use super::{assert_reported, assert_silent_about, codes_of};
+use super::{assert_reported, assert_silent_about, codes_in, codes_of};
 use crate::DiagnosticCode;
 
 /// **The plain receiver**: `missing.size` has no declaration to type it, which is why `undefined-field` has nothing
@@ -106,5 +106,33 @@ fn a_lambda_body_and_an_adl_call_are_silent() {
         &adl,
         DiagnosticCode::UndefinedName,
         "`swap` may be found through `Widget`'s namespace",
+    );
+}
+
+/// **A macro from an included header is not an undeclared callee.**
+///
+/// `<assert.h>` defines `assert` conditionally, and a conditional definition is exactly the shape this rule used to
+/// report: the summary holds the file's own macros, but not the header's, and the cook can leave the name in the
+/// rendering when its guard is undecided. The index's macro environment is the wider answer.
+#[test]
+fn a_macro_from_an_included_header_is_silent() {
+    let codes = codes_in(
+        &[
+            (
+                "/p/assert.h",
+                "#ifndef ASSERT_H\n#define ASSERT_H\n#if defined(NDEBUG)\n#define ASSERT(x) ((void)0)\n\\
+                 #else\n#define ASSERT(x) ((void)(x))\n#endif\n#endif\n",
+            ),
+            (
+                "/p/a.cpp",
+                "#include \"assert.h\"\nvoid f() { ASSERT(1); }\n",
+            ),
+        ],
+        "/p/a.cpp",
+    );
+    assert_silent_about(
+        &codes,
+        DiagnosticCode::UndefinedName,
+        "`ASSERT` is a macro the included header defines",
     );
 }

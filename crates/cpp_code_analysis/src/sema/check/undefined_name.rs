@@ -56,6 +56,7 @@
 use crate::Known;
 use crate::ScopeKind;
 use crate::UnknownReason;
+use crate::file::coordinates::ReadingOffset;
 use crate::index;
 use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
 
@@ -91,12 +92,7 @@ impl Check for UndefinedName {
             if in_a_template(&node) || in_a_lambda(context, at) {
                 continue;
             }
-            if context
-                .summary
-                .macros
-                .iter()
-                .any(|macro_fact| macro_fact.name == name)
-            {
+            if a_macro_is_visible(context, &name, at) {
                 continue;
             }
             if context.model.names_a_template_parameter(&name, at) {
@@ -150,12 +146,7 @@ impl Check for UndefinedName {
             if in_a_template(&call_node) || in_a_lambda(context, at) {
                 continue;
             }
-            if context
-                .summary
-                .macros
-                .iter()
-                .any(|macro_fact| macro_fact.name == name)
-            {
+            if a_macro_is_visible(context, &name, at) {
                 continue;
             }
             if context.model.names_a_template_parameter(&name, at) {
@@ -336,6 +327,39 @@ fn in_a_lambda(context: &CheckContext<'_>, at: usize) -> bool {
             .scope(*id)
             .is_some_and(|data| data.kind == ScopeKind::Lambda)
     })
+}
+
+/// **Is this spelling a macro the file can see**, including one defined in another header?
+///
+/// The summary only holds the file's **own** `#define`s. A macro from `<assert.h>` is not there, so `assert(...)`
+/// was read as an undeclared callee when the cook left it unexpanded (the common case for a conditional header
+/// macro). The index's macro environment knows every reachable definition; a name it calls a macro — including one
+/// whose guard is undecided — is not a name this rule may report as undeclared.
+fn a_macro_is_visible(context: &CheckContext<'_>, name: &str, at: usize) -> bool {
+    if context
+        .summary
+        .macros
+        .iter()
+        .any(|macro_fact| macro_fact.name == name)
+    {
+        return true;
+    }
+
+    // The tree offset is in the rendering's coordinates; the macro environment is keyed by the file's.
+    let in_the_file = context
+        .view
+        .file_offset_of(ReadingOffset::new(at))
+        .map(|offset| offset.get())
+        .unwrap_or(at);
+    match context
+        .model
+        .index()
+        .macro_environment(name, context.path)
+        .is_a_macro_at(in_the_file)
+    {
+        Known::Yes(_) | Known::Unknown(UnknownReason::ConditionalCompilation) => true,
+        Known::Unknown(_) | Known::No => false,
+    }
 }
 
 /// **Does anything name `name` where this use is written?**

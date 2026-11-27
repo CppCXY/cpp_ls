@@ -3824,6 +3824,23 @@ fn a_define_after_an_undef_is_in_force_again() {
 }
 
 #[test]
+fn an_undef_before_a_conditional_define_is_not_absence() {
+    // `<assert.h>` writes this shape: `#undef assert`, then one definition per configuration. The certain undef is
+    // before every definition, so it must not settle the answer as "not a macro"; the later conditional definitions
+    // are exactly the doubt `ConditionalCompilation` names.
+    let source =
+        "#undef MAX\n#if defined(ONE)\n#define MAX 1\n#else\n#define MAX 2\n#endif\nint x = MAX;\n";
+    let (index, tree) = analysed(&[], "/p/a.cpp", source);
+    let root = tree.get_red_root();
+
+    let found = super::macro_across_files(&index, &root, Path::new("/p/a.cpp"), at(source, "MAX;"));
+    assert!(
+        matches!(found, Known::Unknown(UnknownReason::ConditionalCompilation)),
+        "the conditional definitions overturn the undef: {found:?}"
+    );
+}
+
+#[test]
 fn a_define_inside_a_conditional_is_unknown_rather_than_guessed() {
     let source = "#if defined(USE_MAX)\n#define MAX 1\n#endif\nint x = MAX;\n";
     let (index, tree) = analysed(&[], "/p/a.cpp", source);

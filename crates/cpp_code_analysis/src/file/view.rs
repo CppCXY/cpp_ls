@@ -324,6 +324,28 @@ impl FileView {
             .map(|span| ReadingOffset::new(span.cooked.start_offset + (written - token_start)))
     }
 
+    /// **The macro invocation whose expansion covers this file offset.**
+    ///
+    /// The cook already records the chain in every rendered token's [`Origin`] — which `#define` was used, and in
+    /// which file — and this view holds the spans. So a hover at a macro use can answer from the expansion the
+    /// compiler actually made, instead of rebuilding a candidate list from summaries. The call site is not always
+    /// the token's own range (an argument can be substituted into a body), but the invocation's call site is
+    /// always a range in this file; the offset only has to fall inside it.
+    pub fn macro_invocation_at(
+        &self,
+        written: usize,
+        name: &str,
+    ) -> Option<&crate::MacroInvocation> {
+        self.reading.iter().find_map(|span| {
+            let crate::Origin::Expanded { invocations } = &span.origin else {
+                return None;
+            };
+            invocations.iter().find(|invocation| {
+                invocation.name.as_ref() == name && invocation.call_site.contain(written)
+            })
+        })
+    }
+
     /// **Where in the file a *range's end* is** — the outbound mapping for the far end of a range.
     ///
     /// [`FileView::file_offset_of`] answers with the span **containing** an offset, so an end that falls in

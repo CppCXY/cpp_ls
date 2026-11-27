@@ -64,6 +64,19 @@ impl MacroEnvironment {
             return Known::Unknown(UnknownReason::ConditionalCompilation);
         }
 
+        // **An unconditional `#undef` is not final when a conditional `#define` comes after it.** The rule that a
+        // certain fact beats a conditional one is right for two competing definitions, but not for this shape:
+        // `assert.h` writes `#undef assert` once and then redefines it in every branch, and the certain undef must
+        // not turn every later use into "not a macro". The name is a macro in some configuration; which definition
+        // is in force is the conditional question, not absence.
+        if !best.is_definition()
+            && in_force
+                .iter()
+                .any(|candidate| candidate.position > best.position && candidate.is_definition())
+        {
+            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        }
+
         self.as_answer(best)
     }
 

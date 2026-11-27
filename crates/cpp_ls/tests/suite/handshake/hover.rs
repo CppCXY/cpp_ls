@@ -1013,6 +1013,10 @@ int mode = ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         "the replacement list is in the card: {value}"
     );
     assert!(
+        !value.contains("This definition is inside a conditional block"),
+        "the cook's provenance is exact, not a conditional caveat: {value}"
+    );
+    assert!(
         !value.contains("a macro whose `#define` is inside a conditional block"),
         "the generic refusal is not the answer when a definition is available: {value}"
     );
@@ -1065,6 +1069,68 @@ int flags = LR_LOADFROMFILE;
     assert!(
         value.contains("0x00000010"),
         "the header's replacement list is in the card: {value}"
+    );
+    assert!(
+        !value.contains("This definition is inside a conditional block"),
+        "the header guard was decided by the cook: {value}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **The `<assert.h>` shape**: an unconditional `#undef` followed by one definition per configuration.
+///
+/// This is the macro the editor reported as undeclared. The name is a macro in every configuration, so the card
+/// must show a `#define` (the strict query may still refuse to pick one for a jump); the diagnostics rule asks the
+/// weaker question and must stay silent.
+#[test]
+fn a_macro_redefined_after_an_undef_gets_its_define_card() {
+    const HEADER: &str = "\
+#undef ASSERT
+#if defined(NDEBUG)
+# define ASSERT(x) ((void)0)
+#else
+# define ASSERT(x) ((void)(x))
+#endif
+";
+    const SOURCE: &str = "\
+#include \"assert.h\"
+void f(void) { ASSERT(1); }
+";
+    let project = Project::new("assert-macro-hover");
+    project.write("assert.h", HEADER);
+    project.write("main.c", SOURCE);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let answer = hover_at(&mut server, 100, &uri, SOURCE, "ASSERT", 1);
+    let value = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the macro has a popup: {answer}"));
+    assert!(
+        value.contains("#define") || value.contains("# define"),
+        "the replacement list is in the card: {value}"
+    );
+    assert!(
+        !value.contains("a macro whose `#define` is inside a conditional block"),
+        "the generic refusal is not the card when a definition is available: {value}"
     );
 
     server.request(999, "shutdown", Value::Null);
