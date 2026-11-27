@@ -2,7 +2,6 @@
 name = "cpp_inspect"
 version = "0.5.0"
 edition = "2024"
-publish = false
 description = "Ask the C++ analysis one question, as JSON, for a program rather than a person."
 
 # **Why this crate exists.** Every question about the analysis used to be a new `tests/tmp_*.rs` probe: write it,

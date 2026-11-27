@@ -2,7 +2,6 @@
 name = "cpp_check"
 version = "0.5.0"
 edition = "2024"
-publish = false
 description = "Run the analysis's checks over a whole workspace, from the command line."
 
 # **Why this crate exists.** The checks live in `cpp_code_analysis` and reach a reader through the language server,
