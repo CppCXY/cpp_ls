@@ -130,6 +130,16 @@ impl MacroEnvironment {
             .collect()
     }
 
+    /// **The definition a hover can still show when `at` refuses the name.**
+    ///
+    /// `at` is deliberately strict: a `#define` inside a condition the environment cannot decide is not a jump
+    /// destination, because it may not be in force. A reader pointing at the name is asking a smaller question —
+    /// "what does this macro say?" — and the nearest definition in translation order is the useful answer even when
+    /// the condition is unknown. The caller says that the condition is unknown; the card must not pretend it is not.
+    pub fn conditional_definition(&self, offset: usize) -> Option<&MacroCandidate> {
+        last(self.definitions_in_force(offset).into_iter())
+    }
+
     pub(crate) fn in_force(&self, offset: usize) -> impl Iterator<Item = &MacroCandidate> {
         self.candidates
             .iter()

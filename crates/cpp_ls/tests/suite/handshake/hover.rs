@@ -962,3 +962,111 @@ int main() {
         "both parameters, spelled as the header writes them: {text}"
     );
 }
+
+/// **A macro defined under `#if !defined(NAME)` still gets its `#define` card.**
+///
+/// This is the system-header idiom, and neovim's `ENABLE_VIRTUAL_TERMINAL_PROCESSING` uses it in the file that
+/// consumes it. The strict macro query refuses the name because which `#define` is in force depends on an earlier
+/// header; a reader pointing at the use still wants the replacement list, so the card shows it and names the doubt.
+#[test]
+fn a_macro_defined_under_if_not_defined_gets_its_define_card() {
+    const SOURCE: &str = "\
+#if !defined(ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+# define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+int mode = ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+";
+    let project = Project::new("conditional-macro-hover");
+    project.write("a.c", SOURCE);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("a.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let answer = hover_at(
+        &mut server,
+        100,
+        &uri,
+        SOURCE,
+        "ENABLE_VIRTUAL_TERMINAL_PROCESSING",
+        1,
+    );
+    let value = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the macro has a popup: {answer}"));
+    assert!(
+        value.contains("0x0004"),
+        "the replacement list is in the card: {value}"
+    );
+    assert!(
+        !value.contains("a macro whose `#define` is inside a conditional block"),
+        "the generic refusal is not the answer when a definition is available: {value}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **The same card for a macro guarded in a header**, which is the shape of `LR_LOADFROMFILE`.
+///
+/// The definition is not in the buffer, so `macro_definition_text` cannot find it; the index's candidate carries the
+/// defining file and body range, and the card reads the replacement list from that file.
+#[test]
+fn a_macro_defined_in_a_guarded_header_gets_its_define_card() {
+    const HEADER: &str = "\
+#ifndef LR_LOADFROMFILE
+# define LR_LOADFROMFILE 0x00000010
+#endif
+";
+    const SOURCE: &str = "\
+#include \"winuser.h\"
+int flags = LR_LOADFROMFILE;
+";
+    let project = Project::new("conditional-header-macro-hover");
+    project.write("winuser.h", HEADER);
+    project.write("main.c", SOURCE);
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.c"));
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {},
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "c", "version": 1, "text": SOURCE }
+        }),
+    );
+
+    let answer = hover_at(&mut server, 100, &uri, SOURCE, "LR_LOADFROMFILE", 1);
+    let value = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the macro has a popup: {answer}"));
+    assert!(
+        value.contains("0x00000010"),
+        "the header's replacement list is in the card: {value}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

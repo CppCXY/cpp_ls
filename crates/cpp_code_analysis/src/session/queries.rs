@@ -428,29 +428,34 @@ impl<F: FileProvider + Clone> Session<F> {
         view: &FileView,
         offset: file::coordinates::FileOffset,
     ) -> Known<ProjectMacro> {
-        // **The file's own text, from whichever view this is** — a handler may hold the *plain* view, whose root is the
-        // file's own text, and asking only for `written_text()` made every macro question in the editor answer "no
-        // written text". See `FileView::the_written_text`.
         let Some(written) = view.the_written_text() else {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("no written text")));
         };
-        let at = offset.get();
-        // The word under the cursor, in the file's own bytes — the same walk `hover`'s `name_at_the_cursor` makes for a fix.
-        let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-        let bytes = written.as_bytes();
-        let mut start = at.min(bytes.len());
-        while start > 0 && is_a_word(bytes[start - 1]) {
-            start -= 1;
-        }
-        let mut end = at.min(bytes.len());
-        while end < bytes.len() && is_a_word(bytes[end]) {
-            end += 1;
-        }
-        let name = &written[start..end];
-        if name.is_empty() {
+        let Some((name, at)) = macro_name_at_a_file_offset(&written, offset) else {
             return Known::Unknown(UnknownReason::UnparsableName);
-        }
-        self.store.index().macro_definition(name, &view.path, at)
+        };
+        self.store.index().macro_definition(&name, &view.path, at)
+    }
+
+    /// **The same name and position, with the strictness removed only for a display.**
+    ///
+    /// A macro behind `#if !defined(NAME)` is certainly a macro in the region that writes it (that is the
+    /// `settles_the_name` idiom), but `macro_at_a_file_offset` still answers `ConditionalCompilation`: the definition
+    /// may not be the one in force if an earlier header already defined it. Hover needs a card, not a jump
+    /// destination, so the last definition in force is returned and the caller says that the condition is unknown.
+    pub fn macro_candidate_at_a_file_offset(
+        &self,
+        view: &FileView,
+        offset: file::coordinates::FileOffset,
+    ) -> Option<ProjectMacro> {
+        let written = view.the_written_text()?;
+        let (name, at) = macro_name_at_a_file_offset(&written, offset)?;
+        let environment = self.store.index().macro_environment(&name, &view.path);
+        let candidate = environment.conditional_definition(at)?;
+        Some(ProjectMacro {
+            file: candidate.file().to_path_buf(),
+            fact: candidate.fact().clone(),
+        })
     }
 
     /// **A `#define`/`#undef` this file writes itself**, read from its text — the answer to a macro question about a
@@ -1212,4 +1217,24 @@ fn push_a_quoted(out: &mut String, name: &str) {
         }
     }
     out.push('"');
+}
+
+/// The identifier under `offset` in a file's own bytes, with its offset.
+fn macro_name_at_a_file_offset(
+    written: &str,
+    offset: file::coordinates::FileOffset,
+) -> Option<(String, usize)> {
+    let at = offset.get();
+    let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = written.as_bytes();
+    let mut start = at.min(bytes.len());
+    while start > 0 && is_a_word(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at.min(bytes.len());
+    while end < bytes.len() && is_a_word(bytes[end]) {
+        end += 1;
+    }
+    let name = &written[start..end];
+    (!name.is_empty()).then(|| (name.to_string(), at))
 }

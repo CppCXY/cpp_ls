@@ -725,6 +725,22 @@ fn hover_of_the_program(
             if let Some(what) = a_standard_integer_typedef(&word) {
                 return Some(markdown(format!("`{word}` — {what}.")));
             }
+            // **Show the definition even when the condition is undecided.** `#if !defined(NAME)` /
+            // `#ifndef NAME` is the system-header idiom that defines most Windows macros, and the name is certainly
+            // a macro after it even though which `#define` is in force can depend on an earlier header. The old
+            // answer — "a macro whose #define is inside a conditional block" — told a reader nothing about the
+            // replacement list they pointed at. The card says what the definition says and then names the doubt.
+            if let Some(found) = session.macro_candidate_at_a_file_offset(view, in_the_file)
+                && !a_pass_through_macro(&found)
+            {
+                let mut card = macro_markdown(session, view, &found, Some(in_the_file));
+                card.push_str(
+                    "\n\n*This definition is inside a conditional block. The configuration this file is \
+                     analysed with has not decided the condition, so an earlier header may have defined the name \
+                     instead.*\n",
+                );
+                return Some(markdown(card));
+            }
             let written = cpp_parser::token_at(&view.root, offset.get())
                 .map(|token| token.text().to_string())
                 .unwrap_or_default();
