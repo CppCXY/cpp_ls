@@ -63,13 +63,7 @@ pub async fn on_code_lens(
 ) -> RequestOutcome<Vec<CodeLens>> {
     let uri = params.text_document.uri;
     let client = context.lsp_features().client_id();
-    let last = context.last_code_lens().clone();
-    let key = uri.to_string();
 
-    // **A code-lens answer replaces the client's list, so an incomplete one is worse than a stale one.** The client
-    // already has the previous list on screen; when the index cannot answer completely, the last complete list for
-    // this document is returned unchanged. There is one slot, not a map of every open tab: it is a request boundary,
-    // and a complete answer for another document replaces it.
     let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **A project can turn the lens off** (`code_lens.enable = false` in `.cppls.toml`), which is a preference
@@ -86,19 +80,14 @@ pub async fn on_code_lens(
     .await;
 
     match answer {
-        RequestOutcome::Ready(lenses) => {
-            if let Ok(mut held) = last.lock() {
-                *held = Some((key, lenses.clone()));
-            }
-            RequestOutcome::Ready(lenses)
+        // **A partial list is not an answer.** LSP has no "keep what you have": a code-lens response replaces the
+        // client's list. Returning the functions whose counts are known while another is still `Unknown` makes the
+        // visible lines change on every keystroke, and returning an empty list clears them. `ContentModified` says
+        // the request could not be answered for the document as it is; the client keeps what it is showing, and the
+        // refresh after a load is what asks again once the answer exists.
+        RequestOutcome::Missing => {
+            RequestOutcome::Cancelled(context::CancelSource::ContentModified)
         }
-        // **The summary is being rebuilt, not gone.** Return exactly what the client is already drawing. A partial
-        // list would replace it, and a `ContentModified`/empty answer makes several clients clear every lens; both
-        // are the disappearance this guard exists for.
-        RequestOutcome::Missing => match last.lock().ok().and_then(|held| held.clone()) {
-            Some((held_key, lenses)) if held_key == key => RequestOutcome::Ready(lenses),
-            _ => RequestOutcome::Cancelled(context::CancelSource::ContentModified),
-        },
         other => other,
     }
 }
@@ -109,8 +98,8 @@ pub async fn on_code_lens(
 /// not what a reader counts callers of.
 ///
 /// `None` means the question cannot be answered completely yet — no summary, or a declaration whose reference query
-/// is `Unknown` while the index is filling. [`on_code_lens`] waits for the writer to make the answer complete rather
-/// than sending a partial list.
+/// is `Unknown` while the index is filling. The wire handler turns that into `ContentModified` rather than sending a
+/// partial list; see [`complete_lenses_of`] and `on_code_lens`.
 #[cfg(test)]
 pub fn lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     session: &cpp_code_analysis::Session<F>,
@@ -128,15 +117,8 @@ fn complete_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
     uri: &Uri,
     client: ClientId,
 ) -> Option<Vec<CodeLens>> {
-    // **A file that does not currently parse is not a file with no functions.** While a body is being typed the
-    // parser recovers with an error node, and the recovered tree can still name *some* of the functions — a partial
-    // list is exactly what makes one lens vanish while its neighbour stays. The last complete answer is returned
-    // instead; the writer's next cook replaces it.
     let held = session.files().held(&view.path)?;
     let summary = session.index().summary(&view.path)?;
-    if !view.tree.get_errors().is_empty() {
-        return None;
-    }
 
     let mut lenses = Vec::new();
     for fact in &summary.declarations {
@@ -185,7 +167,7 @@ fn complete_lenses_of<F: cpp_code_analysis::FileProvider + Clone>(
         else {
             // **Unknown is not zero, and it is not a list we may send partially.** The client would replace its
             // lenses with a list missing this function, then replace them again when the references index catches up.
-            // The handler waits for a complete answer; the next request supersedes this one if the text moved on.
+            // The handler answers `ContentModified`; the refresh after a load asks once more.
             return None;
         };
         let locations = locations_of(session, &places);

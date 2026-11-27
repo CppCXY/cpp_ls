@@ -157,10 +157,9 @@ drops an occurrence when the file's own scopes resolve it to a binding a functio
 
 4. **Inlay hints and CodeLens disappear on every keystroke and come back seconds later.** Answering *nothing* while the
    index catches up is worse than answering a number that grows: the client is told the answer changed, so it erases what
-   it drew. CodeLens keeps one last complete answer while the writer rebuilds the summary, so the client keeps its
-   existing list; a complete answer replaces it, and `supersede` cancels the older request when the next one arrives.
-   Inlay hints should get the same treatment — never answer "empty because not ready", never replace a list with a
-   partial one.
+   it drew. The CodeLens now answers from what is known and lets `workspace/codeLens/refresh` (sent when indexing drains)
+   correct it; inlay hints should get the same treatment — never answer "empty because not ready", always answer the
+   current best and refresh.
 
 5. **`std::vector<T>::emplace_back()`'s result is unknown**, so `auto &result = results.emplace_back()` has no type and
    `result.Start` is unresolvable. **Corrected by measurement** (see the two sections below): the substitution the
