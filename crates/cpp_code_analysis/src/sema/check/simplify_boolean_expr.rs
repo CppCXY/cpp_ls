@@ -26,6 +26,45 @@ impl Check for SimplifyBooleanExpr {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::SimplifyBooleanExpr];
 
     fn check(context: &mut CheckContext<'_>) {
+        // **A conditional expression with `true` and `false` as its branches is the same sentence** — `return ready ?
+        // true : false;` says `return ready;` — and the module note lists it beside the `if (ready == true)` forms. The
+        // loop below only walks `if` statements, so that shape could never be reported; the corpus asked for it and
+        // went silent (`corpus/findings/flow.cpp`).
+        for ternary in context
+            .own::<cpp_parser::CppTernaryExpr>()
+            .collect::<Vec<_>>()
+        {
+            let written = context
+                .node_written_text(ternary.syntax())
+                .unwrap_or_else(|| context.node_text(ternary.syntax()));
+            let collapsed = written.split_whitespace().collect::<Vec<_>>().join(" ");
+            let Some(question) = collapsed.find('?') else {
+                continue;
+            };
+            let (condition, branches) = (
+                collapsed[..question].trim(),
+                collapsed[question + 1..].trim(),
+            );
+            let Some(colon) = branches.find(':') else {
+                continue;
+            };
+            let (then, otherwise) = (branches[..colon].trim(), branches[colon + 1..].trim());
+            let simplified = match (then, otherwise) {
+                ("true", "false") => Some(condition.to_string()),
+                ("false", "true") => Some(format!("!({condition})")),
+                _ => None,
+            };
+            let Some(simplified) = simplified else {
+                continue;
+            };
+            context.add(
+                DiagnosticCode::SimplifyBooleanExpr,
+                cpp_parser::source_range(ternary.syntax().text_range()),
+                collapsed.clone(),
+                format!("`{collapsed}` picks a literal from a condition — write `{simplified}`"),
+            );
+        }
+
         for statement in context.own::<cpp_parser::CppIfStat>().collect::<Vec<_>>() {
             let Some(condition) = statement.get_condition() else {
                 continue;

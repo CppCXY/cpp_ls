@@ -95,3 +95,23 @@ fn only_an_if_condition_is_read() {
         "a comparison in an initialiser is not a condition",
     );
 }
+
+/// **The conditional-expression form, which the module note lists and the loop could not reach.** `return ready ? true :
+/// false;` is `return ready;`, and `return ready ? false : true;` is `return !(ready);`. The corpus asked for the first
+/// (`corpus/findings/flow.cpp`) and the rule was silent, because it walked `if` statements only.
+#[test]
+fn a_ternary_picking_a_literal_is_the_value_itself() {
+    let positive = codes_of("bool f(bool ready) { return ready ? true : false; }\n");
+    assert_reported(
+        &positive,
+        DiagnosticCode::SimplifyBooleanExpr,
+        "`? true : false` is the condition",
+    );
+
+    let negative = codes_of("bool f(bool ready) { return ready ? false : true; }\n");
+    assert_reported(
+        &negative,
+        DiagnosticCode::SimplifyBooleanExpr,
+        "`? false : true` is its negation",
+    );
+}
