@@ -1351,6 +1351,21 @@ pub(crate) fn continues_a_qualified_name(p: &CppParser) -> bool {
             | CppTokenKind::LeftBrace
             | CppTokenKind::RightBrace
             | CppTokenKind::LeftParen
+            // **`(` and `)` both end the name, and `)` is the one this list was missing.** A parameter is decided
+            // inside its own parentheses, and the `::` of a *trailing return type* is on the other side of the
+            // closing one:
+            //
+            // ```cpp
+            // auto f(std::string_view value) -> std::string;   // `value` is the declarator, not another type
+            // auto f(std::string_view value) -> int;           // …and this one always read correctly
+            // ```
+            //
+            // Stepping over the `)` found the `::` of `std::string`, answered "this name continues as a qualified
+            // name", and `value` joined the specifier sequence — so the parameter had no declarator, the scope tree
+            // bound no name, and `unresolved-call-or-receiver` reported the parameter as undeclared on correct code.
+            // Measured: every function written `auto … -> a::qualified::name` lost **all** of its parameter names.
+            // A qualified name never has a `)` between two of its segments, so nothing valid is refused here.
+            | CppTokenKind::RightParen
             | CppTokenKind::LeftBracket
             | CppTokenKind::RightBracket
             | CppTokenKind::Assign
