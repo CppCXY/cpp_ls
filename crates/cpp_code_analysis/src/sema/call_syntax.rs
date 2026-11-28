@@ -151,6 +151,46 @@ pub(crate) fn tidy_list_text(text: &str) -> (String, Vec<usize>) {
     let mut at = 0usize;
 
     while at < bytes.len() {
+        // **A comment is not part of the list.** A summary's parameter list is the *file's* text, and a declaration
+        // written across lines with a comment beside each parameter keeps those comments in it:
+        //
+        // ```c
+        // static Decimal *decimal_new(
+        //   sqlite3_context *pCtx,       /* Report error here, if not null */
+        //   sqlite3_value *pIn,          /* Construct the decimal object from this */
+        // ```
+        //
+        // `parameters_in` then split on the comma *inside* the comment, and the spelling of one parameter became
+        // "`if not null */ sqlite3_value *`" — measured on sqlite, six `param-type-check` findings about a type no
+        // file writes. The bytes are dropped from the text and land on the position of the next word, so a span
+        // inside a comment maps into the word that follows it rather than into nothing.
+        if bytes[at] == b'/'
+            && at + 1 < bytes.len()
+            && (bytes[at + 1] == b'*' || bytes[at + 1] == b'/')
+        {
+            let line_comment = bytes[at + 1] == b'/';
+            let mut end = at + 2;
+            while end < bytes.len() {
+                if line_comment && bytes[end] == b'\n' {
+                    break;
+                }
+                if !line_comment
+                    && bytes[end] == b'*'
+                    && end + 1 < bytes.len()
+                    && bytes[end + 1] == b'/'
+                {
+                    end += 2;
+                    break;
+                }
+                end += 1;
+            }
+            for slot in &mut map[at..end.min(bytes.len())] {
+                *slot = out.len();
+            }
+            at = end;
+            continue;
+        }
+
         if bytes[at].is_ascii_whitespace() {
             // Whitespace lands where the next word will start, before the separator is decided: no span begins or
             // ends in it — a span is a whole parameter, and each is trimmed.
@@ -208,4 +248,40 @@ pub(crate) fn arguments_of(call: &CppSyntaxNode) -> Option<Vec<CppSyntaxNode>> {
         .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList);
 
     (!arguments.is_empty() && !unread).then_some(arguments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A comment between two parameters is not part of the list.** A summary`s parameter list is the file`s own
+    /// text, and sqlite writes one declaration per parameter with a comment beside each:
+    ///
+    /// ```c
+    /// static Decimal *decimal_new(
+    ///   sqlite3_context *pCtx,       /* Report error here, if not null */
+    ///   sqlite3_value *pIn,          /* Construct the decimal object from this */
+    /// ```
+    ///
+    /// The comma inside the first comment split the list, and a parameter`s spelling became
+    /// `if not null */ sqlite3_value *` — measured on sqlite, six `param-type-check` findings about a type no file
+    /// writes.
+    #[test]
+    fn a_comment_inside_a_parameter_list_is_dropped() {
+        let (text, _map) = tidy_list_text(
+            "(sqlite3_context *pCtx,       /* Report error here, if not null */\n  sqlite3_value *pIn)",
+        );
+        assert_eq!(text, "(sqlite3_context *pCtx, sqlite3_value *pIn)");
+        assert!(
+            !text.contains("*/") && !text.contains("if not null"),
+            "no comment text survives: {text}"
+        );
+    }
+
+    /// A line comment ends at the newline, and the parameter after it is still one word.
+    #[test]
+    fn a_line_comment_ends_at_the_newline() {
+        let (text, _map) = tidy_list_text("(int a, // the first\n int b)");
+        assert_eq!(text, "(int a, int b)");
+    }
 }

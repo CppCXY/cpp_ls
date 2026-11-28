@@ -474,6 +474,13 @@ use std::path::{Path, PathBuf};
 /// a body-local `static`. Summaries written before this record `nvim_main` as `static`; the content hash cannot see a
 /// reader change, so only the version reaches them.
 ///
+/// # Why this moved to 65
+///
+/// **A stored parameter list dropped its comments.** `tidy_list_text` collapses a declaration`s layout into one line,
+/// and a comment written between two parameters stayed in it: `parameters_in` then split at the comma *inside* the
+/// comment, and a parameter`s spelling became "`if not null */ sqlite3_value *`" — measured on sqlite, six
+/// `param-type-check` findings about a type no file writes. A summary is keyed by content and context, neither of
+/// which moves for a reader change, so only the version reaches the old rows.
 /// # Why this moved to 64
 ///
 /// **A stored rendering's `inactive` spans were missing a shape.** The cook marked only the *runs* between directives,
@@ -481,7 +488,7 @@ use std::path::{Path, PathBuf};
 /// shape in a real header — recorded no span, and a finding on that line was drawn on text no compiler reads. The
 /// spans are part of the record (`put_u32(rendered.inactive.len())`), and a cached rendering is served for the same
 /// content and configuration, so a warmed cache keeps the empty list until the version moves.
-pub const FORMAT_VERSION: u32 = 64;
+pub const FORMAT_VERSION: u32 = 65;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///
