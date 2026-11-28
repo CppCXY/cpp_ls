@@ -53,6 +53,17 @@ impl Check for ReturnTypeMismatch {
             }
 
             for returned in super::the_returns_in(&function) {
+                // **A `co_return` is the coroutine promise`s business, not a conversion.** The parser files
+                // `co_return` as a return statement, so this rule read `auto produce(int v) -> Task { co_return v; }`
+                // as `return v;` from a function declared to return `Task` — and a function that returns a `Task`
+                // *by writing a coroutine* converts nothing: the value goes to `promise_type::return_value`.
+                // Measured on the corpus (`corpus/clean/coroutines.cpp`), which is correct C++ and was reported.
+                let written = context
+                    .node_written_text(returned.syntax())
+                    .unwrap_or_default();
+                if written.trim_start().starts_with("co_return") {
+                    continue;
+                }
                 let expression = returned.get_expr();
                 let returned_text = expression
                     .as_ref()

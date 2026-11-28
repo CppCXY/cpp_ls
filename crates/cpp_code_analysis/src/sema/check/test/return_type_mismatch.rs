@@ -132,3 +132,25 @@ static int same(const unsigned char *a, const unsigned char *b, int n)
         "both arms are `int`, so the conditional is an `int`",
     );
 }
+
+/// **A `co_return` converts nothing.** The parser files it as a return statement, so this rule read
+/// `auto produce(int value) -> Task { co_return value; }` as `return value;` from a function declared to return `Task`.
+/// The value of a `co_return` goes to `promise_type::return_value`, and the function's declared type is the coroutine
+/// handle type — no conversion is asked of anything. Measured on the corpus (`corpus/clean/coroutines.cpp`), which is
+/// correct C++ and was reported.
+#[test]
+fn a_co_return_is_not_a_conversion() {
+    let coroutine = codes_of("auto produce(int value) -> Task { co_return value; }\n");
+    assert_silent_about(
+        &coroutine,
+        DiagnosticCode::ReturnTypeMismatch,
+        "the coroutine promise owns what a `co_return` produces",
+    );
+
+    let ordinary = codes_of("int f() { return \"text\"; }\n");
+    assert_reported(
+        &ordinary,
+        DiagnosticCode::ReturnTypeMismatch,
+        "a plain `return` is still judged",
+    );
+}
