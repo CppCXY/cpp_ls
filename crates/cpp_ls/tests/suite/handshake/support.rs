@@ -88,7 +88,7 @@ pub(crate) fn position_of(source: &str, needle: &str) -> (u32, u32) {
 /// a load-dependent timeout into an ordered run.
 const AT_ONCE: usize = 6;
 
-static RUNNING: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static RUNNING: Mutex<usize> = Mutex::new(0);
 static ROOM: std::sync::Condvar = std::sync::Condvar::new();
 
 /// One of the [`AT_ONCE`] places, given back when the server it belongs to is dropped.

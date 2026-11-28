@@ -307,7 +307,7 @@ impl WorkspaceState {
     }
 
     /// **A configuration file outside the workspace root**, which a recursive watch of the root cannot see.
-    pub fn configuration_outside_the_root(&self) -> Option<std::path::PathBuf> {
+    pub fn configuration_outside_the_root(&self) -> Option<PathBuf> {
         let configuration = self.config_file.as_ref()?;
         let root = self.root()?;
         (!configuration.starts_with(root)).then(|| configuration.clone())

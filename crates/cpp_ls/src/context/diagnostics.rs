@@ -180,7 +180,7 @@ static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize
 
 /// The counter above, for a trace.
 pub fn computations() -> usize {
-    COMPUTED.load(std::sync::atomic::Ordering::Relaxed)
+    COMPUTED.load(Ordering::Relaxed)
 }
 
 async fn compute(
@@ -188,7 +188,7 @@ async fn compute(
     uri: &Uri,
     cancel: CancellationToken,
 ) -> RequestOutcome<Vec<Diagnostic>> {
-    COMPUTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    COMPUTED.fetch_add(1, Ordering::Relaxed);
     let delay = context
         .diagnostics()
         .change_delay_ms

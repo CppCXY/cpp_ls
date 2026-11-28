@@ -636,8 +636,7 @@ mod tests {
         let session = a_project(source);
         let path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&path).expect("the file is held");
-        let view =
-            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let view = FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = source.find("Widget").expect("the fixture names it");
 
         let fixes = fixes_of(
@@ -674,8 +673,7 @@ mod tests {
         let session = a_project(source);
         let path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&path).expect("the file is held");
-        let view =
-            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let view = FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = source.find("Widget").expect("the fixture names it");
 
         assert!(
@@ -739,8 +737,7 @@ mod tests {
         session.index_everything();
         let path = PathBuf::from("/p/use.cpp");
         let held = session.files().held(&path).expect("the file is held");
-        let view =
-            cpp_code_analysis::FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
+        let view = FileView::parse_with(held, &cpp_parser::MacroEnvironment::default());
         let at = use_cpp.find("Report").expect("the fixture names it");
 
         let fixes = fixes_of_named(

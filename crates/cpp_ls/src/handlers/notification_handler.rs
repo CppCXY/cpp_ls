@@ -31,7 +31,7 @@ use super::{
 /// It takes the notification **by value** because `Notification::extract` consumes it, and it reads the URI out of the
 /// raw params *before* extracting, which is the only place it exists once extraction has failed. The params themselves
 /// are never logged: a `didChange` carries whole buffers.
-fn or_report<P: serde::de::DeserializeOwned>(notification: lsp_server::Notification) -> Option<P> {
+fn or_report<P: serde::de::DeserializeOwned>(notification: Notification) -> Option<P> {
     let method = notification.method.clone();
     let uri = notification
         .params

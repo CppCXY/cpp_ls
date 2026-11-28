@@ -269,7 +269,7 @@ fn definition_of_a_documentation_link<F: cpp_code_analysis::FileProvider + Clone
 
 /// The declaration's name, as a range in the file that declares it.
 fn name_range(
-    session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
+    session: &Session<DiskFiles>,
     file: &std::path::Path,
     fact: &cpp_code_analysis::DeclFact,
 ) -> Option<Range> {

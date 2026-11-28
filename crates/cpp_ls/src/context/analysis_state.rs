@@ -144,7 +144,7 @@ pub struct AnalysisState {
 
 /// The previous rendered completion, and the text it was read from — see [`AnalysisState::last_rendered`].
 struct LastRenderedCompletion {
-    path: std::path::PathBuf,
+    path: PathBuf,
     /// Where the typed word starts, in file offsets.
     prefix_start: usize,
     /// What had been typed when the answer was built.
@@ -258,7 +258,7 @@ impl AnalysisState {
     /// other request. (A query that loaded what it needed would take `&mut Session` and serialize all of them, which
     /// is the trade this exists to avoid.)
     pub async fn prepare(&self, path: &std::path::Path) -> bool {
-        let whole = std::time::Instant::now();
+        let whole = Instant::now();
         let answer = self.prepare_inner(path).await;
         if whole.elapsed().as_millis() >= 50 {
             log::warn!("prepare {} took {:?}", path.display(), whole.elapsed());
@@ -720,7 +720,7 @@ impl AnalysisState {
         // **The four phases, timed.** This is the server's largest unprompted piece of work and every one of its parts
         // has been a separate investigation — the walk, the cook and the parse, the per-file records, the inserts — so
         // the line that says what a program read cost is the instrument the next one starts from.
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let Some(Some((root, revision))) = self.with_snapshot(|session| {
             session
                 .the_program_to_read()
@@ -766,7 +766,7 @@ impl AnalysisState {
         //
         // The `Arc` is what lets the read-lock phase borrow the reading on a blocking thread that must be `'static`;
         // it is handed back with `try_unwrap` because the phase that borrowed it has returned.
-        let prepared = prepared.map(std::sync::Arc::new);
+        let prepared = prepared.map(Arc::new);
         let records = match &prepared {
             Some(reading) => {
                 let reading = reading.clone();
@@ -789,7 +789,7 @@ impl AnalysisState {
             None => Vec::new(),
         };
         let prepared = match prepared {
-            Some(reading) => std::sync::Arc::try_unwrap(reading).ok(),
+            Some(reading) => Arc::try_unwrap(reading).ok(),
             None => None,
         };
 
@@ -797,7 +797,7 @@ impl AnalysisState {
 
         // **And the inserts, under the writer.** The root is marked read even when the read declined, so a program
         // that cannot be built is not chosen again on the next wake.
-        let committing = std::time::Instant::now();
+        let committing = Instant::now();
         let read = self
             .update_session("read a program", move |session| {
                 if !session.is_current(&revision) {
@@ -865,7 +865,7 @@ impl AnalysisState {
         at_most: Duration,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> bool {
-        let deadline = std::time::Instant::now() + at_most;
+        let deadline = Instant::now() + at_most;
         loop {
             if cancel.is_cancelled() {
                 return false;
@@ -876,7 +876,7 @@ impl AnalysisState {
             {
                 return true;
             }
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return false;
             }
@@ -977,7 +977,7 @@ impl AnalysisState {
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
     {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
         let waited_for_a_permit = started.elapsed().as_millis() as u64;
         let inner = self.inner.clone();
@@ -986,7 +986,7 @@ impl AnalysisState {
 
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let locked = std::time::Instant::now();
+            let locked = Instant::now();
             let session = inner
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -995,7 +995,7 @@ impl AnalysisState {
             // The gate is released before the query runs: it orders an update against the queries already in
             // flight, and holding it for the whole query would make every notification queue behind every read.
             drop(gate);
-            let ran = std::time::Instant::now();
+            let ran = Instant::now();
             // `?` cannot be used here — the closure answers with the timings as well — so `None` is threaded by hand:
             // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
             // whether the session was missing or the query declined.
@@ -1110,7 +1110,7 @@ impl AnalysisState {
         // answer cannot be read off this function: four of its six stages are `run_blocking` calls whose work happens
         // elsewhere. Each one is timed here, at `debug`, because the log line `a query took … ran …` that already
         // exists only says a call was slow, not which call.
-        let stage = std::time::Instant::now();
+        let stage = Instant::now();
         let mut sliced = 0usize;
         for _ in 0..PREPARE_INDEX_SLICE {
             let Some(next) = self.next_file_for_catch_up(&to_prepare).await else {
@@ -1238,7 +1238,7 @@ impl AnalysisState {
             // This is the architecture rather than a diagnostic: [`WRITE_BUDGET`] is the contract, this is what
             // enforces it, and `worst_write_hold` is what a test asserts on. A fix that does not move this number
             // has not fixed anything.
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let answer = f(&mut slot);
             let took = started.elapsed().as_millis() as u64;
             held.fetch_max(took, std::sync::atomic::Ordering::Relaxed);
@@ -1328,7 +1328,7 @@ mod tests {
         // than the typing, in a project of any size).
         state
             .update_session("a test's index pass", move |session| {
-                session.add_project_files([std::path::PathBuf::from("/p/main.cpp")]);
+                session.add_project_files([PathBuf::from("/p/main.cpp")]);
                 session.index_everything();
                 session.did_open(std::path::Path::new("/p/main.cpp"), buffer);
                 session
@@ -1536,11 +1536,9 @@ mod tests {
         // **Hold the gate for writing.** Any `update_session` — which is what the slow path is made of — blocks
         // here, so a pull that returns has proved it never asked for the lock.
         let held = state.gate.clone().write_owned().await;
-        let second = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            state.prepare_for_a_diagnostic(path),
-        )
-        .await;
+        let second =
+            tokio::time::timeout(Duration::from_secs(2), state.prepare_for_a_diagnostic(path))
+                .await;
         drop(held);
 
         assert_eq!(
@@ -1668,12 +1666,12 @@ mod tests {
             })
             .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
             .await
             .unwrap()
             .unwrap();
         token.cancel();
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), query)
+        let outcome = tokio::time::timeout(Duration::from_secs(1), query)
             .await
             .unwrap()
             .unwrap();
@@ -1685,7 +1683,7 @@ mod tests {
         let write_state = state.clone();
         let mut write = tokio::spawn(async move { write_state.update("test", |_| 1).await });
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut write)
+            tokio::time::timeout(Duration::from_millis(50), &mut write)
                 .await
                 .is_err()
         );
@@ -1705,11 +1703,11 @@ mod tests {
         let writer = tokio::task::spawn_blocking(move || {
             let _guard = inner.write().unwrap();
             entered_tx.send(()).unwrap();
-            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
         });
         entered_rx.await.unwrap();
         let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
+            Duration::from_millis(100),
             state.catch_up(&root.join("main.cpp")),
         )
         .await;

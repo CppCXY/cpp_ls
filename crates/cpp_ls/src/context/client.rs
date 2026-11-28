@@ -130,7 +130,7 @@ impl ClientProxy {
         registration_param: RegistrationParams,
     ) -> Result<(), String> {
         let request_id = self.next_id();
-        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_token = CancellationToken::new();
         let answer = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             self.send_request(

@@ -183,11 +183,11 @@ impl ServerContext {
             let res = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
-                    Ok(RequestOutcome::Cancelled(query_runner::CancelSource::Client))
+                    Ok(RequestOutcome::Cancelled(CancelSource::Client))
                 }
                 _ = changed => {
                     cancel_token.cancel();
-                    Ok(RequestOutcome::Cancelled(query_runner::CancelSource::ContentModified))
+                    Ok(RequestOutcome::Cancelled(CancelSource::ContentModified))
                 }
                 result = catch_unwind(exec(cancel_token.clone())) => result,
             };
@@ -200,20 +200,16 @@ impl ServerContext {
                 Ok(RequestOutcome::Failed { code, message }) => {
                     Response::new_err(req_id.clone(), code as i32, message)
                 }
-                Ok(RequestOutcome::Cancelled(query_runner::CancelSource::Client)) => {
-                    Response::new_err(
-                        req_id.clone(),
-                        ErrorCode::RequestCanceled as i32,
-                        "cancel".to_string(),
-                    )
-                }
-                Ok(RequestOutcome::Cancelled(query_runner::CancelSource::ContentModified)) => {
-                    Response::new_err(
-                        req_id.clone(),
-                        ErrorCode::ContentModified as i32,
-                        "document changed while the request was running".to_string(),
-                    )
-                }
+                Ok(RequestOutcome::Cancelled(CancelSource::Client)) => Response::new_err(
+                    req_id.clone(),
+                    ErrorCode::RequestCanceled as i32,
+                    "cancel".to_string(),
+                ),
+                Ok(RequestOutcome::Cancelled(CancelSource::ContentModified)) => Response::new_err(
+                    req_id.clone(),
+                    ErrorCode::ContentModified as i32,
+                    "document changed while the request was running".to_string(),
+                ),
                 Err(_) => {
                     log::error!("request {req_id:?} panicked");
                     Response::new_err(

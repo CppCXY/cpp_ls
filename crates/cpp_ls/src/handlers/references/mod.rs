@@ -554,7 +554,7 @@ const NAME_REFERENCE_BUDGET: usize = 2000;
 /// scopes are what say which class an occurrence sits in). The parse is cached per file for the one call, and a file
 /// with no occurrence is never parsed — the same shape, and the same price, as [`name_level_offsets`].
 pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
+    session: &Session<F>,
     fact: &cpp_code_analysis::DeclFact,
     file: std::path::PathBuf,
     include_declaration: bool,
@@ -647,7 +647,7 @@ pub fn places_of<F: cpp_code_analysis::FileProvider + Clone>(
 ///
 /// The declarations are filtered by the same rule, which is what keeps another class's *declaration* out of the list.
 pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
+    session: &Session<F>,
     view: &cpp_code_analysis::FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     include_declaration: bool,
@@ -850,7 +850,7 @@ pub fn name_level_offsets<F: cpp_code_analysis::FileProvider + Clone>(
 
 /// [`name_level_offsets`], as protocol positions.
 fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
+    session: &Session<F>,
     view: &cpp_code_analysis::FileView,
     offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     include_declaration: bool,
@@ -858,7 +858,7 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
     name_level_offsets(session, view, offset, include_declaration)
         .into_iter()
         .filter_map(|(file, range)| {
-            let uri = util::path_to_uri(&file)?;
+            let uri = path_to_uri(&file)?;
             let (Some(start), Some(end)) = (
                 position_of(session, &file, range.start_offset),
                 position_of(session, &file, range.end_offset()),
@@ -881,7 +881,7 @@ fn name_level_locations<F: cpp_code_analysis::FileProvider + Clone>(
 /// Split out of the `push` closure so that the disk path is testable on its own: a session over `MemoryFiles` holds
 /// every file it knows, and the case that matters is precisely the file it does not know.
 fn position_of<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
+    session: &Session<F>,
     file: &std::path::Path,
     offset: usize,
 ) -> Option<lsp_types::Position> {
@@ -992,7 +992,7 @@ pub(crate) fn narrowed_to_the_cursors_class(
 /// A receiver whose type cannot be worked out keeps the occurrence: a list a reader cannot rename from is a
 /// smaller problem than a list that hides a use.
 fn an_occurrence_of_another_class<F: cpp_code_analysis::FileProvider + Clone>(
-    session: &cpp_code_analysis::Session<F>,
+    session: &Session<F>,
     view: &cpp_code_analysis::FileView,
     offset: usize,
     owner: &str,

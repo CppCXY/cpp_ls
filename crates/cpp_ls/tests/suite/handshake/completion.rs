@@ -1291,7 +1291,7 @@ void f() {
     // **Asked until it answers.** A hover before the project has been read is `null` — the analysis has no view yet —
     // and a well-behaved client asks again as it types; asserting the first answer would be asserting the machine's
     // speed rather than the server's behaviour.
-    let mut hover_on = |id: i64, line: u32, character: u32| -> serde_json::Value {
+    let mut hover_on = |id: i64, line: u32, character: u32| -> Value {
         let uri = a_uri.clone();
         server.ask_until_it(
             id,

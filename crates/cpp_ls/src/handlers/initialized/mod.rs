@@ -736,7 +736,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
 
             // Gather cook inputs and prepare the drain under a read lock; render the owned cooks after releasing it.
             let drain_was_empty = drain.is_empty();
-            let asked: Vec<std::path::PathBuf> = claimed.clone();
+            let asked: Vec<PathBuf> = claimed.clone();
             let claimed_count = asked.len();
             log::trace!(
                 "pump: drain starts (empty {}, {} claimed to cook)",
@@ -820,8 +820,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
                 stored: stored_cooks,
                 fresh: rendered_cooks,
             };
-            let built: Vec<std::path::PathBuf> =
-                slice.paths().map(|path| path.to_path_buf()).collect();
+            let built: Vec<PathBuf> = slice.paths().map(|path| path.to_path_buf()).collect();
 
             // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
             // cooked file, and nothing else.
@@ -1325,7 +1324,7 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
 /// reader's bar frozen at its last report (a session superseded while it was being built, a pump that stopped
 /// because the workspace was reloaded): neither called this. `LoadIndicator` ends the bar when it is dropped, and
 /// this retires it early for the ordinary "the load is settled, the rest is idle work" case.
-async fn finish_the_load(context: &ServerContextSnapshot, load: &crate::context::LoadIndicator) {
+async fn finish_the_load(context: &ServerContextSnapshot, load: &LoadIndicator) {
     // **The load's one program read is over.** A later edit is rebuilt by its own cook; it must not queue another
     load.retire();
     log::info!(

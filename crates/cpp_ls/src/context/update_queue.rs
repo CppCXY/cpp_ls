@@ -322,7 +322,7 @@ impl UpdateInbox {
     pub async fn apply_upto<F, Fut>(&self, upto: u64, mut apply: F) -> usize
     where
         F: FnMut(UpdateEvent) -> Fut,
-        Fut: std::future::Future<Output = ()>,
+        Fut: Future<Output = ()>,
     {
         let started = std::time::Instant::now();
         let _applying = self.applying.lock().await;
@@ -375,7 +375,7 @@ impl UpdateInbox {
     pub async fn apply_batch_upto<F, Fut>(&self, upto: u64, apply: F) -> usize
     where
         F: FnOnce(Vec<UpdateEvent>) -> Fut,
-        Fut: std::future::Future<Output = ()>,
+        Fut: Future<Output = ()>,
     {
         let _applying = self.applying.lock().await;
         let mut events = Vec::new();
@@ -525,7 +525,7 @@ async fn apply_text_batch(
     // unrelated slice happens to cook a file. The task waits for `when_caught_up`, so it cannot deadlock the applier.
     let publications = snapshot.clone();
     tokio::spawn(async move {
-        crate::handlers::inactive_regions::publish_all(&publications).await;
+        handlers::inactive_regions::publish_all(&publications).await;
     });
 }
 

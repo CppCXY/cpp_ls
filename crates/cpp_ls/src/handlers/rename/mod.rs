@@ -730,7 +730,7 @@ int two() { return size; }
             WatchFilter::new("/p"),
             CompilerConfig::default(),
         );
-        session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+        session.add_project_files([PathBuf::from("/p/a.cpp")]);
         session.load("/p/a.cpp");
         session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
         session.index_everything();

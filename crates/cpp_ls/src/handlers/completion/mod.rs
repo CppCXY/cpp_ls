@@ -525,7 +525,7 @@ pub async fn on_completion_resolve(
 /// fact of that **name** at or after it: the label is what the client echoed, and within one file it is what
 /// selects between two declarations of one name.
 fn declaration_in(
-    session: &cpp_code_analysis::Session<DiskFiles>,
+    session: &Session<DiskFiles>,
     file: &std::path::Path,
     offset: usize,
     label: &str,

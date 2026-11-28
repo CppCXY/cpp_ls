@@ -279,7 +279,7 @@ pub(crate) fn doc_target_at(
 /// The same walk `Session::macro_at_a_file_offset` makes; it is repeated here because the answer is needed *before*
 /// that query, to ask the toolchain about a name that no file defines.
 fn word_in_the_file(
-    view: &cpp_code_analysis::FileView,
+    view: &FileView,
     offset: cpp_code_analysis::file::coordinates::FileOffset,
 ) -> String {
     // **The file's own text, from whichever view this is** — see `FileView::the_written_text`: the handler holds the
@@ -445,7 +445,7 @@ pub fn hover(
                     .find(|one| one.fact.name_range.start_offset == in_the_file.get())
                     .or_else(|| found.found.first())
             {
-                let definition = cpp_code_analysis::ProjectDefinition {
+                let definition = ProjectDefinition {
                     file: one.file.clone(),
                     fact: one.fact.clone(),
                 };
@@ -568,7 +568,7 @@ fn hover_of_the_rendering(
 /// A declaration card is left alone; the rendering fallback is for the cards that say the plain reading did not find
 /// the declaration.
 fn a_failed_card_may_need_the_rendering(hover: &Hover) -> bool {
-    let lsp_types::HoverContents::Markup(markup) = &hover.contents else {
+    let HoverContents::Markup(markup) = &hover.contents else {
         return false;
     };
     let text = &markup.value;
@@ -853,9 +853,7 @@ fn hover_of_the_program(
                 if let Some(the_type) = found
                     .found
                     .iter()
-                    .filter(|definition| {
-                        matches!(definition.fact.kind, cpp_code_analysis::DeclKind::Type)
-                    })
+                    .filter(|definition| matches!(definition.fact.kind, DeclKind::Type))
                     .max_by_key(|definition| {
                         // **More template parameters is the more general declaration** — `fact.parameters()` is the
                         // template head's own names, and it is what says which fact a partial specialization is:
@@ -927,7 +925,7 @@ fn member_markdown(
     // inside the braced list, and the offset question answered `int` for it, which is the "`int` has no member `sum`"
     // in the report.
     let object_type = match session.type_of_the_expression(view, &access.object) {
-        cpp_code_analysis::Known::Yes(found) => Some(found),
+        Known::Yes(found) => Some(found),
         // **A macro call has no type in the file's own text; its expansion has.** `ci_func(ci)->p` in Lua 5.5.0's
         // `ldebug.c:101` is the case: `ci_func` is a macro, so the object is a `MacroCall` that nothing can type, and
         // the card said "the type of `ci_func(ci)` is not known here" beside a member the project's own headers
@@ -969,7 +967,7 @@ fn member_markdown(
     // them; the arrow's class is the fallback for a member the handle does not have (`ptr->twin` on a
     // `shared_ptr<Node>`), which is why it is still asked.
     for class in std::iter::once(&written).chain(reached.iter()) {
-        if let cpp_code_analysis::Known::Yes(candidates) = session.members_of(view, class) {
+        if let Known::Yes(candidates) = session.members_of(view, class) {
             if candidates
                 .members
                 .iter()
@@ -1039,7 +1037,7 @@ fn member_markdown(
         .filter(|selected| selected.len() == 1)
         && let Some(member) = candidates.get(selected[0])
     {
-        let definition = cpp_code_analysis::ProjectDefinition {
+        let definition = ProjectDefinition {
             file: member.file.clone(),
             fact: member.fact.clone(),
         };
@@ -1091,7 +1089,7 @@ fn member_markdown(
     if shown.len() == 1
         && let Some(member) = shown.first()
     {
-        let definition = cpp_code_analysis::ProjectDefinition {
+        let definition = ProjectDefinition {
             file: member.file.clone(),
             fact: member.fact.clone(),
         };
@@ -1155,7 +1153,7 @@ fn member_markdown(
         );
     };
 
-    let definition = cpp_code_analysis::ProjectDefinition {
+    let definition = ProjectDefinition {
         file: member.file.clone(),
         fact: member.fact.clone(),
     };
@@ -1821,7 +1819,7 @@ fn declaration_markdown(
     let indexed = if !found.fact.local
         && !matches!(
             found.fact.kind,
-            cpp_code_analysis::DeclKind::Type | cpp_code_analysis::DeclKind::Namespace
+            DeclKind::Type | DeclKind::Namespace
         )
         // **Nothing to render at all**, which is what a *binding* leaves behind: a binding is a place to jump to and
         // carries no type, no return type, no parameter list and no annotation.
@@ -3000,7 +2998,7 @@ mod tests {
         let text = "enum class Kind { A = 1, B, C = 0x10, D, E = 100, F };\n";
         let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
         let files = cpp_code_analysis::MemoryFiles::new().with_file("/p/a.cpp", text);
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
             cpp_code_analysis::WatchFilter::new("/p"),
@@ -3032,7 +3030,7 @@ mod tests {
         // answer is `None` rather than a number nobody computed.
         let shifted = "enum class S { A = 1 << 4, B };\n";
         let files = cpp_code_analysis::MemoryFiles::new().with_file("/p/s.cpp", shifted);
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
             cpp_code_analysis::WatchFilter::new("/p"),
@@ -3061,7 +3059,7 @@ mod tests {
             .with_file("/p/defs.h", definition)
             .with_file("/p/wincon.h", declaration)
             .with_file("/p/main.cpp", "#include \"wincon.h\"\n");
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             cpp_code_analysis::SessionFiles::new(cpp_code_analysis::OpenDocuments::new(), files),
             cpp_code_analysis::WatchFilter::new("/p"),

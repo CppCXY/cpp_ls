@@ -716,7 +716,7 @@ void f() {}
             "params": { "textDocument": { "uri": uri }, "position": { "line": 1, "character": 11 } },
         })
     });
-    let empty: Vec<serde_json::Value> = Vec::new();
+    let empty: Vec<Value> = Vec::new();
     let items = prose["result"]["items"].as_array().unwrap_or(&empty);
     assert!(
         items.is_empty(),

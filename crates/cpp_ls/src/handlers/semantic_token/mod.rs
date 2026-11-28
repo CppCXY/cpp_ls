@@ -885,7 +885,7 @@ void f() { std::cout << std::endl; }
             .with_file("/p/h.h", header)
             .with_file("/p/a.cpp", text);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             providers,
             WatchFilter::new("/p"),
@@ -1050,8 +1050,8 @@ constexpr bool is_assignable_v = __is_assignable(To, From);
         // **A client that does not advertise the custom type gets `variable`** — the same colour it had before the
         // type existed, rather than no token at all (which would take away the grammar's colour too).
         let standard = Some(vec![
-            lsp_types::SemanticTokenType::VARIABLE,
-            lsp_types::SemanticTokenType::TYPE_PARAMETER,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::TYPE_PARAMETER,
         ]);
         let fallback = by_offset(
             text,
@@ -1125,7 +1125,7 @@ using ContainerOf = Container<int, int>;
     fn a_held_file(text: &str) -> (Session<MemoryFiles>, std::path::PathBuf) {
         let files = MemoryFiles::new().with_file("/p/a.cpp", text);
         let providers = SessionFiles::new(OpenDocuments::new(), files);
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             providers,
             WatchFilter::new("/p"),
@@ -1182,10 +1182,7 @@ int f(CallInfo *ci) {
     /// in it is three bytes per unit, and keying the byte offset of the line's start with the protocol's column put
     /// every token on that line at the wrong key. That was invisible for as long as every fixture was ASCII — the
     /// format-string fixture is the first one that is not, and it found this.
-    fn by_offset(
-        text: &str,
-        tokens: &[lsp_types::SemanticToken],
-    ) -> std::collections::HashMap<usize, u32> {
+    fn by_offset(text: &str, tokens: &[SemanticToken]) -> std::collections::HashMap<usize, u32> {
         let mut line_starts = vec![0usize];
         for (at, ch) in text.char_indices() {
             if ch == '\n' {
@@ -2342,10 +2339,7 @@ void f(int width, double d) {
     /// theme mapping for them would draw *nothing*, which is why the fallback stays for everyone else.
     #[test]
     fn a_vscode_client_is_sent_the_custom_format_types() {
-        let standard = vec![
-            lsp_types::SemanticTokenType::REGEXP,
-            lsp_types::SemanticTokenType::KEYWORD,
-        ];
+        let standard = vec![SemanticTokenType::REGEXP, SemanticTokenType::KEYWORD];
         let drawn =
             extended_with_the_custom_types(Some(standard.clone()), context::ClientId::VSCode)
                 .expect("a client that named its types keeps a list");
@@ -2358,7 +2352,7 @@ void f(int width, double d) {
             assert!(
                 drawn
                     .iter()
-                    .any(|kind| *kind == lsp_types::SemanticTokenType::new(name)),
+                    .any(|kind| *kind == SemanticTokenType::new(name)),
                 "{name} is missing from {drawn:?}"
             );
         }
@@ -2449,10 +2443,10 @@ void f(int width, double d) {
         // This is the shape of the report: the inspector said "standard token type: Other" for a word the pass had
         // claimed as a kind the legend did not carry.
         let without_modifier = Some(vec![
-            lsp_types::SemanticTokenType::KEYWORD,
-            lsp_types::SemanticTokenType::TYPE_PARAMETER,
-            lsp_types::SemanticTokenType::VARIABLE,
-            lsp_types::SemanticTokenType::TYPE,
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::TYPE_PARAMETER,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::TYPE,
         ]);
         let fallback = by_offset(
             text,
@@ -2523,7 +2517,7 @@ void Pattern::Lex(int reader) {}
             .with_file("/p/a.h", header)
             .with_file("/p/a.cpp", text);
         let providers = SessionFiles::new(OpenDocuments::new(), memory);
-        let mut session = cpp_code_analysis::Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             providers,
             WatchFilter::new("/p"),
