@@ -129,7 +129,7 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 // (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
 // branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
 // drops it.
-#[ignore = "known: the cook drops the definitions of an undecidable region instead of reading its #else branch"]
+#[ignore = "known: the unit cook applies an unknown-region #define (summary.rs:4295) and the use site still does not expand — the next question is the interface unit`s own rendering"]
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1
