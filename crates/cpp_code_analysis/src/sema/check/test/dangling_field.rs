@@ -150,3 +150,18 @@ fn a_view_member_of_a_view_parameter_is_silent() {
         "the characters a pointer parameter names are the caller's",
     );
 }
+
+/// **`explicit` is a specifier, not a return type.** The constructor with one was not found at all — the declaration
+/// was recognised by "has no decl-specifiers", and an `explicit` constructor has a specifier sequence that names no
+/// type. Measured on the corpus (`corpus/findings/danger.cpp`), where the same class without `explicit` was reported.
+#[test]
+fn a_view_member_of_an_explicit_constructors_parameter_is_reported() {
+    let codes = codes_of(
+        "struct string {};\nstruct string_view {};\nstruct S {\n    explicit S(string s) : v(s) {}\n    string_view v;\n};\n",
+    );
+    assert_reported(
+        &codes,
+        DiagnosticCode::DanglingField,
+        "`explicit` says how the constructor is called, not what it returns",
+    );
+}
