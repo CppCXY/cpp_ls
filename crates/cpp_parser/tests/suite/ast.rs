@@ -1377,3 +1377,27 @@ fn a_parenthesised_declarator_names_its_parameter_list_as_a_child() {
         Some("(int a)".to_string())
     );
 }
+
+/// **A parameter whose type is a function pointer keeps the signature.** `void (*xCleanup)(ctx*, void*)` is one
+/// parameter of type `void (*)(ctx*, void*)`, and the composer answered only the operators — `void*` — because the
+/// `ParameterList` is a sibling of the nested declarator rather than of the name. Measured on sqlite
+/// (`src/prepare.c`): the call `xCleanup(db, pPtr)` was compared against that spelling.
+#[test]
+fn a_function_pointer_parameter_keeps_its_signature() {
+    let source = "void install(void (*xCleanup)(ctx*, void*));\n";
+    let (root, _) = unit(source);
+    let declaration = root
+        .get_declarations()
+        .next()
+        .expect("the function declares");
+    let parameters: Vec<(String, String)> = declaration
+        .descendants::<cpp_parser::CppParam>()
+        .filter_map(|parameter| Some((parameter.get_name_text()?, parameter.get_type_text())))
+        .collect();
+
+    assert_eq!(
+        parameters,
+        vec![("xCleanup".to_string(), "void(*)(ctx*, void*)".to_string())],
+        "the parameter`s type is the pointer to the function, signature included"
+    );
+}

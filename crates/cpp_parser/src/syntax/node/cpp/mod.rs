@@ -1518,6 +1518,21 @@ impl CppParam {
                     // **The declarator's type parts and then nothing**: what follows a declarator is a default value or a
                     // trailing qualifier, neither of which is the type.
                     if let Some(declarator) = CppDeclarator::cast(child.clone()) {
+                        // **A parameter that is a function pointer** — `void (*xCleanup)(ctx*, void*)` — is a declarator
+                        // whose nested one holds the `*` and whose `ParameterList` sibling holds the signature.
+                        // `get_type_suffix` answers only the operators, so the spelling came out `void*` and every call
+                        // through such a parameter was compared against the wrong type: measured on sqlite
+                        // (`src/prepare.c`), `xCleanup(db, pPtr)` was reported as passing a `void *` where `void` is
+                        // declared.
+                        if let Some(parameters) = declarator.get_param_list() {
+                            let operators = declarator.get_type_suffix();
+                            push_a_spelling(&mut the_type, &format!("({operators})"));
+                            push_a_spelling(
+                                &mut the_type,
+                                &syntax::node::traits::subtree_text_spaced(parameters.syntax()),
+                            );
+                            break;
+                        }
                         the_type.push_str(&declarator.get_type_suffix());
                         break;
                     }
