@@ -129,7 +129,7 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 // (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
 // branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
 // drops it.
-#[ignore = "known: the unit`s rendering still holds `SHAPE(Widget)` — measured by this test`s own `render_the_unit` assertion — so the definition never reaches the stream"]
+#[ignore = "known: the walk marks both branches` #define `in_force=false, visibility=Unknown`, and the rendering the test is answered from never calls `definitions()` at all — it is a cached render from an earlier, provisional walk"]
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1
