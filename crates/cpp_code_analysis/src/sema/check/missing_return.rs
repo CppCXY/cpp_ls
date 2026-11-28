@@ -86,6 +86,28 @@ enum Promise {
 /// rule that has to be sure does not speak.
 fn the_promise_of(context: &CheckContext<'_>, declaration: &cpp_parser::CppDeclaration) -> Promise {
     use cpp_parser::CppAstNode;
+    // **A trailing return type is the type that was promised.** `auto f() -> int` is not a deduced return type: the
+    // `auto` is a placeholder the arrow fills in, and the specifier sequence holds only `auto` — so
+    // `is_deduced_return_type` answered "deduced, promise unknown", and every `auto … -> T` function whose body falls off
+    // the end was silent. Measured on the corpus, and on a prefix and a trailing spelling side by side in one file.
+    //
+    // This is the same reader `dangling-return` and `return-type-mismatch` needed, and it waits for `try_flow` in this
+    // file: with the rule blind to these functions, `corpus/clean/exceptions.cpp`'s three single-`try` bodies were
+    // never judged, and once they were they came out as false positives until the flow walk followed the handler.
+    if let Some(trailing) = declaration
+        .get_init_declarator()
+        .and_then(|init| init.get_declarator())
+        .and_then(|declarator| declarator.get_trailing_return_type())
+    {
+        let written = cpp_parser::subtree_text_spaced(trailing.syntax());
+        let written = written.trim();
+        return match written {
+            // The arrow can name a placeholder too, and then nothing is promised this rule can read.
+            "auto" | "decltype(auto)" => Promise::NotKnown,
+            "void" => Promise::Nothing,
+            _ => Promise::AValue,
+        };
+    }
     let Some(specifiers) = declaration.get_decl_specifiers() else {
         return Promise::NotKnown;
     };

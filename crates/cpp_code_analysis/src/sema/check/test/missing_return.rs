@@ -138,3 +138,32 @@ fn a_try_whose_block_and_handlers_return_is_complete() {
         "the block can leave the `try` without returning",
     );
 }
+
+/// **A trailing return type is a promise too.** `auto f() -> int` writes `auto` where a type would be, so the specifier
+/// sequence said "deduced, promise unknown" and the function was silent however its body ended — while the same body
+/// under `int f()` was reported. Measured on the corpus (`corpus/findings/flow.cpp` and the empty-bodied
+/// `corpus/findings/types.cpp`).
+#[test]
+fn a_function_whose_return_type_is_written_after_the_arrow_is_judged() {
+    let codes =
+        codes_of("auto f(bool flag) -> int {\n    if (flag) {\n        return 1;\n    }\n}\n");
+    assert_reported(
+        &codes,
+        DiagnosticCode::MissingReturn,
+        "the `int` after the arrow is what the function promises",
+    );
+
+    let deduced = codes_of("auto f(bool flag) {\n    if (flag) {\n        return 1;\n    }\n}\n");
+    assert_silent_about(
+        &deduced,
+        DiagnosticCode::MissingReturn,
+        "a deduced return type promises nothing this rule can read",
+    );
+
+    let nothing = codes_of("auto f() -> void {\n    return;\n}\n");
+    assert_silent_about(
+        &nothing,
+        DiagnosticCode::MissingReturn,
+        "`-> void` promises nothing",
+    );
+}
