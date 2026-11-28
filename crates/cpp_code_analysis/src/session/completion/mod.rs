@@ -80,7 +80,7 @@ use std::sync::Arc;
 
 use cpp_parser::{CppSyntaxNode, SourceRange};
 
-pub use context::{CompletionContext, context_at, doc_comment_at};
+pub use context::{CompletionContext, context_at, doc_comment_at, doc_comment_in};
 pub use includes::{Header, HeaderIndex, HeaderKind, SharedHeaders};
 pub use table::{
     BUILTIN_TYPES, DIRECTIVES, DirectiveName, KEYWORDS, Keyword, KeywordUse, SNIPPETS, Snippet,

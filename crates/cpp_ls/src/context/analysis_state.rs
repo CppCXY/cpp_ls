@@ -298,8 +298,17 @@ impl AnalysisState {
         self.run_blocking("a completion's reading", move |session| {
             let editable = session.view_of_the_file(&path)?;
             let offset = util::file_offset_at_position(&editable, position)?;
+            // **A documentation comment is prose the rendering does not contain.** Every answer below is computed
+            // at an offset in the **rendering**, and a comment produces no token there at all — so a completion
+            // inside one was answered from the wrong place: measured, `@see Widget` s edit landed 26 bytes away,
+            // in the declaration below the comment. The written text is where the doc reader looks, and
+            // `Session::completions` is the path that asks it (the handler falls back to that when this declines).
+            if let Some(text) = session.text(&path)
+                && cpp_code_analysis::completion::doc_comment_in(&text, offset.get()).is_some()
+            {
+                return None;
+            }
             let typed = identifier_before(&editable.source, offset.get());
-
             // **A keystroke that only lengthens the word reuses the last answer.** See `last_rendered`: the list is
             // the same scope read with a longer filter, and reading it again costs 66–68 ms on a large file.
             if !typed.is_empty() {

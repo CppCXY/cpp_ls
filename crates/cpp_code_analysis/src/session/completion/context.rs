@@ -301,7 +301,13 @@ fn the_qualifier_written_before(text: &str, at: usize) -> Option<String> {
 /// Doxygen's vocabulary there would be wrong twice: it is not documentation, and a plain `//` comment is not what
 /// Doxygen reads.
 pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext> {
-    let text = root.text().to_string();
+    doc_comment_in(&root.text().to_string(), offset)
+}
+
+/// **The same question asked of text with no tree behind it** — for a caller that has the file's own text and no parse
+/// of it: a comment produces no token in a rendering, so the position of one has to be read from the written text, and
+/// a caller deciding *whether* to ask the doc reader should not pay for a parse to find out.
+pub fn doc_comment_in(text: &str, offset: usize) -> Option<CompletionContext> {
     let before = text.get(..offset.min(text.len()))?;
     let line_start = before.rfind('\n').map_or(0, |at| at + 1);
     let line = before.get(line_start..)?;
@@ -335,7 +341,7 @@ pub fn doc_comment_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionC
     // **A code block is an example of *code*** — `@code` … `@endcode` — so its words are the program's, and the
     // answer there is the name completion a statement gets rather than the prose refusal below. Asked before every
     // other documentation question, because a code block is the innermost scope a cursor in a comment can be in.
-    if doc::inside_a_code_block(&root.text().to_string(), offset) {
+    if doc::inside_a_code_block(text, offset) {
         let line_before_cursor = &line[..line.len().min(line.len())];
         let typed = line_before_cursor
             .trim_end()

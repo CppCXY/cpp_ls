@@ -1697,7 +1697,6 @@ fn the_first_completion_after_an_open_answers_the_same_as_the_second() {
 /// which the client then replaced. The item has to say *where* it goes — a `textEdit` over the typed word — and not
 /// leave the client to insert at the cursor.
 #[test]
-#[ignore = "known: the server answers through `completion_from_a_rendering`, whose offset is the rendering`s, so `@see Widget` s edit lands at 43..48 instead of 17..22"]
 fn a_doc_links_completion_carries_the_edit_for_the_word() {
     let project = Project::new("doc-link-edit");
     let source = "/** A ship. @see Widget */\nstruct Widget { int size; };\n";
