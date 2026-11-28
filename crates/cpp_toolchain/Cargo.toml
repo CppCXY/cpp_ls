@@ -31,3 +31,6 @@ serde.workspace = true
 toml.workspace = true
 rustc-hash = "2"
 smol_str = "0.2"
+
+[lints]
+workspace = true

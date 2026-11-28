@@ -28,3 +28,6 @@ rustc-hash.workspace = true
 # `serde` feature is on because a name ends up in an LSP payload (`typeHierarchyItem.data`), and converting at each
 # site is what the type should not need.
 smol_str.workspace = true
+
+[lints]
+workspace = true

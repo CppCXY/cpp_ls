@@ -59,13 +59,3 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run Tests
         run: cargo test --release --workspace --all-features
-  crate-paths:
-    name: Crate Path Lint
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    - name: Check changed files
-      run: python lint/crate_paths.py check --changed

@@ -5,6 +5,15 @@ members = [
     "tools/*"
 ]
 
+# **The one style rule this project states for paths**: a path is written with the shortest name that still
+# resolves — `CppSyntaxKind`, not `cpp_parser::CppSyntaxKind` — and the compiler is what decides. `unused_qualifications`
+# fires exactly when the shorter form names the same item, so an ambiguity (two `Display`s, a shadowed name) is
+# never flagged and an enum variant keeps its qualifier (`Style::Fallback` stays `Style::Fallback`: the variants are
+# not in scope). The lint is allow-by-default only because it is noisy in a tree that has not adopted it; here it is
+# the rule, and `-D warnings` in CI is what enforces it.
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
 # Every entry here is used by at least one crate. The table was inherited from the Lua project this server's shell
 # came from and carried twenty crates nothing referenced (`walkdir`, `dirs`, `tera`, `schemars`,
 # `internment`, `toml_edit`, …); they are gone, and an entry that no `Cargo.toml` names is a dependency a reader
@@ -40,3 +49,4 @@ unicode-ident = "1.0.27"
 mimalloc-safe = "0.1.71"
 smol_str = { version = "0.3.7", features = ["serde"] }
 rustc-hash = "2"
+

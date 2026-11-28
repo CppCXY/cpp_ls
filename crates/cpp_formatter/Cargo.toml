@@ -21,3 +21,6 @@ path = "src/lib.rs"
 [dependencies]
 # The token stream and the tree that settles what a token *is* (`int *p` vs `a * b`).
 cpp_parser.workspace = true
+
+[lints]
+workspace = true
