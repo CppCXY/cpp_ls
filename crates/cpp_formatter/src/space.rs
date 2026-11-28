@@ -17,10 +17,10 @@
 //! "pending space" state to keep.
 
 use crate::config::Style;
+use crate::layout;
 use crate::options::StyleOption;
 use crate::roles::Roles;
 use crate::tokens::{Stream, Token};
-use crate::{layout, tokens};
 use cpp_parser::CppTokenKind;
 
 /// The number of spaces between `tokens[index - 1]` and `tokens[index]`.
@@ -224,7 +224,7 @@ fn between_rules(
         let after_a_pack_declaration = index >= 2
             && matches!(
                 stream.tokens[index - 2].kind,
-                CppTokenKind::TypenameKeyword | CppTokenKind::ClassKeyword
+                TypenameKeyword | ClassKeyword
             );
         return usize::from(after_a_pack_declaration);
     }
@@ -266,7 +266,7 @@ fn between_rules(
     // to glue every token after `operator` and wrote `operatorsize_t()`, which no longer lexes the same (`size_t` is a
     // declarator name, not punctuation). Measured on nlohmann json's `position_t.hpp`, where that merge made the whole
     // file fall back to its source.
-    if matches!(previous.kind, CppTokenKind::OperatorKeyword)
+    if matches!(previous.kind, OperatorKeyword)
         && !current
             .text
             .chars()
@@ -277,10 +277,7 @@ fn between_rules(
     }
     // The `(` of an operator function is glued to the punctuator (`operator=(`), which is the token after the
     // `operator` keyword — not a call parenthesis.
-    if current.kind == CppTokenKind::LeftParen
-        && index >= 2
-        && stream.tokens[index - 2].kind == CppTokenKind::OperatorKeyword
-    {
+    if current.kind == LeftParen && index >= 2 && stream.tokens[index - 2].kind == OperatorKeyword {
         return 0;
     }
     // 3. An opening parenthesis: a control statement's parenthesis has a space before it (`if (x)`), a call's does
@@ -342,13 +339,13 @@ fn between_rules(
     /// The roles classify such a brace as an *initializer* (the body is a list of declarations), which is right for the
     /// layout but wrong for the space before the closer: clang-format writes `enum class E { A, B };`, and the roles`
     /// answer would produce `{ A, B};`.
-    fn closes_a_declaration_body(stream: &tokens::Stream<'_>, index: usize) -> bool {
+    fn closes_a_declaration_body(stream: &Stream<'_>, index: usize) -> bool {
         let mut depth = 0isize;
         let mut opener: Option<usize> = Option::None;
         for cursor in (0..index).rev() {
             match stream.tokens[cursor].kind {
-                CppTokenKind::RightBrace => depth += 1,
-                CppTokenKind::LeftBrace => {
+                RightBrace => depth += 1,
+                LeftBrace => {
                     if depth == 0 {
                         opener = Some(cursor);
                         break;
@@ -365,11 +362,8 @@ fn between_rules(
         while cursor > 0 {
             cursor -= 1;
             match stream.tokens[cursor].kind {
-                CppTokenKind::ClassKeyword
-                | CppTokenKind::StructKeyword
-                | CppTokenKind::EnumKeyword
-                | CppTokenKind::UnionKeyword => return true,
-                CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace => {
+                ClassKeyword | StructKeyword | EnumKeyword | UnionKeyword => return true,
+                Semicolon | LeftBrace | RightBrace => {
                     return false;
                 }
                 _ => {}
@@ -400,7 +394,7 @@ fn between_rules(
         // The other side of the same rule, and the same exception: a `{` that follows a `)` opens a body
         // (`requires(T t) { t.size(); }`, `f() { g(); }`), and the roles call some of those list initializers, so the
         // parenthesis decides first.
-        let body = index >= 2 && stream.tokens[index - 2].kind == CppTokenKind::RightParen;
+        let body = index >= 2 && stream.tokens[index - 2].kind == RightParen;
         // **A requirement block is a block too**: `{ c.size() } -> std::convertible_to<size_t>` — the brace
         // is followed by `->`, and the spaces inside it are the block`s (`{ c.size() }`, not `{c.size()}`).
         let requirement = is_a_requirement_block(stream, index - 1);
@@ -412,29 +406,23 @@ fn between_rules(
         return 0;
     }
     // A postfix `++`/`--` is glued to the value before it; a prefix one is glued to the operand after it.
-    if matches!(
-        current.kind,
-        CppTokenKind::PlusPlus | CppTokenKind::MinusMinus
-    ) && is_a_value(previous.kind)
-    {
+    if matches!(current.kind, PlusPlus | MinusMinus) && is_a_value(previous.kind) {
         return 0;
     }
-    if matches!(
-        previous.kind,
-        CppTokenKind::PlusPlus | CppTokenKind::MinusMinus
-    ) && !is_a_value(previous_before_previous(stream, index))
+    if matches!(previous.kind, PlusPlus | MinusMinus)
+        && !is_a_value(previous_before_previous(stream, index))
     {
         return 0;
     }
     // A parameter pack: `T... args` — the ellipsis is glued to the type before it.
-    if current.kind == CppTokenKind::Ellipsis && is_a_value(previous.kind) {
+    if current.kind == Ellipsis && is_a_value(previous.kind) {
         return 0;
     }
 
     // **`&& requires(...)`**: the constraint operator, not an rvalue-reference declarator — a constraint chain is
     // `Iterable<T> && requires(T t) { ... }` and the space belongs there (measured on the concept snippet, where the
     // parser tagged the `&&` as a declarator and the reference rule glued it to the keyword).
-    if previous.kind == CppTokenKind::LogicalAnd && current.text == "requires" {
+    if previous.kind == LogicalAnd && current.text == "requires" {
         return 1;
     }
     // 5. `*` and `&`: a declarator follows `PointerAlignment`, an operator is a binary operator.
@@ -641,7 +629,7 @@ fn is_a_requirement_block(stream: &Stream<'_>, open: usize) -> bool {
 /// The opener is found by matching back, and the requirement test is the arrow that follows it.
 fn closes_a_requirement_block(stream: &Stream<'_>, close: usize) -> bool {
     let mut depth = 0isize;
-    let mut opener: Option<usize> = Option::None;
+    let mut opener: Option<usize> = None;
     for cursor in (0..close).rev() {
         match stream.tokens[cursor].kind {
             CppTokenKind::RightBrace => depth += 1,
@@ -660,7 +648,7 @@ fn closes_a_requirement_block(stream: &Stream<'_>, close: usize) -> bool {
 
 fn is_a_cast_expression(stream: &Stream<'_>, close: usize) -> bool {
     let mut depth = 0isize;
-    let mut opener: Option<usize> = Option::None;
+    let mut opener: Option<usize> = None;
     for cursor in (0..close).rev() {
         match stream.tokens[cursor].kind {
             CppTokenKind::RightParen => depth += 1,

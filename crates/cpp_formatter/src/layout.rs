@@ -365,7 +365,7 @@ pub fn enum_body_braces(stream: &Stream<'_>) -> Vec<bool> {
 pub fn template_angles(stream: &Stream<'_>, roles: &Roles) -> Vec<bool> {
     let mut angles = vec![false; stream.tokens.len()];
     for index in 0..stream.tokens.len() {
-        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
+        if stream.tokens[index].kind == CppTokenKind::Less
             && roles.is_template_angle(stream.tokens[index].start)
             && let Some(close) = matching_angle(stream, index)
         {
@@ -374,7 +374,7 @@ pub fn template_angles(stream: &Stream<'_>, roles: &Roles) -> Vec<bool> {
         }
     }
     for index in 0..stream.tokens.len() {
-        if stream.tokens[index].kind == cpp_parser::CppTokenKind::Less
+        if stream.tokens[index].kind == CppTokenKind::Less
             && !angles[index]
             && let Some(close) = matching_angle(stream, index)
         {
@@ -436,7 +436,7 @@ fn matching_angle(stream: &Stream<'_>, open: usize) -> Option<usize> {
             Greater => {
                 depth -= 1;
                 if depth == 0 {
-                    return Option::Some(open + offset);
+                    return Some(open + offset);
                 }
             }
             Semicolon | LeftBrace | RightBrace | RightParen => return Option::None,
@@ -624,7 +624,7 @@ pub fn is_an_access_specifier(stream: &Stream<'_>, index: usize) -> bool {
 }
 
 /// Does this token kind act as a binary operator, i.e. one a continuation line may start with?
-pub fn is_a_binary_operator(kind: cpp_parser::CppTokenKind) -> bool {
+pub fn is_a_binary_operator(kind: CppTokenKind) -> bool {
     use cpp_parser::CppTokenKind::*;
     matches!(
         kind,

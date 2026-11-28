@@ -509,10 +509,9 @@ pub fn laid_out(source: &str, style: &config::Style) -> String {
         let current = &stream.tokens[index];
         let previous = stream.tokens.get(index.wrapping_sub(1));
         let attaches_to_the_line_before = attaches
-            && (current.kind == cpp_parser::CppTokenKind::LeftBrace
-                || (previous.is_some_and(|previous| {
-                    previous.kind == cpp_parser::CppTokenKind::RightBrace
-                }) && matches!(current.text, "else" | "catch" | "while")));
+            && (current.kind == CppTokenKind::LeftBrace
+                || (previous.is_some_and(|previous| previous.kind == CppTokenKind::RightBrace)
+                    && matches!(current.text, "else" | "catch" | "while")));
         let needs_a_break = index > 0
             && !in_directive
             && !attaches_to_the_line_before

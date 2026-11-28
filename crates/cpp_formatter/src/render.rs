@@ -11,12 +11,10 @@
 use crate::breaks;
 use crate::columns::Columns;
 use crate::comments;
-use crate::config;
 use crate::config::Style;
 use crate::functions;
 use crate::includes;
 use crate::layout;
-use crate::options;
 use crate::options::StyleOption;
 use crate::regions;
 use crate::roles;
@@ -1695,7 +1693,7 @@ fn case_label_indent(
         || stream.tokens[index].kind != cpp_parser::CppTokenKind::LeftBrace
         || stream.tokens[index - 1].kind != cpp_parser::CppTokenKind::Colon
     {
-        return Option::None;
+        return None;
     }
     let mut earlier = index;
     while earlier > 0 {
@@ -1813,7 +1811,7 @@ struct WrappingLines {
 fn wrapping_lines(
     stream: &tokens::Stream<'_>,
     roles: &roles::Roles,
-    style: &config::Style,
+    style: &Style,
 ) -> WrappingLines {
     // **Qualified, not a glob**: `CppTokenKind` has a `None` variant, and a glob import shadows `Option::None` with
     // it — which is a type error on every `let Some(…) = … else { closed = None; }` below.
@@ -1822,7 +1820,7 @@ fn wrapping_lines(
     // Allman brace under `Attach` when the limit is 0 and attaches it when there is a limit — measured, and it is the
     // difference between this project's own corpus (limit 0) and a real file. A *break the style demands* still
     // happens with limit 0 (Microsoft wraps a record body either way), so only the join is gated.
-    let reflows = style.count(options::StyleOption::ColumnLimit) > 0;
+    let reflows = style.count(StyleOption::ColumnLimit) > 0;
     let count = stream.tokens.len();
     let mut wrapped = vec![false; count];
     // **A short control body this pass moved to its own line**, which needs the indent the layout cannot give it.

@@ -578,7 +578,6 @@ fn split_documents(text: &str) -> Vec<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options;
 
     #[test]
     fn the_llvm_preset_is_the_base_and_every_other_preset_overrides_it() {
@@ -634,7 +633,7 @@ mod tests {
 
         let style = style_for_file(&inside);
         assert_eq!(
-            style.count(options::StyleOption::IndentWidth),
+            style.count(StyleOption::IndentWidth),
             7,
             "the nearest `.clang-format` wins"
         );
@@ -643,8 +642,8 @@ mod tests {
         // The fallback is four spaces (this project`s convention), not clang-format`s two.
         let orphan = std::env::temp_dir().join("cppfmt-style-none/x.cpp");
         assert_eq!(
-            style_for_file(&orphan).count(options::StyleOption::IndentWidth),
-            Style::fallback_style().count(options::StyleOption::IndentWidth),
+            style_for_file(&orphan).count(StyleOption::IndentWidth),
+            Style::fallback_style().count(StyleOption::IndentWidth),
             "with no configuration anywhere the default style is the answer"
         );
     }
