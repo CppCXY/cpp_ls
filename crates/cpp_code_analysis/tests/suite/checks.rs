@@ -4527,3 +4527,19 @@ static int caller(void)
         codes_of_a_file("/p/b.c", right)
     );
 }
+
+/// **A compiler keyword is not a name a project declares.** `__declspec(dllexport)` and `__attribute__((…))` in a C
+/// file are the compiler's own words, and the bare-name rule reported them: measured on sqlite, **59 `__declspec`
+/// and 27 `__attribute__`** findings — the same guard the call half of the rule already kept.
+#[test]
+fn a_compiler_keyword_is_not_a_missing_name_in_c() {
+    let source = "\
+__declspec(dllexport) int exported(void);
+__attribute__((unused)) static int quiet(void) { return 0; }
+";
+    assert!(
+        !codes_of_a_file("/p/a.c", source).contains(&DiagnosticCode::UndefinedName),
+        "the compiler's own words are not names: {:?}",
+        codes_of_a_file("/p/a.c", source)
+    );
+}

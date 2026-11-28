@@ -219,6 +219,13 @@ impl Check for UndefinedName {
                 }
                 let name = token.text().to_string();
                 let at = usize::from(token.text_range().start());
+                // **A keyword spelling is never a name a project declares** — the same guard the call half keeps,
+                // and the reason it is here: `__declspec(dllexport)` and `__attribute__((…))` in a C file are the
+                // compiler's own words, and a bare-name rule without this reported 59 `__declspec` and 27
+                // `__attribute__` findings on sqlite.
+                if is_a_keyword_construct(&name) || is_the_implementations_builtin(&name) {
+                    continue;
+                }
                 if in_a_template(&node) || in_a_lambda(context, at) {
                     continue;
                 }
@@ -263,6 +270,23 @@ fn a_read_and_not_a_declaration(node: &cpp_parser::CppSyntaxNode) -> bool {
     }
     let mut above = node.parent();
     while let Some(current) = above {
+        // **The compiler's own parentheses are not names.** `__declspec(dllexport)` and `__attribute__((unused))` are
+        // one construct written with an argument, and the argument is a word the compiler reads: measured on sqlite,
+        // the guard that skips `__declspec` itself left `dllexport` reported.
+        if let Some(first) = current.first_token() {
+            if matches!(
+                first.text(),
+                "__declspec"
+                    | "__attribute__"
+                    | "__attribute"
+                    | "_Pragma"
+                    | "__pragma"
+                    | "alignas"
+                    | "_Alignas"
+            ) {
+                return false;
+            }
+        }
         if cpp_parser::CppDeclarator::cast(current.clone()).is_some()
             || cpp_parser::CppParam::cast(current.clone()).is_some()
             || cpp_parser::CppDesignatedInitExpr::cast(current.clone()).is_some()
