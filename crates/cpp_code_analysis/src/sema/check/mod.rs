@@ -1212,6 +1212,17 @@ pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHea
     // `int*` and `int *` are one type; the `*` run is kept as written, so `int *` is the spelling given back.
     let returns = returns.trim().to_string();
 
+    // **A trailing return type is the return type, and it is written after the name.** `auto f() -> int` declares
+    // `int`; a reader that stops at the name answers `auto`, and every consumer of this head treats `auto` as
+    // "deduced, do not judge" — so `return "text";` inside such a function was silent while the same body under a
+    // written prefix return type was reported. The trailing type wins whenever both are written: `auto` is a
+    // placeholder rather than a type, and the arrow names the type it stands for.
+    let returns = if returns == "auto" || returns == "decltype(auto)" {
+        trailing_return_type_written_by(function).unwrap_or(returns)
+    } else {
+        returns
+    };
+
     // **The three shapes C++ gives no return type to.** `~S` and `operator*` are spelled that way and no scope
     // table would name them; a constructor is an *ordinary identifier* whose name is the class's, which is why it
     // is the one case this cannot decide from the name alone and asks the enclosing class instead.
@@ -1244,6 +1255,23 @@ fn source_between(function_text: &str, function_starts: usize, from: usize, to: 
         to.saturating_sub(function_starts),
     );
     function_text.get(from..to).unwrap_or(" ")
+}
+
+/// **The type written after `->`**, as the source spells it, or `None` for a function without one.
+///
+/// The wrapper node's own text starts at the `->`, so the text is read from the `TypeId` inside it — which is the
+/// type itself, and the reason `get_trailing_return_type` returns that node rather than the wrapper.
+fn trailing_return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    use cpp_parser::CppAstNode;
+
+    let declarator = function
+        .descendants()
+        .find(|node| cpp_parser::CppDeclarator::can_cast(node.kind().into()))?;
+    let written = cpp_parser::CppDeclarator::cast(declarator)?.get_trailing_return_type()?;
+    let text = cpp_parser::subtree_text_spaced(written.syntax())
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// **Drop every scope name a head ends with** — `int a::b::` becomes `int`.
