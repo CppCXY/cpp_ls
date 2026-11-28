@@ -427,19 +427,32 @@ pub async fn on_completion_resolve(
     let _ = context.analysis().prepare_for_a_diagnostic(&file).await;
 
     let looked_up = file.clone();
+    // **The label, for the lookup that has to match a declaration the identity offset only points near.**
+    let label = item.label.clone();
     let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
         // **The detail the list did not send**, found from the identity the list did send. This is the whole reason
         // `item_for` leaves the two detail fields empty: a parameter list per item is the largest part of a
         // completion answer and a client draws a few dozen rows of it. See the note there.
-        let detail = declaration_in(session, &looked_up, offset).and_then(|fact| detail_of(&fact));
+        // **The fact, and the offset it is actually at.** An item built from a *binding* — a member of a class
+        // declared in the file being edited — carries the declarator`s start as its identity (the `int` of
+        // `int size;`), while the summary files the same declaration at its **name**, so an exact match on the
+        // identity offset found nothing and the item came back without its documentation. Measured: `w.` on a
+        // `Widget` in the edited file offered `size` with `offset: 20`, the fact is at 60, and resolve answered
+        // unchanged. The label is what the client echoed, and it is what selects between two declarations of one
+        // name; the identity offset says which of them, so the first at or after it is the one.
+        let fact = declaration_in(session, &looked_up, offset, &label);
+        let detail = fact.as_ref().and_then(detail_of);
+        let at = fact
+            .as_ref()
+            .map(|fact| fact.name_range.start_offset)
+            .unwrap_or(offset);
 
         // The view is of the **declaring** file, which is what makes the lookup below one walk for a declaration in
         // the file being edited and one parse for the first name that comes from a header.
         let documentation = session
             .view(&file)
-            .and_then(|view| session.documentation(&view, &looked_up, offset))
+            .and_then(|view| session.documentation(&view, &looked_up, at))
             .map(|comment| documentation_text(&comment));
-
         Some((detail, documentation.flatten()))
     })
     .await;
@@ -473,16 +486,32 @@ pub async fn on_completion_resolve(
 ///
 /// `None` for an item that has no declaration behind it — a keyword, a snippet, a header — and the caller then
 /// sends no detail, which is the item minus a hint rather than a wrong hint.
+/// **The declaration an item`s identity names.**
+///
+/// `offset` is the identity the list sent — a **binding`s** declarator start for a member of a class declared in
+/// the file being edited (`int size;` answers the `int`), and a fact`s name for one that came from the summary.
+/// The two are the same declaration written at two offsets, so the exact match is tried first and then the first
+/// fact of that **name** at or after it: the label is what the client echoed, and within one file it is what
+/// selects between two declarations of one name.
 fn declaration_in(
     session: &cpp_code_analysis::Session<DiskFiles>,
     file: &std::path::Path,
     offset: usize,
+    label: &str,
 ) -> Option<cpp_code_analysis::DeclFact> {
     let summary = session.index().summary(file)?;
-    summary
+    if let Some(exact) = summary
         .declarations
         .iter()
         .find(|fact| fact.name_range.start_offset == offset)
+    {
+        return Some(exact.clone());
+    }
+    summary
+        .declarations
+        .iter()
+        .filter(|fact| fact.name.as_str() == label && fact.name_range.start_offset >= offset)
+        .min_by_key(|fact| fact.name_range.start_offset)
         .cloned()
 }
 
