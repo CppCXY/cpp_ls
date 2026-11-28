@@ -135,6 +135,33 @@ fn is_an_owner(spelling: &str) -> bool {
 /// this function's own; a name bound before it is a parameter (and whether that parameter is by value or by reference
 /// is asked of the parameter's declarator). A caller with no body — an in-class member initialiser — passes the
 /// initialiser's own node, and every name in it is then a member or a global.
+/// **Does the chain this expression reads through reach a `->`?** — `&p->a[iTerm]` is a pointer into the *pointee* of
+/// `p`, not into `p`, and the member-or-element in between does not change that: the base is still somebody else's
+/// object. The walk answers for the shapes a borrow can be taken of — a member, an element, and the object inside
+/// them.
+fn reaches_through_an_arrow(node: &cpp_parser::CppSyntaxNode) -> bool {
+    use cpp_parser::CppAstNode;
+    let mut current = node.clone();
+    loop {
+        if super::an_arrow_access(&current) {
+            return true;
+        }
+        let Some(expression) = cpp_parser::CppExpr::cast(current.clone()) else {
+            return false;
+        };
+        current = match expression {
+            cpp_parser::CppExpr::IndexExpr(index) => match index.get_object() {
+                Some(object) => object.syntax().clone(),
+                None => return false,
+            },
+            cpp_parser::CppExpr::MemberExpr(member) => match member.get_object() {
+                Some(object) => object.syntax().clone(),
+                None => return false,
+            },
+            _ => return false,
+        };
+    }
+}
 pub(crate) fn origin_of(
     context: &CheckContext<'_>,
     expression: &cpp_parser::CppSyntaxNode,
@@ -224,7 +251,7 @@ pub(crate) fn origin_of(
                 // `dangling-return` findings, every one of them this shape. The `.` form keeps its meaning — a member of
                 // a local dies with the local.
                 let operand = unary.get_operand()?;
-                if super::an_arrow_access(operand.syntax()) {
+                if reaches_through_an_arrow(operand.syntax()) {
                     return Some(unknown(unary.syntax().text().to_string()));
                 }
                 // `&x` — the address of the operand, which carries its origin.

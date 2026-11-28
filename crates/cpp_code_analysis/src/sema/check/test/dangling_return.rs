@@ -238,3 +238,19 @@ static struct node *pick(void) { struct node up = {0}; return &up.pAfter; }
         "`up` is the function's own local, and its member dies with it",
     );
 }
+
+/// **The chain does not change the answer**: `&p->a[iTerm]` is an element of an array inside the *pointee* of `p`,
+/// and every step of the chain still belongs to somebody else's object. Measured on sqlite (`src/where.c:4575`):
+/// one finding, this shape, after the plain `&p->member` case was fixed.
+#[test]
+fn an_element_of_a_pointer_member_is_not_a_local() {
+    let source = "\
+struct term { int a[4]; };
+static int *pick(struct term *p, int iTerm) { return &p->a[iTerm]; }
+";
+    assert_silent_about(
+        &codes_of(source),
+        DiagnosticCode::DanglingReturn,
+        "the array belongs to the pointee, which outlives the call",
+    );
+}
