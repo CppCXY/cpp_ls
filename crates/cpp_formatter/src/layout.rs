@@ -817,7 +817,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "the level bookkeeping does not accumulate through a case body yet: the inner switch`s labels come out one level short"]
     fn a_switch_inside_a_case_body_keeps_its_own_labels() {
         let mut style = Style::default_style();
         style.set_from_text("IndentWidth", "4");
@@ -826,11 +825,14 @@ mod tests {
             "void f()\n{\nswitch (a) {\ncase 1:\nswitch (b) {\ncase 2:\nreturn;\n}\n}\n}\n}\n",
             &style,
         );
-        assert_eq!(found[5], ("switch".to_string(), Some(12)), "{found:?}");
-        assert_eq!(found[6], ("case".to_string(), Some(16)), "{found:?}");
-        assert_eq!(found[7], ("return".to_string(), Some(20)), "{found:?}");
+        // **The indices are of the token list `columns` returns**, which starts with the declaration: the inner
+        // `switch` is the fifth entry. The levels are what the test is about — the label of a `switch` that is
+        // itself inside a case body is two steps deeper than the outer label, and the `case` and the statement
+        // inside it follow one more each.
+        assert_eq!(found[4], ("switch".to_string(), Some(12)), "{found:?}");
+        assert_eq!(found[5], ("case".to_string(), Some(16)), "{found:?}");
+        assert_eq!(found[6], ("return".to_string(), Some(20)), "{found:?}");
     }
-
     #[test]
     fn an_indented_case_label_puts_its_statements_one_level_deeper() {
         // The corpus asks for `IndentCaseLabels: true`: label at the body's level, statements one deeper, and a block

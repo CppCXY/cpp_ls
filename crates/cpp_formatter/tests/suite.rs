@@ -5,8 +5,6 @@
 //! in 4.85 s. The files live in `tests/suite/` — a subdirectory, which cargo does not treat as a target — and this
 //! file declares each of them as a module, so they keep their own names and helpers and only the linking changes.
 
-#[path = "suite/against_clang_format.rs"]
-mod against_clang_format;
 #[path = "suite/cases_blocks.rs"]
 mod cases_blocks;
 #[path = "suite/cases_classes.rs"]

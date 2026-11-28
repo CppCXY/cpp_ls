@@ -143,7 +143,6 @@ fn a_members_members_are_offered_over_the_wire() {
 /// `a_member_position_offers_the_members_with_their_distinctions` (the member list and its kinds, from a fixture
 /// with no standard library in it) and the probe, which is the instrument this was measured with.
 #[test]
-#[ignore = "needs the release profile: the standard library closure takes minutes to index in debug"]
 fn a_standard_library_member_list_has_each_spelling_once() {
     let project = Project::new("completion-std-string");
     project.write("main.cpp", STD_STRING_CPP);
@@ -595,7 +594,6 @@ fn a_completion_sees_the_keystroke_that_asked_for_it() {
 /// cargo test --release -p cpp_ls --test suite handshake -- --ignored a_member_access_on_the_last_line
 /// ```
 #[test]
-#[ignore = "needs the release profile: the answer comes from the standard library's include closure (156 files)"]
 fn a_member_access_on_the_last_line_of_a_body_offers_the_members() {
     let project = Project::new("completion-last-line");
     project.write("main.cpp", LAST_LINE_CPP);
@@ -912,8 +910,8 @@ fn a_module_is_read_in_the_background_for_completion() {
 /// hundred names — so this test asks the two questions a client asks, in order: complete, then resolve the item the
 /// user highlighted. What comes back is the declaration's own comment, rendered by the same function the hover and
 /// the signature help use.
-#[ignore]
 #[test]
+#[ignore = "known: the item`s documentation and textEdit are not right yet — see the failure in this file"]
 fn a_completion_item_resolves_to_its_declarations_documentation() {
     let project = Project::new("completion-resolve");
     project.write("main.cpp", RESOLVE_CPP);
@@ -1699,8 +1697,8 @@ fn the_first_completion_after_an_open_answers_the_same_as_the_second() {
 /// **offset 0** (a comment has no tree node to ask about), and its answer carried a range from the top of the file,
 /// which the client then replaced. The item has to say *where* it goes — a `textEdit` over the typed word — and not
 /// leave the client to insert at the cursor.
-#[ignore]
 #[test]
+#[ignore = "known: the item`s documentation and textEdit are not right yet — see the failure in this file"]
 fn a_doc_links_completion_carries_the_edit_for_the_word() {
     let project = Project::new("doc-link-edit");
     let source = "/** A ship. @see Widget */\nstruct Widget { int size; };\n";

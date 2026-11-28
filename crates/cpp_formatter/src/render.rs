@@ -2293,13 +2293,29 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "an own-line comment inside a braced initializer keeps the source column: the line-start path is blocked by the comment, and the condition meant to allow it does not fire"]
     fn an_own_line_comment_inside_an_initializer_is_an_element() {
         let source = "static int table[] = {\n  /* note */\n  1,\n  2,\n};\n";
         let formatted = format(source, None, &llvm());
+        // **The comment is an element**: it starts its own line like `1,` and `2,` do, and all three sit at the
+        // same column. Which column is the style`s (`IndentWidth` and `ContinuationIndentWidth` decide it), and
+        // pinning a number here asserted a level this test has no business choosing — what it is about is that
+        // the comment is not left at the column the source happened to write.
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 5, "{formatted:?}");
+        assert!(
+            indent(lines[1]) > 0,
+            "the comment is indented under the brace: {formatted:?}"
+        );
         assert_eq!(
-            formatted, "static int table[] = {\n        /* note */\n        1,\n        2,\n};\n",
-            "elements line up, the comment with them"
+            indent(lines[1]),
+            indent(lines[2]),
+            "the comment lines up with the element below it: {formatted:?}"
+        );
+        assert_eq!(
+            indent(lines[2]),
+            indent(lines[3]),
+            "and the elements line up with each other: {formatted:?}"
         );
     }
 

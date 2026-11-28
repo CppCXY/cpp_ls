@@ -124,8 +124,12 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 /// the undecidable branch for these facts — with `A_FEATURE_VALUE` defined **without a value**, `#if A_FEATURE_VALUE
 /// == 1` is evaluated as `Inactive` rather than `Unknown`, so the `#else` branch's definition is dropped as dead
 /// instead of kept. The next target is the condition evaluator, not the walk.
-#[ignore = "known: an empty-bodied macro in a `#if` expression evaluates as false, not `Unknown`"]
 #[test]
+// **Ignored while it fails**, and it is a *different* defect from the one the walk fixed: the condition is undecidable
+// (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
+// branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
+// drops it.
+#[ignore = "known: the cook drops the definitions of an undecidable region instead of reading its #else branch"]
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1
