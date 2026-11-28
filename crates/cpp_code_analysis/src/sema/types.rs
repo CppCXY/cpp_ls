@@ -591,6 +591,18 @@ impl Type {
     }
 
     /// Is this spelling one of the arithmetic types?
+    /// **Is this `bool`** — the type a condition already is, and therefore not a conversion of anything.
+    ///
+    /// Asked through the qualifiers on purpose: `bool const flag = …; if (flag)` converts nothing, and the rule that
+    /// asks this used to compare the *spelling* with `"bool"`, which a qualified type spells `bool const`.
+    pub fn is_bool(&self) -> bool {
+        match self {
+            Type::Builtin { spelling } => spelling.as_str() == "bool",
+            Type::Qualified { of, .. } => of.is_bool(),
+            _ => false,
+        }
+    }
+
     pub fn is_arithmetic(&self) -> bool {
         match self {
             Type::Builtin { spelling } => !matches!(spelling.as_str(), "void" | "decltype(auto)"),

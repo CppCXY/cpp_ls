@@ -59,7 +59,7 @@ impl Check for ImplicitBoolConversion {
             // **Arithmetic and not `bool`.** `bool` is the type the conversion would produce, so it is not a conversion;
             // a pointer is the idiom a rule must leave alone, and a class with an `operator bool` is the C++ way to say
             // "this is testable", which is another question entirely.
-            if !type_of.is_arithmetic() || type_of.to_string() == "bool" {
+            if !type_of.is_arithmetic() || type_of.is_bool() {
                 return;
             }
             let range = inner.text_range();

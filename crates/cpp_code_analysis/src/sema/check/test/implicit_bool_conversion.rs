@@ -117,3 +117,17 @@ fn a_class_that_declares_operator_bool_is_not_reported() {
         "a class is not an arithmetic type",
     );
 }
+
+/// **A `const bool` is still a `bool`.** The rule compared the *spelling* with `"bool"`, and a qualified type spells
+/// itself `bool const`, so a condition on a `bool const` local was reported as an implicit conversion — measured by the
+/// corpus (`corpus/findings/style.cpp`, whose `bool const flag = value > 0;` was reported on the `if (flag)`).
+#[test]
+fn a_const_bool_condition_is_not_a_conversion() {
+    let local =
+        codes_of("void f(int value) { bool const flag = value > 0; if (flag) { return; } }\n");
+    assert_silent_about(
+        &local,
+        DiagnosticCode::ImplicitBoolConversion,
+        "`bool const` converts to `bool` as well",
+    );
+}
