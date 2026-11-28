@@ -81,6 +81,15 @@ pub struct Args {
     /// Print where the time went, stage by stage.
     #[arg(long)]
     pub time: bool,
+
+    /// **Read the whole project before the first file** — what the workspace-wide rules need.
+    ///
+    /// `missing-include`, `pure-virtual-not-overridden` and `unused` ask the *index* about files the checked file
+    /// never includes, and a per-file closure cannot answer that: measured on the corpus, `missing-include` said
+    /// "`OnlyHere` is declared in only_here.h" from `cpp_inspect --index` and nothing at all from `cpp_check`, because
+    /// `only_here.h` was not in the closure the run read. The price is the project`s reading, so it is opt-in.
+    #[arg(long)]
+    pub index: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -203,6 +212,7 @@ mod tests {
             quiet: true,
             exclude: Vec::new(),
             time: false,
+            index: false,
         }
     }
 

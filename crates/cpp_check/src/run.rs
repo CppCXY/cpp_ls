@@ -35,13 +35,21 @@ pub fn check_files(
     skipped: Option<&BTreeSet<&'static str>>,
     _tracing: bool,
     quiet: bool,
+    // **The project the session is told about** — the checked files, or every file of the project when `--index`.
+    project_files: &[PathBuf],
+    read_the_whole_project: bool,
 ) -> Run {
     let mut session = Session::open(
         root,
         SessionFiles::new(OpenDocuments::new(), DiskFiles),
         WatchFilter::new(root),
     );
-    session.add_project_files(files.to_vec());
+    session.add_project_files(project_files.to_vec());
+    // **`--index`: the whole project read before the first file** — see the flag`s note. The loop is the one
+    // `Session::index_everything` runs, and it stops on its own progress test rather than on a count.
+    if read_the_whole_project {
+        session.index_everything();
+    }
 
     let mut run = Run::default();
     for (at, file) in files.iter().enumerate() {

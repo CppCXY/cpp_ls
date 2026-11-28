@@ -87,6 +87,15 @@ fn main() {
         eprintln!("cpp_check: no files to check");
         std::process::exit(2);
     }
+    // **What the session is told the project is.** A run that reads the whole project needs the *project* rather than
+    // the named files: `missing-include` finds `OnlyHere` only if the header that declares it was read, and a header is
+    // not one of the files a check run names. Headers are included for that reason, and the walk is the same one
+    // `files_to_check` uses when nothing is named.
+    let project = if args.index {
+        walk::discover(&root, true, &args.exclude)
+    } else {
+        files.clone()
+    };
 
     // **The names the filters allow**, resolved once: an unknown code is a typo, not an empty filter, and a check run
     // that silently reports nothing because of one is worse than one that refuses.
@@ -122,6 +131,8 @@ fn main() {
         skipped.as_ref(),
         args.time || (!args.quiet && !args.json),
         args.quiet || args.json,
+        &project,
+        args.index,
     )];
     let mut findings: Vec<Report> = Vec::new();
     let mut unreadable: Vec<PathBuf> = Vec::new();

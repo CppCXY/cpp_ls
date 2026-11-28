@@ -10,6 +10,7 @@ $ cpp_check --skip-code=braces-around-statements
 $ cpp_check --headers                # headers on their own, not only translation units
 $ cpp_check --max-files=25           # a smoke run
 $ cpp_check --exclude=third_party    # a path substring to keep out of the walk
+$ cpp_check --index                  # read the whole project first: the workspace-wide rules need the index
 $ cpp_check E:\neovim --file src/nvim/cursor.c --file src/nvim/api/vim.c
 $ cpp_check E:\neovim --files-from changed.txt
 ```
@@ -19,6 +20,8 @@ $ cpp_check E:\neovim --files-from changed.txt
 costs four minutes. `--file` is repeatable; `--files-from` reads one path per line, ignoring blank lines and `#`
 comments, and resolves a relative path against the current directory. `ROOT` still names the **project** — its compile
 database, flags and `.cppls.toml` — so a named file is read the way the build reads it, not as a loose file.
+
+**`--index` is what the workspace-wide rules need**, and it is opt-in because the price is the project's reading: `missing-include` finds a type only if the file that declares it was read, and a file a translation unit never includes is not in any closure — measured on the corpus, `missing-include` said "`OnlyHere` is declared in only_here.h" from `cpp_inspect --index` and nothing at all from `cpp_check`, because `only_here.h` was not in the closure the run read. With `--index` the walk's files (headers included) are handed to the session and read before the first check.
 
 Exit code: `1` when at least one finding is at or above `--min-severity`, `0` when none is, `2` for a run that could
 not start (no such directory, no sources, an unknown rule name).
@@ -202,3 +205,4 @@ and the editor has the same false positive in it.
   the checks that do not need types; the summary says how many files that was.
 * The findings are the analysis's, with the analysis's refusal to guess: a rule that cannot decide says nothing.
   `--min-severity=error` is therefore not "what the compiler would say" — it is "what this layer is sure of".
+
