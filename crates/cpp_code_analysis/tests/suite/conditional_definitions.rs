@@ -129,7 +129,7 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 // (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
 // branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
 // drops it.
-#[ignore = "known: the unit cook applies both branches` #define (measured: `DEBUG unit unknown-define \"SHAPE\" read=true` twice), so the use site`s expansion is lost between the unit`s environment and the interface file`s summary"]
+#[ignore = "known: `read_the_program` never reaches its cook for this fixture — the memoised indexed unit (`self.known`) short-circuits it, so the interface`s facts are never filed from a unit rendering"]
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1
