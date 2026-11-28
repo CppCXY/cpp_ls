@@ -381,9 +381,10 @@ fn flow_of(statement: &CppStat, has_a_goto: bool) -> Flow {
             endless_loop(body, endless, has_a_goto)
         }
         CppStat::SwitchStat(switch) => switch_flow(switch, has_a_goto),
-        // **`try` is assumed to complete**: the handler may be entered from any call in the block, so the only
-        // readable answer is the conservative one — no finding about a body this walk cannot follow.
-        CppStat::TryStat(_) => Flow::FALLS_THROUGH,
+        // **`try` completes when its block does and every handler does.** A handler may be entered from any call in the
+        // block, so the block's own end says nothing on its own — but when both halves stop, no path reaches the
+        // statement's end. See [`try_flow`] for what the conservative version cost.
+        CppStat::TryStat(try_) => try_flow(try_, has_a_goto),
         // An expression, a declaration, a label: control runs past it.
         _ => Flow::FALLS_THROUGH,
     }
@@ -393,6 +394,30 @@ fn flow_of(statement: &CppStat, has_a_goto: bool) -> Flow {
 ///
 /// **The loop's own breaks stop here**: `while (true) { while (true) { break; } }` leaves the inner loop only, so the
 /// outer one still cannot be left. That is the one place a `break` is consumed rather than reported.
+/// **A `try` statement`s flow.** `try` used to be "assumed to complete" — the handler may be entered from any call in
+/// the block, so the block`s own end says nothing. That is true and it is not the whole question: a statement whose
+/// block stops **and** whose every handler stops cannot be left at all.
+///
+/// Measured: `corpus/clean/exceptions.cpp` writes three bodies that are one `try` each, with a `return` in the block
+/// and in every handler — every path out of them returns — and the walk reported "its body has no `return`" once the
+/// rule could see their trailing return type. That is why the trailing type and this are one change.
+fn try_flow(try_: &cpp_parser::CppTryStat, has_a_goto: bool) -> Flow {
+    let body_of = |body: Option<cpp_parser::CppCompoundStat>| {
+        body.map_or(Flow::FALLS_THROUGH, |body| {
+            flow_of(&CppStat::CompoundStat(body), has_a_goto)
+        })
+    };
+    let block = body_of(try_.get_body());
+    let mut handlers = try_
+        .get_catch_handlers()
+        .map(|handler| body_of(handler.get_body()));
+    // **Both halves are asked separately**: a path that throws inside the block reaches no end of it, and only the
+    // handler it lands in says where that path goes.
+    let reaches = block.reaches || handlers.any(|handler| handler.reaches);
+    let breaks = block.breaks || handlers.any(|handler| handler.breaks);
+    Flow { reaches, breaks }
+}
+
 fn endless_loop(body: Flow, endless: bool, has_a_goto: bool) -> Flow {
     Flow {
         reaches: !endless || body.breaks || has_a_goto,

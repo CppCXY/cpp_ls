@@ -114,3 +114,27 @@ struct S {
         "a member function that writes `int` and returns nothing is still an ordinary function",
     );
 }
+
+/// **A body that is one `try` returns when its block and every handler return.** The walk used to answer "`try`
+/// completes" for every `try` statement — conservative, and wrong in the direction that produces findings: a body
+/// whose every path returns through the block or a handler was reported as having no `return`.
+#[test]
+fn a_try_whose_block_and_handlers_return_is_complete() {
+    let complete = codes_of(
+        "int f(bool flag) {\n    try {\n        if (flag) {\n            throw 1;\n        }\n        return 1;\n    } catch (int) {\n        return 2;\n    }\n}\n",
+    );
+    assert_silent_about(
+        &complete,
+        DiagnosticCode::MissingReturn,
+        "the block returns and so does the handler",
+    );
+
+    let falls_through = codes_of(
+        "int f(bool flag) {\n    try {\n        if (flag) {\n            return 1;\n        }\n    } catch (int) {\n        return 2;\n    }\n}\n",
+    );
+    assert_reported(
+        &falls_through,
+        DiagnosticCode::MissingReturn,
+        "the block can leave the `try` without returning",
+    );
+}
