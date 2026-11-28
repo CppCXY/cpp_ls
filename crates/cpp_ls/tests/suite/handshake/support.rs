@@ -78,41 +78,6 @@ pub(crate) fn position_of(source: &str, needle: &str) -> (u32, u32) {
     (line as u32, character as u32)
 }
 
-/// **How many servers may run at once**, and the permit that says so.
-///
-/// Every handshake test spawns its own server, and `cargo test` runs them on every core at once: on a loaded machine
-/// a dozen debug servers each index their fixture closure while the rest of the workspace builds, and a request that
-/// takes five seconds alone waits long enough to miss a deadline. Measured:
-/// `handshake::diagnostics::the_reported_file_is_answered` failed one full-workspace run in three and passed alone in
-/// 5.4 s. A cap costs nothing when the machine is idle — a waiting test is one that would have contended — and turns
-/// a load-dependent timeout into an ordered run.
-const AT_ONCE: usize = 6;
-
-static RUNNING: Mutex<usize> = Mutex::new(0);
-static ROOM: std::sync::Condvar = std::sync::Condvar::new();
-
-/// One of the [`AT_ONCE`] places, given back when the server it belongs to is dropped.
-struct APermit;
-
-impl APermit {
-    fn take() -> Self {
-        let mut running = RUNNING.lock().expect("the count is not poisoned");
-        while *running >= AT_ONCE {
-            running = ROOM.wait(running).expect("the count is not poisoned");
-        }
-        *running += 1;
-        APermit
-    }
-}
-
-impl Drop for APermit {
-    fn drop(&mut self) {
-        let mut running = RUNNING.lock().expect("the count is not poisoned");
-        *running -= 1;
-        ROOM.notify_one();
-    }
-}
-
 /// The server, as a client sees it: a process, a pipe, and the messages it sent.
 pub(crate) struct Server {
     pub(crate) child: Child,
@@ -135,8 +100,6 @@ pub(crate) struct Server {
     /// **Answer `client/registerCapability` with an error**, the way a client that advertises the capability and then
     /// refuses the registration does.
     pub(crate) refuse_registrations: bool,
-    /// **A place among the [`AT_ONCE`] servers**, given back when this one is dropped — see [`APermit`].
-    _permit: APermit,
 }
 
 impl Server {
@@ -230,7 +193,6 @@ impl Server {
             configuration_answers: 0,
             held_configuration_requests: Vec::new(),
             refuse_registrations: false,
-            _permit: APermit::take(),
         }
     }
 
