@@ -4563,3 +4563,22 @@ fn a_missing_header_does_not_also_report_its_absent_names() {
         "and its names are not reported as undeclared on top of it: {codes:?}"
     );
 }
+
+/// **A parameter written without a name is all type.** `void take(ctx*)` has a declarator that holds the pointer and
+/// no name at all, and the nameless fallback took the `*` for a *name* and stripped it — the parameter read as `ctx`.
+///
+/// Measured on sqlite (`src/prepare.c`, `src/test_md5.c`, `ext/fts3/fts3_porter.c`): a call through a function
+/// pointer whose signature is `(ctx*, void*)` was compared against `(ctx, void)`, and six correct calls were reported.
+#[test]
+fn a_nameless_pointer_parameter_keeps_its_operator() {
+    let source = "\
+typedef struct ctx ctx;
+typedef void (*cleanup_fn)(ctx*, void*);
+static void use(cleanup_fn xCleanup, ctx *c, void *p) { xCleanup(c, p); }
+";
+    let codes = codes_of_a_file("/p/a.c", source);
+    assert!(
+        !codes.contains(&DiagnosticCode::ParamTypeCheck),
+        "`void *` is exactly what `xCleanup` takes for its second parameter: {codes:?}"
+    );
+}

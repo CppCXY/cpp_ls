@@ -2679,10 +2679,24 @@ pub(crate) fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
         // A parameter with no declarator (`void f(int)`) declares no name: the whole of it is the type.
         match declarator {
             Some(declarator) => {
-                let name = cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&declarator)
-                    .next()
-                    .map(|child| cpp_parser::source_range(child.get_range()))
-                    .unwrap_or_else(|| cpp_parser::source_range(declarator.text_range()));
+                // **A parameter written without a name is all type** — `void take(ctx*)`. The declarator holds the
+                // pointer and no name at all, and the fallback took the `*` for a *name* and stripped it: measured,
+                // `void take(ctx*)` read the parameter as `ctx`, so a call through a function pointer whose signature
+                // is `(ctx*, void*)` was compared against `(ctx, void)` and a correct call was reported.
+                let Some(named) =
+                    cpp_parser::typed_descendants::<cpp_parser::CppNameExpr>(&declarator).next()
+                else {
+                    let written = format!(
+                        "{} {}",
+                        cpp_parser::subtree_text_spaced(&specifiers),
+                        cpp_parser::CppDeclarator::cast(declarator.clone())
+                            .map(|typed| typed.get_type_suffix())
+                            .unwrap_or_default()
+                    );
+                    parameters.push(parse_type_spelling(written.trim()));
+                    continue;
+                };
+                let name = cpp_parser::source_range(named.get_range());
                 // A parameter is an object: a list of its own is the constructor call of a default argument
                 // shape, not a function type.
                 parameters.push(type_of_declaration(
