@@ -66,3 +66,16 @@ fn prose_and_data_are_not_expressions() {
         "a string literal is not a use",
     );
 }
+
+/// **The spelling survives the macro being expanded.** `#define NULL 0` is what every standard header writes, and a
+/// rule that read the tree found the definition's `0` and nothing at all — so the finding disappeared as soon as
+/// another file in the run had pulled `<cstddef>` in (measured on the corpus; `cpp_check --index` lost it every time).
+#[test]
+fn a_null_that_the_macro_expanded_is_still_reported() {
+    let codes = codes_of("#define NULL 0\nvoid g() {\n    int *p = NULL;\n    (void)p;\n}\n");
+    assert_reported(
+        &codes,
+        DiagnosticCode::UseNullptr,
+        "the use is reported and the `#define` line is not",
+    );
+}
