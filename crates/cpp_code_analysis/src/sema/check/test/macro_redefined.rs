@@ -123,3 +123,26 @@ fn a_definition_in_a_header_this_file_does_not_include_is_not_a_redefinition() {
         "the rule compares this file's own definitions, not the headers': {findings:?}"
     );
 }
+
+/// **A definition in a branch nobody compiles is not in force**, and the cook is what knows which branch that is —
+/// the fact`s own guard does not always say so. Measured on a ten-line file while a second `#ifndef` block followed
+/// the pair: both definitions reached the rule with `Unconditional` guards, and it compared the untaken one.
+#[test]
+fn a_definition_in_an_untaken_branch_is_not_a_redefinition() {
+    let source = "\
+#ifdef A
+#  define X 1
+#else
+#  define X 0
+#endif
+#ifndef G
+#define G 1
+#endif
+static int use(void){ return X + G; }
+";
+    assert_silent_about(
+        &codes_of(source),
+        DiagnosticCode::MacroRedefined,
+        "only one of the two definitions is compiled",
+    );
+}

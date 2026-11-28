@@ -359,6 +359,14 @@ impl<'a> CheckContext<'a> {
     /// there are eleven checks and the twelfth would forget. This is also where a per-line suppression will go (a
     /// comment naming a code on the line the finding is on), for the same reason — one place, so that no check has
     /// to know it was suppressed.
+    /// **Is this offset inside a branch the cook did not compile?** — the same question [`CheckContext::push`] asks
+    /// of a finding`s range before it drops it, exposed for a rule that has to *compare* two facts and must not
+    /// count one that is not in force.
+    pub fn a_dead_branch_holds(&self, offset: usize) -> bool {
+        self.inactive
+            .iter()
+            .any(|span| span.start_offset <= offset && offset < span.end_offset())
+    }
     pub fn add(
         &mut self,
         code: DiagnosticCode,

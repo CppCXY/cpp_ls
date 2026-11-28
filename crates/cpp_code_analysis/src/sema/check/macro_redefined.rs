@@ -48,15 +48,20 @@ impl Check for MacroRedefined {
         let seed = context.index().macros();
 
         // **The definitions in force, in the order the file writes them** — condition 1 by the filter, condition 2
-        // by the guard layer. Everything below reads this list and nothing else.
+        // by the guard layer, and condition 2 by the cook`s dead-branch spans too: the sweep assigns guards from the
+        // directive structure, and measured on a ten-line file whose `#ifdef`/`#else` pair is followed by a second
+        // `#ifndef` block, both definitions reached here with `Unconditional`. The spans are the same answer from the
+        // other reading — the one the central filter already uses. Measured on sqlite
+        // (`ext/wasm/api/sqlite3-wasm.c`): the `#define` in the untaken `#ifdef` branch was read as the definition a
+        // later one redefines.
         let live: Vec<&MacroFact> = context
             .summary
             .macros
             .iter()
             .filter(|fact| fact.kind.is_definition())
             .filter(|fact| fact_in_force(seed, context.summary, fact))
+            .filter(|fact| !context.a_dead_branch_holds(fact.range.start_offset))
             .collect();
-
         for (at, fact) in live.iter().enumerate() {
             let Some(first) = live[..at].iter().find(|earlier| earlier.name == fact.name) else {
                 // The first definition of a name is what a redefinition would be of. Nothing to report.
