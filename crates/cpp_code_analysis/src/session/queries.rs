@@ -612,6 +612,7 @@ impl<F: FileProvider + Clone> Session<F> {
             scope: String::new(),
             prefix: written.to_string(),
             replace: range,
+            replace_in_the_file: false,
             truncated: false,
             // A module name is a file on disk, not a fact the index has to have read: nothing here can be missing.
             incomplete: false,

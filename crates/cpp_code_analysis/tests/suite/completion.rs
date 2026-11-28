@@ -3821,3 +3821,47 @@ fn a_macro_declared_local_is_completed_by_name_from_the_rendering() {
         "the local the macro wrote: {labels:?}"
     );
 }
+
+/// **A documentation link is completed from the written text, and its range is the written text's.**
+///
+/// `@see Widget` names a declaration the file has, and the item is offered — but a comment produces **no token in a
+/// rendering**, so the word being typed does not exist there at all. The range a client replaces must therefore be
+/// the one the doc reader measured, in the file the reader is editing; measured through the server, the item came
+/// back with `43..48` — the *written* word pushed through the *reading's* map — where the written text has it at
+/// `17..22`.
+#[test]
+fn a_doc_link_completes_the_word_it_is_typing() {
+    let source = "/** A ship. @see Widget */\nstruct Widget { int size; };\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let mut session = Session::with_config(
+        "/p",
+        SessionFiles::new(OpenDocuments::new(), files),
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    let view = cooked_view(&mut session, "/p/a.cpp");
+    // The cursor is inside the word, after `Widge`, which is where a reader pressing Tab is.
+    let found = session.completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(22),
+    );
+
+    assert!(
+        found.items.iter().any(|item| item.label == "Widget"),
+        "the class the comment names is offered: {:?}",
+        found
+            .items
+            .iter()
+            .map(|item| &item.label)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        found.replace,
+        cpp_parser::SourceRange::new(17, 5),
+        "the word in the comment, in the file's own coordinates"
+    );
+    assert!(
+        found.replace_in_the_file,
+        "and a client must edit the file with it"
+    );
+}

@@ -381,6 +381,14 @@ pub struct CompletionSet {
     pub prefix: String,
     /// The range a client **replaces** with the chosen item.
     pub replace: SourceRange,
+    /// **Is `replace` a range in the *file*, or in the reading?**
+    ///
+    /// The reading is the file with its macros expanded and its dead branches removed, so a range in it is not
+    /// a range in the text a client edits, and the handler maps it back. The documentation contexts are read from
+    /// the **written** text — a comment produces no token in a rendering — so their range is already the file`s,
+    /// and mapping it again lands somewhere else: measured, `@see Widget` s edit pointed 26 bytes further, into
+    /// the declaration below the comment.
+    pub replace_in_the_file: bool,
     ///
     /// Distinct from the analysis being incomplete, and the distinction is the protocol's `isIncomplete`: a client
     /// told "incomplete" asks again as the user types, which is exactly right while a background index is still
@@ -399,6 +407,12 @@ pub struct CompletionSet {
 }
 
 impl CompletionSet {
+    /// **The same set with `replace` stated to be a range in the file** — see [`Self::replace_in_the_file`].
+    fn in_the_file(mut self) -> Self {
+        self.replace_in_the_file = true;
+        self
+    }
+
     /// **Did the answer hold nothing that could be what the reader is typing?**
     ///
     /// A client filters the list by the typed prefix and, on an empty result, shows *"no suggestions"* — and some
@@ -424,6 +438,7 @@ impl Default for CompletionSet {
             scope: String::new(),
             prefix: String::new(),
             replace: SourceRange::new(0, 0),
+            replace_in_the_file: false,
             truncated: false,
             incomplete: false,
         }
@@ -584,10 +599,11 @@ pub fn completion_with(
             written,
             range,
             wants,
-        } => doc_comments(index, path, &written, range, wants),
+        } => doc_comments(index, path, &written, range, wants).in_the_file(),
         CompletionContext::DocLink { written, range } => doc_link_names(
             index, scopes, root, path, &written, range, family, budget, unincluded,
-        ),
+        )
+        .in_the_file(),
         // **A code block is code**, so it is answered with the same list a statement gets — keywords and snippets
         // included, because that is what a reader writing an example is writing.
         CompletionContext::DocCode { written, range } => {
@@ -599,6 +615,7 @@ pub fn completion_with(
             names(
                 index, scopes, root, path, &position, 0, true, family, budget, unincluded, None,
             )
+            .in_the_file()
         }
     }
 }
@@ -1010,6 +1027,7 @@ fn members(
             scope: String::new(),
             prefix: prefix.clone(),
             replace,
+            replace_in_the_file: false,
             truncated: false,
             // **"Not worked out" is not "nothing there".** Every refusal below is a missing fact — the type of the
             // object, or the class it names — so the client has to be told to ask again, and the handler's
@@ -1101,6 +1119,7 @@ fn members_of_a_type(
                 scope: String::new(),
                 prefix,
                 replace,
+                replace_in_the_file: false,
                 truncated: false,
                 incomplete: false,
                 items: Vec::new(),
@@ -1125,6 +1144,7 @@ fn members_of_a_type(
                     scope: class.to_string(),
                     prefix,
                     replace,
+                    replace_in_the_file: false,
                     truncated: false,
                     incomplete: true,
                     items: Vec::new(),
@@ -1140,6 +1160,7 @@ fn members_of_a_type(
                     scope: class.to_string(),
                     prefix,
                     replace,
+                    replace_in_the_file: false,
                     truncated: false,
                     incomplete: true,
                     items: Vec::new(),
@@ -1272,6 +1293,7 @@ fn members_of_a_type(
             scope: class.to_string(),
             prefix,
             replace,
+            replace_in_the_file: false,
             truncated,
             incomplete,
             items,
@@ -1707,6 +1729,7 @@ fn names(
         scope: listed_scope,
         prefix: listed_prefix,
         replace,
+        replace_in_the_file: false,
         truncated,
         // A name list is not a member list: nothing here can be *missing* because a class was not read.
         incomplete: false,
@@ -1733,6 +1756,7 @@ fn directives(written: &str, range: SourceRange) -> CompletionSet {
         scope: String::new(),
         prefix: written.to_string(),
         replace: range,
+        replace_in_the_file: false,
         truncated: false,
         incomplete: false,
         items,
@@ -1845,6 +1869,7 @@ fn doc_comments(
         scope: String::new(),
         prefix: written.to_string(),
         replace: range,
+        replace_in_the_file: false,
         truncated: false,
         incomplete: false,
         items,
@@ -1893,6 +1918,7 @@ fn macro_body(
         scope: String::new(),
         prefix: written.to_string(),
         replace: range,
+        replace_in_the_file: false,
         truncated: false,
         incomplete: false,
         items,
@@ -1988,6 +2014,7 @@ fn condition(
         scope: String::new(),
         prefix: written.to_string(),
         replace: range,
+        replace_in_the_file: false,
         truncated: false,
         incomplete: false,
         items,
@@ -2034,6 +2061,7 @@ fn headers_for(
         scope: String::new(),
         prefix: written.to_string(),
         replace: range,
+        replace_in_the_file: false,
         truncated: headers.truncated(),
         incomplete: false,
         items,

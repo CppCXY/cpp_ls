@@ -60,7 +60,7 @@ use tokio_util::sync::CancellationToken;
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::handlers::hover::documentation_text;
-use crate::util::{file_offset_at_position, position_at_offset, uri_to_file_path};
+use crate::util::{file_offset_at_position, position_at_offset, position_in, uri_to_file_path};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -172,7 +172,16 @@ pub async fn on_completion(
                 .items
                 .iter()
                 .enumerate()
-                .map(|(rank, item)| item_for(item, rank, &view, found.replace, snippets))
+                .map(|(rank, item)| {
+                    item_for(
+                        item,
+                        rank,
+                        &view,
+                        found.replace,
+                        found.replace_in_the_file,
+                        snippets,
+                    )
+                })
                 .collect(),
         }))
     })
@@ -299,6 +308,7 @@ fn item_for(
     rank: usize,
     view: &cpp_code_analysis::FileView,
     replace: cpp_parser::SourceRange,
+    replace_in_the_file: bool,
     snippets: Snippets,
 ) -> CompletionItem {
     let insert_as_a_snippet = item.snippet && snippets == Snippets::Yes;
@@ -334,7 +344,13 @@ fn item_for(
         // letters — or none.
         filter_text: item.filter.clone(),
         insert_text_format: insert_as_a_snippet.then_some(InsertTextFormat::SNIPPET),
-        text_edit: text_edit(view, replace, item, insert_as_a_snippet),
+        text_edit: text_edit(
+            view,
+            replace,
+            item,
+            replace_in_the_file,
+            insert_as_a_snippet,
+        ),
         ..CompletionItem::default()
     }
 }
@@ -348,6 +364,7 @@ fn text_edit(
     view: &cpp_code_analysis::FileView,
     replace: cpp_parser::SourceRange,
     item: &AnalysisItem,
+    replace_in_the_file: bool,
     insert_as_a_snippet: bool,
 ) -> Option<CompletionTextEdit> {
     let new_text = if insert_as_a_snippet {
@@ -363,11 +380,25 @@ fn text_edit(
         item.label.clone()
     };
 
-    Some(CompletionTextEdit::Edit(TextEdit {
-        range: lsp_types::Range::new(
+    // **Which text the range is in.** The reading is the file with its macros expanded and its dead branches
+    // removed, so its offsets are not the file`s and the handler maps them back. The documentation contexts are
+    // read from a parse of the **written** text, so their range is already the file`s and is positioned directly:
+    // measured, `@see Widget` s edit landed 26 bytes away, in the declaration below the comment.
+    let (start, end) = if replace_in_the_file {
+        let text = view.written_text().unwrap_or(&view.source);
+        (
+            position_in(text, view.written_lines(), replace.start_offset)?,
+            position_in(text, view.written_lines(), replace.end_offset())?,
+        )
+    } else {
+        (
             position_at_offset(view, ReadingOffset::new(replace.start_offset))?,
             position_at_offset(view, ReadingOffset::new(replace.end_offset()))?,
-        ),
+        )
+    };
+
+    Some(CompletionTextEdit::Edit(TextEdit {
+        range: lsp_types::Range::new(start, end),
         new_text,
     }))
 }
