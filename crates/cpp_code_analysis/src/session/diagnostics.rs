@@ -242,7 +242,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {
         let path = path.as_ref();
-        let _whole = DiagTrace::new("diagnostics");
 
         // The index's own spelling of the path, for the reason `cook` documents: a client's `C:\…` and the
         // resolver's `c:/…` are the same file, and a lookup by the client's spelling finds nothing.
@@ -275,12 +274,8 @@ impl<F: FileProvider + Clone> Session<F> {
             // The **checks** read it too, and for the same reason: they are asked of the file's facts and its tree,
             // and both come from this one view. A file that cannot be read back is a file with no checks, which is
             // the same answer as a file no check had anything to say about.
-            let view = {
-                let _t = DiagTrace::new("the file's tree (view)");
-                self.view(path)
-            };
+            let view = { self.view(path) };
             if let Some(view) = &view {
-                let _t = DiagTrace::new("module notes");
                 // **A note about a module says what the session has *read*, so it waits for the reading.**
                 //
                 // `no file this project contains declares module `std`` was published on the first pull after a

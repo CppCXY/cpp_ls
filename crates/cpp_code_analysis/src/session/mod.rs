@@ -173,31 +173,6 @@ pub(crate) fn the_marked_seed_for(config: &CompilerConfig, macros: &Marked, root
 const SHARING_FILE: &str = "sharing.bin";
 const COOK_SLICE: usize = 4;
 
-/// **Where one `diagnostics` call spent its time**, on `CPPLS_TRACE_DIAGNOSTICS=1`.
-///
-/// The call has four parts and they have four different fixes: the **cooked lookup** (a hash), the **view** (the
-/// file's own tree — a parse), the **module notes**, and the **checks**. Measured on MSVC's `<vector>`: the whole
-/// call is **3.5 s on every request**, and the tree alone is 21 ms — so the split is not what the code around it
-/// suggests, which is the whole reason this exists. Nested timings are printed as they end, one line each.
-pub struct DiagTrace(Option<(&'static str, std::time::Instant)>);
-
-impl DiagTrace {
-    pub fn new(what: &'static str) -> DiagTrace {
-        DiagTrace(false.then(|| (what, std::time::Instant::now())))
-    }
-}
-
-impl Drop for DiagTrace {
-    fn drop(&mut self) {
-        if let Some((what, started)) = self.0 {
-            eprintln!(
-                "      [diagnostics] {what:<28} {:>7} ms",
-                started.elapsed().as_millis()
-            );
-        }
-    }
-}
-
 /// **How many files one drain re-reads**, once the closure is in hand.
 ///
 /// The second of the two things a drain does that are proportional to the project, and the one that was measured
