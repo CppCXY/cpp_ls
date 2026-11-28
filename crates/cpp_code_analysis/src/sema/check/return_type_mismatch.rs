@@ -61,8 +61,13 @@ impl Check for ReturnTypeMismatch {
 
                 match expression {
                     // `return;` — the statement is the keyword and the semicolon and nothing between them.
+                    //
+                    // **The declared type, parsed, not compared as text.** `void JNICALL` is a `void`-returning
+                    // function with a convention, and the word arrives in the spelling whenever the header that
+                    // defines it is absent: measured on sqlite's JNI binding, every `return;` in such a function was
+                    // reported. `parse_type_spelling` drops the convention, and `is_void` is the question.
                     None => {
-                        if declared != "void" {
+                        if !sema::types::parse_type_spelling(&declared).is_void() {
                             context.add(
                                 DiagnosticCode::ReturnTypeMismatch,
                                 cpp_parser::source_range(returned.get_range()),

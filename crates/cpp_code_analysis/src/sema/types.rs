@@ -1096,6 +1096,13 @@ impl TypeBindings {
 /// parser splits differently from how it was written still answers the same class — see the tests, which pin the
 /// round trip for the shapes a fact actually records.
 pub fn parse_type_spelling(written: &str) -> Type {
+    // **A calling convention is not part of the type.** `void JNICALL` is a `void`-returning function with a
+    // convention, and the compiler reads the word and not a type. Measured on sqlite`s JNI binding, where the
+    // header that defines `JNICALL` is absent: every `return;` in such a function was reported as a value that does
+    // not convert to `void JNICALL` — a type no file writes.
+    if let Some(without) = without_a_calling_convention(written) {
+        return parse_type_spelling(&without);
+    }
     // **The qualifiers written last come off first, and they are kept.** `Widget* const` is a pointer with a
     // `const` *after* the operator, so peeling the `*` before the `const` would look for one at a position where it
     // is not — the spelling would end in `const` and the operator would end up inside the name.
@@ -3540,4 +3547,41 @@ mod deducing_specifiers {
         assert_eq!(read("struct point p = {0};"), "point");
         assert_eq!(read("unsigned long n = 0;"), "unsigned long");
     }
+}
+
+/// **The words a calling convention is written with.** The compiler's own headers put one on the declaration's line,
+/// so it arrives *inside* the return or the parameter spelling: `void JNICALL sqlite3_x(…)`, `int WINAPI f(…)`.
+///
+/// A project's macro may expand to any of them, and a macro header that is absent leaves the word itself here — which
+/// is the measured case: sqlite's `ext/jni/src/c/sqlite3-jni.c` includes `jni.h`, the header is not installed, and
+/// every `return;` in a `void JNICALL` function was a finding about a type nothing writes.
+const CALLING_CONVENTIONS: &[&str] = &[
+    "JNICALL",
+    "JNIEXPORT",
+    "WINAPI",
+    "APIENTRY",
+    "CALLBACK",
+    "PASCAL",
+    "STDMETHODCALLTYPE",
+    "STDMETHODVCALLTYPE",
+    "__stdcall",
+    "__cdecl",
+    "__fastcall",
+    "__thiscall",
+    "__vectorcall",
+    "__pascal",
+    "__clrcall",
+];
+
+/// **The spelling without the calling-convention words**, when it had one — `None` otherwise.
+fn without_a_calling_convention(written: &str) -> Option<String> {
+    let words: Vec<&str> = written.split_whitespace().collect();
+    if words.len() < 2 || !words.iter().any(|word| CALLING_CONVENTIONS.contains(word)) {
+        return None;
+    }
+    let kept: Vec<&str> = words
+        .into_iter()
+        .filter(|word| !CALLING_CONVENTIONS.contains(word))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(" "))
 }

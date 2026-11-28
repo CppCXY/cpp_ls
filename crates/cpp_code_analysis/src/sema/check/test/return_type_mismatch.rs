@@ -95,3 +95,17 @@ int f() {
         "`bool` to `int` is an arithmetic conversion, not a mismatch",
     );
 }
+
+/// **A calling convention is not part of the return type.** `void JNICALL f(void) { return; }` returns nothing, and
+/// the word is the compiler's: measured on sqlite's JNI binding (`ext/jni/src/c/sqlite3-jni.c`), where the header
+/// defining `JNICALL` is absent, every `return;` in such a function was reported as a value that does not convert to
+/// `void JNICALL` — a type nothing writes.
+#[test]
+fn a_calling_convention_is_not_part_of_the_return_type() {
+    let source = "void JNICALL cleanup(int x) { (void)x; return; }\n";
+    assert_silent_about(
+        &codes_of(source),
+        DiagnosticCode::ReturnTypeMismatch,
+        "the function returns `void`, whatever its convention",
+    );
+}
