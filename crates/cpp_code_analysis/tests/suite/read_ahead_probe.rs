@@ -20,7 +20,7 @@
 use std::path::PathBuf;
 
 use cpp_code_analysis::{
-    CompilerConfig, DiskFiles, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
 
 /// **A project whose prepared summaries are worth more than the budget.**
@@ -98,70 +98,5 @@ fn the_read_ahead_stays_inside_its_budget() {
         peak <= BUDGET + 8 * 1024 * 1024,
         "the read-ahead peaked at {} MB, over the 32 MB budget",
         peak / (1024 * 1024),
-    );
-}
-
-/// The same question on a project on this machine — `CPPLS_REAL_PROJECT`, `CPPLS_PROBE_DIRS`.
-#[test]
-#[ignore = "a probe: reads a project on this machine"]
-fn the_read_ahead_on_a_real_project() {
-    let root = Option::<std::ffi::OsString>::None
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\zc\\Desktop\\test_cpp"));
-    let directories: Vec<String> = Result::<String, std::env::VarError>::Ok(String::new())
-        .map(|dirs| dirs.split(',').map(|dir| dir.trim().to_string()).collect())
-        .unwrap_or_else(|_| vec!["src".to_string(), "include".to_string()]);
-
-    let mut files = Vec::new();
-    let mut pending: Vec<PathBuf> = directories.iter().map(|dir| root.join(dir)).collect();
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("cpp" | "cc" | "h" | "hpp")
-            ) {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    if files.is_empty() {
-        eprintln!("[read-ahead] no sources under {}", root.display());
-        return;
-    }
-
-    let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
-    let mut session = Session::with_config(
-        &root,
-        providers,
-        WatchFilter::new(&root),
-        CompilerConfig::default(),
-    );
-    session.add_project_files(files.iter().cloned());
-    session.index_everything();
-
-    let mut peak = 0usize;
-    let mut slices = 0usize;
-    while session.pending_work() > 0 && slices < 400 {
-        let wave = session.prepare_background_wave(24);
-        let _ = session.commit_a_wave(wave, 24);
-        session.advance(24);
-        peak = peak.max(session.memory_report().prefetched_bytes);
-        slices += 1;
-    }
-    println!(
-        "{} file(s), {slices} slice(s): read-ahead peak {} MB, settled at {} MB of session tables",
-        files.len(),
-        peak / (1024 * 1024),
-        // **The session's own estimate, not the process's resident set.** The allocator byte counter this line used
-        // to read is gone (see `docs/open-questions.md`); what a probe about *read-ahead* wants is the bytes the
-        // session says it holds, and `MemoryReport` is that number by construction.
-        session.memory_report().total() / (1024 * 1024),
     );
 }

@@ -188,29 +188,3 @@ fn a_qualified_name_inside_a_member_definition_is_not_the_classes_member() {
         "the qualified name is resolved through the alias, not as Holder's member: {found}"
     );
 }
-
-/// **A probe: what the index records for an alias**, which is what an ask needs to find the class's file.
-#[test]
-#[ignore = "a probe: prints the alias fact the index holds"]
-fn the_alias_fact_fields() {
-    let session = session_of(&[
-        ("/p/basic.h", BASIC),
-        ("/p/alias.h", ALIAS),
-        (
-            "/p/main.cpp",
-            "#include \"alias.h\"\nint main() { return 0; }\n",
-        ),
-    ]);
-    for name in ["ns::simple", "ns::basic", "ns::simple::make"] {
-        match session
-            .index()
-            .definition(name, std::path::Path::new("/p/main.cpp"))
-        {
-            Known::Yes(found) => println!(
-                "[fact] {name}: kind {:?}, scope {:?}, type_of {:?}, returns {:?}",
-                found.fact.kind, found.fact.scope, found.fact.type_of, found.fact.returns
-            ),
-            other => println!("[fact] {name}: {:?}", other),
-        }
-    }
-}

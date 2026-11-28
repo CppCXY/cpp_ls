@@ -135,8 +135,6 @@ mod response_files;
 mod scopes;
 #[path = "suite/selection.rs"]
 mod selection;
-#[path = "suite/sema_cost.rs"]
-mod sema_cost;
 #[path = "suite/semantic.rs"]
 mod semantic;
 #[path = "suite/semantic_real_probe.rs"]

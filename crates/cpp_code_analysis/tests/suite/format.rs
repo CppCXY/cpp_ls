@@ -398,61 +398,6 @@ void f(int y, double d) {
         }
     }
 }
-
-/// **What the walk costs on a real file** — a measurement, not an assertion.
-///
-/// ```text
-/// $env:CPPLS_FILE = "E:\neovim\src\nvim\message.c"
-/// cargo test --release -p cpp_code_analysis --test suite format:: -- --ignored --nocapture
-/// ```
-///
-/// It prints the token count, how many string literals the file has, how many the walk kept, and the time — next to
-/// `classified_names` on the same view, because that is the pass that dominates a `semanticTokens` answer and the
-/// question here is whether the format walk is visible in it at all.
-#[test]
-#[ignore = "a measurement: needs CPPLS_FILE"]
-fn what_the_walk_costs() {
-    let Some(path) = Option::<std::path::PathBuf>::None else {
-        eprintln!("skipped: set CPPLS_FILE");
-        return;
-    };
-    let source = std::fs::read_to_string(&path).expect("the file is readable");
-    let (session, path) = a_session(&source);
-
-    let started = std::time::Instant::now();
-    let view = session.view_of_the_file(&path).expect("a view");
-    let view_time = started.elapsed();
-    let tokens = view.tree.get_tokens().len();
-    let literals = view
-        .tree
-        .get_tokens()
-        .iter()
-        .filter(|token| token.kind == cpp_parser::CppTokenKind::StringLiteral)
-        .count();
-
-    let started = std::time::Instant::now();
-    let rounds = 20;
-    let mut kept = 0usize;
-    for _ in 0..rounds {
-        kept = session
-            .format_literals(&view, &FormatConfig::default())
-            .len();
-    }
-    let each = started.elapsed() / rounds;
-
-    let started = std::time::Instant::now();
-    let names = session.classified_names(&view);
-    let classify_time = started.elapsed();
-
-    println!(
-        "PROBE {}: {} bytes, {tokens} token(s), {literals} string literal(s), {kept} format string(s) kept | \
-         {each:?} per format walk, {} name(s) in {classify_time:?}, view {view_time:?}",
-        path.display(),
-        source.len(),
-        names.len(),
-    );
-}
-
 /// **`fmt`'s two syntaxes**, and the one name whose argument position depends on which library declares it.
 ///
 /// `fmt` is where `std::format` came from, so `fmt::format` / `fmt::print` take the same `{…}` grammar — but the

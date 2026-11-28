@@ -27,14 +27,10 @@ mod idle;
 mod implementation_declaration;
 #[path = "suite/latency.rs"]
 mod latency;
-#[path = "suite/lsp_status.rs"]
-mod lsp_status;
 #[path = "suite/module_implementation.rs"]
 mod module_implementation;
 #[path = "suite/progress.rs"]
 mod progress;
-#[path = "suite/real_project.rs"]
-mod real_project;
 #[path = "suite/reported_hover.rs"]
 mod reported_hover;
 #[path = "suite/watch_rescan.rs"]
