@@ -86,6 +86,14 @@ pub async fn on_hover(
         // one. `catch_up` is the same step the semantic-token and inlay-hint handlers take, for the same reason, and it
         // is bounded to the files this one names (9), so it cannot become the settle that used to make every hover
         // wait for the whole project.
+        //
+        // **`catch_up` first, and the wait second.** The wait is a ceiling on the *whole* closure, and a C project's
+        // `<stdio.h>` closure is hundreds of files: measured on a six-file C project whose `main.c` includes ten
+        // headers, the ninth is its own `strbuf.h`, a hover on `sb_append` answered null while an earlier include's
+        // header answered — the pump had reached the depth-2 system headers and not the file's own ninth include.
+        // `catch_up` reads exactly the unread includes of *this* file, which is what a hover about this file needs,
+        // and it is the same step a completion takes.
+        context.analysis().catch_up(&path).await;
         // **`catch_up` is nine files and this name is fourteen headers down**, so the readiness that decides the
         // answer is [`AnalysisState::wait_for_the_closure`] — the same condition the semantic-token handler checks,
         // waited for instead of answered with `null`. The budget is a ceiling: on a warm index the first check

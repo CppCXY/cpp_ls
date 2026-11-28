@@ -719,7 +719,22 @@ impl<F: FileProvider + Clone> Session<F> {
                     return Known::Yes(a_scalar_layout(size, alignment));
                 }
                 Some(None) => return Known::No,
-                None => {}
+                // **No alias fact, and no class body either — so there is no layout to paint.**
+                //
+                // `members_of` answers `Yes(empty)` for a name it resolves through an alias to a builtin: the
+                // underlying type has no members, and an empty list is what an empty *class* also answers. The two
+                // are not the same question. Measured from an editor: `size_t` — `typedef __SIZE_TYPE__ size_t;` in
+                // gcc's `stddef.h`, whose summary records no target — was laid out by the empty-class rule and the
+                // card said **"size 1 byte(s), alignment 1"** where the truth is 8/8 on x64. A name with no class body
+                // is not a class, and a wrong number is worse than no number.
+                None => {
+                    if self
+                        .the_class_as_its_file_wrote_it(&head, &view.path)
+                        .is_none()
+                    {
+                        return Known::No;
+                    }
+                }
             }
         }
         // **The class and its members as their file wrote them** — the text a union's keyword and a bitfield's `:` are
