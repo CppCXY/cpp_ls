@@ -911,7 +911,7 @@ fn a_module_is_read_in_the_background_for_completion() {
 /// user highlighted. What comes back is the declaration's own comment, rendered by the same function the hover and
 /// the signature help use.
 #[test]
-#[ignore = "known: the item`s documentation and textEdit are not right yet — see the failure in this file"]
+#[ignore = "known: `completionItem/resolve` sends no documentation, and the `@see` completion`s edit range is 43..48 (into the declaration) where the word in the comment is 17..23"]
 fn a_completion_item_resolves_to_its_declarations_documentation() {
     let project = Project::new("completion-resolve");
     project.write("main.cpp", RESOLVE_CPP);
@@ -1698,7 +1698,7 @@ fn the_first_completion_after_an_open_answers_the_same_as_the_second() {
 /// which the client then replaced. The item has to say *where* it goes — a `textEdit` over the typed word — and not
 /// leave the client to insert at the cursor.
 #[test]
-#[ignore = "known: the item`s documentation and textEdit are not right yet — see the failure in this file"]
+#[ignore = "known: `completionItem/resolve` sends no documentation, and the `@see` completion`s edit range is 43..48 (into the declaration) where the word in the comment is 17..23"]
 fn a_doc_links_completion_carries_the_edit_for_the_word() {
     let project = Project::new("doc-link-edit");
     let source = "/** A ship. @see Widget */\nstruct Widget { int size; };\n";
