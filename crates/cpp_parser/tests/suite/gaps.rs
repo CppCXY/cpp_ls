@@ -7617,25 +7617,18 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
         let root = tree.get_red_root();
         let declaration = root
             .descendants()
-            .find(|node| {
-                CppSyntaxKind::from(node.kind())
-                    == CppSyntaxKind::NamespaceDecl
-            })
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl)
             .unwrap_or_else(|| panic!("{source}: no NamespaceDecl"));
 
         // The name's identifiers, in order — `inline` is not part of the name, and the body is not the name.
         let name_node = declaration
             .children()
-            .find(|node| {
-                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr
-            })
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
             .unwrap_or_else(|| panic!("{source}: no NameExpr"));
         let written: Vec<String> = name_node
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
-            .filter(|token| {
-                CppTokenKind::from(token.kind()) == CppTokenKind::Identifier
-            })
+            .filter(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
             .map(|token| token.text().to_string())
             .collect();
         assert_eq!(written.join("::"), name, "{source}");
@@ -7672,10 +7665,7 @@ fn a_templated_base_is_one_base_specifier() {
         let bases = tree
             .get_red_root()
             .descendants()
-            .filter(|node| {
-                CppSyntaxKind::from(node.kind())
-                    == CppSyntaxKind::BaseSpecifier
-            })
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BaseSpecifier)
             .count();
         assert_eq!(bases, expected, "{source}");
     }

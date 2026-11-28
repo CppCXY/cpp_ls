@@ -31,11 +31,9 @@ fn main() {
     // no grammar for — therefore parses here and fails there, which is a difference this tool has to be able to
     // reproduce. `--c` is that half; `--cpp` is the default written out, for a script that wants to be explicit.
     let language = if args.iter().any(|arg| arg == "--c") {
-        features::LanguageConfig::new()
-            .with_standard(features::Standard::C11)
+        features::LanguageConfig::new().with_standard(features::Standard::C11)
     } else {
-        features::LanguageConfig::new()
-            .with_standard(features::Standard::Cpp23)
+        features::LanguageConfig::new().with_standard(features::Standard::Cpp23)
     };
 
     let content = std::fs::read_to_string(filename).expect("Failed to read the file");

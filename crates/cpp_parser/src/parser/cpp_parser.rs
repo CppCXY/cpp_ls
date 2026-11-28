@@ -156,8 +156,7 @@ fn a_tree_that_says(text: &str, tokens: &[CppTokenData], problem: String) -> Cpp
     builder.finish_node();
     let root = builder.finish();
     let message = format!("the token stream does not describe this text: {problem}");
-    let error =
-        CppParseError::syntax_error_from(&message, SourceRange::new(0, text.len().min(1)));
+    let error = CppParseError::syntax_error_from(&message, SourceRange::new(0, text.len().min(1)));
     CppSyntaxTree::new(root, vec![error], tokens.to_vec(), 0)
 }
 

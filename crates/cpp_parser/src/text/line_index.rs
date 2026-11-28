@@ -12,8 +12,7 @@ impl LineIndex {
     /// Asked by the analysis's memory report (`cpp_code_analysis::MemoryReport`): a VFS entry is text *and* an index,
     /// and a report that counted only the text would blame the wrong half on a project of many small files.
     pub fn heap_bytes(&self) -> usize {
-        self.line_offsets.capacity() * size_of::<TextSize>()
-            + self.line_only_ascii_vec.capacity()
+        self.line_offsets.capacity() * size_of::<TextSize>() + self.line_only_ascii_vec.capacity()
     }
 
     /// Build the index for `text`, treating **every spelling of a line break** as one.
