@@ -1473,6 +1473,11 @@ pub fn a_spelling_of(type_of: &sema::types::Type) -> Option<String> {
     })
 }
 
+/// **Is this expression a member reached through `->`?** — the question a borrow asks before it treats a member as a
+/// subobject of a *local*: `&p->member` is a pointer into the pointee, not into `p`, and the pointee outlives the call.
+pub fn an_arrow_access(expression: &cpp_parser::CppSyntaxNode) -> bool {
+    crate::sema::resolve::member_access_of(expression).is_some_and(|access| access.arrow)
+}
 pub fn a_class_can_be_built_from(
     context: &CheckContext<'_>,
     class: &str,

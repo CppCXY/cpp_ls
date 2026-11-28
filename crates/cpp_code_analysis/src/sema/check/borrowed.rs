@@ -218,9 +218,17 @@ pub(crate) fn origin_of(
         CppExpr::UnaryExpr(unary) => {
             let operator = unary.get_operator_text();
             if operator.as_deref() == Some("&") {
+                // **`&x->member` is not a pointer into `x`.** `x` is a pointer, and the member lives in the *pointee*,
+                // which is somebody else's object and outlives this call: `&pUp->pAfter` returned from a function is a
+                // pointer into the caller's data. Measured on sqlite (`ext/misc/amatch.c`, `ext/misc/closure.c`): five
+                // `dangling-return` findings, every one of them this shape. The `.` form keeps its meaning — a member of
+                // a local dies with the local.
+                let operand = unary.get_operand()?;
+                if super::an_arrow_access(operand.syntax()) {
+                    return Some(unknown(unary.syntax().text().to_string()));
+                }
                 // `&x` — the address of the operand, which carries its origin.
-                let mut borrowed =
-                    origin_of(context, unary.get_operand()?.syntax(), function_body)?;
+                let mut borrowed = origin_of(context, operand.syntax(), function_body)?;
                 borrowed.address_of = true;
                 borrowed.description = unary.syntax().text().to_string();
                 return Some(borrowed);

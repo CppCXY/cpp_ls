@@ -212,3 +212,29 @@ Style &f() {
         "a local returned directly is still the finding this rule exists for",
     );
 }
+
+/// **`&p->member` is a pointer into the pointee, not into `p`.** `p` is a pointer, and the member lives in the
+/// object it points at — somebody else`s data that outlives the call. Measured on sqlite (`ext/misc/amatch.c`,
+/// `ext/misc/closure.c`): five findings, every one of them this shape, while the `.` form below is a real borrow.
+#[test]
+fn the_address_of_a_pointer_member_is_not_the_address_of_a_local() {
+    let through_a_pointer = "\
+struct node { struct node *pAfter; };
+static struct node *pick(struct node *pUp) { return &pUp->pAfter; }
+";
+    assert_silent_about(
+        &codes_of(through_a_pointer),
+        DiagnosticCode::DanglingReturn,
+        "the member belongs to the pointee, which outlives the call",
+    );
+
+    let of_a_local = "\
+struct node { struct node *pAfter; };
+static struct node *pick(void) { struct node up = {0}; return &up.pAfter; }
+";
+    assert_reported(
+        &codes_of(of_a_local),
+        DiagnosticCode::DanglingReturn,
+        "`up` is the function's own local, and its member dies with it",
+    );
+}
