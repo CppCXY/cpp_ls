@@ -406,7 +406,7 @@ impl<F: FileProvider + Clone> Session<F> {
             return None;
         }
         // **The file's own configuration**, whose language is the one this session worked out for it — see
-        // Session::config_for_file. The parser inside ender_cook reads the file, and it must read it as the
+        // Session::config_for_file. The parser inside 
         // language the checks are told.
         let config = self.config_for_file(&materials.path);
         Self::render_cook(&self.files, &config.config, materials)
