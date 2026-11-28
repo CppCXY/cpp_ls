@@ -184,8 +184,11 @@ pub fn check_files(
             {
                 continue;
             }
-            let start = in_the_file(finding.range.start_offset);
-            let (line, column) = position_of(&text, start);
+            // **A check`s range is already in the file.** `CheckContext::push` maps the reading`s range through the
+            // same view this loop used for errors (`add` → `in_the_file`), so mapping it again sends a *file* offset
+            // through the *rendering`s* map: measured on sqlite, `src/util.c`'s one finding was reported at line 1212
+            // instead of 455 — the offset had been mapped twice.
+            let (line, column) = position_of(&text, finding.range.start_offset);
             run.findings.push(Report {
                 file: file.clone(),
                 line,
