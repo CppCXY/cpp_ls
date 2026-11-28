@@ -139,8 +139,16 @@ impl Server {
         {
             command.arg("--log-path").arg("none");
         }
-        if let Ok(level) = Ok::<String, std::env::VarError>("info".to_string()) {
-            command.arg("--log-level").arg(level);
+        // **The level the suite was told to use** — `CPPLS_TEST_LOG_LEVEL=debug` and `CPPLS_TEST_LOG_PATH=<file>`
+        // are what the note above promises, and this line used to read the level from a *literal*: the variable was
+        // never consulted, so the one workflow the comment describes (watch a request that does not arrive) could
+        // not be run at all. `info` stays the default.
+        let level = std::env::var("CPPLS_TEST_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        command.arg("--log-level").arg(&level);
+        // **A file the test can read afterwards**, when the environment names one: a failure in CI then carries the
+        // server`s own account of what it was doing instead of a bare timeout.
+        if let Ok(path) = std::env::var("CPPLS_TEST_LOG_PATH") {
+            command.arg("--log-path").arg(path);
         }
         for argument in arguments {
             command.arg(argument);

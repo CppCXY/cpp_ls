@@ -497,6 +497,11 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
         // never goes idle: measured once as `index slice: … 2 to cook, 0 left` once a second for as long as a window
         // stayed open, with every diagnostic pull answered 1.4 s late because the pump held the lock it waited for.
         let mut no_progress = 0usize;
+        // **When the no-progress streak began**, because a slice count is not a clock: a first cook that spans more
+        // slices than the bound is a slow machine, not a stuck queue — measured from CI, where a file opened and
+        // left alone never got a rendering (`handshake::inactive` timed out waiting for its regions), which is what
+        // dropping the queue in the middle of a long cook looks like from the outside.
+        let mut no_progress_since: Option<std::time::Instant> = None;
         // **The load is not finished when the queue is empty.** The pump still writes the sharing cache, publishes
         // the first inactive regions and reads the open file's program; the bar used to end before that work, and the
         // machine stayed busy with no indicator. These flags keep it on screen until the post-drain work has run.
@@ -969,7 +974,19 @@ async fn index_in_background(context: ServerContextSnapshot, version: i64, load:
             } else {
                 no_progress + 1
             };
-            if no_progress >= 8 {
+            if no_progress == 0 {
+                no_progress_since = None;
+            } else {
+                no_progress_since.get_or_insert_with(std::time::Instant::now);
+            }
+            // **A slice count is not a clock.** Eight slices of a slow machine is a first cook that is still running,
+            // and dropping the queue under it is how a file opened and left alone never gets a rendering — measured
+            // from CI, where `handshake::inactive` timed out waiting for regions a dropped cook would have produced.
+            // The streak is also bounded in *time*, so a genuinely stuck queue is still abandoned.
+            const NO_PROGRESS_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+            let stuck = no_progress >= 8
+                && no_progress_since.is_some_and(|since| since.elapsed() >= NO_PROGRESS_PATIENCE);
+            if stuck {
                 let dropped = context
                     .analysis()
                     .update_session("drop the files that cannot be built", |session| {
