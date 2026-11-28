@@ -488,7 +488,15 @@ use std::path::{Path, PathBuf};
 /// shape in a real header — recorded no span, and a finding on that line was drawn on text no compiler reads. The
 /// spans are part of the record (`put_u32(rendered.inactive.len())`), and a cached rendering is served for the same
 /// content and configuration, so a warmed cache keeps the empty list until the version moves.
-pub const FORMAT_VERSION: u32 = 65;
+/// # Why this moved to 65
+///
+/// **A `#define` in a branch nobody can decide is now part of the timeline**, so a use site of it expands. The walk
+/// kept such a fact for what follows (the *state* that answers conditions) and the **timeline** — the record the cook
+/// expands from — never heard of it, so `#if A_FEATURE_VALUE == 1` / `#else` (with `A_FEATURE_VALUE` defined empty)
+/// left `SHAPE(Widget)` unexpanded in the program's own rendering. A rendering is stored, and serving one written
+/// before this is serving a text a compiler would not have produced — measured: the test for it failed on a warm
+/// cache and passed on a cold one, which is what a version bump is for.
+pub const FORMAT_VERSION: u32 = 66;
 
 /// **The fingerprint of the readers a summary was built by**, in the key.
 ///

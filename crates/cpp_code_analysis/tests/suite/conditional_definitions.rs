@@ -125,11 +125,9 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 /// == 1` is evaluated as `Inactive` rather than `Unknown`, so the `#else` branch's definition is dropped as dead
 /// instead of kept. The next target is the condition evaluator, not the walk.
 #[test]
-// **Ignored while it fails**, and it is a *different* defect from the one the walk fixed: the condition is undecidable
-// (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
-// branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
-// drops it.
-#[ignore = "known: the walk marks both branches` #define `in_force=false, visibility=Unknown`, and the rendering the test is answered from never calls `definitions()` at all — it is a cached render from an earlier, provisional walk"]
+// **The walk keeps such a `#define` and the timeline now records it too**, which is what makes the use site
+// expandable: the state answered *conditions* with it while the cook had never heard of the name, and the two
+// readings of one fact disagreed. See `walk_one_file`'s `Visibility::Unknown` arm.
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1

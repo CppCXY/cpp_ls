@@ -4295,6 +4295,31 @@ fn walk_one_file<'a>(
                     preprocess::guard::Visibility::Unknown if fact.kind.is_definition() => {
                         if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
                             unit.define(&fact.name, definition, path, fact.range.start_offset);
+                            // **And the timeline, so a use site can expand it.** The line above keeps the name in
+                            // the walk's *state*, which answers conditions; the cook expands from the **timeline**,
+                            // and a name only the state knows is a name no `SHAPE(Widget)` can use. Measured: the
+                            // program's own rendering kept the invocation while `unit.define` had been called for
+                            // both branches of the region.
+                            if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut())
+                            {
+                                timeline.record(frame, fact, source, false);
+                            }
+                            // The **body** too, which is the channel a conditional body is read through — the same
+                            // one the in-force facts below feed. The branch is not known, the body is written down
+                            // either way, and the steps arrive in source order, so `#else` is the one in force:
+                            // the branch a compiler takes when a feature macro's value is absent.
+                            if let Some(text) = fact.body_range.and_then(|range| {
+                                source.get(range.start_offset..range.start_offset + range.length)
+                            }) {
+                                let parameters = fact
+                                    .body_range
+                                    .and_then(|range| parameters_before(source, range.start_offset))
+                                    .map(Box::from);
+                                walked.conditional_bodies.insert(
+                                    Box::from(&*fact.name),
+                                    (fact.function_like, parameters, Box::from(text)),
+                                );
+                            }
                         }
                     }
                     preprocess::guard::Visibility::Unknown => {}
