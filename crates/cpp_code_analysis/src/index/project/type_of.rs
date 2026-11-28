@@ -590,7 +590,23 @@ pub(crate) fn type_of_expression_inner(
         return answer;
     }
 
-    if writes_a_name(written) {
+    // **A node whose kind is an operator is never a name read**, whatever its text says. A macro-expanded node
+    // carries the *argument`s* range, so the slice `written` reads is not the node`s text: measured on a C file,
+    // `n<0 ? 0 : U(*a) - U(*b)` — with `U(x)` defined as `table[x]` — read `written` as `"a"`, took this arm, and
+    // answered the type of `a` (`const unsigned char*`) for the whole `?:`. The kind is what the expansion did not
+    // corrupt; the text is.
+    let the_kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    let names_something = writes_a_name(written)
+        && !matches!(
+            the_kind,
+            cpp_parser::CppSyntaxKind::TernaryExpr
+                | cpp_parser::CppSyntaxKind::BinaryExpr
+                | cpp_parser::CppSyntaxKind::CallExpr
+                | cpp_parser::CppSyntaxKind::CastExpr
+                | cpp_parser::CppSyntaxKind::InitListExpr
+                | cpp_parser::CppSyntaxKind::UnaryExpr
+        );
+    if names_something {
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => {
                 let dt = declared_type(memo, index, declaring, scopes, root, path, &named, depth);

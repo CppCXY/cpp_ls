@@ -109,3 +109,26 @@ fn a_calling_convention_is_not_part_of_the_return_type() {
         "the function returns `void`, whatever its convention",
     );
 }
+
+/// **A node whose kind is an operator is not a name read**, whatever its text says — and a macro-expanded node
+/// carries the *argument`s* range, so its text is not its own.
+///
+/// Measured on sqlite (`src/util.c:452`): `return N<0 ? 0 : U(*a) - U(*b);` with `U(x)` defined as `table[x]` was
+/// typed as `const unsigned char*` — the type of `a` — and reported against an `int` return. The name arm took the
+/// node because its *slice* read `"a"`; the kind (`TernaryExpr`) is what the expansion did not corrupt.
+#[test]
+fn a_macro_expanded_ternary_is_judged_by_its_arms_not_its_text() {
+    let source = "\
+#define U(x) table[x]
+static unsigned char table[256];
+static int same(const unsigned char *a, const unsigned char *b, int n)
+{
+    return n<0 ? 0 : U(*a) - U(*b);
+}
+";
+    assert_silent_about(
+        &codes_of(source),
+        DiagnosticCode::ReturnTypeMismatch,
+        "both arms are `int`, so the conditional is an `int`",
+    );
+}
