@@ -541,6 +541,20 @@ impl<'a> CheckContext<'a> {
             return;
         }
 
+        // **"Nothing declares it" is a claim about a reading, and a reading with a header missing is not one.**
+        // `include-not-found` already reports the absent header; the names that would have come from it are absent for
+        // that reason, and reporting both is one fact told twice — the second time as a defect in the reader's code.
+        // Measured on sqlite: 593 `unresolved-call-or-receiver` findings, every one a name from a header the tree does
+        // not contain. A *macro* include is not this case: its target is unknown until the macro is expanded, which is
+        // why the rule does not report those either.
+        if code.claims_a_name_is_absent()
+            && self.summary.includes.iter().any(|include| {
+                include.resolved.is_none() && include.form != crate::IncludeForm::Macro
+            })
+        {
+            return;
+        }
+
         // **A C++-only rule says nothing about a C file** — see [`DiagnosticCode::is_cpp_only`]. The skip in
         // [`run_check`] covers a check that is entirely C++, and this covers the codes of a check that reports both.
         if self.is_c() && code.is_cpp_only() {

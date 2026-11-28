@@ -4543,3 +4543,23 @@ __attribute__((unused)) static int quiet(void) { return 0; }
         codes_of_a_file("/p/a.c", source)
     );
 }
+
+/// **A header that is not there is one fact, told once.** `include-not-found` reports the absent header, and the
+/// names that would have come from it are absent for that reason — a bare-name rule that reports them too tells the
+/// reader their code is wrong when their include path is.
+///
+/// Measured on sqlite: 593 `unresolved-call-or-receiver` findings, every one of them a name from a header this tree
+/// does not contain (`sqlite3.h` before it was generated, `tcl.h`, `jni.h`, `fts5parse.h`).
+#[test]
+fn a_missing_header_does_not_also_report_its_absent_names() {
+    let source = "#include <not_here.h>\nstatic int caller(void) { return from_a_header(); }\n";
+    let codes = codes_of_a_file("/p/a.c", source);
+    assert!(
+        codes.contains(&DiagnosticCode::IncludeNotFound),
+        "the missing header is reported: {codes:?}"
+    );
+    assert!(
+        !codes.contains(&DiagnosticCode::UndefinedName),
+        "and its names are not reported as undeclared on top of it: {codes:?}"
+    );
+}

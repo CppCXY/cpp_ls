@@ -488,6 +488,19 @@ impl DiagnosticCode {
                 | DiagnosticCode::AscendStdType
         )
     }
+    /// **Does this rule claim that nothing declares a name?** — the claim a header the reading never saw can falsify.
+    ///
+    /// `include-not-found` already reports the missing header, and the names that would have come from it are absent
+    /// for that reason. Reporting both is one fact told twice, and the second telling is the one a reader takes as a
+    /// defect in their code: measured on sqlite, 593 `unresolved-call-or-receiver` findings, every one of them a name
+    /// from a header this tree does not contain (`sqlite3.h` before it was generated, `tcl.h`, `jni.h`,
+    /// `fts5parse.h`).
+    pub fn claims_a_name_is_absent(self) -> bool {
+        matches!(
+            self,
+            DiagnosticCode::UndefinedName | DiagnosticCode::UndefinedField
+        )
+    }
 }
 
 /// **What a client may grey out** — the protocol calls these tags, and this is the crate's own vocabulary for them.
