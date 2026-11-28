@@ -9,7 +9,13 @@ use std::time::Duration;
 /// name inside it waits for the index to read them. A test whose subject *is* that closure therefore waits longer —
 /// see [`STD_LIBRARY_TIMEOUT`] — rather than the whole file being given a longer deadline, because a fixture that
 /// hangs should still fail in half a minute.
-pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// **The deadline is a ceiling, not a wait** — a warm run answers in milliseconds — and it has to absorb a
+/// *loaded* machine: `cargo test --workspace` runs several suites at once, and each handshake test spawns its own
+/// server, so a debug-build cook that takes two seconds alone can take tens of seconds while the other binaries
+/// are building or indexing. Measured: `handshake::features::the_folds_of_a_file_are_the_regions_a_reader_hides`
+/// failed one full-workspace run in three at thirty seconds, and passed alone in 4.7 s every time.
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The deadline for a test that makes the analysis read a standard-library header, which is real work.
 pub(crate) const STD_LIBRARY_TIMEOUT: Duration = Duration::from_secs(180);
