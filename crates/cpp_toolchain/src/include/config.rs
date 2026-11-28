@@ -1861,14 +1861,14 @@ fn target_macros(target: &str) -> Vec<CommandLineMacro> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config;
+
     /// **A database that names both `Foo.cpp` and `foo.cpp` means both.** Matching used to fold case before comparing,
     /// so on a case-sensitive filesystem — where the two are different translation units — a request for either could
     /// select the other's command: a plausible wrong compilation rather than a missing one
     /// (`docs/worklog.md` P2-9).
     #[test]
     fn an_exact_case_match_wins_over_a_folded_one() {
-        let database = config::parse_compile_commands(
+        let database = parse_compile_commands(
             r#"[
                 {"directory": "/p", "file": "/p/src/Foo.cpp", "arguments": ["clang++", "-DUPPER", "-c", "src/Foo.cpp"]},
                 {"directory": "/p", "file": "/p/src/foo.cpp", "arguments": ["clang++", "-Dlower", "-c", "src/foo.cpp"]}
@@ -1919,7 +1919,7 @@ mod tests {
     /// flags of the source beside it (`docs/worklog.md` P2-8).
     #[test]
     fn a_relative_command_file_is_resolved_against_its_directory() {
-        let database = config::parse_compile_commands(
+        let database = parse_compile_commands(
             r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-DFROM_BUILD", "-c", "../src/a.cpp"]}]"#,
         );
 
@@ -1950,7 +1950,7 @@ mod tests {
     /// name it was invoked with; the index needs one identity per file, so the command keeps both.
     #[test]
     fn the_presumed_name_is_the_spelling_the_database_wrote() {
-        let database = config::parse_compile_commands(
+        let database = parse_compile_commands(
             r#"[{"directory": "/p/build", "file": "../src/a.cpp", "arguments": ["clang++", "-c"]}]"#,
         );
         let config = CompilerConfig {

@@ -435,7 +435,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         region: Option<SourceRange>,
     ) -> Option<Token> {
         let lines = self.lines?;
-        if token.kind != cpp_parser::CppTokenKind::Identifier {
+        if token.kind != CppTokenKind::Identifier {
             return None;
         }
         // **The outermost call site** — the one the reader wrote — then the token's own place in the run, and the
@@ -462,7 +462,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         };
         match token.text.as_str() {
             "__LINE__" => Some(Token::new(
-                cpp_parser::CppTokenKind::IntegerLiteral,
+                CppTokenKind::IntegerLiteral,
                 (lines(at) as isize + self.line_base).max(1).to_string(),
                 token.range,
             )),
@@ -471,13 +471,13 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                 let value = counters.get();
                 counters.set(value + 1);
                 Some(Token::new(
-                    cpp_parser::CppTokenKind::IntegerLiteral,
+                    CppTokenKind::IntegerLiteral,
                     value.to_string(),
                     token.range,
                 ))
             }
             "__FILE__" => Some(Token::new(
-                cpp_parser::CppTokenKind::StringLiteral,
+                CppTokenKind::StringLiteral,
                 a_file_name_literal(self.file),
                 token.range,
             )),

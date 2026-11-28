@@ -32,7 +32,6 @@
 
 use crate::expand;
 use crate::macros;
-use crate::preprocess;
 use cpp_parser::{CppTokenKind, SourceRange};
 
 use crate::token::is_trivia;
@@ -442,7 +441,7 @@ fn expand_a_run_recording(tokens: &[Token], macros: &impl MacroValues) -> (Vec<T
     let unchanged = expansion
         .tokens
         .iter()
-        .all(|expanded| matches!(expanded.origin, preprocess::expand::Origin::Source));
+        .all(|expanded| matches!(expanded.origin, expand::Origin::Source));
     let tokens = expansion
         .tokens
         .into_iter()

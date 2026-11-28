@@ -433,7 +433,7 @@ pub struct LibrarySection {
     pub name: String,
     /// The library's root. Absolute, or relative to the workspace root.
     #[serde(default)]
-    pub path: std::path::PathBuf,
+    pub path: PathBuf,
     /// Directories **under `path`** searched for headers. Empty means `path` itself.
     #[serde(default)]
     pub includes: Vec<String>,
@@ -450,7 +450,7 @@ pub struct LibrarySection {
 
 impl LibrarySection {
     /// The root this library lives at, resolved against the workspace.
-    pub fn root(&self, workspace: &Path) -> std::path::PathBuf {
+    pub fn root(&self, workspace: &Path) -> PathBuf {
         if self.path.is_absolute() {
             self.path.clone()
         } else {
@@ -459,7 +459,7 @@ impl LibrarySection {
     }
 
     /// **The directories this library's headers live in**, resolved — what a depending target gets on its search path.
-    pub fn include_directories(&self, workspace: &Path) -> Vec<std::path::PathBuf> {
+    pub fn include_directories(&self, workspace: &Path) -> Vec<PathBuf> {
         let root = self.root(workspace);
         if self.includes.is_empty() {
             return vec![root];
@@ -471,7 +471,7 @@ impl LibrarySection {
     }
 
     /// The directories searched for module interfaces — `modules`, or the root.
-    pub fn module_directories(&self, workspace: &Path) -> Vec<std::path::PathBuf> {
+    pub fn module_directories(&self, workspace: &Path) -> Vec<PathBuf> {
         let root = self.root(workspace);
         if self.modules.is_empty() {
             return vec![root];

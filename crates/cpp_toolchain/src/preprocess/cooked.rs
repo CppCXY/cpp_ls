@@ -267,7 +267,7 @@ fn written_at(cooked: &ExpandedToken) -> Option<SourceRange> {
         Origin::Expanded { invocations } => match invocations.first().map(|it| it.written_in) {
             // The outermost invocation is the call the reader can see, and it is in this file; the *spelling* is
             // in the body's file, and it is the body's file that decides whether this map can name it.
-            Some(Some(macros::MacroFile::Here)) => Some(cooked.token.range),
+            Some(Some(MacroFile::Here)) => Some(cooked.token.range),
             _ => None,
         },
     }
@@ -327,7 +327,7 @@ impl RenderedCooked {
     /// the session's rendering budget, so the number has to include the spans: a closure of 600 000 tokens is
     /// 600 000 `RenderedSpan`s, which is as much as the text itself.
     pub fn weight(&self) -> usize {
-        self.text.len() + self.spans.len() * std::mem::size_of::<RenderedSpan>()
+        self.text.len() + self.spans.len() * size_of::<RenderedSpan>()
     }
 
     /// **A rendering whose parts were read back rather than produced** — the decoder's door.
@@ -726,7 +726,7 @@ pub struct ParsedDefinitions {
     /// Keyed by what identifies a definition: its name, its parameter list and its body. `Arc<str>` hashes by
     /// its contents, so the key is the text — the same thing [`definition_text`] would have built, without
     /// building it to find out whether it is already known.
-    parsed: std::collections::HashMap<DefinitionKey, Option<std::sync::Arc<macros::MacroDef>>>,
+    parsed: std::collections::HashMap<DefinitionKey, Option<std::sync::Arc<MacroDef>>>,
 }
 
 /// What identifies a definition: exactly what [`definition_text`] writes, in the three pieces it writes it from.
@@ -760,7 +760,7 @@ impl ParsedDefinitions {
         name: &str,
         parameters: Option<&std::sync::Arc<str>>,
         body: &std::sync::Arc<str>,
-    ) -> Option<std::sync::Arc<macros::MacroDef>> {
+    ) -> Option<std::sync::Arc<MacroDef>> {
         let key: DefinitionKey = (
             Box::from(name),
             parameters.cloned(),
@@ -794,7 +794,7 @@ impl ParsedDefinitions {
     /// not a definition this reader can put back together, which is the caller's to count.
     pub fn define_in(
         &mut self,
-        table: &mut macros::MacroTable,
+        table: &mut MacroTable,
         name: &str,
         parameters: Option<&str>,
         body: &str,
@@ -819,7 +819,7 @@ impl ParsedDefinitions {
 /// [`definition_text`] from a name, a parameter list and a body that arrived as *text*, so an offset in it is an
 /// offset in no file. `parse_define` answers [`MacroFile::Here`] because the tokens a *file* wrote are positions
 /// in that file; a caller that reconstructs has to say so itself, and this is the one caller that reconstructs.
-fn parse_a_definition(text: &str) -> Option<macros::MacroDef> {
+fn parse_a_definition(text: &str) -> Option<MacroDef> {
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
     let range = SourceRange::new(0, text.len());
     let tokens: Vec<token::Token> = tokens
@@ -1081,7 +1081,7 @@ pub trait MacroEnvironment {
 /// own `of(index)`; see `summary.rs`. An index this type does not recognise answers `None`, which is the same answer
 /// as a body that did not read — the definition is simply not in the table.
 pub trait UnitDefinitionsView {
-    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<macros::MacroDef>>;
+    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<MacroDef>>;
 }
 
 /// **What one file of a walked unit starts with**, as the cooker asks it: the unit's definitions *as that file
@@ -1138,7 +1138,7 @@ impl<'unit> FileMacros<'unit> {
     ///
     /// `None` for a name the in-force channel does not carry **or cannot use**: an unusable body is not in the
     /// table at all (it is counted instead), so it must not shadow the definitions underneath it.
-    fn in_force(&self, name: &str) -> Option<&'unit std::sync::Arc<macros::MacroDef>> {
+    fn in_force(&self, name: &str) -> Option<&'unit std::sync::Arc<MacroDef>> {
         if !self.use_in_force_bodies {
             return None;
         }
@@ -1152,13 +1152,13 @@ impl<'unit> FileMacros<'unit> {
     /// `None` rather than searching further back: the last entry is what a name *is* there, and that is what the
     /// name's collapse meant before this type existed. `None` is therefore "the unit says nothing usable", which
     /// leaves the seed underneath.
-    fn positional(&self, name: &str) -> Option<(usize, &'unit std::sync::Arc<macros::MacroDef>)> {
+    fn positional(&self, name: &str) -> Option<(usize, &'unit std::sync::Arc<MacroDef>)> {
         let (at, index) = self.view.visible_binding(name)?;
         Some((at, self.definitions.definition_of(index)?))
     }
 }
 
-impl macros::MacroBindings for FileMacros<'_> {
+impl MacroBindings for FileMacros<'_> {
     /// **What the table actually holds for a name**, behind an environment variable.
     ///
     /// Written because two facts can both be true and still not explain an output: a probe can prove a macro is
@@ -1167,7 +1167,7 @@ impl macros::MacroBindings for FileMacros<'_> {
     /// decides whether `NAME (args)` is a call at all. The shape is not visible from outside.
     ///
     /// `CPPLS_TRACE_MACRO=NAME` prints one line per lookup of that name, with everything the expander will see.
-    fn definition_at(&self, name: &str, offset: usize) -> Option<&macros::MacroDef> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&MacroDef> {
         let found = self.definition_at_traced(name, offset);
 
         // **The trace is asked for through `crate::probes`, which reads its variable once.** `definition_at` is the
@@ -1177,7 +1177,7 @@ impl macros::MacroBindings for FileMacros<'_> {
         found
     }
 
-    fn definition(&self, name: &str) -> Option<&macros::MacroDef> {
+    fn definition(&self, name: &str) -> Option<&MacroDef> {
         self.definition_at(name, usize::MAX)
     }
 }
@@ -1185,7 +1185,7 @@ impl macros::MacroBindings for FileMacros<'_> {
 impl FileMacros<'_> {
     /// The lookup [`crate::macros::MacroBindings::definition_at`] wraps, split out so the trace around it can see the
     /// answer without interfering with the early returns that produce it.
-    fn definition_at_traced(&self, name: &str, offset: usize) -> Option<&macros::MacroDef> {
+    fn definition_at_traced(&self, name: &str, offset: usize) -> Option<&MacroDef> {
         if let Some(definition) = self.in_force(name) {
             // In force from offset 0, so every offset sees it — see the type's note on the layer order.
             return Some(definition);
@@ -1218,7 +1218,7 @@ impl FileMacros<'_> {
 /// shape any reading uses.
 impl cpp_parser::MacroBodies for FileMacros<'_> {
     fn body_at(&self, name: &str, at: usize) -> Option<std::borrow::Cow<'_, str>> {
-        let definition = macros::MacroBindings::definition_at(self, name, at)?;
+        let definition = MacroBindings::definition_at(self, name, at)?;
 
         let mut spelling = String::new();
         for token in definition.body.significant() {
@@ -1239,14 +1239,14 @@ impl cpp_parser::MacroBodies for FileMacros<'_> {
 /// could add to, and every one of those bindings was already shared and immutable.
 struct Live<'base> {
     own: MacroTable,
-    base: &'base dyn macros::MacroBindings,
+    base: &'base dyn MacroBindings,
     /// **What `#pragma push_macro` has saved** — `(name, the definition that was in force)`, innermost last.
     ///
     /// A stack on the table rather than in it, because a push is not a binding: nothing about what a name *means* at
     /// an offset changes, and the only thing being recorded is what to come back to. `None` means the name was not
     /// defined when it was pushed, which `pop` restores by undefining it — the distinction between "was empty" and
     /// "was not there" is one `#ifdef` away from mattering.
-    pushed: Vec<(String, Option<std::sync::Arc<macros::MacroDef>>)>,
+    pushed: Vec<(String, Option<std::sync::Arc<MacroDef>>)>,
     /// **What `__has_include` is answered from**, when the caller supplied a search. `None` makes the operator
     /// `Unknown`, which is the honest answer for a cook that has no search paths — see [`HeaderSearch`].
     search: Option<&'base dyn HeaderSearch>,
@@ -1257,8 +1257,8 @@ struct Live<'base> {
     features: Option<&'base dyn include::feature::FeatureProbe>,
 }
 
-impl macros::MacroBindings for Live<'_> {
-    fn definition_at(&self, name: &str, offset: usize) -> Option<&macros::MacroDef> {
+impl MacroBindings for Live<'_> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&MacroDef> {
         // **An `#undef` in this file ends the search** — see `Over`'s note on the same rule. The header that defined a
         // name must not answer it after the file took it away; curl's `lib/multi.c` `#undef`s the public
         // `curl_multi_socket` macro and then defines the function of that name.
@@ -1270,7 +1270,7 @@ impl macros::MacroBindings for Live<'_> {
             .or_else(|| self.base.definition_at(name, offset))
     }
 
-    fn definition(&self, name: &str) -> Option<&macros::MacroDef> {
+    fn definition(&self, name: &str) -> Option<&MacroDef> {
         if self.own.undefined(name) {
             return None;
         }
@@ -1325,14 +1325,14 @@ impl Live<'_> {
     }
 }
 
-impl condition::MacroValues for Live<'_> {
-    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
+impl MacroValues for Live<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
         // The same answer the expansion path gives for this position: a name this walk has defined shadows what the
         // file started with. `Live` is only ever used by the condition evaluator through a
         // [`PositionalMacros`] wrapper, so this arm exists to keep the two spellings of the same question in step.
         match self.definition(name) {
-            Some(definition) => condition::Lookup::Defined(definition),
-            None => condition::Lookup::Undefined,
+            Some(definition) => Lookup::Defined(definition),
+            None => Lookup::Undefined,
         }
     }
 
@@ -1362,22 +1362,19 @@ impl condition::MacroValues for Live<'_> {
 /// and underneath it the builtins are the same table for every file in the run. Copying one into the other is what
 /// `MacroTable::extend_from` used to do per file — and it is a copy of bindings that are already shared.
 pub struct Over<'a> {
-    newest: &'a dyn macros::MacroBindings,
-    oldest: &'a dyn macros::MacroBindings,
+    newest: &'a dyn MacroBindings,
+    oldest: &'a dyn MacroBindings,
 }
 
 impl<'a> Over<'a> {
     /// `newest` wins wherever it has a binding in force; `oldest` answers everything else.
-    pub fn new(
-        newest: &'a dyn macros::MacroBindings,
-        oldest: &'a dyn macros::MacroBindings,
-    ) -> Self {
+    pub fn new(newest: &'a dyn MacroBindings, oldest: &'a dyn MacroBindings) -> Self {
         Over { newest, oldest }
     }
 }
 
-impl macros::MacroBindings for Over<'_> {
-    fn definition_at(&self, name: &str, offset: usize) -> Option<&macros::MacroDef> {
+impl MacroBindings for Over<'_> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&MacroDef> {
         // **An `#undef` in the newer layer ends the search.** `None` from `newest` means two different things —
         // "never mentioned here" and "taken away here" — and only the first may fall through to the older layer.
         // Measured on curl's `lib/multi.c`, which `#undef`s the public `curl_multi_socket` macro before defining the
@@ -1392,7 +1389,7 @@ impl macros::MacroBindings for Over<'_> {
             .or_else(|| self.oldest.definition_at(name, offset))
     }
 
-    fn definition(&self, name: &str) -> Option<&macros::MacroDef> {
+    fn definition(&self, name: &str) -> Option<&MacroDef> {
         if self.newest.undefined(name) {
             return None;
         }
@@ -1618,7 +1615,7 @@ impl<F: file::paths::FileProvider> HeaderSearch for Search<'_, F> {
 pub fn cook_with(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
 ) -> CookedStream {
     cook_with_search(source, tokens, initial, None, Path::new(""))
 }
@@ -1631,7 +1628,7 @@ pub fn cook_with(
 pub fn cook_with_file(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
     file: Option<&Path>,
 ) -> CookedStream {
     cook_with_file_and_features(source, tokens, initial, file, None)
@@ -1641,7 +1638,7 @@ pub fn cook_with_file(
 pub fn cook_with_file_and_features(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
     file: Option<&Path>,
     features: Option<&dyn include::feature::FeatureProbe>,
 ) -> CookedStream {
@@ -1685,7 +1682,7 @@ pub struct CookingState {
 pub fn cook_with_search(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
     search: Option<&dyn HeaderSearch>,
     directory: &Path,
 ) -> CookedStream {
@@ -1704,7 +1701,7 @@ pub fn cook_with_search(
 pub fn cook_with_search_and_state(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
     state: &mut CookingState,
     search: Option<&dyn HeaderSearch>,
     directory: &Path,
@@ -1720,7 +1717,7 @@ pub fn cook_with_search_and_state(
 pub fn cook_with_search_and_state_and_features(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &dyn macros::MacroBindings,
+    initial: &dyn MacroBindings,
     state: &mut CookingState,
     search: Option<&dyn HeaderSearch>,
     directory: &Path,
@@ -2143,7 +2140,7 @@ fn push_and_pop_macro(
     at: usize,
     live: &mut Live<'_>,
 ) -> bool {
-    let directive::Directive::Pragma { tokens } = &spanned.directive else {
+    let Directive::Pragma { tokens } = &spanned.directive else {
         return false;
     };
 
@@ -2272,7 +2269,7 @@ fn merge_span(spans: &mut Vec<SourceRange>, span: SourceRange) {
 fn decide(
     directive: &Directive,
     range: SourceRange,
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     tokens: &[CppTokenData],
     token_index: usize,
 ) -> Option<bool> {
@@ -2294,7 +2291,7 @@ fn decide(
 fn decide_a_condition(
     directive: &Directive,
     range: SourceRange,
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     tokens: &[CppTokenData],
     token_index: usize,
     line_starts: &mut Option<Vec<usize>>,
@@ -2389,7 +2386,7 @@ fn a_predefined_macro(
 /// names a macro at all.
 fn a_condition_mentions_the_position(
     directive: &Directive,
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     offset: usize,
 ) -> bool {
     let mentions = |name: &str| {
@@ -2409,7 +2406,7 @@ fn a_condition_mentions_the_position(
 
 /// Does `name`'s body, at `offset`, contain one of the two position names, directly or through another macro?
 fn a_body_mentions_the_position(
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     name: &str,
     offset: usize,
     depth: u32,
@@ -2435,7 +2432,7 @@ fn a_body_mentions_the_position(
 /// architecture's ladder) is expected to drive to zero.
 fn rests_on_an_undefined_name(
     directive: &Directive,
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     token_index: usize,
     tokens: &[CppTokenData],
 ) -> bool {
@@ -2520,7 +2517,7 @@ pub fn a_line_directive_changes(
         *line_base = number - (directive_line as isize + 1);
     }
     if let Some(name) = tokens.get(1)
-        && name.kind == cpp_parser::CppTokenKind::StringLiteral
+        && name.kind == CppTokenKind::StringLiteral
     {
         *file = Some(PathBuf::from(a_presumed_file_name(name.text())));
     }
@@ -2561,7 +2558,7 @@ fn expand_run(
     tokens: &[CppTokenData],
     from: usize,
     to: usize,
-    live: &dyn macros::MacroBindings,
+    live: &dyn MacroBindings,
     file: Option<&Path>,
     line_base: isize,
     out: &mut CookedStream,
@@ -2616,12 +2613,12 @@ mod tests {
     /// A configuration that defines nothing: every `#ifdef` is false, which is what the standard says.
     struct Nothing;
 
-    impl macros::MacroBindings for Nothing {
-        fn definition(&self, _name: &str) -> Option<&macros::MacroDef> {
+    impl MacroBindings for Nothing {
+        fn definition(&self, _name: &str) -> Option<&MacroDef> {
             None
         }
 
-        fn definition_at(&self, _name: &str, _offset: usize) -> Option<&macros::MacroDef> {
+        fn definition_at(&self, _name: &str, _offset: usize) -> Option<&MacroDef> {
             None
         }
     }

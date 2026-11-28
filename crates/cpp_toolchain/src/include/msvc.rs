@@ -461,7 +461,7 @@ pub fn predefined_macros_with(
     runner: &impl CommandRunner,
     msvc: &Msvc,
     standard: Option<&str>,
-    fallbacks: &[std::path::PathBuf],
+    fallbacks: &[PathBuf],
 ) -> Option<Vec<CommandLineMacro>> {
     let scratch = Scratch::new(fallbacks)?;
     let environment = msvc.environment();
@@ -545,7 +545,7 @@ impl Scratch {
     /// The system temporary directory first, then whatever the caller offered. `None` only when **every** base was
     /// refused, and each refusal is reported: an empty macro table is a wrong reading of every `#ifdef` in every
     /// header, so the reason has to be visible rather than inferred from a count of zero.
-    fn new(fallbacks: &[std::path::PathBuf]) -> Option<Scratch> {
+    fn new(fallbacks: &[PathBuf]) -> Option<Scratch> {
         // A clock reading is not unique across threads (Windows' resolution is 100ns, and two sessions ask at
         // once): two callers got the same name, one's `Drop` deleted the directory the other was creating, and the
         // loser saw "access denied" and an empty macro table. A counter cannot collide inside a process.

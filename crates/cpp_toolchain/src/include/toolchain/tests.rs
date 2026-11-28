@@ -15,7 +15,7 @@ use crate::include;
 fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
     // **The macro**, with a GNU macro table beside it: `nvcc` on Linux defines both, and the host dialect must not be
     // swallowed by the CUDA reading.
-    let macros = super::parse_builtin_macros("#define __GNUC__ 12\n#define __CUDACC__ 1\n");
+    let macros = parse_builtin_macros("#define __GNUC__ 12\n#define __CUDACC__ 1\n");
     assert!(
         a_cuda_toolchain(&macros, None),
         "`__CUDACC__` is nvcc's own word"
@@ -23,21 +23,18 @@ fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
 
     // **The name**, when there is no macro table to read.
     assert!(
-        a_cuda_toolchain(&[], Some(std::path::Path::new("/usr/local/cuda/bin/nvcc"))),
+        a_cuda_toolchain(&[], Some(Path::new("/usr/local/cuda/bin/nvcc"))),
         "an nvcc that could not be asked is still nvcc"
     );
 
     // **And neither**, which is the ordinary case: g++ and cl are not CUDA, and a project of theirs must not read
     // `__global__` as a qualifier.
-    let gnu = super::parse_builtin_macros("#define __GNUC__ 12\n");
+    let gnu = parse_builtin_macros("#define __GNUC__ 12\n");
     assert!(!a_cuda_toolchain(&gnu, None));
-    assert!(!a_cuda_toolchain(
-        &[],
-        Some(std::path::Path::new("/usr/bin/g++"))
-    ));
+    assert!(!a_cuda_toolchain(&[], Some(Path::new("/usr/bin/g++"))));
 
     // The switch itself: a CUDA toolchain's configuration turns the parser's flag on, and keeps the host dialect.
-    let toolchain = super::Toolchain {
+    let toolchain = Toolchain {
         compiler: Some("/usr/local/cuda/bin/nvcc".into()),
         version: None,
         system_include_paths: Vec::new(),
@@ -45,10 +42,10 @@ fn a_cuda_toolchain_is_recognised_and_turns_the_parsers_switch_on() {
         cuda: true,
         dialect: Some(Dialect::Gnu),
         standard: None,
-        source: super::ToolchainSource::CompileDatabase,
+        source: ToolchainSource::CompileDatabase,
         note: None,
     };
-    let config = toolchain.config(&super::CompilerConfig::new());
+    let config = toolchain.config(&CompilerConfig::new());
     assert!(config.cuda(), "the parser must read this project as CUDA");
     assert_eq!(
         config.dialect(),
@@ -111,12 +108,12 @@ fn both_compilers_search_lists_are_read_the_same_way() {
     // Normalized, which folds the `..` GCC prints and the separators Clang prints.
     assert_eq!(
         gcc[0],
-        std::path::Path::new("C:/tools/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++"),
+        Path::new("C:/tools/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++"),
         "the `bin/../lib` in the compiler's own output is folded"
     );
     assert_eq!(
         clang[0],
-        std::path::Path::new("C:/Program Files/LLVM/lib/clang/18/include")
+        Path::new("C:/Program Files/LLVM/lib/clang/18/include")
     );
 }
 
@@ -132,10 +129,7 @@ fn the_quoted_block_is_not_read() {
  /for/angles
 End of search list.
 ";
-    assert_eq!(
-        parse_search_list(output),
-        [std::path::PathBuf::from("/for/angles")]
-    );
+    assert_eq!(parse_search_list(output), [PathBuf::from("/for/angles")]);
 }
 
 #[test]
@@ -151,8 +145,8 @@ End of search list.
     assert_eq!(
         parse_search_list(output),
         [
-            std::path::PathBuf::from("/System/Library/Frameworks"),
-            std::path::PathBuf::from("/usr/include")
+            PathBuf::from("/System/Library/Frameworks"),
+            PathBuf::from("/usr/include")
         ]
     );
 }
@@ -235,9 +229,9 @@ fn the_environment_is_read_as_data() {
     // code. What matters is that the shape is usable without touching `std::env`, which is what the tests
     // below rely on.
     let environment = Environment {
-        cxx: Some(std::path::PathBuf::from("/opt/gcc/bin/g++")),
+        cxx: Some(PathBuf::from("/opt/gcc/bin/g++")),
         cc: None,
-        path: vec![std::path::PathBuf::from("/usr/bin")],
+        path: vec![PathBuf::from("/usr/bin")],
         path_extensions: Vec::new(),
     };
     assert_eq!(environment.path.len(), 1);
@@ -553,7 +547,7 @@ fn an_empty_installation_directory_is_not_a_compiler() {
 
     assert_eq!(
         find_compiler_among(&files, None, Path::new("/p/main.cpp"), &on_path, &[]),
-        Some(std::path::PathBuf::from("/mingw/bin/g++.exe"))
+        Some(PathBuf::from("/mingw/bin/g++.exe"))
     );
 }
 
@@ -1224,20 +1218,20 @@ fn a_c_file_is_asked_with_the_c_language_and_the_c_standards() {
         output: &'static str,
     }
 
-    impl super::CommandRunner for Recording {
+    impl CommandRunner for Recording {
         fn run(
             &self,
             _program: &Path,
             arguments: &[&str],
             _environment: &[(std::ffi::OsString, std::ffi::OsString)],
-        ) -> Option<super::Output> {
+        ) -> Option<Output> {
             self.asked.borrow_mut().push(
                 arguments
                     .iter()
                     .map(|argument| argument.to_string())
                     .collect(),
             );
-            Some(super::Output {
+            Some(Output {
                 stdout: String::new(),
                 stderr: self.output.to_string(),
                 status: Some(0),
@@ -1259,7 +1253,7 @@ End of search list.
         asked: RefCell::new(Vec::new()),
         output: C_SEARCH_LIST,
     };
-    let found = super::search_paths(
+    let found = search_paths(
         &runner,
         Path::new("/usr/bin/cc"),
         None,
@@ -1306,7 +1300,7 @@ fn a_cached_answer_reads_back_and_its_key_notices_a_difference() {
     let bytes = encode(&output).expect("it encodes");
     assert_eq!(decode(&bytes), Some(output));
 
-    let program = std::path::Path::new("/usr/bin/g++");
+    let program = Path::new("/usr/bin/g++");
     let empty: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
     let one = CachedCommands::the_key(program, &["-E", "-v"], &empty);
     let same = CachedCommands::the_key(program, &["-E", "-v"], &empty);

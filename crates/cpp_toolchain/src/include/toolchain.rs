@@ -138,13 +138,13 @@ pub struct DiskCommands;
 /// interface the discovery has to the outside world, so caching here cannot miss a call, and a new question added to
 /// the discovery is cached the day it is written.
 pub struct CachedCommands {
-    directory: std::path::PathBuf,
+    directory: PathBuf,
     inner: DiskCommands,
 }
 
 impl CachedCommands {
     /// The cache lives under the project's own cache directory, beside the summaries it is the environment of.
-    pub fn new(directory: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
         let _ = std::fs::create_dir_all(&directory);
         Self {
@@ -207,7 +207,7 @@ impl CachedCommands {
         hash::fnv1a64(&bytes)
     }
 
-    fn the_file(&self, key: u64) -> std::path::PathBuf {
+    fn the_file(&self, key: u64) -> PathBuf {
         self.directory.join(format!("{key:016x}.cache"))
     }
 
@@ -1339,10 +1339,7 @@ fn system_headers_fallback(
 /// What this is **not** is "the host compiler is MSVC": on Windows a CUDA project drives `cl.exe` as the host
 /// compiler, and finding `cl` says nothing about whether the driver is `nvcc`. The two layers are independent, which
 /// is the whole reason [`Toolchain::cuda`] and [`Toolchain::dialect`] are separate fields.
-fn a_cuda_toolchain(
-    builtin_macros: &[CommandLineMacro],
-    compiler: Option<&std::path::Path>,
-) -> bool {
+fn a_cuda_toolchain(builtin_macros: &[CommandLineMacro], compiler: Option<&Path>) -> bool {
     builtin_macros
         .iter()
         .any(|macro_| macro_.name.as_ref() == "__CUDACC__")

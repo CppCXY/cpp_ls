@@ -131,8 +131,8 @@ impl PositionalMacros<'_> {
     }
 }
 
-impl condition::MacroValues for PositionalMacros<'_> {
-    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
+impl MacroValues for PositionalMacros<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
         use crate::condition::Lookup;
 
         self.table
@@ -156,7 +156,7 @@ impl condition::MacroValues for PositionalMacros<'_> {
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<condition::Value> {
         if name == "__has_cpp_attribute" {
             let msvc = self.is_msvc();
-            let answer = preprocess::cooked::attribute_support_in(operand, msvc);
+            let answer = cooked::attribute_support_in(operand, msvc);
 
             return answer.map(condition::Value::Known);
         }
@@ -290,7 +290,7 @@ fn preprocess_using(
             // **The branch's verdict**, asked of the compilation rather than of the file's own table: these are
             // questions about names the compiler predefines (`__cplusplus`, `_MSC_VER`), and no directive above them
             // in this file has anything to say about those. `None` leaves the branch exactly as it was.
-            let taken = preprocess::environment::a_branch_is_taken(
+            let taken = environment::a_branch_is_taken(
                 is_a_macro,
                 kind,
                 &branch,

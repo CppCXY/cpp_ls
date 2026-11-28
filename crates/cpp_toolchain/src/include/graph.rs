@@ -1073,7 +1073,7 @@ pub struct Marked {
     ///
     /// The `Vec` itself stays: order is what decides shadowing, and the reverse scan in `is_defined` is over a
     /// handful of entries once this has said the name is there at all.
-    mentioned: std::collections::HashSet<Box<str>>,
+    mentioned: HashSet<Box<str>>,
     /// Definitions from the command line, kept so that a lookup can answer about a *value* as well as a name.
     command_line: Vec<macros::MacroDef>,
     /// Whether macros this state does not mention might still have been in force.
@@ -1141,7 +1141,7 @@ impl condition::MacroValues for Marked {
         // `#ifndef __has_cpp_attribute`, we answered "not defined", and the header then defined
         // `_HAS_MSVC_ATTRIBUTE(x)` as the literal `0` — so `_NO_SPECIALIZATIONS_MSG` was never defined and
         // `[[msvc::no_specializations(...)]]` vanished from `xtr1common:28`.
-        if preprocess::condition::is_a_builtin_operator(name) {
+        if condition::is_a_builtin_operator(name) {
             return Lookup::DefinedWithoutAValue;
         }
 
