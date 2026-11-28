@@ -254,3 +254,24 @@ static int *pick(struct term *p, int iTerm) { return &p->a[iTerm]; }
         "the array belongs to the pointee, which outlives the call",
     );
 }
+
+/// **The type written after the arrow is the return type.** `auto f() -> int&` declares a reference; the declarator
+/// holds no `&` (it is in the `TrailingReturnType`) and the specifier sequence holds `auto`, so every shape the module
+/// documents went silent when it was written in the trailing spelling — measured on the corpus
+/// (`corpus/findings/danger.cpp`, five shapes, none reported).
+#[test]
+fn a_trailing_return_type_is_a_borrowed_result_too() {
+    let reference = codes_of("auto f() -> int& {\n    int local = 0;\n    return local;\n}\n");
+    assert_reported(
+        &reference,
+        DiagnosticCode::DanglingReturn,
+        "the `&` is after the arrow",
+    );
+
+    let view = codes_of("auto f() -> std::string_view {\n    std::string s;\n    return s;\n}\n");
+    assert_reported(
+        &view,
+        DiagnosticCode::DanglingReturn,
+        "the view is named after the arrow",
+    );
+}

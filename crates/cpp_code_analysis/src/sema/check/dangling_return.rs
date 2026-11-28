@@ -77,17 +77,37 @@ impl Check for DanglingReturn {
 
             // **The result type is the declaration's own**: a `&`/`&&` part of the declarator makes a reference, a `*` part a
             // pointer, and the type's *name* is what `view_name_of` classifies.
-            let is_reference = declarator.is_a_reference();
-            let is_pointer = declarator.is_a_pointer();
-            let head = function
-                .get_decl_specifiers()
-                .map(|specifiers| {
-                    specifiers
-                        .get_type_name()
-                        .map(|name| name.get_qualified_name())
-                        .unwrap_or_else(|| specifiers.get_type_text())
-                })
-                .unwrap_or_default();
+            //
+            // **A trailing return type is the return type**, and it is the whole of what `auto f() -> int&` declares: the
+            // declarator holds no `&` (the `&` is in the `TrailingReturnType`) and the specifier sequence holds `auto`,
+            // so every one of the five shapes the module documents was silent when it was written after the arrow —
+            // measured on the corpus, which writes `auto reference_to_a_local() -> int&`. Same shape as the note in
+            // `function_head`.
+            let trailing = declarator.get_trailing_return_type().map(|written| {
+                cpp_parser::subtree_text_spaced(written.syntax())
+                    .trim()
+                    .to_string()
+            });
+            let head = match &trailing {
+                Some(written) => written.clone(),
+                None => function
+                    .get_decl_specifiers()
+                    .map(|specifiers| {
+                        specifiers
+                            .get_type_name()
+                            .map(|name| name.get_qualified_name())
+                            .unwrap_or_else(|| specifiers.get_type_text())
+                    })
+                    .unwrap_or_default(),
+            };
+            let is_reference = trailing.as_deref().map_or_else(
+                || declarator.is_a_reference(),
+                |written| written.ends_with('&'),
+            );
+            let is_pointer = trailing.as_deref().map_or_else(
+                || declarator.is_a_pointer(),
+                |written| written.ends_with('*'),
+            );
             let view = view_name_of(&head);
             if !is_reference && !is_pointer && view.is_none() {
                 continue;
