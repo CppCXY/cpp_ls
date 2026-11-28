@@ -23,6 +23,14 @@ pub async fn on_pull_document_diagnostic(
     };
     let for_the_query = path.clone();
     let retry_token = cancel_token.clone();
+    // **The reading first, before the question.** `prepare_for_a_diagnostic` is free when the file is read, cooked
+    // and has a view — three lookups under a `try_read` — and it is what makes the answer the *compiler's* reading
+    // rather than the raw parse. It used to be called only when the index had no summary at all, and that missed the
+    // window a pull actually arrives in: `didOpen` reads the file and the pump cooks it a moment later, so a pull
+    // between the two found a summary, answered from the raw text, and reported `expected ';' after expression` for
+    // a file that parses. Measured: `handshake::diagnostics::the_reported_file_is_answered` failed one full run in
+    // three on exactly that diagnostic, and passed when it ran alone.
+    let _ = context.analysis().prepare_for_a_diagnostic(&path).await;
     let mut outcome = snapshot_query(context.analysis(), cancel_token, move |session| {
         super::diagnose_file(session, &for_the_query).map(|(_, items)| items)
     })
