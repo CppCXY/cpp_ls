@@ -550,7 +550,7 @@ pub fn the_diagnostics(opened: &Opened) -> Result<Answer, String> {
             finding.message
         ));
     }
-    let mut findings: Vec<serde_json::Value> = found
+    let mut findings: Vec<Value> = found
         .errors
         .iter()
         .map(|error| {
@@ -966,11 +966,7 @@ pub fn the_sweep(
                 let in_the_file = view
                     .as_ref()
                     .and_then(|view| {
-                        view.file_offset_of(
-                            cpp_code_analysis::file::coordinates::ReadingOffset::new(
-                                finding.range.start_offset,
-                            ),
-                        )
+                        view.file_offset_of(ReadingOffset::new(finding.range.start_offset))
                     })
                     .map(|offset| offset.get())
                     .unwrap_or(finding.range.start_offset)

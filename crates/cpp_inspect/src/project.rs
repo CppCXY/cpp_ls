@@ -60,8 +60,8 @@ pub const DEFAULT_DATABASE: &str = "inspect.db";
 /// Two requests that agree on all of this can share the session; the ones that disagree cannot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Setup {
-    pub project: std::path::PathBuf,
-    pub file: std::path::PathBuf,
+    pub project: PathBuf,
+    pub file: PathBuf,
     pub index: bool,
     pub all_files: bool,
     pub cook: bool,
@@ -299,10 +299,10 @@ pub fn open(args: &ProjectArgs) -> Result<Opened, String> {
 /// entry point the pump uses, so a file that is already read is a cache hit. It stops at files with no resolved
 /// includes (a system header's own includes are read by `catch_up`'s own cascade) and at 4 096 files, which is more
 /// than any real closure and keeps a broken graph from looping.
-pub(crate) fn warm_the_closure(session: &mut cpp_code_analysis::Session, file: &Path) {
+pub(crate) fn warm_the_closure(session: &mut Session, file: &Path) {
     const LIMIT: usize = 4096;
     let mut pending = vec![file.to_path_buf()];
-    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     while let Some(path) = pending.pop() {
         if seen.len() >= LIMIT || !seen.insert(path.clone()) {
             continue;
