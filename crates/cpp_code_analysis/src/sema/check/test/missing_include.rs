@@ -36,6 +36,21 @@ fn a_type_used_without_its_header_is_reported() {
         DiagnosticCode::MissingInclude,
         "a type in a parameter list is a position this rule reads",
     );
+
+    // **A function's return type is the same question**, and the fact records it (`DeclFact::returns`) — the loop over
+    // declarations read only `type_of` and the parameter list, so no return type could ever be reported.
+    let a_return = codes_in(
+        &[
+            ("/p/onlyhere.h", "class OnlyHere {};\n"),
+            ("/p/returns.cpp", "OnlyHere* make();\n"),
+        ],
+        "/p/returns.cpp",
+    );
+    assert_reported(
+        &a_return,
+        DiagnosticCode::MissingInclude,
+        "a return type is a position this rule reads too",
+    );
 }
 
 /// **The `#include` is the fix, so a file that already writes it has no finding** — and neither has a file that

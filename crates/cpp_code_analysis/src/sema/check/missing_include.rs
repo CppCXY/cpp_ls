@@ -296,11 +296,18 @@ fn is_ours(context: &CheckContext<'_>, file: &Path) -> bool {
     })
 }
 
-/// The type spellings a declaration uses — its own type, and the types in its parameter list.
+/// The type spellings a declaration uses — its own type, its return type, and the types in its parameter list.
 fn types_this_declaration_uses(fact: &DeclFact) -> Vec<String> {
     let mut spellings: Vec<String> = Vec::new();
     if let Some(of) = &fact.type_of {
         spellings.push(of.to_string());
+    }
+    // **A function's return type is a spelling too.** `OnlyHere* make();` uses the type exactly as `OnlyHere x;` does,
+    // and the fact records it (`DeclFact::returns`) — but only `type_of` and the parameter list were read here, so no
+    // function's return type could ever be reported. Measured on the corpus: `auto returns_one() -> OnlyHere;` was
+    // silent while `OnlyHere a_variable;` on the line above was reported.
+    if let Some(returns) = &fact.returns {
+        spellings.push(returns.to_string());
     }
     if let Some(parameters) = &fact.parameter_list() {
         spellings.extend(parameters.split(',').map(|one| one.trim().to_string()));
