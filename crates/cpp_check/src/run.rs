@@ -119,11 +119,22 @@ pub fn check_files(
         run.stages.pump += pumped.elapsed();
         run.stages.pump_rounds += rounds;
         let diagnosed = Instant::now();
-        let Some(diagnostics) = session.diagnostics(file) else {
+        let Some(mut diagnostics) = session.diagnostics(file) else {
             run.no_reading.push(file.clone());
             run.tally.no_reading += 1;
             continue;
         };
+        // **A render made from the file`s own text carries no header macros**, and the parse then reports errors in
+        // correct code: `UINT64_C` — a `#define` a header holds — is a call to an undeclared name, and the reading is
+        // not the compiler`s. Measured on sqlite`s `src/vdbe.c`: the per-file cook produced 123 parse errors and the
+        // **unit read** (the closure stitched in include order, parsed once) produced none. It is asked only when the
+        // per-file render did not parse, because it costs the whole program rather than one file.
+        if !diagnostics.errors.is_empty() {
+            let _ = session.read_the_unit(file);
+            if let Some(again) = session.diagnostics(file) {
+                diagnostics = again;
+            }
+        }
         run.stages.diagnostics += diagnosed.elapsed();
 
         run.tally.checked += 1;
@@ -223,3 +234,4 @@ pub struct Tally {
     pub withheld: usize,
     pub parse_errors: usize,
 }
+
