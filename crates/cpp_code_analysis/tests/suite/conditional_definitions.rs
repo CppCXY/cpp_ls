@@ -129,7 +129,7 @@ fn an_unconditional_definition_from_the_same_header_does_expand() {
 // (an empty-bodied macro makes `#if A_FEATURE_VALUE == 1` unparseable after expansion), and the cook keeps neither
 // branch`s `#define` — so `SHAPE(Widget)` reaches the use site unexpanded. The evaluator is right; the cook is what
 // drops it.
-#[ignore = "known: `read_the_program` never reaches its cook for this fixture — the memoised indexed unit (`self.known`) short-circuits it, so the interface`s facts are never filed from a unit rendering"]
+#[ignore = "known: the unit`s rendering still holds `SHAPE(Widget)` — measured by this test`s own `render_the_unit` assertion — so the definition never reaches the stream"]
 fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let header = r#"#pragma once
 #if A_FEATURE_VALUE == 1
@@ -150,6 +150,16 @@ fn a_definition_in_a_branch_nobody_can_decide_is_still_in_force() {
     let mut session = session_with(files);
     let read = session.read_the_modules_a_file_imports(Path::new("src/main.cpp"));
     assert_eq!(read, 1, "one interface unit: `m.ixx`, and nothing else");
+    // **The unit's own rendering**, which is the text the program is parsed from — not `rendered_text_of`, which
+    // answers with the *file's own* cook where the invocation is still a macro call.
+    let unit = session
+        .render_the_unit(Path::new("lib/modules/m.ixx"))
+        .expect("the interface is a unit the session can render");
+    assert!(
+        unit.text.contains("struct Widget"),
+        "the unit's rendering holds the use site's expansion: {:?}",
+        unit.text
+    );
     let widgets = facts_named(&session, "Widget");
     assert!(
         widgets.iter().any(|(scope, _)| scope.is_none()),
