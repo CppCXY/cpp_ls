@@ -923,18 +923,17 @@ pub(crate) fn the_target_of_a_namespace_alias(
     }
     let range = scope.range?;
     let node = root.descendants().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NamespaceDecl
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl
             && cpp_parser::source_range(node.text_range()) == range
     })?;
-    if node.children().any(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::CompoundStat
-    }) {
+    if node
+        .children()
+        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+    {
         return None;
     }
     node.children()
-        .find(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
-        })
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
         .map(|child| child.text().to_string())
 }
 

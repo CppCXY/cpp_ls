@@ -17,10 +17,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A candidate that a unit already built reads is skipped — the question is "which timeline holds this file's
     /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
     /// this returns **one** unit, where the second pass used to walk a closure per file.
-    pub(crate) fn units_for_the_pass(
-        &self,
-        files: &[PathBuf],
-    ) -> Vec<std::sync::Arc<TranslationUnit>> {
+    pub(crate) fn units_for_the_pass(&self, files: &[PathBuf]) -> Vec<Arc<TranslationUnit>> {
         // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
         // that a project file is a root whose closure is the whole program and therefore covers the most — and the
         // argument was right about coverage and wrong about cost, because the units built here are a **local** vector
@@ -41,7 +38,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // asking with `C:\…` about a frame spelled `c:/…` answers `None` — which would build a unit per file and
         // put the whole cost back where it was.
         let mut candidates: Vec<PathBuf> = Vec::new();
-        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
         for path in files.iter() {
             let path = self
                 .store
@@ -81,7 +78,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The sequential loop is also the one that walks **fewer** timelines: it skips a candidate an earlier unit
         // already covers, which is roughly 541 of 1729 on that project and is exactly what running first gives up.
-        let mut units: Vec<std::sync::Arc<TranslationUnit>> = Vec::new();
+        let mut units: Vec<Arc<TranslationUnit>> = Vec::new();
 
         // **A unit already in memory may cover this file, and then there is nothing to walk.**
         //
@@ -93,13 +90,13 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The key carries the environment (`SummaryKey::env_hash`), so a summary built from one root's environment is
         // filed under it: reusing a unit can produce a *different* entry, never a wrong one.
-        let held: Vec<std::sync::Arc<TranslationUnit>> = {
+        let held: Vec<Arc<TranslationUnit>> = {
             let table = self.held_units();
             table
                 .held
                 .values()
                 .filter(|held| !held.provisional)
-                .map(|held| std::sync::Arc::clone(&held.unit))
+                .map(|held| Arc::clone(&held.unit))
                 .collect()
         };
         let mut still_to_walk: Vec<PathBuf> = Vec::new();
@@ -108,11 +105,8 @@ impl<F: FileProvider + Clone> Session<F> {
                 .iter()
                 .find(|unit| unit.environment_of(&candidate).is_some())
             {
-                if !units
-                    .iter()
-                    .any(|known| std::sync::Arc::ptr_eq(known, unit))
-                {
-                    units.push(std::sync::Arc::clone(unit));
+                if !units.iter().any(|known| Arc::ptr_eq(known, unit)) {
+                    units.push(Arc::clone(unit));
                 }
                 continue;
             }
@@ -144,7 +138,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn walk_the_timelines(
         &self,
         roots: Vec<PathBuf>,
-    ) -> Vec<(PathBuf, Option<std::sync::Arc<TranslationUnit>>)> {
+    ) -> Vec<(PathBuf, Option<Arc<TranslationUnit>>)> {
         roots
             .into_iter()
             .map(|root| {
@@ -903,10 +897,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// scope. The second pass repairs that, and until it runs, a **check** reading this summary is reading an answer
     /// that is about to change.
     pub fn is_owed_a_re_read(&self, path: &Path) -> bool {
-        let key = file::paths::normalize_path(path, cfg!(windows));
+        let key = normalize_path(path, cfg!(windows));
         self.parsed_since_the_last_pass
             .iter()
-            .any(|queued| file::paths::normalize_path(queued, cfg!(windows)) == key)
+            .any(|queued| normalize_path(queued, cfg!(windows)) == key)
     }
 
     /// **Does anything this file can see wait for the second pass?** — the closure question behind

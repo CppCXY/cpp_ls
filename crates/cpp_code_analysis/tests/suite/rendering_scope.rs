@@ -65,7 +65,7 @@ fn a_scope_opened_by_another_files_body_is_in_the_rendering() {
     // **And the same file read the way the index is supposed to read it**: the rendering, through the indexer. The
     // question this answers is whether the scope survives *that* path — the session test's failure cannot be blamed on
     // the commit if the summary built here already has no scope.
-    let empty = cpp_code_analysis::MemoryFiles::new();
+    let empty = MemoryFiles::new();
     let config = CompilerConfig::default();
     let indexer = cpp_code_analysis::FileIndexer::new(&empty, &config);
     let read = indexer.index_rendering(

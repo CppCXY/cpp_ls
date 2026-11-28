@@ -39,10 +39,7 @@ pub(crate) fn a_project_can_decline_to_read_its_other_roots() {
         WatchFilter::new("/p"),
         CompilerConfig::default(),
     );
-    session.add_project_files([
-        std::path::PathBuf::from("/p/a.cpp"),
-        std::path::PathBuf::from("/p/b.cpp"),
-    ]);
+    session.add_project_files([PathBuf::from("/p/a.cpp"), PathBuf::from("/p/b.cpp")]);
     session.did_open("/p/a.cpp", a);
     session.index_everything();
 
@@ -51,7 +48,7 @@ pub(crate) fn a_project_can_decline_to_read_its_other_roots() {
     let first = session
         .read_a_program_now()
         .expect("the reader's own program");
-    assert_eq!(first.root, std::path::Path::new("/p/a.cpp"));
+    assert_eq!(first.root, Path::new("/p/a.cpp"));
 
     // **And then nothing is owed**, however long the pause: `b.cpp` is a root nobody has open, which this project
     // asked not to read.
@@ -67,7 +64,7 @@ pub(crate) fn a_project_can_decline_to_read_its_other_roots() {
     assert!(
         !session
             .index()
-            .the_program_that_read(std::path::Path::new("/p/b.cpp"))
+            .the_program_that_read(Path::new("/p/b.cpp"))
             .is_some(),
         "and `b.cpp` was not read"
     );

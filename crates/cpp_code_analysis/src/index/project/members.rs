@@ -177,12 +177,12 @@ pub(crate) fn the_braced_initialiser_of(
     // **The list is wrapped**: `Pair p{1, 2.5}` is `InitDeclarator > [Declarator "p", Initializer "{1, 2.5}"]`, and the
     // `Initializer` holds the `InitListExpr`. One hop, not a search: a subtree search would also find a braced list in an
     // argument (`Pair p(make(1))`'s nested calls), which is not this declaration's initialisation.
-    let initializer = parent.children().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Initializer
-    })?;
-    initializer.children().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::InitListExpr
-    })
+    let initializer = parent
+        .children()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)?;
+    initializer
+        .children()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitListExpr)
 }
 
 /// **A member of the class the cursor is inside** — the second half of C++'s unqualified name lookup.
@@ -265,9 +265,7 @@ pub(crate) fn the_elements_of_a_braced_list(
 ) -> Vec<cpp_parser::CppSyntaxNode> {
     let mut elements: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
     for child in expression.children().skip(1) {
-        match cpp_parser::CppSyntaxKind::from(child.kind())
-            == cpp_parser::CppSyntaxKind::InitListExpr
-        {
+        match CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitListExpr {
             true => elements.extend(child.children()),
             false => elements.push(child),
         }
@@ -366,8 +364,8 @@ pub(crate) fn a_namespace_aliass_target(
 pub(crate) fn the_deduction_the_standard_fixes(
     name: &str,
     class_as_written: &str,
-    element_types: &[sema::types::Type],
-) -> Option<Vec<sema::types::Type>> {
+    element_types: &[Type],
+) -> Option<Vec<Type>> {
     let plain = class_as_written
         .rsplit("::")
         .next()
@@ -441,15 +439,15 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     if spelled.contains('<') {
         return None;
     }
-    let class = sema::types::parse_type_spelling(spelled);
-    let sema::types::Type::Named { name, arguments } = &class else {
+    let class = parse_type_spelling(spelled);
+    let Type::Named { name, arguments } = &class else {
         return None;
     };
     if !arguments.is_empty() {
         return None;
     }
 
-    let element_types: Vec<sema::types::Type> = elements
+    let element_types: Vec<Type> = elements
         .iter()
         .filter_map(|element| {
             match type_of_expression_memoed(
@@ -512,7 +510,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
     // started: a table that exists so that a walk is unnecessary cannot be read after it.
     if let Some(deduced) = the_deduction_the_standard_fixes(name, &class_as_written, &element_types)
     {
-        return Some(sema::types::Type::Named {
+        return Some(Type::Named {
             name: class_as_written,
             arguments: deduced,
         });
@@ -540,7 +538,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         return None;
     }
 
-    let mut agreed: Option<Vec<sema::types::Type>> = None;
+    let mut agreed: Option<Vec<Type>> = None;
     for constructor in listed
         .members
         .iter()
@@ -554,7 +552,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         );
         // Every parameter must have been replaced: one left standing is not a deduction.
         let every = deduced.iter().all(|argument| {
-            !matches!(argument, sema::types::Type::Named { name, .. }
+            !matches!(argument, Type::Named { name, .. }
                 if parameters.iter().any(|parameter| parameter == name))
         });
         if !every {
@@ -567,7 +565,7 @@ pub(crate) fn the_arguments_a_braced_initialisation_deduces(
         }
     }
 
-    agreed.map(|arguments| sema::types::Type::Named {
+    agreed.map(|arguments| Type::Named {
         name: name.clone(),
         arguments,
     })
@@ -588,8 +586,8 @@ pub(crate) fn the_pointee_of_a_handle(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
-    arguments: &[sema::types::Type],
-) -> Option<(String, Vec<sema::types::Type>)> {
+    arguments: &[Type],
+) -> Option<(String, Vec<Type>)> {
     let written: Vec<String> = arguments
         .iter()
         .map(|argument| argument.to_string())
@@ -2136,7 +2134,7 @@ pub(crate) fn direct_members(
         // asked for by that name. A name whose declarations live in two different classes stays ambiguous.
         Known::Unknown(UnknownReason::Ambiguous(_)) => {
             if let Known::Yes(found) = index.definitions(class, path) {
-                let names: std::collections::BTreeSet<String> = found
+                let names: BTreeSet<String> = found
                     .found
                     .iter()
                     .filter(|declaration| declaration.fact.kind == DeclKind::Type)

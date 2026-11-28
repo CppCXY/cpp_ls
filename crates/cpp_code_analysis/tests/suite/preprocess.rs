@@ -450,7 +450,7 @@ fn defined_names_are_sorted_and_deduplicated() {
 
 /// A table that defines nothing.
 fn no_macros() -> impl MacroValues {
-    cpp_code_analysis::condition::NoMacros
+    NoMacros
 }
 
 /// Evaluate a condition written inside `#if ...`.
@@ -467,14 +467,14 @@ fn condition_value(source: &str, macros: &impl MacroValues) -> Value {
 struct HalfKnown;
 
 impl MacroValues for HalfKnown {
-    fn lookup(&self, name: &str) -> cpp_code_analysis::Lookup<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
         match name {
             // Defined by a `#define` this table read, whose body it did not keep.
-            "HERE" => cpp_code_analysis::Lookup::DefinedWithoutAValue,
+            "HERE" => Lookup::DefinedWithoutAValue,
             // Explicitly `#undef`ed by a file this table read: a definite no.
-            "GONE" => cpp_code_analysis::Lookup::Undefined,
+            "GONE" => Lookup::Undefined,
             // Nothing this table read mentions it. Not the same answer.
-            _ => cpp_code_analysis::Lookup::Unanswered,
+            _ => Lookup::Unanswered,
         }
     }
 }
@@ -1084,7 +1084,7 @@ fn a_define_in_an_else_branch_is_inside_a_guard() {
     assert!(
         matches!(
             guard.visibility(&preprocessing.macros_at(offset)),
-            cpp_code_analysis::Visibility::Inactive
+            Visibility::Inactive
         ),
         "and the branch it is in is the one not taken"
     );

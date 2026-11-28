@@ -123,7 +123,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `[completion] suggest_unincluded = false` turns the whole thing off.
     pub(crate) fn the_files_this_file_could_include(
         &self,
-        path: &std::path::Path,
+        path: &Path,
     ) -> Vec<completion::Unincluded> {
         if !self
             .project_config()
@@ -167,7 +167,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 continue;
             }
             // **Already reached** by an `#include`, transitively: its names are visible, so there is nothing to add.
-            let key = file::paths::normalize_path(file, cfg!(windows));
+            let key = normalize_path(file, cfg!(windows));
             if reached.contains(&key) {
                 continue;
             }
@@ -207,11 +207,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// or last `import` for the other. An item whose inclusion cannot be placed (a file whose text is not the one the
     /// completion was computed on) keeps its name and loses its edit, which is the harmless direction: the reader sees
     /// the name and no include, rather than an edit at an offset that may have moved.
-    pub(crate) fn attach_the_inclusions(
-        &self,
-        offered: &mut CompletionSet,
-        path: &std::path::Path,
-    ) {
+    pub(crate) fn attach_the_inclusions(&self, offered: &mut CompletionSet, path: &Path) {
         if !offered.items.iter().any(|item| item.inclusion.is_some()) {
             return;
         }

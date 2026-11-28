@@ -51,7 +51,7 @@ fn imports_of<'a>(
     graph: &'a ModuleGraph,
     interner: &PathInterner,
     file: &str,
-) -> Vec<&'a cpp_code_analysis::ImportEdge> {
+) -> Vec<&'a ImportEdge> {
     let id = interner.get(Path::new(file)).unwrap_or_else(|| {
         panic!(
             "{file} is not in the graph; analysed: {:?}",
@@ -1429,11 +1429,11 @@ fn the_standard_module_is_found_in_gcc_include_tree() {
     session.index_everything();
 
     assert!(
-        session.imports_a_module_that_is_not_read(std::path::Path::new("/p/std_demo.cpp")),
+        session.imports_a_module_that_is_not_read(Path::new("/p/std_demo.cpp")),
         "the module is not in the index yet — the state a request finds when it arrives first"
     );
     assert_eq!(
-        session.read_the_modules_a_file_imports(std::path::Path::new("/p/std_demo.cpp")),
+        session.read_the_modules_a_file_imports(Path::new("/p/std_demo.cpp")),
         1,
         "the request path resolves `std` and reads it in"
     );
@@ -1445,7 +1445,7 @@ fn the_standard_module_is_found_in_gcc_include_tree() {
 
     let found = session
         .index()
-        .definitions("std::vector", std::path::Path::new("/p/std_demo.cpp"));
+        .definitions("std::vector", Path::new("/p/std_demo.cpp"));
     assert!(
         matches!(found, cpp_code_analysis::Known::Yes(_)),
         "so a name the module exports is in the index for the importer: {found:?}"
@@ -1494,7 +1494,7 @@ fn an_exported_namespace_and_its_concept_are_exported_facts() {
 
     let summary = session
         .index()
-        .summary(std::path::Path::new("src/math.cppm"))
+        .summary(Path::new("src/math.cppm"))
         .expect("the unit is indexed");
     let exported = |name: &str| {
         summary
@@ -1622,7 +1622,7 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
     let providers = SessionFiles::new(OpenDocuments::new(), files);
     let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
-    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
+    session.want_cooked_reading(Path::new("src/main.cpp"));
     session.index_everything();
 
     // The read is the step under test, so it is asked for by name rather than left to a handler.
@@ -1679,7 +1679,7 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
     // **The ask, and then the pump**: `Session::view` is a request for the cooked reading and answers `None` until
     // something has asked for it — the pair every other fixture in this workspace uses.
-    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
+    session.want_cooked_reading(Path::new("src/main.cpp"));
     session.index_everything();
 
     let view = session.view("src/main.cpp").expect("the file is held");
@@ -1730,7 +1730,7 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
         std::path::PathBuf::from("src/mylib.ixx"),
     ]);
     // **The ask, and then the pump** — see the note on the fixture above.
-    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
+    session.want_cooked_reading(Path::new("src/main.cpp"));
     session.index_everything();
 
     let view = session.view("src/main.cpp").expect("the file is held");
@@ -1832,7 +1832,7 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
         Session::with_config(".", providers, WatchFilter::new("."), CompilerConfig::new());
     session.add_project_files([std::path::PathBuf::from("src/shapes.cppm")]);
     // **The ask, and then the pump** — see the note on the fixture above.
-    session.want_cooked_reading(std::path::Path::new("src/shapes.cppm"));
+    session.want_cooked_reading(Path::new("src/shapes.cppm"));
     session.index_everything();
 
     let view = session.view("src/shapes.cppm").expect("the file is held");
@@ -1864,7 +1864,7 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
         std::path::PathBuf::from("src/shapes.cppm"),
         std::path::PathBuf::from("src/shapes-area.cppm"),
     ]);
-    session.want_cooked_reading(std::path::Path::new("src/shapes.cppm"));
+    session.want_cooked_reading(Path::new("src/shapes.cppm"));
     session.index_everything();
 
     let view = session.view("src/shapes.cppm").expect("the file is held");
@@ -2018,7 +2018,7 @@ fn the_interface_unit_of_an_imported_module_can_be_queued_instead_of_read() {
     );
 
     session.did_open(
-        std::path::Path::new("src/main.cpp"),
+        Path::new("src/main.cpp"),
         "import std;\nstd::string greeting;\n",
     );
     // The pump asks after a drain, so the file has a summary again by then — an edit drops it, and a summary is what
@@ -2107,7 +2107,7 @@ fn a_module_unit_is_read_as_a_translation_unit() {
     }
 
     assert_eq!(
-        session.read_the_modules_a_file_imports(std::path::Path::new("/p/std_demo.cpp")),
+        session.read_the_modules_a_file_imports(Path::new("/p/std_demo.cpp")),
         1,
         "the request path finds the interface unit"
     );
@@ -2136,7 +2136,7 @@ fn a_module_unit_is_read_as_a_translation_unit() {
         opened.is_none(),
         "a file that imports a module is served by the module's reading: {opened:?}"
     );
-    let header = std::path::Path::new("/inc/bits/thing.h");
+    let header = Path::new("/inc/bits/thing.h");
     let declarations = session
         .index()
         .cooked_declarations(header)
@@ -2154,10 +2154,10 @@ fn a_module_unit_is_read_as_a_translation_unit() {
     assert_eq!(
         session
             .index()
-            .the_program_that_read(std::path::Path::new("/p/std_demo.cpp")),
+            .the_program_that_read(Path::new("/p/std_demo.cpp")),
         session
             .index()
-            .the_program_that_read(std::path::Path::new("/inc/bits/std.cc")),
+            .the_program_that_read(Path::new("/inc/bits/std.cc")),
         "a file that imports a module is compiled with the module's build"
     );
 }
@@ -2208,10 +2208,10 @@ fn a_partition_named_with_an_underscore_is_found_and_its_names_are_visible() {
         std::path::PathBuf::from("src/geometry_area.cppm"),
         std::path::PathBuf::from("src/use.cpp"),
     ]);
-    session.want_cooked_reading(std::path::Path::new("src/use.cpp"));
+    session.want_cooked_reading(Path::new("src/use.cpp"));
     session.index_everything();
 
-    let use_file = std::path::Path::new("src/use.cpp");
+    let use_file = Path::new("src/use.cpp");
     let rect = session.index().definition("Rect", use_file);
     assert!(
         matches!(rect, Known::Yes(ref found) if found.file.ends_with("geometry_shapes.cppm")),

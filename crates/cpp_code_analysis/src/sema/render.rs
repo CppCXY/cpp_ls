@@ -1039,12 +1039,8 @@ mod tests {
             .unwrap_or_else(|| panic!("{name} must be a fact: {facts:?}"));
         // **The node at the name**, which is how the session finds it — a template's declaration starts at
         // `template`, and a class's fact starts at `class`, so a range match on the fact's start finds neither.
-        let declaration =
-            cpp_parser::token_at(&root, fact.name_range.start_offset).and_then(|token| {
-                token
-                    .parent_ancestors()
-                    .find_map(cpp_parser::CppDeclaration::cast)
-            });
+        let declaration = cpp_parser::token_at(&root, fact.name_range.start_offset)
+            .and_then(|token| token.parent_ancestors().find_map(CppDeclaration::cast));
         an_item(fact, declaration.as_ref(), None)
     }
 

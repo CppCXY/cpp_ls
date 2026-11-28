@@ -850,10 +850,7 @@ fn directly_initialized_at(root: &CppSyntaxNode, offset: usize) -> Option<(Strin
             let class = specifiers
                 .descendants_with_tokens()
                 .filter_map(|element| element.into_token())
-                .filter(|token| {
-                    cpp_parser::CppTokenKind::from(token.kind())
-                        == cpp_parser::CppTokenKind::Identifier
-                })
+                .filter(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
                 .last()
                 .map(|token| token.text().to_string())?;
             return Some((class, child));

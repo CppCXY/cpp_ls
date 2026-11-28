@@ -726,7 +726,7 @@ where
             }
             // **The last identifier is the name**, and a parameter without one has no place for a label: the tokens
             // before it are the type (`auto`, `auto&&`), and a default value or a pack comes after.
-            let Some(name) = cpp_parser::CppAstNode::syntax(&parameter)
+            let Some(name) = CppAstNode::syntax(&parameter)
                 .descendants_with_tokens()
                 .filter_map(|element| element.into_token())
                 .filter(|token| {
@@ -741,7 +741,7 @@ where
             if !contains(range, at) {
                 continue;
             }
-            if let Some(label) = deduce(cpp_parser::CppAstNode::syntax(&parameter))
+            if let Some(label) = deduce(CppAstNode::syntax(&parameter))
                 && is_a_type_spelling(&label)
             {
                 hints.push(TypeHint {

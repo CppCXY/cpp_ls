@@ -546,9 +546,7 @@ pub(crate) fn the_concept_parameters(
     name: &str,
 ) -> Option<String> {
     for declaration in root.descendants() {
-        if cpp_parser::CppSyntaxKind::from(declaration.kind())
-            != cpp_parser::CppSyntaxKind::ConceptDecl
-        {
+        if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::ConceptDecl {
             continue;
         }
         let text = declaration.text().to_string();
@@ -585,9 +583,7 @@ pub(crate) fn the_concept_definition(
     name: &str,
 ) -> Option<String> {
     for declaration in root.descendants() {
-        if cpp_parser::CppSyntaxKind::from(declaration.kind())
-            != cpp_parser::CppSyntaxKind::ConceptDecl
-        {
+        if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::ConceptDecl {
             continue;
         }
         let text = declaration.text().to_string();
@@ -641,15 +637,16 @@ pub(crate) fn the_overload_a_call_names(
     // **The call the cursor's name is the callee of.** A name that is not called has no arguments, so there is nothing to
     // decide a condition against and the set stands as it is.
     let name = sema::resolve::expression_at(root, offset)?;
-    let call = name.ancestors().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::CallExpr
-    })?;
+    let call = name
+        .ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr)?;
     // **The arguments are the call's children after the callee**, and not always wrapped in an `ArgumentList`: measured,
     // `describe(1.5)` is `CallExpr > [IdentifierExpr, LiteralExpr]`. Asking only for the wrapper found none and answered
     // "this name is not called", which is why the narrowing never ran.
-    let arguments: Vec<cpp_parser::CppSyntaxNode> = match call.children().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ArgumentList
-    }) {
+    let arguments: Vec<cpp_parser::CppSyntaxNode> = match call
+        .children()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ArgumentList)
+    {
         Some(list) => list.children().collect(),
         None => call.children().skip(1).collect(),
     };
@@ -679,10 +676,7 @@ pub(crate) fn the_overload_a_call_names(
         // binding's text was `describe(T value)` for both overloads, so the condition was never found and nothing narrowed.
         let declaration_node = the_candidate
             .ancestors()
-            .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind())
-                    == cpp_parser::CppSyntaxKind::Declaration
-            })
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
             .unwrap_or_else(|| the_candidate.clone());
         let declaration = declaration_node.text().to_string();
         // **A `requires` clause is read from its own node**, because the clause and the declaration that follows it are
@@ -691,10 +685,7 @@ pub(crate) fn the_overload_a_call_names(
         // the text and needs no node.
         let requires_clause = declaration_node
             .descendants()
-            .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind())
-                    == cpp_parser::CppSyntaxKind::RequiresClause
-            })
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause)
             .map(|node| node.text().to_string())
             .and_then(|text| sema::constraint::a_requires_clause(&text).map(str::to_string));
         let condition_owned = requires_clause
@@ -802,12 +793,10 @@ pub(crate) fn the_class_a_definition_is_written_for(
     let mut node = cpp_parser::token_at(root, offset).and_then(|token| token.parent());
 
     while let Some(current) = node {
-        let is_a_definition = cpp_parser::CppSyntaxKind::from(current.kind())
-            == cpp_parser::CppSyntaxKind::Declaration
-            && current.children().any(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::CompoundStat
-            });
+        let is_a_definition = CppSyntaxKind::from(current.kind()) == CppSyntaxKind::Declaration
+            && current
+                .children()
+                .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat);
         if is_a_definition {
             let text = current.text().to_string();
             let before_the_parameters = text.split('(').next().unwrap_or_default();

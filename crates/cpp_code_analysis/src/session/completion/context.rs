@@ -232,9 +232,7 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
                 &root.text().to_string(),
                 position.range.start_offset,
             ) {
-                Some(scope) => {
-                    CompletionContext::Qualified(resolve::NamePosition { scope, ..position })
-                }
+                Some(scope) => CompletionContext::Qualified(NamePosition { scope, ..position }),
                 None => CompletionContext::Name(position),
             }
         }
@@ -630,10 +628,7 @@ fn the_designator_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionCo
 /// a `.` or `->` end there is the answer. Three is what the two readings need plus the byte between them, and the
 /// window cannot reach anything else — the operator is adjacent to the cursor by construction, because that is what
 /// "the cursor is after the operator" means.
-fn member_access_from_the_text(
-    root: &CppSyntaxNode,
-    offset: usize,
-) -> Option<resolve::MemberAccess> {
+fn member_access_from_the_text(root: &CppSyntaxNode, offset: usize) -> Option<MemberAccess> {
     // The operator, asked of the two offsets a cursor on it can be: the reader has just typed it (`full2.|`) or the
     // caret is drawn **on** its column (`full2|.`). One function rather than two branches, because both are
     // "the operator next to this cursor" and neither is special.
@@ -654,7 +649,7 @@ fn member_access_from_the_text(
     // `shared_ptr`'s own. The operator's own spelling is the only evidence there is, and it is one token to read.
     let arrow = operator.text().to_string().ends_with('>');
 
-    Some(resolve::MemberAccess {
+    Some(MemberAccess {
         object,
         member: String::new(),
         member_range: SourceRange::new(at, 0),
@@ -1283,7 +1278,7 @@ mod tests {
         assert_eq!(&source[dot..dot + 1], ".", "the fixture's operator");
 
         for offset in [dot, dot + 1] {
-            let access = super::member_access_from_the_text(&root, offset).unwrap_or_else(|| {
+            let access = member_access_from_the_text(&root, offset).unwrap_or_else(|| {
                 panic!(
                     "the offset {offset} is on the `.` at {dot} and must read as a member access; the token there \
                      is {:?} and the object before the operator is {:?}",

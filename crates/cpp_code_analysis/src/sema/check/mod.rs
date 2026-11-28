@@ -1069,7 +1069,7 @@ pub struct FunctionHead {
     /// The name as written: `f`, `~S`, `S`, `operator+`.
     pub name: String,
     /// Where that name is, for a diagnostic. The whole span for an `operator`, which is not one token.
-    pub name_range: cpp_parser::SourceRange,
+    pub name_range: SourceRange,
 }
 
 /// **The return type a function definition writes**, as [`function_head`] reads it.

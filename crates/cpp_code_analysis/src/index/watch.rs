@@ -579,8 +579,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // are deleted in the same batch: the includer is named by the header's removal, and it is not there to be
         // read. Reading it would be a step whose only outcome is `Missing`.
         if !forgotten.is_empty() {
-            let gone: std::collections::HashSet<String> =
-                forgotten.iter().map(|path| normalize(path)).collect();
+            let gone: HashSet<String> = forgotten.iter().map(|path| normalize(path)).collect();
             reindex.retain(|path| !gone.contains(&normalize(path)));
         }
 
@@ -593,11 +592,7 @@ impl<F: FileProvider> SummaryStore<F> {
 }
 
 /// Add a path to the work list if it is not already there.
-fn push_once(
-    work: &mut Vec<PathBuf>,
-    queued: &mut std::collections::HashSet<String>,
-    path: PathBuf,
-) {
+fn push_once(work: &mut Vec<PathBuf>, queued: &mut HashSet<String>, path: PathBuf) {
     if queued.insert(normalize(&path)) {
         work.push(path);
     }
@@ -612,7 +607,7 @@ fn push_once(
 fn naming_files(
     index: &ProjectIndex,
     config: &CompilerConfig,
-    created: &std::collections::HashSet<String>,
+    created: &HashSet<String>,
 ) -> Vec<PathBuf> {
     if created.is_empty() {
         return Vec::new();
@@ -630,11 +625,7 @@ fn naming_files(
 }
 
 /// Does this file write an include that would find one of these paths, where it did not find it before?
-fn names_one_of(
-    summary: &FileSummary,
-    config: &CompilerConfig,
-    created: &std::collections::HashSet<String>,
-) -> bool {
+fn names_one_of(summary: &FileSummary, config: &CompilerConfig, created: &HashSet<String>) -> bool {
     let including = summary.path.parent().unwrap_or(Path::new("."));
 
     summary.includes.iter().any(|include| {

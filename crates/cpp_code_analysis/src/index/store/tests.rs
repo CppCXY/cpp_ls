@@ -364,8 +364,8 @@ fn every_file_gets_a_cache_entry_of_its_own() {
     // writes to (`SummaryStore::summary_database` is private, so this asks the same question a query does).
     let stored_one = store.get(Path::new("/p/one.h")).expect("written").clone();
     let stored_two = store.get(Path::new("/p/two.h")).expect("written").clone();
-    assert_eq!(stored_one.path, std::path::Path::new("/p/one.h"));
-    assert_eq!(stored_two.path, std::path::Path::new("/p/two.h"));
+    assert_eq!(stored_one.path, Path::new("/p/one.h"));
+    assert_eq!(stored_two.path, Path::new("/p/two.h"));
     assert!(
         stored_one
             .declarations
@@ -849,7 +849,7 @@ fn a_file_that_cannot_be_read_is_not_an_error() {
     let (mut store, root) = store("missing", &files);
 
     assert!(store.get(Path::new("/p/nothing.cpp")).is_none());
-    assert_eq!(store.stats(), super::StoreStats::default());
+    assert_eq!(store.stats(), StoreStats::default());
     assert_eq!(
         store.stats().hit_rate(),
         None,

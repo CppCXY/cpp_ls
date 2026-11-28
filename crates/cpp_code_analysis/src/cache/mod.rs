@@ -709,13 +709,13 @@ pub use cpp_toolchain::{content_hash, fnv1a64};
 /// Sorted here rather than by the callers, because two callers compute this key — the render, and the check that a
 /// stored rendering still describes the files it names — and a disagreement about the order would be a permanent cache
 /// miss for one of them.
-pub fn a_rendering_key(inputs: &[(&std::path::Path, u64)]) -> u64 {
+pub fn a_rendering_key(inputs: &[(&Path, u64)]) -> u64 {
     a_rendering_key_by(inputs, READING_FINGERPRINT)
 }
 
 /// [`a_rendering_key`] with the fingerprint as a parameter — the only way to test that the key folds it, since the
 /// real one is a constant.
-fn a_rendering_key_by(inputs: &[(&std::path::Path, u64)], fingerprint: u64) -> u64 {
+fn a_rendering_key_by(inputs: &[(&Path, u64)], fingerprint: u64) -> u64 {
     let mut inputs = inputs.to_vec();
     inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
     let mut folded = String::with_capacity(inputs.len() * 48);
@@ -817,8 +817,8 @@ mod tests {
         // inputs in any order are the same program (the walk's order is the stream's, not this fold's), and the same
         // inputs read by a different reader are a **different** answer — that is the half whose absence served a
         // rendering with eighteen copies of one header (see [`super::a_rendering_key`]).
-        let one = std::path::Path::new("/p/a.cpp");
-        let two = std::path::Path::new("/p/b.h");
+        let one = Path::new("/p/a.cpp");
+        let two = Path::new("/p/b.h");
         let inputs = [
             (one, content_hash("int x;\n")),
             (two, content_hash("int y;\n")),

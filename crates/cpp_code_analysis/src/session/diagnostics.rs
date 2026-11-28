@@ -9,7 +9,6 @@ use crate::FileView;
 use crate::ImportTarget;
 use crate::ModuleInfo;
 use crate::cache;
-use crate::file;
 use crate::sema;
 
 impl<F: FileProvider + Clone> Session<F> {
@@ -198,7 +197,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn module_unit_at(
         &self,
         view: &FileView,
-        in_the_file: file::coordinates::FileOffset,
+        in_the_file: FileOffset,
     ) -> Option<ModuleUnitTarget> {
         let summary = self.store.index().summary(&view.path)?;
         let info = ModuleInfo::from_tree(&view.root);
@@ -469,11 +468,11 @@ impl<F: FileProvider + Clone> Session<F> {
             log::warn!("`[diagnostics]` names a rule this build does not have: `{name}`");
         }
         let inside = {
-            let mut inside: Vec<std::path::PathBuf> = vec![self.root.clone()];
+            let mut inside: Vec<PathBuf> = vec![self.root.clone()];
             inside.extend(
                 self.project
                     .iter()
-                    .filter_map(|file| file.parent().map(std::path::Path::to_path_buf)),
+                    .filter_map(|file| file.parent().map(Path::to_path_buf)),
             );
             // **A library is the project's too**, as far as a suggestion is concerned: its headers are what a target
             // that depends on it may add an `#include` for. See `missing_include`.

@@ -150,7 +150,7 @@ pub struct FileView {
     /// vector alone is twelve bytes per token, so a clone of the tree is a copy of megabytes; behind an `Arc` a
     /// clone of a view is a handful of reference-count bumps, which is what makes [`crate::Session::view`] able
     /// to answer from a cache. Every use reads through the deref and needs no change.
-    pub tree: std::sync::Arc<CppSyntaxTree>,
+    pub tree: Arc<CppSyntaxTree>,
     /// The tree's root. Exactly `tree.get_red_root()`, kept because every query wants it and re-deriving a red root
     /// per query would allocate one per query.
     pub root: CppSyntaxNode,
@@ -159,7 +159,7 @@ pub struct FileView {
     ///
     /// Behind an `Arc` for the same reason as [`FileView::tree`]: a `ScopeTree` is a `Vec<Scope>` plus maps and
     /// cloning one is proportional to the file.
-    pub scopes: std::sync::Arc<ScopeTree>,
+    pub scopes: Arc<ScopeTree>,
     /// Did the text come from an open buffer rather than from the file?
     pub open: bool,
     /// **The file's own text, when [`FileView::source`] is a rendering of it.**
@@ -194,8 +194,8 @@ pub struct ParsedView {
     pub path: PathBuf,
     pub source: Arc<str>,
     pub line_index: Arc<LineIndex>,
-    pub tree: std::sync::Arc<CppSyntaxTree>,
-    pub scopes: std::sync::Arc<ScopeTree>,
+    pub tree: Arc<CppSyntaxTree>,
+    pub scopes: Arc<ScopeTree>,
     pub open: bool,
     pub written: Option<Arc<str>>,
     pub written_lines: Option<Arc<LineIndex>>,
@@ -982,9 +982,9 @@ impl FileView {
             path: file.path.clone(),
             source,
             line_index: file.line_index.clone(),
-            tree: std::sync::Arc::new(tree),
+            tree: Arc::new(tree),
             root,
-            scopes: std::sync::Arc::new(scopes),
+            scopes: Arc::new(scopes),
             open: file.open,
             written: None,
             written_lines: None,
@@ -1083,9 +1083,9 @@ impl FileView {
             path: file.path.clone(),
             source,
             line_index,
-            tree: std::sync::Arc::new(tree),
+            tree: Arc::new(tree),
             root,
-            scopes: std::sync::Arc::new(scopes),
+            scopes: Arc::new(scopes),
             open: file.open,
             written: Some(file.text.clone()),
             written_lines: Some(file.line_index.clone()),

@@ -13,7 +13,6 @@ use crate::UnlistedBase;
 use crate::Visibility;
 use crate::cache;
 use crate::index;
-use crate::sema;
 
 /// **What one file contributes to a visibility walk**, as a number — see [`ProjectIndex::the_walks_fingerprint`].
 ///
@@ -183,7 +182,7 @@ impl ProjectIndex {
     pub(crate) fn completion_visible_declarations(
         &self,
         visible_from: &Path,
-    ) -> std::sync::Arc<Vec<OwnedVisibleDeclaration>> {
+    ) -> Arc<Vec<OwnedVisibleDeclaration>> {
         let root = normalize(visible_from);
         if let Ok(snapshots) = self.completion_names.lock()
             && let Some(snapshot) = snapshots.get(&root)
@@ -198,7 +197,7 @@ impl ProjectIndex {
             MAX_COLLECTED_NAMES,
             Narrow::Nothing,
         );
-        let mut contributors: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut contributors: HashSet<String> = HashSet::new();
         let mut names: Vec<OwnedVisibleDeclaration> = Vec::new();
         for declaration in found {
             let file = normalize(&declaration.file);
@@ -213,7 +212,7 @@ impl ProjectIndex {
             });
         }
         names.truncate(MAX_COLLECTED_NAMES);
-        let names = std::sync::Arc::new(names);
+        let names = Arc::new(names);
         if let Ok(mut snapshots) = self.completion_names.lock() {
             if snapshots.len() >= 4
                 && !snapshots.contains_key(&root)
@@ -244,7 +243,7 @@ impl ProjectIndex {
             type_hits: std::sync::atomic::AtomicU64::new(0),
             type_misses: std::sync::atomic::AtomicU64::new(0),
             visibility: std::sync::Mutex::new(HashMap::new()),
-            walking: std::sync::Mutex::new(std::collections::HashSet::new()),
+            walking: std::sync::Mutex::new(HashSet::new()),
             walks_built: std::sync::atomic::AtomicU64::new(0),
             walks_hit: std::sync::atomic::AtomicU64::new(0),
             walks_met: std::sync::atomic::AtomicU64::new(0),
@@ -981,7 +980,7 @@ impl ProjectIndex {
         let mut cooked_bytes = 0usize;
         for readings in self.cooked.values() {
             for (_, reading) in readings.every() {
-                cooked_bytes += std::mem::size_of::<CookedFile>()
+                cooked_bytes += size_of::<CookedFile>()
                     + reading
                         .declarations
                         .iter()
@@ -992,7 +991,7 @@ impl ProjectIndex {
                         .iter()
                         .map(MacroFact::heap_bytes)
                         .sum::<usize>()
-                    + reading.diagnostics.len() * std::mem::size_of::<CookedDiagnostic>();
+                    + reading.diagnostics.len() * size_of::<CookedDiagnostic>();
             }
         }
         (
@@ -1026,21 +1025,21 @@ impl ProjectIndex {
         let mut edge_bytes = 0usize;
         for (included, includers) in &self.included_by {
             edges += includers.len();
-            edge_bytes += included.len() + std::mem::size_of::<BTreeSet<String>>();
+            edge_bytes += included.len() + size_of::<BTreeSet<String>>();
             edge_bytes += includers
                 .iter()
-                .map(|includer| includer.len() + std::mem::size_of::<String>())
+                .map(|includer| includer.len() + size_of::<String>())
                 .sum::<usize>();
         }
         edge_bytes += self
             .included_by
             .keys()
-            .map(|key| key.len() + std::mem::size_of::<String>())
+            .map(|key| key.len() + size_of::<String>())
             .sum::<usize>();
         let modules: usize = self
             .module_interfaces
             .iter()
-            .map(|(name, path)| name.len() + path.len() + 2 * std::mem::size_of::<String>())
+            .map(|(name, path)| name.len() + path.len() + 2 * size_of::<String>())
             .sum();
         // **The three memos that outlive a request.** `member_lists` is the big one — a list is hundreds of
         // `ProjectMember`s, each carrying a `DeclFact` — and it is bounded at `MAX_CACHED_MEMBER_LISTS`.
@@ -1057,15 +1056,13 @@ impl ProjectIndex {
                             .members
                             .iter()
                             .map(|member| {
-                                std::mem::size_of::<ProjectMember>()
-                                    + DeclFact::heap_bytes(&member.fact)
+                                size_of::<ProjectMember>() + DeclFact::heap_bytes(&member.fact)
                             })
                             .sum();
-                        let unlisted =
-                            held.list.unlisted.len() * std::mem::size_of::<UnlistedBase>();
+                        let unlisted = held.list.unlisted.len() * size_of::<UnlistedBase>();
                         members
                             + unlisted
-                            + held.contributors.len() * std::mem::size_of::<PathBuf>()
+                            + held.contributors.len() * size_of::<PathBuf>()
                             + held
                                 .contributors
                                 .iter()
@@ -1082,9 +1079,7 @@ impl ProjectIndex {
             .map(|answers| {
                 (
                     answers.len(),
-                    answers.len()
-                        * (std::mem::size_of::<(PathBuf, usize, u32)>()
-                            + std::mem::size_of::<Visibility>()),
+                    answers.len() * (size_of::<(PathBuf, usize, u32)>() + size_of::<Visibility>()),
                 )
             })
             .unwrap_or_default();
@@ -1104,8 +1099,8 @@ impl ProjectIndex {
                             .map(|path| path.len() * 2 + 48)
                             .sum();
                         names
-                            + reached * std::mem::size_of::<IncludeVisibility>()
-                            + walk.contributors.len() * std::mem::size_of::<String>()
+                            + reached * size_of::<IncludeVisibility>()
+                            + walk.contributors.len() * size_of::<String>()
                     })
                     .sum();
                 (walks.len(), bytes)
@@ -1117,10 +1112,7 @@ impl ProjectIndex {
             .map(|answers| {
                 (
                     answers.len(),
-                    answers.len()
-                        * (std::mem::size_of::<(String, u32)>()
-                            + std::mem::size_of::<Visibility>()
-                            + 24),
+                    answers.len() * (size_of::<(String, u32)>() + size_of::<Visibility>() + 24),
                 )
             })
             .unwrap_or_default();
@@ -1128,12 +1120,12 @@ impl ProjectIndex {
         let path_bytes: usize = self
             .order
             .values()
-            .map(|path| path.len() + std::mem::size_of::<String>())
+            .map(|path| path.len() + size_of::<String>())
             .sum::<usize>()
             + self
                 .sequence
                 .keys()
-                .map(|path| path.len() + std::mem::size_of::<String>())
+                .map(|path| path.len() + size_of::<String>())
                 .sum::<usize>();
 
         TableCost {
@@ -1748,8 +1740,8 @@ impl ProjectIndex {
     /// The cost is the closure's size in `HashSet` probes, which is what lets it be asked on every keystroke: on a
     /// project whose closure is 600 files the whole walk is under a millisecond, against **1.2 s** for the full
     /// visibility walk that evaluates every condition on the way.
-    pub fn include_closure(&self, from: &Path) -> std::collections::HashSet<String> {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    pub fn include_closure(&self, from: &Path) -> HashSet<String> {
+        let mut seen: HashSet<String> = HashSet::new();
         let mut pending: Vec<String> = vec![normalize(from)];
         while let Some(path) = pending.pop() {
             if !seen.insert(path.clone()) {
@@ -1776,7 +1768,7 @@ impl ProjectIndex {
     /// still a walk plus a `Vec` of candidates). A check that asks about *every type a file spells* wants the walk
     /// once and hash lookups after that: measured on a real project, per-name asks were **0.7 s each** on a file whose
     /// closure is large, and the whole set is one walk.
-    pub fn visible_names(&self, from: &Path) -> std::collections::HashSet<String> {
+    pub fn visible_names(&self, from: &Path) -> HashSet<String> {
         self.visible_declarations_upto(from, &|_| true, usize::MAX, Narrow::Nothing)
             .into_iter()
             .map(|declaration| declaration.fact.name.to_string())
@@ -1797,7 +1789,7 @@ impl ProjectIndex {
     }
 
     /// See [`ProjectIndex::name_postings`].
-    pub fn all_summaries(&self) -> Vec<(std::path::PathBuf, &FileSummary)> {
+    pub fn all_summaries(&self) -> Vec<(PathBuf, &FileSummary)> {
         self.summaries
             .values()
             .map(|summary| (summary.path.clone(), summary))
@@ -1805,7 +1797,7 @@ impl ProjectIndex {
     }
 
     /// See [`ProjectIndex::name_postings`].
-    pub fn summaries_named_like(&self, needle: &str) -> Vec<std::path::PathBuf> {
+    pub fn summaries_named_like(&self, needle: &str) -> Vec<PathBuf> {
         self.summaries
             .values()
             .map(|summary| summary.path.clone())
@@ -1818,7 +1810,7 @@ impl ProjectIndex {
     }
 
     /// See [`ProjectIndex::name_postings`].
-    pub fn every_fact_named(&self, name: &str) -> Vec<(std::path::PathBuf, &DeclFact)> {
+    pub fn every_fact_named(&self, name: &str) -> Vec<(PathBuf, &DeclFact)> {
         let mut found = Vec::new();
         for posting in self.names.named(name) {
             let Some(key) = self.order.get(&posting.file) else {
@@ -2418,11 +2410,11 @@ impl ProjectIndex {
         if let Ok(mut walks) = self.visibility.lock() {
             walks.insert(
                 from,
-                std::sync::Arc::new(CachedWalk {
-                    seen: std::sync::Arc::new(seen),
-                    contributors: std::sync::Arc::new(contributors),
+                Arc::new(CachedWalk {
+                    seen: Arc::new(seen),
+                    contributors: Arc::new(contributors),
                     fingerprint,
-                    files: std::sync::Arc::new(files),
+                    files: Arc::new(files),
                     stamp: self.changed,
                 }),
             );
@@ -2440,10 +2432,7 @@ impl ProjectIndex {
     pub(crate) fn the_visible_walk(
         &self,
         from: &Path,
-    ) -> (
-        std::sync::Arc<Seen>,
-        std::sync::Arc<Vec<(u32, IncludeVisibility)>>,
-    ) {
+    ) -> (Arc<Seen>, Arc<Vec<(u32, IncludeVisibility)>>) {
         let from = normalize(from);
         let remembered = self
             .visibility
@@ -2456,19 +2445,16 @@ impl ProjectIndex {
             // touching the closure. Measured on a cold inlay this is the difference between ~0.1 ms and ~1 µs per
             // question, and there are 15 489 of them.
             if known.stamp == self.changed {
-                return (
-                    std::sync::Arc::clone(&known.seen),
-                    std::sync::Arc::clone(&known.files),
-                );
+                return (Arc::clone(&known.seen), Arc::clone(&known.files));
             }
             if self.the_walks_fingerprint(&known.contributors) == known.fingerprint {
                 let files = if known.files.len() == known.seen.visibility.len() {
-                    std::sync::Arc::clone(&known.files)
+                    Arc::clone(&known.files)
                 } else {
                     // **The order is complete only if every visible file had a sequence when the walk was made.** A
                     // walk can be built while a file it can see is not yet in the index, so the stored order is one
                     // short. The lengths are the check and this is the repair — cheap and rare.
-                    std::sync::Arc::new(
+                    Arc::new(
                         self.visible_in_order_of(
                             known
                                 .seen
@@ -2482,16 +2468,16 @@ impl ProjectIndex {
                 if let Ok(mut walks) = self.visibility.lock() {
                     walks.insert(
                         from.clone(),
-                        std::sync::Arc::new(CachedWalk {
-                            seen: std::sync::Arc::clone(&known.seen),
-                            contributors: std::sync::Arc::clone(&known.contributors),
+                        Arc::new(CachedWalk {
+                            seen: Arc::clone(&known.seen),
+                            contributors: Arc::clone(&known.contributors),
                             fingerprint: known.fingerprint,
-                            files: std::sync::Arc::clone(&files),
+                            files: Arc::clone(&files),
                             stamp: self.changed,
                         }),
                     );
                 }
-                return (std::sync::Arc::clone(&known.seen), files);
+                return (Arc::clone(&known.seen), files);
             }
         }
         // A miss builds through the one implementation of the walk, and the freshly memoised entry is the answer.
@@ -2502,15 +2488,9 @@ impl ProjectIndex {
             .ok()
             .and_then(|walks| walks.get(&from).cloned())
         {
-            return (
-                std::sync::Arc::clone(&known.seen),
-                std::sync::Arc::clone(&known.files),
-            );
+            return (Arc::clone(&known.seen), Arc::clone(&known.files));
         }
-        (
-            std::sync::Arc::new(Seen::default()),
-            std::sync::Arc::new(Vec::new()),
-        )
+        (Arc::new(Seen::default()), Arc::new(Vec::new()))
     }
 
     /// **Everything behind one module edge**: the target's includes, its own module edges, and theirs.
@@ -3353,7 +3333,7 @@ impl ProjectIndex {
     /// answered `_Alty_traits::size_type`, because `allocator_traits` had no members to look `size_type` up in.
     ///
     /// Idempotent and cheap — a set insert. The session decides when to serve it; see [`ProjectIndex::take_refinement_asks`].
-    pub fn ask_for_refinement(&self, path: impl Into<std::path::PathBuf>) {
+    pub fn ask_for_refinement(&self, path: impl Into<PathBuf>) {
         if let Ok(mut asked) = self.refinement_asks.lock() {
             asked.insert(path.into());
         }
@@ -3361,7 +3341,7 @@ impl ProjectIndex {
 
     /// **Take the files a query asked for**, emptying the set — the session's half of
     /// [`ProjectIndex::ask_for_refinement`].
-    pub fn take_refinement_asks(&self) -> Vec<std::path::PathBuf> {
+    pub fn take_refinement_asks(&self) -> Vec<PathBuf> {
         self.refinement_asks
             .lock()
             .map(|mut asked| asked.drain().collect())
@@ -3589,7 +3569,7 @@ impl ProjectIndex {
                 if alias.fact.kind != DeclKind::Type {
                     return None;
                 }
-                let target = sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
+                let target = parse_type_spelling(alias.fact.type_of.as_deref()?);
                 let class = target.class_name()?;
 
                 let qualified = if class.contains("::") {
@@ -3884,7 +3864,7 @@ impl ProjectIndex {
             }
             memo.insert(
                 key,
-                std::sync::Arc::new(CachedMacroState {
+                Arc::new(CachedMacroState {
                     contributors,
                     state: state.clone(),
                 }),
@@ -4218,7 +4198,7 @@ impl ProjectIndex {
         &self,
         root: &Path,
         questions: &[(String, u32, usize)],
-    ) -> (Vec<Option<Visibility>>, u64, std::sync::Arc<Vec<String>>) {
+    ) -> (Vec<Option<Visibility>>, u64, Arc<Vec<String>>) {
         let mut walk = GuardWalk::new();
         let mut asked: Vec<Option<Vec<(u32, usize)>>> = Vec::with_capacity(questions.len());
         for (file, region, fact_offset) in questions {
@@ -4286,7 +4266,7 @@ impl ProjectIndex {
                 })
             })
             .collect();
-        (answers, stamp, std::sync::Arc::new(contributors))
+        (answers, stamp, Arc::new(contributors))
     }
 
     /// **Install the verdicts [`ProjectIndex::answer_the_guards`] produced**, so the guard filter finds them
@@ -4297,7 +4277,7 @@ impl ProjectIndex {
         root: &Path,
         answers: HashMap<(String, u32, usize), Visibility>,
         stamp: u64,
-        contributors: std::sync::Arc<Vec<String>>,
+        contributors: Arc<Vec<String>>,
     ) {
         if answers.is_empty() {
             return;
@@ -4310,10 +4290,7 @@ impl ProjectIndex {
             {
                 installed.remove(&oldest);
             }
-            installed.insert(
-                normalize(root),
-                (stamp, contributors, std::sync::Arc::new(answers)),
-            );
+            installed.insert(normalize(root), (stamp, contributors, Arc::new(answers)));
         }
     }
 
@@ -4321,10 +4298,10 @@ impl ProjectIndex {
     fn answered_guards_of(
         &self,
         root: &Path,
-    ) -> Option<std::sync::Arc<HashMap<(String, u32, usize), Visibility>>> {
+    ) -> Option<Arc<HashMap<(String, u32, usize), Visibility>>> {
         let installed = self.answered_guards.lock().ok()?;
         let (stamp, contributors, answers) = installed.get(&normalize(root))?;
-        (self.the_walks_fingerprint(contributors) == *stamp).then(|| std::sync::Arc::clone(answers))
+        (self.the_walks_fingerprint(contributors) == *stamp).then(|| Arc::clone(answers))
     }
 
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
@@ -4570,15 +4547,15 @@ impl GuardWalk {
 /// [`ProjectIndex::the_walks_fingerprint`].
 #[derive(Debug, Clone)]
 pub(crate) struct CachedWalk {
-    pub(crate) seen: std::sync::Arc<Seen>,
-    pub(crate) contributors: std::sync::Arc<Vec<String>>,
+    pub(crate) seen: Arc<Seen>,
+    pub(crate) contributors: Arc<Vec<String>>,
     /// The inputs this walk was made of, as one number. An entry answers only while every contributor's
     /// [`ProjectIndex::walk_inputs`] still hashes to what it did here.
     pub(crate) fingerprint: u64,
     /// **The files the walk found, in sequence order** — the order every cross-file question iterates by. Computed
     /// once with the walk: rebuilding it per question (clone every path, look up every sequence, sort) was seconds of
     /// a cold request, because a cold inlay asks thousands of those questions.
-    pub(crate) files: std::sync::Arc<Vec<(u32, IncludeVisibility)>>,
+    pub(crate) files: Arc<Vec<(u32, IncludeVisibility)>>,
     /// The value of [`ProjectIndex::changed`] when this entry was last built or validated: while the index has not
     /// changed since, there is nothing to validate and the fingerprint is not recomputed.
     pub(crate) stamp: u64,

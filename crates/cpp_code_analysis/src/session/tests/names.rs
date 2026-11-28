@@ -341,7 +341,7 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
     session.index_everything();
 
     let view = session
-        .view_of_the_file(std::path::Path::new("/p/LSPHandle.cpp"))
+        .view_of_the_file(Path::new("/p/LSPHandle.cpp"))
         .expect("a view of the source");
     let at = SOURCE
         .rfind("LSPHandle::RefreshDiagnostic")
@@ -364,7 +364,7 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
         .rfind("LSPHandle::RefreshDiagnostic")
         .expect("the qualified call")
         + 3;
-    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(qualifier));
+    let typed = session.type_at(&view, ReadingOffset::new(qualifier));
     let shown = format!("{typed:?}");
     assert!(
         !shown.contains("LSPHandle(int") && !shown.contains("LSPHandle(int)"),
@@ -374,9 +374,9 @@ pub(crate) fn a_class_whose_name_is_also_its_constructor_still_lists_its_members
     // **And after one keystroke**, which is the only state an editor asks the question in.
     let edited = format!("{SOURCE}// typed\n");
     session.did_change("/p/LSPHandle.cpp", &edited);
-    session.catch_up(std::path::Path::new("/p/LSPHandle.cpp"));
+    session.catch_up(Path::new("/p/LSPHandle.cpp"));
     let view = session
-        .view_of_the_file(std::path::Path::new("/p/LSPHandle.cpp"))
+        .view_of_the_file(Path::new("/p/LSPHandle.cpp"))
         .expect("a view of the edited source");
     let set = session.completions(&view, file::coordinates::FileOffset::new(at));
     let names: Vec<&str> = set.items.iter().map(|item| item.label.as_str()).collect();
@@ -408,11 +408,11 @@ pub(crate) fn a_conditional_macros_value_is_folded_when_every_definition_agrees(
     session.did_open("/p/agree.cpp", agreeing);
     session.index_everything();
     let view = session
-        .view_of_the_file(std::path::Path::new("/p/agree.cpp"))
+        .view_of_the_file(Path::new("/p/agree.cpp"))
         .expect("a view");
     let at = agreeing.find("VALUE = ").expect("the fixture");
     assert_eq!(
-        session.constant_value_at(&view, file::coordinates::ReadingOffset::new(at)),
+        session.constant_value_at(&view, ReadingOffset::new(at)),
         Some(32),
         "both definitions in force say 0x10"
     );
@@ -596,20 +596,20 @@ pub(crate) fn a_rendering_view_survives_twelve_buffer_views() {
     }
     let fixture = Memory::new("a-rendering-view-survives", &files);
     let mut session = fixture.session();
-    let project: Vec<std::path::PathBuf> = (0..12)
-        .map(|index| std::path::PathBuf::from(format!("/p/h{index}.h")))
+    let project: Vec<PathBuf> = (0..12)
+        .map(|index| PathBuf::from(format!("/p/h{index}.h")))
         .collect();
     session.add_project_files(project.iter().cloned());
     session.did_open("/p/main.cpp", main);
     for _ in 0..8 {
         session.index_everything();
-        session.catch_up(std::path::Path::new("/p/main.cpp"));
+        session.catch_up(Path::new("/p/main.cpp"));
         if session.pending_work() == 0 {
             break;
         }
     }
 
-    let rendered = session.view(std::path::Path::new("/p/main.cpp"));
+    let rendered = session.view(Path::new("/p/main.cpp"));
     assert!(rendered.is_some(), "the cook left a rendering to parse");
     assert_eq!(
         session.rendering_views.lock().expect("not poisoned").len(),
@@ -631,7 +631,7 @@ pub(crate) fn a_rendering_view_survives_twelve_buffer_views() {
         "and twelve buffer views did not throw it away"
     );
     assert!(
-        session.view(std::path::Path::new("/p/main.cpp")).is_some(),
+        session.view(Path::new("/p/main.cpp")).is_some(),
         "the second ask is a cache hit, not a re-parse"
     );
 }

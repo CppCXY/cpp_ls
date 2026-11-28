@@ -16,7 +16,6 @@ use crate::ScopeTree;
 use crate::cache;
 use crate::completion;
 use crate::file;
-use crate::index;
 use crate::sema;
 use crate::symbol;
 use smol_str::SmolStr;
@@ -64,7 +63,7 @@ pub(crate) fn the_type_key(path: &Path, expression: &cpp_parser::CppSyntaxNode) 
     bytes.push(0x1f);
     bytes.extend_from_slice(&u64::from(u32::from(range.start())).to_le_bytes());
     bytes.extend_from_slice(&u64::from(u32::from(range.end())).to_le_bytes());
-    let kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    let kind = CppSyntaxKind::from(expression.kind());
     bytes.extend_from_slice(&u64::from(kind as u16).to_le_bytes());
     bytes.push(0x1e);
     bytes.extend_from_slice(expression.text().to_string().as_bytes());
@@ -80,9 +79,9 @@ pub(crate) fn the_type_key(path: &Path, expression: &cpp_parser::CppSyntaxNode) 
 /// `TypeId` child skips it without a rule about parentheses. `None` for a `new` with no type, which is a parse
 /// error rather than an allocation.
 pub(crate) fn new_expression_allocates(expression: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    let allocated = expression.children().find(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::TypeId
-    })?;
+    let allocated = expression
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)?;
 
     let written = allocated.text().to_string();
     let written = written.trim();
@@ -156,12 +155,11 @@ pub(crate) fn type_of_expression(
 /// memo of the *lookup*, not of the answer's use: each caller still gets its own `DeclFact` clone.
 #[derive(Default)]
 pub(crate) struct TypeMemo {
-    types: std::cell::RefCell<std::collections::HashMap<(u32, u32), Known<(Type, PathBuf)>>>,
+    types: std::cell::RefCell<HashMap<(u32, u32), Known<(Type, PathBuf)>>>,
     /// **The questions being answered right now** — see [`TypeMemo::enter`]. Keyed like `types`, because a node is
     /// unique within one tree and a tree is not mutated while a query runs.
-    in_flight: std::cell::RefCell<std::collections::HashSet<(u32, u32)>>,
-    members:
-        std::cell::RefCell<std::collections::HashMap<(String, String), Known<(DeclFact, PathBuf)>>>,
+    in_flight: std::cell::RefCell<HashSet<(u32, u32)>>,
+    members: std::cell::RefCell<HashMap<(String, String), Known<(DeclFact, PathBuf)>>>,
 }
 
 impl TypeMemo {
@@ -309,7 +307,7 @@ pub(crate) fn type_of_expression_inner(
     //
     // It is not "not implemented": every lambda is a distinct type with no spelling, and a reader asking what the
     // variable is wants to hear exactly that.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::LambdaExpr {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::LambdaExpr {
         return Known::Unknown(UnknownReason::UnnamedLambda);
     }
 
@@ -364,7 +362,7 @@ pub(crate) fn type_of_expression_inner(
             )
             && !returns.trim().is_empty()
         {
-            let settled = sema::types::parse_type_spelling(&returns);
+            let settled = parse_type_spelling(&returns);
             return Known::Yes((settled, path.to_path_buf()));
         }
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
@@ -378,9 +376,8 @@ pub(crate) fn type_of_expression_inner(
     //
     // The spelling is the standard's, and the header that declares it (`<meta>`) is not one this machine has: the
     // answer names the type rather than resolving it, exactly as it would for a type from a header nobody read.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ReflectExpr
-    {
-        let info = sema::types::parse_type_spelling("std::meta::info");
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::ReflectExpr {
+        let info = parse_type_spelling("std::meta::info");
         return Known::Yes((info, path.to_path_buf()));
     }
 
@@ -442,12 +439,8 @@ pub(crate) fn type_of_expression_inner(
         if kind == cpp_parser::CppTokenKind::UserDefinedLiteral {
             // **An unknown answer says what is unknown**: the literal, with its suffix, rather than the whole
             // expression, because the suffix is the part that did not resolve.
-            let a_user_defined_literal_is = |returns: String| {
-                Known::Yes((
-                    sema::types::parse_type_spelling(&returns),
-                    path.to_path_buf(),
-                ))
-            };
+            let a_user_defined_literal_is =
+                |returns: String| Known::Yes((parse_type_spelling(&returns), path.to_path_buf()));
             if let Some(suffix) = a_user_defined_literals_suffix(&written_as)
                 && let Some(declared) = index
                     .files_declaring(&format!("operator\"\"{suffix}"), path)
@@ -469,10 +462,7 @@ pub(crate) fn type_of_expression_inner(
             // `parse_type_spelling` is the crate's own reader for a written type: it knows the builtins, the
             // qualifiers and the declarators, and it is the same function a declaration's own spelling goes through
             // — so a literal's type and a declared type are built by one implementation.
-            return Known::Yes((
-                sema::types::parse_type_spelling(spelled),
-                path.to_path_buf(),
-            ));
+            return Known::Yes((parse_type_spelling(spelled), path.to_path_buf()));
         }
     }
 
@@ -509,7 +499,7 @@ pub(crate) fn type_of_expression_inner(
     //
     // Measured on a real editor session: `auto z = std::vector<int>();` had **no** type, so `z.append(…)` fell back
     // to "every `append` in the project" and hover answered with nine `basic_string::append` declarations.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::CallExpr
         && let Some(callee) = written.strip_suffix("()")
         && callee.contains('<')
         // **A type spelling has no space in it.** `_STD h<int>()` is a macro followed by a name — two identifiers the
@@ -561,10 +551,10 @@ pub(crate) fn type_of_expression_inner(
     // with the type already in the tree and nothing asking it. The template arguments are kept rather than resolved:
     // `_Ref_count_obj2<_Ty>*` is what a reader wants to see, and an attempt to resolve `_Ty` would turn a certain
     // answer into an uncertain one.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::NewExpr {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::NewExpr {
         return match new_expression_allocates(expression) {
             Some(allocated) => Known::Yes((
-                sema::types::parse_type_spelling(&format!("{allocated}*")),
+                parse_type_spelling(&format!("{allocated}*")),
                 path.to_path_buf(),
             )),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -595,16 +585,16 @@ pub(crate) fn type_of_expression_inner(
     // `n<0 ? 0 : U(*a) - U(*b)` — with `U(x)` defined as `table[x]` — read `written` as `"a"`, took this arm, and
     // answered the type of `a` (`const unsigned char*`) for the whole `?:`. The kind is what the expansion did not
     // corrupt; the text is.
-    let the_kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    let the_kind = CppSyntaxKind::from(expression.kind());
     let names_something = writes_a_name(written)
         && !matches!(
             the_kind,
-            cpp_parser::CppSyntaxKind::TernaryExpr
-                | cpp_parser::CppSyntaxKind::BinaryExpr
-                | cpp_parser::CppSyntaxKind::CallExpr
-                | cpp_parser::CppSyntaxKind::CastExpr
-                | cpp_parser::CppSyntaxKind::InitListExpr
-                | cpp_parser::CppSyntaxKind::UnaryExpr
+            CppSyntaxKind::TernaryExpr
+                | CppSyntaxKind::BinaryExpr
+                | CppSyntaxKind::CallExpr
+                | CppSyntaxKind::CastExpr
+                | CppSyntaxKind::InitListExpr
+                | CppSyntaxKind::UnaryExpr
         );
     if names_something {
         return match declaration_of_expression(index, scopes, root, path, expression) {
@@ -644,8 +634,7 @@ pub(crate) fn type_of_expression_inner(
     // `auto w = Widget{}` a declaration of a `Widget`. Only the first child is read, and only when it *names* a
     // type: `{1, 2}` names nothing, and a braced list of values is a different thing that this layer does not
     // deduce (C++ deduces it as `std::initializer_list`, which is a library type, not a language one).
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::InitListExpr
-    {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::InitListExpr {
         let Some(first) = expression.children().next() else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
@@ -654,11 +643,9 @@ pub(crate) fn type_of_expression_inner(
         // type's name and a nested list of values. The first branch below refuses *anything* whose first child has a
         // type, which is right for a value and wrong for a type: `Builder<int>{}.with(2)` answered "the type of
         // `Builder<int>{}` is not known" while the head was a class this file declares.
-        let has_a_head = cpp_parser::CppSyntaxKind::from(first.kind())
-            != cpp_parser::CppSyntaxKind::InitListExpr
+        let has_a_head = CppSyntaxKind::from(first.kind()) != CppSyntaxKind::InitListExpr
             && expression.children().nth(1).is_some_and(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::InitListExpr
+                CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitListExpr
             });
 
         return match type_of_expression_memoed(
@@ -706,7 +693,7 @@ pub(crate) fn type_of_expression_inner(
                     let settled = the_arguments_a_braced_initialisation_deduces(
                         memo, index, declaring, scopes, root, path, &elements, spelled, depth,
                     )
-                    .unwrap_or_else(|| sema::types::parse_type_spelling(spelled));
+                    .unwrap_or_else(|| parse_type_spelling(spelled));
                     Known::Yes((settled, named.file(path)))
                 }
                 // **A qualified type name is a type even when the name query declines it.** `std::pair{1, 2}` is an
@@ -720,7 +707,7 @@ pub(crate) fn type_of_expression_inner(
                         let settled = the_arguments_a_braced_initialisation_deduces(
                             memo, index, declaring, scopes, root, path, &elements, &spelled, depth,
                         )
-                        .unwrap_or_else(|| sema::types::parse_type_spelling(&spelled));
+                        .unwrap_or_else(|| parse_type_spelling(&spelled));
                         Known::Yes((settled, path.to_path_buf()))
                     }
                     None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -730,7 +717,7 @@ pub(crate) fn type_of_expression_inner(
     }
 
     // A **call**: what the callee returns, or a temporary of the class it names.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::CallExpr {
         return type_of_a_call(
             memo, shapes, index, declaring, scopes, root, path, expression, depth,
         );
@@ -744,7 +731,7 @@ pub(crate) fn type_of_expression_inner(
     // Measured before this arm existed: 39 `auto` declarations across `<vector>` and `<xutility>` refused, every one
     // of them a cast — `UnknownType("static_cast<size_t>")`, `UnknownType("const_cast<char*>")` — with the cast
     // expression already in the tree and nothing asking it.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CastExpr {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::CastExpr {
         let target = expression
             .children()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId);
@@ -752,10 +739,7 @@ pub(crate) fn type_of_expression_inner(
             Some(target) => {
                 let written = target.text().to_string();
                 let written = written.trim();
-                Known::Yes((
-                    sema::types::parse_type_spelling(written),
-                    path.to_path_buf(),
-                ))
+                Known::Yes((parse_type_spelling(written), path.to_path_buf()))
             }
             // A `CastExpr` with no type in it is one the recovery built around a keyword with nothing after it,
             // which is a file being typed at rather than a cast.
@@ -766,8 +750,7 @@ pub(crate) fn type_of_expression_inner(
     // **A conditional expression** has the type the two branches agree on: `cond ? 1 : 2.0` is a `double` — [expr.cond]
     // usual arithmetic conversions, the same rule a fold uses. Measured: `auto widened = true ? 1 : 2.0;` answered
     // *"the type of `true ? 1 : 2.0` is not known here"*.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::TernaryExpr
-    {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::TernaryExpr {
         let branches: Vec<cpp_parser::CppSyntaxNode> = expression.children().collect();
         if let (Some(one), Some(other)) = (branches.get(1), branches.get(2)) {
             let one_type = type_of_expression_memoed(
@@ -799,7 +782,7 @@ pub(crate) fn type_of_expression_inner(
                     Some(one_type.clone())
                 } else {
                     sema::declarations::the_widest_of(&[one_type, other_type])
-                        .map(|widest| sema::types::parse_type_spelling(&widest))
+                        .map(|widest| parse_type_spelling(&widest))
                 };
                 if let Some(agreed) = agreed {
                     return Known::Yes((agreed, file));
@@ -816,17 +799,14 @@ pub(crate) fn type_of_expression_inner(
         let spelled = expression.text().to_string();
         let spelled = spelled.trim_start();
         if spelled.starts_with("sizeof") || spelled.starts_with("alignof") {
-            return Known::Yes((
-                sema::types::parse_type_spelling("size_t"),
-                path.to_path_buf(),
-            ));
+            return Known::Yes((parse_type_spelling("size_t"), path.to_path_buf()));
         }
     }
 
     // A **parenthesised** expression has the type of what it wraps, and the parentheses are a node of their own:
     // `(*p).size` makes the object of the `.` a `ParenExpr`, so a recursion that did not step through it would
     // stop one level above the answer — which is exactly where it used to stop.
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
             Some(inner) => type_of_expression_memoed(
                 memo,
@@ -928,7 +908,7 @@ pub(crate) fn type_of_expression_inner(
                 &format!("operator{operator}"),
             )
         {
-            return Known::Yes((sema::types::parse_type_spelling(&returns), file));
+            return Known::Yes((parse_type_spelling(&returns), file));
         }
 
         if matches!(
@@ -1044,7 +1024,7 @@ pub(crate) fn type_of_expression_inner(
                         &type_of,
                         "operator*",
                     ) {
-                        return Known::Yes((sema::types::parse_type_spelling(&returns), file));
+                        return Known::Yes((parse_type_spelling(&returns), file));
                     }
                     // **The iterator model**, for a class with no `operator*` that came from `begin()`: it is a
                     // view of its container's element, so `*it` is the element the type already is.
@@ -1138,7 +1118,7 @@ pub(crate) fn type_of_expression_inner(
                         &format!("operator{symbol}"),
                     )
                 {
-                    return Known::Yes((sema::types::parse_type_spelling(&returns), file));
+                    return Known::Yes((parse_type_spelling(&returns), file));
                 }
                 if symbol == "!" {
                     Known::Yes((Type::named("bool"), path.to_path_buf()))
@@ -1282,7 +1262,7 @@ pub(crate) fn type_of_expression_inner(
                                 index, scopes, root, path, &type_of, &returns,
                             );
 
-                            Known::Yes((sema::types::parse_type_spelling(&written), file))
+                            Known::Yes((parse_type_spelling(&written), file))
                         }
                         // A class with no `operator[]`: nothing this layer can say, and saying nothing is the rule.
                         None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1460,9 +1440,9 @@ pub(crate) fn type_of_expression_inner(
         let arguments = arguments.to_vec();
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
-        let being_called = expression.parent().is_some_and(|parent| {
-            cpp_parser::CppSyntaxKind::from(parent.kind()) == cpp_parser::CppSyntaxKind::CallExpr
-        });
+        let being_called = expression
+            .parent()
+            .is_some_and(|parent| CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::CallExpr);
 
         // **A member of a class template is finished here**, and this is the one place it can be: the argument list
         // is the object type's, which is what this arm just computed, and the parameter names are the declaring
@@ -1514,9 +1494,9 @@ pub(crate) fn type_of_expression_inner(
                     .split_once('<')
                     .map(|(_, rest)| rest.trim_end().strip_suffix('>').unwrap_or(rest))
                     .unwrap_or_default();
-                let argument_types: Vec<sema::types::Type> = sema::builtins::split_arguments(inner)
+                let argument_types: Vec<Type> = sema::builtins::split_arguments(inner)
                     .iter()
-                    .map(|one| sema::types::parse_type_spelling(one))
+                    .map(|one| parse_type_spelling(one))
                     .collect();
                 let bare_named = named
                     .split_once('<')
@@ -1663,7 +1643,7 @@ pub(crate) fn declared_class(
     {
         let written = sema::builtins::split_arguments(inside);
         let target = sema::types::substituted_spelling(target, found.fact.parameters(), &written);
-        if let Some(named) = sema::types::parse_type_spelling(&target).class_name() {
+        if let Some(named) = parse_type_spelling(&target).class_name() {
             return Some(named.to_string());
         }
     }
@@ -1692,7 +1672,7 @@ pub(crate) fn declared_class(
 pub(crate) fn binary_operands_of(
     node: &cpp_parser::CppSyntaxNode,
 ) -> Option<(String, cpp_parser::CppSyntaxNode, cpp_parser::CppSyntaxNode)> {
-    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::BinaryExpr {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::BinaryExpr {
         return None;
     }
 
@@ -1786,10 +1766,9 @@ fn the_view_a_pipeline_names(
             // `views::all_t` borrows it (`ref_view`); a call's result is a prvalue, and `all_t` *owns* it
             // (`owning_view`). Both are the standard's answers for the operand they are given.
             let borrowed = matches!(
-                cpp_parser::CppSyntaxKind::from(left.kind()),
-                cpp_parser::CppSyntaxKind::IdentifierExpr | cpp_parser::CppSyntaxKind::IndexExpr
-            ) || (cpp_parser::CppSyntaxKind::from(left.kind())
-                == cpp_parser::CppSyntaxKind::UnaryExpr
+                CppSyntaxKind::from(left.kind()),
+                CppSyntaxKind::IdentifierExpr | CppSyntaxKind::IndexExpr
+            ) || (CppSyntaxKind::from(left.kind()) == CppSyntaxKind::UnaryExpr
                 && left.text().to_string().trim_start().starts_with('*'));
             let of = match borrowed {
                 true => "std::ranges::ref_view",
@@ -1825,10 +1804,10 @@ fn the_view_a_pipeline_names(
 fn the_adaptor_a_use_names(
     right: &cpp_parser::CppSyntaxNode,
 ) -> Option<(&'static str, bool, Option<Type>)> {
-    let kind = cpp_parser::CppSyntaxKind::from(right.kind());
+    let kind = CppSyntaxKind::from(right.kind());
     // `std::views::take(2)` — a call whose callee names the adaptor, and whose arguments are the adaptor's own.
     let (callee, arguments) = match kind {
-        cpp_parser::CppSyntaxKind::CallExpr => {
+        CppSyntaxKind::CallExpr => {
             let mut arguments: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
             let mut callee = None;
             for child in right.children() {
@@ -1887,7 +1866,7 @@ fn the_adaptor_a_use_names(
 /// printed `(lambda)`. A type that changes with the order of the questions is not a type; `(lambda)` is the same
 /// answer from every caller.
 fn a_lambdas_spelling(node: &cpp_parser::CppSyntaxNode) -> Option<Type> {
-    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::LambdaExpr {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::LambdaExpr {
         return None;
     }
     Some(Type::named("(lambda)"))
@@ -1942,7 +1921,7 @@ pub(crate) fn operator_returns_of_with_arguments(
     path: &Path,
     class_type: &Type,
     operator: &str,
-    argument_types: &[sema::types::Type],
+    argument_types: &[Type],
     // **How many arguments the call wrote** — the types can be fewer, because a lambda's type is unnamed and a
     // conversion that failed records nothing. The count is what picks an overload; the types are what fill it in.
     argument_count: Option<usize>,
@@ -1977,14 +1956,14 @@ pub(crate) fn operator_returns_of_with_arguments(
             class_type.arguments().iter().map(Type::to_string).collect();
         let target =
             sema::types::substituted_spelling(target, first.fact.parameters(), &alias_arguments);
-        let target_type = sema::types::parse_type_spelling(&target);
+        let target_type = parse_type_spelling(&target);
         // **The alias's target does not carry the object's qualifier, and the recursion needs it.** `const
         // std::string& s` resolved to `basic_string<char, …>` — unqualified — so the recursive call saw a non-const
         // object and chose the non-const `operator[]`: `s[0]` answered `char&` where the compiler answers
         // `const char&`. A qualifier is written on the *use*, so it is put back on the target.
         let target_type = if class_type.is_const() && !target_type.is_const() {
-            sema::types::Type::Qualified {
-                of: std::sync::Arc::new(target_type),
+            Type::Qualified {
+                of: Arc::new(target_type),
                 qualifiers: sema::types::Qualifiers::CONST,
             }
         } else {
@@ -2013,7 +1992,7 @@ pub(crate) fn operator_returns_of_with_arguments(
             ) {
                 (Some(qualifier), Some(bare)) if !bare.contains("::") => {
                     let mut named = target_type.clone();
-                    if let sema::types::Type::Named { name, .. } = &mut named {
+                    if let Type::Named { name, .. } = &mut named {
                         *name = format!("{qualifier}::{bare}");
                     }
                     Some(named)
@@ -2125,7 +2104,7 @@ pub(crate) fn operator_returns_of_with_arguments(
 
     let ranked = (!argument_types.is_empty())
         .then(|| {
-            let declared = index::project::member_candidates(
+            let declared = member_candidates(
                 &sema::declarations::ShapeTable::new(),
                 index,
                 scopes,
@@ -2137,7 +2116,7 @@ pub(crate) fn operator_returns_of_with_arguments(
             );
             // **A `const` object can only call a `const` member**, which is the same rule the arity preference below
             // applies — a candidate it could not call is not a candidate. A non-const object may call both.
-            let callable: Vec<(DeclFact, std::path::PathBuf)> = declared
+            let callable: Vec<(DeclFact, PathBuf)> = declared
                 .into_iter()
                 .filter(|(fact, _)| {
                     !object_is_const || fact.modifiers.contains(DeclModifiers::CONST)
@@ -2360,7 +2339,7 @@ fn the_members_return(
     member_file: &Path,
     parameter_names: &[String],
     written_arguments: &[String],
-    argument_types: &[sema::types::Type],
+    argument_types: &[Type],
 ) -> Option<String> {
     let _ = (index, scopes, root, path);
     let returns = fact
@@ -2485,7 +2464,7 @@ fn deduced_returns_of_the_member(
     file: &Path,
     parameter_names: &[String],
     written_arguments: &[String],
-    argument_types: &[sema::types::Type],
+    argument_types: &[Type],
 ) -> Option<String> {
     // **The fact's offset is a *file* offset; the tree speaks the *reading*.** The same translation the `Indexed`
     // arm of `what_a_call_has_in` makes, for the same reason: `name_range` comes from the index and counts the
@@ -2579,7 +2558,7 @@ fn deduced_returns_of_the_member(
 pub(crate) fn a_co_awaits_operand(
     expression: &cpp_parser::CppSyntaxNode,
 ) -> Option<cpp_parser::CppSyntaxNode> {
-    if cpp_parser::CppSyntaxKind::from(expression.kind()) != cpp_parser::CppSyntaxKind::UnaryExpr {
+    if CppSyntaxKind::from(expression.kind()) != CppSyntaxKind::UnaryExpr {
         return None;
     }
     let mut children = expression.children_with_tokens();
@@ -2743,7 +2722,7 @@ pub(crate) fn unary_operand_with(
     node: &cpp_parser::CppSyntaxNode,
     operator: &str,
 ) -> Option<cpp_parser::CppSyntaxNode> {
-    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::UnaryExpr {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::UnaryExpr {
         return None;
     }
 
@@ -2767,7 +2746,7 @@ pub(crate) fn unary_operand_with(
 pub(crate) fn subscript_base(
     node: &cpp_parser::CppSyntaxNode,
 ) -> Option<cpp_parser::CppSyntaxNode> {
-    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::IndexExpr {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::IndexExpr {
         return None;
     }
 
@@ -2789,7 +2768,7 @@ pub(crate) fn subscript_base(
 pub(crate) fn subscript_index(
     node: &cpp_parser::CppSyntaxNode,
 ) -> Option<cpp_parser::CppSyntaxNode> {
-    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::IndexExpr {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::IndexExpr {
         return None;
     }
     node.children().nth(1)
@@ -2878,12 +2857,12 @@ impl NamedDeclaration {
             // distinction this caller makes is "function or not": everything callable answers `Function` so that a
             // call of a *member function* is never mistaken for a call of an object with an `operator()`.
             NamedDeclaration::Here(binding) => match binding.kind {
-                sema::symbol::BindingKind::Function
-                | sema::symbol::BindingKind::Constructor
-                | sema::symbol::BindingKind::Destructor
-                | sema::symbol::BindingKind::ConversionFunction
-                | sema::symbol::BindingKind::OperatorFunction
-                | sema::symbol::BindingKind::LiteralOperator => DeclKind::Function,
+                BindingKind::Function
+                | BindingKind::Constructor
+                | BindingKind::Destructor
+                | BindingKind::ConversionFunction
+                | BindingKind::OperatorFunction
+                | BindingKind::LiteralOperator => DeclKind::Function,
                 _ => DeclKind::Variable,
             },
             NamedDeclaration::Indexed(fact, _, _) => fact.kind,
@@ -3213,10 +3192,7 @@ impl NamedDeclaration {
                             .iter()
                             .map(|argument| argument.to_string())
                             .collect();
-                        sema::types::parse_type_spelling(&format!(
-                            "{name}<{}>",
-                            arguments.join(", ")
-                        ))
+                        parse_type_spelling(&format!("{name}<{}>", arguments.join(", ")))
                     }
                     _ => started,
                 };
@@ -3356,7 +3332,7 @@ pub(crate) fn finish_a_nested_name(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
-    bindings: &sema::types::TypeBindings,
+    bindings: &TypeBindings,
     mut current: Type,
     mut current_file: PathBuf,
     mut asked: Vec<String>,
@@ -3391,14 +3367,14 @@ pub(crate) fn finish_a_nested_name(
                 scopes,
                 root,
                 path,
-                &sema::types::parse_type_spelling(class),
+                &parse_type_spelling(class),
                 &[],
                 &spelling,
                 MAX_ALIAS_HOPS,
             );
             if resolved != spelling {
                 asked.push(spelling);
-                current = bindings.applied_to(&sema::types::parse_type_spelling(&resolved));
+                current = bindings.applied_to(&parse_type_spelling(&resolved));
                 continue;
             }
         }
@@ -3577,18 +3553,18 @@ pub(crate) fn a_trait_alias_resolved(
         return None;
     };
     let target = fact.type_of.as_deref()?;
-    let arguments: Vec<String> = sema::types::parse_type_spelling(&class)
+    let arguments: Vec<String> = parse_type_spelling(&class)
         .arguments()
         .iter()
         .map(|one| one.to_string())
         .collect();
-    let bare = sema::types::parse_type_spelling(&class);
+    let bare = parse_type_spelling(&class);
     let class_name = bare.class_name()?;
     let parameters = index.template_parameters_for(class_name, path, &arguments);
     let defaults = index.template_parameter_defaults_for(class_name, path, &arguments);
     let resolved =
         sema::types::substituted_spelling_with_defaults(target, &parameters, &defaults, &arguments);
-    Some(sema::types::parse_type_spelling(&resolved))
+    Some(parse_type_spelling(&resolved))
 }
 /// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
 ///
@@ -3673,7 +3649,7 @@ pub(crate) fn declared_type(
     // Measured on a C++20 project (`techniques.h` + `techniques.cpp`): `techniques::Box box(7)` typed as
     // `techniques::Box` while `techniques::Box<int> box(7)` typed correctly, so what was missing was the deduction
     // rather than the template.
-    if let sema::types::Type::Named { name, arguments } = &declaration
+    if let Type::Named { name, arguments } = &declaration
         && arguments.is_empty()
         && !name.contains('<')
     {
@@ -3709,7 +3685,7 @@ pub(crate) fn declared_type(
                 &from_the_initializer,
             )
         {
-            return Known::Yes(sema::types::parse_type_spelling(&with_arguments));
+            return Known::Yes(parse_type_spelling(&with_arguments));
         }
     }
 
@@ -3767,7 +3743,7 @@ pub(crate) fn declared_type(
             depth,
         )
     {
-        return Known::Yes(sema::types::parse_type_spelling(&the_type));
+        return Known::Yes(parse_type_spelling(&the_type));
     }
 
     let Some((as_written, initializer)) = deduction_inputs(root, named) else {
@@ -3809,7 +3785,7 @@ pub(crate) fn an_lvalue(expression: &cpp_parser::CppSyntaxNode) -> bool {
     // because the grammar reaches a name in four ways (`IdentifierExpr`, `NameExpr`, `RefExpr`, and a member's own
     // node) and a positive list is a list to get wrong: measured, `auto&& bound = base;` answered `int&&` with the
     // identifier's kind missing from it.
-    let kind = cpp_parser::CppSyntaxKind::from(expression.kind());
+    let kind = CppSyntaxKind::from(expression.kind());
     if matches!(kind, LiteralExpr | CallExpr | InitListExpr | NewExpr) {
         return false;
     }

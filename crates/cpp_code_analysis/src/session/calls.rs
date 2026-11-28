@@ -939,10 +939,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// node, and `NSUBEXP` is how neovim sizes `lpos_T startpos[NSUBEXP]`. The segment before the next `,`, `;` or `}`
     /// is the declaration's own; no `=` there means an enumerator that inherits its value, which this leaves to the
     /// folder rather than counting by hand.
-    fn the_constant_a_declaration_writes(
-        &self,
-        found: &index::project::ProjectDefinition,
-    ) -> Option<usize> {
+    fn the_constant_a_declaration_writes(&self, found: &ProjectDefinition) -> Option<usize> {
         let text = self.text(&found.file)?;
         let after = text.get(found.fact.name_range.end_offset()..)?;
         let boundary = after.find([',', ';', '}', '{'])?;
@@ -1025,7 +1022,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_class_as_its_file_wrote_it(
         &self,
         written_type: &str,
-        asked_from: &std::path::Path,
+        asked_from: &Path,
     ) -> Option<TheClassAsWritten> {
         let found = self
             .store
@@ -1328,7 +1325,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         head: &str,
         arguments: &[String],
-        path: &std::path::Path,
+        path: &Path,
     ) -> Option<String> {
         let known = self.store.index().definition(head, path).value()?;
         let written = known.fact.type_of.as_deref()?;
@@ -1358,9 +1355,9 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_generated_members(
         &self,
         written_type: &str,
-        path: &std::path::Path,
-        listed: Known<index::MemberList>,
-    ) -> Known<index::MemberList> {
+        path: &Path,
+        listed: Known<MemberList>,
+    ) -> Known<MemberList> {
         let unreal = self
             .project_config()
             .config
@@ -1571,7 +1568,7 @@ impl<F: FileProvider + Clone> Session<F> {
 pub(crate) struct TheClassAsWritten {
     pub text: String,
     pub class_at: usize,
-    pub members: std::collections::HashMap<String, usize>,
+    pub members: HashMap<String, usize>,
     pub parameters: Vec<String>,
     pub parameter_defaults: Vec<String>,
     pub bases: Vec<String>,

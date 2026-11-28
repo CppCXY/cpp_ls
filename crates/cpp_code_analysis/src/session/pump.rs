@@ -233,11 +233,8 @@ impl<F: FileProvider + Clone> Session<F> {
     ///  56 s   cook        this method
     ///   …     diagnose    the checks, per file
     /// ```
-    pub fn diagnose_everything(
-        &mut self,
-        up_to: usize,
-    ) -> Vec<(std::path::PathBuf, FileDiagnostics)> {
-        let paths: Vec<std::path::PathBuf> = self
+    pub fn diagnose_everything(&mut self, up_to: usize) -> Vec<(PathBuf, FileDiagnostics)> {
+        let paths: Vec<PathBuf> = self
             .store
             .index()
             .summaries()
@@ -763,7 +760,7 @@ impl<F: FileProvider + Clone> Session<F> {
     const READ_AHEAD_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
     /// Put a prepared slice in the read-ahead, remembering when it was made.
-    fn remember_a_prepared(&mut self, path: std::path::PathBuf, made: index::store::Prepared) {
+    fn remember_a_prepared(&mut self, path: PathBuf, made: index::store::Prepared) {
         let key = queue_key(&path);
         if self.prefetched.insert(key.clone(), made).is_none() {
             self.prefetched_order.push_back(key);
@@ -1019,7 +1016,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn finish_a_slice(
         &mut self,
         done: &[Step],
-        units: Vec<std::sync::Arc<TranslationUnit>>,
+        units: Vec<Arc<TranslationUnit>>,
     ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
@@ -1056,7 +1053,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // drains that stale entry — traced as `/p/api.h` queued twice, `outcome Built environment false` then
         // `outcome Unstored environment true`. The same statement the filter makes, applied to the queue.
         if done.iter().any(|step| step.with_the_environment) {
-            let repaired: std::collections::HashSet<PathBuf> = done
+            let repaired: HashSet<PathBuf> = done
                 .iter()
                 .filter(|step| step.with_the_environment)
                 .map(|step| step.path.clone())
@@ -1451,10 +1448,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // environment walks the file's whole closure and copies every file's text (103.7 ms on MSVC's headers).
             let _ = self.the_macros_of(&path, &text);
 
-            Some((
-                (path, cache::content_hash(&text)),
-                std::sync::Arc::new(reading),
-            ))
+            Some(((path, cache::content_hash(&text)), Arc::new(reading)))
         };
         let cores = std::thread::available_parallelism()
             .map(|cores| cores.get())

@@ -162,7 +162,7 @@ impl Unit {
 /// per-file walk answers them out of a materialised `MacroEnvironment` and the unit answers them out of a
 /// [`cpp_code_analysis::MacroView`], and a test that had to name one of them could not ask both the same question.
 fn answers(
-    environment: &dyn cpp_parser::MacroFacts,
+    environment: &dyn MacroFacts,
     name: &str,
     offset: usize,
 ) -> (

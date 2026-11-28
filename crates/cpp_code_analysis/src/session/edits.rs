@@ -343,8 +343,7 @@ impl<F: FileProvider + Clone> Session<F> {
         } else {
             self.project.clone()
         };
-        let listed_keys: std::collections::HashSet<String> =
-            listed.iter().map(|path| queue_key(path)).collect();
+        let listed_keys: HashSet<String> = listed.iter().map(|path| queue_key(path)).collect();
 
         let mut answer = ReconcileAnswer::default();
 
@@ -432,15 +431,15 @@ impl<F: FileProvider + Clone> Session<F> {
             .database
             .as_ref()
             .map(|database| &database.commands);
-        let mut project = super::project_files(
+        let mut project = project_files(
             &self.files,
             &self.filter,
             &self.root,
             database,
             &extra_extensions,
-            config.index.max_files.unwrap_or(super::MAX_PROJECT_FILES),
+            config.index.max_files.unwrap_or(MAX_PROJECT_FILES),
         );
-        for file in super::library_files_to_read(&config.libraries, &self.root) {
+        for file in library_files_to_read(&config.libraries, &self.root) {
             if !project.contains(&file) {
                 project.push(file);
             }

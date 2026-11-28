@@ -1145,7 +1145,7 @@ fn a_configured_project_answers_what_a_header_change_affects() {
         let command = commands.command_for(Path::new(unit)).expect("a command");
         let config = command.to_config();
 
-        graphs.push(cpp_code_analysis::walk(
+        graphs.push(walk(
             &source,
             &tree,
             Path::new(unit),

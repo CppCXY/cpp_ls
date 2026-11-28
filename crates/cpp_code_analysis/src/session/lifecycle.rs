@@ -8,7 +8,6 @@ use crate::MacroDefinitions;
 use crate::ParsedDefinitions;
 use crate::completion;
 use crate::effect;
-use crate::file;
 use crate::index;
 use crate::project;
 use crate::{ascend_source_extensions, cuda_source_extensions};
@@ -188,9 +187,9 @@ impl<F: FileProvider + Clone> Session<F> {
             queue: Work::default(),
             stamps: HashMap::new(),
             parsed_since_the_last_pass: Vec::new(),
-            refined_on_request: std::sync::Mutex::new(std::collections::HashSet::new()),
-            refinement_misses: std::sync::Mutex::new(std::collections::HashSet::new()),
-            refined_readings: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refined_on_request: std::sync::Mutex::new(HashSet::new()),
+            refinement_misses: std::sync::Mutex::new(HashSet::new()),
+            refined_readings: std::sync::Mutex::new(HashSet::new()),
             cooking: Cooking::default(),
             definitions: std::sync::Mutex::new(MacroDefinitions::default()),
             units: std::sync::Mutex::new(UnitTable::default()),
@@ -198,10 +197,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 MAX_WALKS_BY_CONTENT_ENTRIES,
                 MAX_WALKS_BY_CONTENT_BYTES,
             )),
-            units_read: std::collections::HashSet::new(),
+            units_read: HashSet::new(),
             read_focused_programs: true,
-            programs_wanted: std::collections::HashSet::new(),
-            units_attempted: std::collections::HashMap::new(),
+            programs_wanted: HashSet::new(),
+            units_attempted: HashMap::new(),
             checks_memo: std::sync::Mutex::new(None),
             pull_hits: std::sync::atomic::AtomicU64::new(0),
             pull_runs: std::sync::atomic::AtomicU64::new(0),
@@ -210,11 +209,11 @@ impl<F: FileProvider + Clone> Session<F> {
             unit_roots: std::sync::Mutex::new(HashMap::new()),
 
             last_edit: std::time::Instant::now(),
-            directive_signatures: std::collections::HashMap::new(),
-            cook_persistence: std::sync::Mutex::new(std::collections::HashMap::new()),
+            directive_signatures: HashMap::new(),
+            cook_persistence: std::sync::Mutex::new(HashMap::new()),
 
             prefetched: HashMap::new(),
-            prefetched_order: std::collections::VecDeque::new(),
+            prefetched_order: VecDeque::new(),
             headers,
             macro_work: std::sync::Mutex::new(Cooking::default()),
             parsed_definitions: std::sync::Mutex::new(ParsedDefinitions::new()),
@@ -232,16 +231,16 @@ impl<F: FileProvider + Clone> Session<F> {
                 RENDERING_SUMMARY_ENTRIES,
                 RENDERING_SUMMARY_BYTES,
             )),
-            cooking_refused: std::sync::Mutex::new(std::collections::HashSet::new()),
-            cooked_or_wanted: std::sync::Mutex::new(std::collections::HashSet::new()),
-            renderings_asked: std::sync::Mutex::new(std::collections::HashSet::new()),
+            cooking_refused: std::sync::Mutex::new(HashSet::new()),
+            cooked_or_wanted: std::sync::Mutex::new(HashSet::new()),
+            renderings_asked: std::sync::Mutex::new(HashSet::new()),
             focused_document: std::sync::Mutex::new(None),
-            client_language: std::sync::Mutex::new(std::collections::HashMap::new()),
+            client_language: std::sync::Mutex::new(HashMap::new()),
             stored_cooks: std::sync::atomic::AtomicUsize::new(0),
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
-            walks_by_root: std::sync::Mutex::new(std::collections::HashMap::new()),
+            walks_by_root: std::sync::Mutex::new(HashMap::new()),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -299,7 +298,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// unit and a project with several targets has no single compilation, so the project-wide answer is *a*
     /// compilation rather than the project's. This is the question the include resolver asks, and the one a caller
     /// debugging "why did this file resolve that header" wants.
-    pub fn config_for(&self, file: &std::path::Path) -> CompilerConfig {
+    pub fn config_for(&self, file: &Path) -> CompilerConfig {
         self.config().for_file(file)
     }
 
@@ -314,13 +313,13 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Bounded by count, and the bound clears the whole memo: a reader meets a few dozen files, and evicting one entry
     /// at a time would buy nothing for the bookkeeping it costs.
-    pub(crate) fn config_for_file(&self, file: &std::path::Path) -> std::sync::Arc<PerFileConfig> {
+    pub(crate) fn config_for_file(&self, file: &Path) -> Arc<PerFileConfig> {
         if let Ok(known) = self.config_for_file.lock()
             && let Some(held) = known.get(file)
         {
-            return std::sync::Arc::clone(held);
+            return Arc::clone(held);
         }
-        let config = std::sync::Arc::new(self.config().for_file(file));
+        let config = Arc::new(self.config().for_file(file));
         // **The client's language mode, when the project states none.** A header is the case this is for: its
         // family is deliberately nobody's guess (`for_file`), and "not told is not C" then lets C++-only rules fire
         // in a C project's `.h` files — 73 `cstyle-cast` findings on redis 8.x, all of them in headers
@@ -376,8 +375,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // parser that builds its tree (`Indexer`), the cook that renders it, and the checks. Before this the
         // session's answer and the parser's were two — a header the session had decided was C was *parsed* as C++
         // — and the syntax errors of that reading were reported on correct code.
-        let config = std::sync::Arc::new((*config).clone().with_language(language));
-        let worked_out = std::sync::Arc::new(PerFileConfig {
+        let config = Arc::new((*config).clone().with_language(language));
+        let worked_out = Arc::new(PerFileConfig {
             language,
             family: config.language(),
             config,
@@ -386,7 +385,7 @@ impl<F: FileProvider + Clone> Session<F> {
             if known.len() >= CONFIG_FOR_FILE_ENTRIES {
                 known.clear();
             }
-            known.insert(file.to_path_buf(), std::sync::Arc::clone(&worked_out));
+            known.insert(file.to_path_buf(), Arc::clone(&worked_out));
         }
         worked_out
     }
@@ -504,14 +503,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // **Both populations**, and the split is why the number is read from two caches: a rendering view is a
         // whole unit's tree and a buffer view is a page, and a report that added only one of them would
         // understate what a reader with a big file open is paying for.
-        let counted = |cache: &std::sync::Mutex<
-            cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>,
-        >| {
-            cache
-                .lock()
-                .map(|known| (known.len(), known.weight()))
-                .unwrap_or((0, 0))
-        };
+        let counted =
+            |cache: &std::sync::Mutex<cache::cache_lru::Cache<ViewKey, Arc<ParsedView>>>| {
+                cache
+                    .lock()
+                    .map(|known| (known.len(), known.weight()))
+                    .unwrap_or((0, 0))
+            };
         let (buffer_views, buffer_view_bytes) = counted(&self.views);
         let (rendering_views, rendering_view_bytes) = counted(&self.rendering_views);
         let (views, view_bytes) = (

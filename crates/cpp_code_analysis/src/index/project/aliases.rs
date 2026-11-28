@@ -312,7 +312,7 @@ pub(crate) fn a_spelling_through_the_aliases_in(
     if names_a_namespace(index, path, &inner) {
         return written.to_string();
     }
-    let inner_type = sema::types::parse_type_spelling(&inner);
+    let inner_type = parse_type_spelling(&inner);
     let Some(inner_name) = inner_type.class_name() else {
         return written.to_string();
     };
@@ -738,7 +738,7 @@ pub(crate) fn the_class_an_arrow_points_at(
     // iterator's own `typedef _Val* pointer;` makes a `pair<const K, V>*`. The step is the same one
     // a member's recorded type goes through ([`a_spelling_through_the_aliases`]), applied here
     // because this is the second place a *spelling* is about to be used as a type.
-    let class_type = sema::types::parse_type_spelling(class);
+    let class_type = parse_type_spelling(class);
     let resolved = a_spelling_through_the_aliases(
         index,
         scopes,

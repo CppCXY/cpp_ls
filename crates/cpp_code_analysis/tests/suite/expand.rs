@@ -715,7 +715,7 @@ fn expansion_work_is_bounded_by_the_budget() {
     let expansion = expand(&tokens, &macros);
 
     assert!(
-        expansion.tokens.len() <= cpp_code_analysis::expand::MAX_TOKENS,
+        expansion.tokens.len() <= expand::MAX_TOKENS,
         "the cap held: {} tokens",
         expansion.tokens.len()
     );

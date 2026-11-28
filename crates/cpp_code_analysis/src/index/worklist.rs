@@ -280,7 +280,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// A store over a few files in memory, with a cache directory of its own.
-    fn store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
+    fn store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, PathBuf) {
         let root = std::env::temp_dir().join("cppls-worklist-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 

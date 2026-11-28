@@ -278,8 +278,8 @@ pub fn classified_names_in_family(
     //
     // A preprocessor expands a function-like macro before any grammar sees it, so for a name this file defines as a
     // macro the declaration reading is not a fact about the token. This set is what lets step 1 stand aside for it.
-    let invoked: std::collections::HashSet<usize> = {
-        let mut invoked = std::collections::HashSet::new();
+    let invoked: HashSet<usize> = {
+        let mut invoked = HashSet::new();
         let mut previous: Option<(usize, CppTokenKind)> = None;
         for token in view.tree.get_tokens() {
             if cpp_parser::is_trivia(token.kind) {
@@ -315,8 +315,7 @@ pub fn classified_names_in_family(
     // **The file's macro environment, built at most once** — see step 4b and
     // [`ProjectIndex::macro_names_in_force`]. It used to be a map from spelling to answer, which meant one walk of the
     // include graph per spelling; on `codeformat.h` that was 526 ms for 521 tokens.
-    let included_macros: std::cell::OnceCell<std::collections::HashSet<String>> =
-        std::cell::OnceCell::new();
+    let included_macros: std::cell::OnceCell<HashSet<String>> = std::cell::OnceCell::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     // **Every guard question this pass is about to ask, answered by one walk through the file's translation unit.**
     //
@@ -329,7 +328,7 @@ pub fn classified_names_in_family(
     {
         let included = included_macros.get_or_init(|| index.macro_names_in_force(&view.path));
         let mut questions: Vec<(String, u32, usize)> = Vec::new();
-        let mut asked_about: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut asked_about: HashSet<&str> = HashSet::new();
         for token in view.tree.get_tokens() {
             if token.kind != CppTokenKind::Identifier {
                 continue;
@@ -380,7 +379,7 @@ pub fn classified_names_in_family(
     // about the text after a token. Built once per file, the same way the other tables in this function are: one walk,
     // then a hash lookup per token. (The first version of this peeked two bytes ahead for `::`, which is the same
     // answer only while the tree and the text agree — and this pass runs on renderings, where they need not.)
-    let qualified_heads: std::collections::HashSet<usize> = view
+    let qualified_heads: HashSet<usize> = view
         .root
         .descendants()
         .filter_map(cpp_parser::CppNameExpr::cast)
@@ -392,9 +391,7 @@ pub fn classified_names_in_family(
                 .collect();
             let mut heads = Vec::new();
             for pair in tokens.windows(2) {
-                if pair[0].kind() == cpp_parser::CppTokenKind::Identifier.into()
-                    && pair[1].text() == "::"
-                {
+                if pair[0].kind() == CppTokenKind::Identifier.into() && pair[1].text() == "::" {
                     heads.push(usize::from(pair[0].text_range().start()));
                 }
             }
@@ -1009,8 +1006,8 @@ fn qualified_names(view: &FileView) -> HashMap<usize, String> {
                 continue;
             };
 
-            match cpp_parser::CppTokenKind::from(token.kind()) {
-                cpp_parser::CppTokenKind::Identifier => {
+            match CppTokenKind::from(token.kind()) {
+                CppTokenKind::Identifier => {
                     if !written.is_empty() {
                         written.push_str("::");
                     }
@@ -1021,7 +1018,7 @@ fn qualified_names(view: &FileView) -> HashMap<usize, String> {
                 }
                 // A leading `::` is part of the spelling and means the global name space — see
                 // `qualified_name_at`, whose convention this is.
-                cpp_parser::CppTokenKind::Scope if written.is_empty() => global = true,
+                CppTokenKind::Scope if written.is_empty() => global = true,
                 _ => {}
             }
         }

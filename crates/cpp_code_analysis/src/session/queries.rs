@@ -11,14 +11,12 @@ use crate::ReferenceBudget;
 use crate::SymbolReferences;
 use crate::SymbolToFind;
 use crate::completion;
-use crate::file;
 use crate::header_at;
 use crate::index;
 use crate::paths;
 use crate::preprocess;
 use crate::preprocess::macros::MacroFile;
 use crate::sema;
-use crate::session;
 
 /// **A specifier written before a declaration but kept outside its node** — see
 /// [`Session::the_attributes_before_a_declaration`].
@@ -104,7 +102,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // corpus against 4.5 s for 255 files, because the closure here is the whole standard library and there it is
         // not. One hash per file is the same answer without the arithmetic.
         let mut seen: HashSet<String> = HashSet::new();
-        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
         queue.push_back(root.to_path_buf());
 
         // **The root's edges come from `seed` when there is one**, because the index has none for it: a file that
@@ -417,7 +415,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn symbol_references_of(
         &self,
         fact: &DeclFact,
-        file: std::path::PathBuf,
+        file: PathBuf,
         budget: ReferenceBudget,
     ) -> Known<SymbolReferences> {
         let symbol = SymbolToFind::of(fact, file);
@@ -436,7 +434,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_at_a_file_offset(
         &self,
         view: &FileView,
-        offset: file::coordinates::FileOffset,
+        offset: FileOffset,
     ) -> Known<ProjectMacro> {
         let Some(written) = view.the_written_text() else {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("no written text")));
@@ -456,7 +454,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_invocation_at_a_file_offset(
         &self,
         view: &FileView,
-        offset: file::coordinates::FileOffset,
+        offset: FileOffset,
     ) -> Option<MacroInvocationSite> {
         let written = view.the_written_text()?;
         let (name, at) = macro_name_at_a_file_offset(&written, offset)?;
@@ -489,7 +487,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_candidate_at_a_file_offset(
         &self,
         view: &FileView,
-        offset: file::coordinates::FileOffset,
+        offset: FileOffset,
     ) -> Option<ProjectMacro> {
         let written = view.the_written_text()?;
         let (name, at) = macro_name_at_a_file_offset(&written, offset)?;
@@ -662,7 +660,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .index()
                 .visible_files(reader)
                 .iter()
-                .any(|(path, _)| std::path::Path::new(path) == declared_in)
+                .any(|(path, _)| Path::new(path) == declared_in)
             && let Some(includer) = self.index().includers_of(declared_in).first()
         {
             unit = includer.clone();
@@ -746,9 +744,9 @@ impl<F: FileProvider + Clone> Session<F> {
     /// only source and it was absent.
     ///
     /// `path` is the file the question is about, because the standard is per file.
-    pub fn predefined_macro(&self, name: &str, path: &std::path::Path) -> Option<String> {
+    pub fn predefined_macro(&self, name: &str, path: &Path) -> Option<String> {
         let language = self.config_for(path).language_for(path);
-        if let Some(value) = session::the_standards_own_macro(name, &language) {
+        if let Some(value) = the_standards_own_macro(name, &language) {
             return Some(value);
         }
 
@@ -780,11 +778,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// with the definitions this file has **in force before the use** and the closure's environment underneath — the
     /// state a compiler is in at that line. The result is formatted (`cpp_formatter`), because an expansion is code and
     /// the reader is going to read it as code.
-    pub fn the_expansion_of_a_macro(
-        &self,
-        view: &FileView,
-        offset: file::coordinates::FileOffset,
-    ) -> Option<String> {
+    pub fn the_expansion_of_a_macro(&self, view: &FileView, offset: FileOffset) -> Option<String> {
         let Known::Yes(found) = self.macro_at_a_file_offset(view, offset) else {
             return None;
         };
@@ -883,7 +877,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // `cast_byte(~PF_VAHID)`: the card said "a macro whose value is `1`" and "Expands to `PF_VAHID`" — the name,
         // because the binding from `lobject.h` sat past the synthetic source's end.
         let environment = self.store.an_environment_of(&view.path)?;
-        let seed = preprocess::macros::MacroTable::from_marked(self.store.index().macros());
+        let seed = MacroTable::from_marked(self.store.index().macros());
         let configuration = {
             let mut parsed = self
                 .parsed_definitions
@@ -934,7 +928,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// answers with `None` for it rather than inventing one.
     pub fn the_attributes_before_a_declaration(
         &self,
-        file: &std::path::Path,
+        file: &Path,
         offset: usize,
     ) -> Vec<WrittenAttribute> {
         use cpp_parser::CppAstNode as _;
@@ -989,7 +983,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .then(|| {
                     self.the_expansion_of_a_macro(
                         &view,
-                        file::coordinates::FileOffset::new(usize::from(node.text_range().start())),
+                        FileOffset::new(usize::from(node.text_range().start())),
                     )
                 })
                 .flatten()
@@ -1217,7 +1211,7 @@ fn a_partition_is_written_before(written: &str, at: usize) -> bool {
 /// ([`crate::preprocess::cooked::a_line_directive_changes`]); the cook itself does the same while it walks, and the
 /// shared function is what keeps the two from disagreeing. The tokens are read **as written** here: a `#line` whose
 /// number is a macro is expanded by the cook, not by the card, and the card's fixture for it is a literal.
-fn presumed_position(written: &str, at: usize) -> (usize, Option<std::path::PathBuf>) {
+fn presumed_position(written: &str, at: usize) -> (usize, Option<PathBuf>) {
     use crate::preprocess::directive::{Directive, scan_directives};
 
     let (tokens, _) = cpp_parser::lex(written, &cpp_parser::LexerConfig::default());
@@ -1264,10 +1258,7 @@ fn push_a_quoted(out: &mut String, name: &str) {
 }
 
 /// The identifier under `offset` in a file's own bytes, with its offset.
-fn macro_name_at_a_file_offset(
-    written: &str,
-    offset: file::coordinates::FileOffset,
-) -> Option<(String, usize)> {
+fn macro_name_at_a_file_offset(written: &str, offset: FileOffset) -> Option<(String, usize)> {
     let at = offset.get();
     let is_a_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let bytes = written.as_bytes();

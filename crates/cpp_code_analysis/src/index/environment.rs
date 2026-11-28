@@ -28,10 +28,8 @@
 //! first — an unresolved `#include` or an unindexed header is a hole in exactly the reasoning that would make
 //! "not defined" sound.
 
-use crate::condition;
 use crate::include;
 use crate::predefined_macros_of;
-use crate::preprocess;
 use std::path::Path;
 
 use crate::ProjectIndex;
@@ -406,11 +404,11 @@ impl<'a> KnownMacros<'a> {
     }
 }
 
-impl condition::MacroValues for KnownMacros<'_> {
-    fn lookup(&self, name: &str) -> condition::Lookup<'_> {
+impl MacroValues for KnownMacros<'_> {
+    fn lookup(&self, name: &str) -> Lookup<'_> {
         match self.facts.kind_of(name, self.offset) {
-            Some(_) => condition::Lookup::DefinedWithoutAValue,
-            None => condition::Lookup::Undefined,
+            Some(_) => Lookup::DefinedWithoutAValue,
+            None => Lookup::Undefined,
         }
     }
 }
@@ -458,9 +456,9 @@ pub fn a_guard_visibility<M: MacroValues>(
     file: &FileSummary,
     fact: &MacroFact,
     macros_at: impl Fn(usize) -> M,
-) -> preprocess::guard::Visibility {
+) -> Visibility {
     if matches!(fact.guard, FactGuard::Unconditional) {
-        return preprocess::guard::Visibility::Active;
+        return Visibility::Active;
     }
     file.guards
         .visibility_of(fact.guard, fact.range.start_offset, &macros_at)

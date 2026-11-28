@@ -20,7 +20,6 @@ use crate::index;
 use crate::paths;
 use crate::preprocess;
 use crate::sema;
-use crate::session;
 
 impl<F: FileProvider + Clone> Session<F> {
     /// **The query entry point for one file** — a [`crate::sema::model::SemanticModel`] over `view`, with the
@@ -66,8 +65,8 @@ impl<F: FileProvider + Clone> Session<F> {
         // Kept **here and not in the session**: a `FileView` holds rowan nodes, which are not `Send`, and a session
         // is shared across threads. This closure lives as long as the model — one diagnostic pass — which is exactly
         // the lifetime in which the repetition happens, and no other thread can see these readings.
-        let seen: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<FileView>>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
+        let seen: std::cell::RefCell<HashMap<PathBuf, Option<FileView>>> =
+            std::cell::RefCell::new(HashMap::new());
         let resolver = Box::new(move |path: &Path| -> Option<FileView> {
             if let Some(known) = seen.borrow().get(path) {
                 return known.clone();
@@ -152,7 +151,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **The timeline of one program** — public for the probes and tests that measure a reading by its environment
     /// rather than by a request. A caller that merely wants an answer wants a query instead: this walks (or loads)
     /// the whole unit, which is the most expensive thing this crate does.
-    pub fn translation_unit_of(&self, path: &Path) -> Option<std::sync::Arc<TranslationUnit>> {
+    pub fn translation_unit_of(&self, path: &Path) -> Option<Arc<TranslationUnit>> {
         self.unit_and_state_of(path).map(|(unit, _)| unit)
     }
 
@@ -161,10 +160,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The flag is needed by the one caller that must not use a provisional timeline at all:
     /// [`Session::cooking_materials`], because a rendering is filed and never revisited, where a timeline is
     /// re-walked the moment the queue drains.
-    pub(crate) fn unit_and_state_of(
-        &self,
-        path: &Path,
-    ) -> Option<(std::sync::Arc<TranslationUnit>, bool)> {
+    pub(crate) fn unit_and_state_of(&self, path: &Path) -> Option<(Arc<TranslationUnit>, bool)> {
         let key = queue_key(path);
 
         // **The guard is bound and dropped before the body**, not held across it: `held_units()` is a `Mutex`, and
@@ -203,7 +199,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 //
                 // Boxed into an `Arc` because both arms of this match must agree, and the walk arm shares its value
                 // with every later root whose closure is the same — see [`Session::walked_by_content`].
-                (std::sync::Arc::new(unit), false)
+                (Arc::new(unit), false)
             }
             None => {
                 // **The file the index cannot describe in full, and the order that answers it.**
@@ -272,7 +268,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     // **Is the closure still growing?** Asked *before* the walk, because a unit whose closure can still
                     // grow is incomplete by construction: it must neither fill the sharing cache nor read from it.
                     let provisional = self.closure_is_still_growing(&closure, &closure_by_key);
-                    let walked = std::sync::Arc::new({
+                    let walked = Arc::new({
                         // **The root's own summary comes from `root`, not from the index.** For a file the index
                         // cannot describe — the one a reader is editing, whose directives are all there is — the
                         // lookup would otherwise answer `None` for the very file the walk starts at, and a timeline
@@ -282,7 +278,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         // C++ source, and a .c program read with __cplusplus takes every C++ branch in every
                         // system header (measured: 24 xtern "C++" blocks in Lua's ldebug.c stream, and 15
                         // parse errors after them).
-                        let seed = session::the_marked_seed_for(&self.config, index.macros(), path);
+                        let seed = the_marked_seed_for(&self.config, index.macros(), path);
                         TranslationUnit::walk(
                             root,
                             |wanted| {
@@ -307,9 +303,7 @@ impl<F: FileProvider + Clone> Session<F> {
                             self.store.contributions(),
                         )
                         .with_the_command_spelling(
-                            self.config
-                                .presumed_name_for(path)
-                                .map(std::path::Path::to_path_buf),
+                            self.config.presumed_name_for(path).map(Path::to_path_buf),
                         )
                     });
 
@@ -330,7 +324,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         // count would treat them the same.
                         let weight = walked.heap_bytes();
                         if let Ok(mut held) = self.walked_by_content.lock() {
-                            held.insert(identity, std::sync::Arc::clone(&walked), weight);
+                            held.insert(identity, Arc::clone(&walked), weight);
                         }
                     }
 
@@ -353,7 +347,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // Already an `Arc` from both arms of the match above — the units table has always held `Arc`s, and a shared
         // timeline is the same value reaching more than one root.
         self.held_units()
-            .insert(key, std::sync::Arc::clone(&unit), provisional);
+            .insert(key, Arc::clone(&unit), provisional);
         Some((unit, provisional))
     }
 
@@ -444,10 +438,7 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` means the file falls back to its own text (and the second pass refines it later), which is the cold
     /// start's path and stays it: an environment that is not the whole program renders *worse* than the raw text.
-    pub(crate) fn the_timeline_to_read_through(
-        &self,
-        path: &Path,
-    ) -> Option<std::sync::Arc<TranslationUnit>> {
+    pub(crate) fn the_timeline_to_read_through(&self, path: &Path) -> Option<Arc<TranslationUnit>> {
         if let Some((false, unit)) = self.held_units().get(&queue_key(path))
             && unit.environment_of(path).is_some()
         {
@@ -608,8 +599,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Not cached: the walk is over the include graph's reverse edges, a handful of steps per header, and a cache
     /// would have to be invalidated by every index insertion — the thing this method exists to stop depending on.
     pub(crate) fn the_unit_that_reads(&self, path: &Path) -> Option<PathBuf> {
-        let project: std::collections::HashSet<String> =
-            self.project.iter().map(|root| queue_key(root)).collect();
+        let project: HashSet<String> = self.project.iter().map(|root| queue_key(root)).collect();
         let a_root = |candidate: &Path| {
             if !project.contains(&queue_key(candidate)) {
                 return false;
@@ -621,8 +611,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 || self.store.index().includers_of(candidate).is_empty()
         };
 
-        let mut seen: std::collections::HashSet<PathBuf> =
-            std::collections::HashSet::from([path.to_path_buf()]);
+        let mut seen: HashSet<PathBuf> = HashSet::from([path.to_path_buf()]);
         let mut level = self.store.index().includers_of(path);
         while !level.is_empty() {
             level.sort();
@@ -659,7 +648,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn walked_bindings(
         &mut self,
         root: &Path,
-    ) -> Option<Vec<(std::path::PathBuf, Vec<(String, Option<bool>, String)>)>> {
+    ) -> Option<Vec<(PathBuf, Vec<(String, Option<bool>, String)>)>> {
         let summary = self.store.index().summary(root)?;
         let root_path = summary.path.clone();
         let root_key = queue_key(&root_path);
@@ -859,7 +848,7 @@ impl<F: FileProvider + Clone> Session<F> {
         rendered: &RenderedUnit,
         stored: u64,
     ) -> bool {
-        let mut inputs: Vec<(&std::path::Path, u64)> = Vec::new();
+        let mut inputs: Vec<(&Path, u64)> = Vec::new();
         for path in &rendered.walked {
             let Some(text) = self.files.read(path) else {
                 return false;
@@ -894,7 +883,7 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
-        let inputs: Vec<(&std::path::Path, u64)> = sources
+        let inputs: Vec<(&Path, u64)> = sources
             .iter()
             .map(|(path, text)| (path.as_path(), cache::content_hash(text)))
             .collect();
@@ -1125,7 +1114,7 @@ impl<F: FileProvider + Clone> Session<F> {
         prepared: &PreparedUnitReading,
     ) -> Vec<(cache::cache_db::CacheKey, Vec<u8>)> {
         let files = &prepared.indexed.files;
-        let prepare = |(path, cooked): &(std::path::PathBuf, CookedFile)| {
+        let prepare = |(path, cooked): &(PathBuf, CookedFile)| {
             self.store.prepare_a_cooked_record(path, cooked)
         };
         // **In parallel, because each record's fingerprint is a walk of its own file's closure.** They share nothing
@@ -1580,7 +1569,7 @@ impl<F: FileProvider + Clone> Session<F> {
         else {
             return false;
         };
-        let path = std::path::PathBuf::from(&key);
+        let path = PathBuf::from(&key);
         // **The whole closure must be summarised before the program is read.** A walk over files the index has not read
         // contributes what it can — and then the reading is filed and marked read, so the *partial* program reading
         // shadows every summary from then on. Measured: in the editor `definitions("std::println", demo.cpp)` answered
@@ -1949,7 +1938,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn modules_in_view_of(&self, path: &Path) -> Vec<String> {
         let mut wanted: Vec<String> = Vec::new();
         let mut pending: Vec<PathBuf> = vec![path.to_path_buf()];
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
 
         while let Some(current) = pending.pop() {
             if !seen.insert(queue_key(&current)) {

@@ -2539,7 +2539,7 @@ fn significant_end(node: &CppSyntaxNode) -> Option<usize> {
     {
         match element.clone().into_token() {
             Some(token) => {
-                if !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
+                if !cpp_parser::is_trivia(CppTokenKind::from(token.kind())) {
                     return Some(cpp_parser::source_range(token.text_range()).end_offset());
                 }
                 // Trivia: this token does not end the declaration, so keep looking backwards.
@@ -3127,11 +3127,9 @@ fn the_naming_declarator(declarator: &CppSyntaxNode) -> Option<CppSyntaxNode> {
 ///
 /// Measured on `int (*maker(int a))(int b);` before this: the subtree scan collected both lists, and `b` — a parameter
 /// of the *returned pointer's* type — was bound as a file-scope variable.
-fn the_lists_of_the_name(
-    naming: cpp_parser::CppSyntaxNode,
-) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> {
+fn the_lists_of_the_name(naming: CppSyntaxNode) -> impl Iterator<Item = CppSyntaxNode> {
     use cpp_parser::CppAstNode;
-    let mut lists: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+    let mut lists: Vec<CppSyntaxNode> = Vec::new();
     let mut current = Some(naming);
     while let Some(node) = current {
         for child in node.children() {
@@ -3153,7 +3151,7 @@ fn the_lists_of_the_name(
 fn a_parameter_list_of_the_declarator(node: &CppSyntaxNode) -> bool {
     use cpp_parser::CppAstNode;
     for child in node.children() {
-        if cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Initializer {
+        if cpp_parser::CppInitializer::can_cast(child.kind().into()) {
             continue;
         }
         if cpp_parser::CppParamList::can_cast(child.kind().into()) {

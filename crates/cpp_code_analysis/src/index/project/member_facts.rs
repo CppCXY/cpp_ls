@@ -246,9 +246,9 @@ pub(crate) fn member_bindings(
     path: &Path,
     class: &str,
     arguments: &[Type],
-) -> sema::types::TypeBindings {
+) -> TypeBindings {
     if arguments.is_empty() {
-        return sema::types::TypeBindings::default();
+        return TypeBindings::default();
     }
 
     let names = class_template_parameters(
@@ -259,7 +259,7 @@ pub(crate) fn member_bindings(
         path,
         class,
     );
-    sema::types::TypeBindings::new(names, arguments.to_vec())
+    TypeBindings::new(names, arguments.to_vec())
 }
 
 /// **The arguments a class template deduces from an initializer** — C++17's implicit guide, for the one shape this can be
@@ -299,7 +299,7 @@ pub(crate) fn deduced_class_template_arguments(
     path: &Path,
     declaring: &mut dyn FnMut(&Path) -> Option<FileView>,
     class: &str,
-    initializer: &sema::types::Type,
+    initializer: &Type,
 ) -> Option<String> {
     let parameters = class_template_parameters(
         &sema::declarations::ShapeTable::new(),
@@ -360,20 +360,16 @@ pub(crate) fn the_constructor_takes(
     // round.
     let in_the_tree = root.descendants().find(|node| {
         matches!(
-            cpp_parser::CppSyntaxKind::from(node.kind()),
-            cpp_parser::CppSyntaxKind::ClassDef
-                | cpp_parser::CppSyntaxKind::StructDef
-                | cpp_parser::CppSyntaxKind::UnionDef
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
         ) && node.children().any(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr
                 && child.text().to_string().trim() == simple
         })
     });
     if let Some(node) = in_the_tree {
         for declaration in node.descendants() {
-            if cpp_parser::CppSyntaxKind::from(declaration.kind())
-                != cpp_parser::CppSyntaxKind::Declaration
-            {
+            if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::Declaration {
                 continue;
             }
             // **A constructor, by its own text.** `explicit Box(T value) : value_(value) {}` is a declaration whose
@@ -389,10 +385,10 @@ pub(crate) fn the_constructor_takes(
             if !(head.starts_with(simple) && head[simple.len()..].trim_start().starts_with('(')) {
                 continue;
             }
-            let Some(parameters) = declaration.descendants().find(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::ParameterList
-            }) else {
+            let Some(parameters) = declaration
+                .descendants()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+            else {
                 continue;
             };
             if the_first_parameter_is(&parameters.text().to_string(), only) {
@@ -420,13 +416,11 @@ pub(crate) fn the_deduction_guide_deduces(
     class: &str,
     simple: &str,
     only: &str,
-    initializer: &sema::types::Type,
+    initializer: &Type,
 ) -> Option<String> {
     let deduces_to = format!("{simple}<{only}>");
     for declaration in root.descendants() {
-        if cpp_parser::CppSyntaxKind::from(declaration.kind())
-            != cpp_parser::CppSyntaxKind::Declaration
-        {
+        if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::Declaration {
             continue;
         }
         let text = declaration.text().to_string();

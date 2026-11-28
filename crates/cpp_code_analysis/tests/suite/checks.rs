@@ -3998,13 +3998,10 @@ fn the_include_directory_beside_src_resolves_a_quoted_include() {
         "#include \"techniques.h\"\n\nint use() { Widget widget; return widget.size(); }\n";
     std::fs::write(root.join("src/techniques.cpp"), source).expect("the source is written");
 
-    let mut session = cpp_code_analysis::Session::open(
+    let mut session = Session::open(
         root.clone(),
-        cpp_code_analysis::SessionFiles::new(
-            cpp_code_analysis::OpenDocuments::new(),
-            cpp_code_analysis::DiskFiles,
-        ),
-        cpp_code_analysis::WatchFilter::new(&root),
+        SessionFiles::new(OpenDocuments::new(), cpp_code_analysis::DiskFiles),
+        WatchFilter::new(&root),
     );
     session.add_project_files([
         root.join("src/techniques.cpp"),

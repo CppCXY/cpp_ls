@@ -7,7 +7,6 @@
 use super::*;
 use crate::FileSummary;
 use crate::MemoryReport;
-use crate::file;
 use crate::index;
 
 impl<F: FileProvider + Clone> Session<F> {
@@ -26,8 +25,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn the_view_cache(
         &self,
         key: &ViewKey,
-    ) -> &std::sync::Mutex<cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>>
-    {
+    ) -> &std::sync::Mutex<cache::cache_lru::Cache<ViewKey, Arc<ParsedView>>> {
         if key.rendering.is_some() {
             &self.rendering_views
         } else {
@@ -40,7 +38,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let weight = a_view_weighs(view);
         if let Ok(mut known) = self.the_view_cache(&key).lock() {
             let parsed = view.clone().into_parsed();
-            known.insert(key, std::sync::Arc::new(parsed), weight);
+            known.insert(key, Arc::new(parsed), weight);
         }
     }
 
@@ -100,13 +98,13 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
         candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.1));
 
-        let open: std::collections::HashSet<String> = self
+        let open: HashSet<String> = self
             .documents
             .paths()
             .iter()
             .map(|path| queue_key(path))
             .collect();
-        let refined: std::collections::HashSet<String> = self
+        let refined: HashSet<String> = self
             .refined_readings
             .lock()
             .map(|refined| refined.iter().cloned().collect())
@@ -162,14 +160,13 @@ impl<F: FileProvider + Clone> Session<F> {
         // **Both populations**, and the split is why the number is read from two caches: a rendering view is a
         // whole unit's tree and a buffer view is a page, and a report that added only one of them would
         // understate what a reader with a big file open is paying for.
-        let counted = |cache: &std::sync::Mutex<
-            cache::cache_lru::Cache<ViewKey, std::sync::Arc<file::view::ParsedView>>,
-        >| {
-            cache
-                .lock()
-                .map(|known| (known.len(), known.weight()))
-                .unwrap_or((0, 0))
-        };
+        let counted =
+            |cache: &std::sync::Mutex<cache::cache_lru::Cache<ViewKey, Arc<ParsedView>>>| {
+                cache
+                    .lock()
+                    .map(|known| (known.len(), known.weight()))
+                    .unwrap_or((0, 0))
+            };
         let (buffer_views, buffer_view_bytes) = counted(&self.views);
         let (rendering_views, rendering_view_bytes) = counted(&self.rendering_views);
         let (views, view_bytes) = (
@@ -187,14 +184,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // adding their byte counts would report the same megabytes twice. Measured rather than assumed: the pointers
         // are compared, and the walk table's half of every overlap is what the totals subtract.
         let shared_timeline_bytes = {
-            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut seen: HashSet<usize> = HashSet::new();
             for unit in self.held_units().timelines() {
-                seen.insert(std::sync::Arc::as_ptr(unit) as *const () as usize);
+                seen.insert(Arc::as_ptr(unit) as *const () as usize);
             }
             let mut shared = 0usize;
             if let Ok(held) = self.walked_by_content.lock() {
                 for unit in held.values() {
-                    if !seen.insert(std::sync::Arc::as_ptr(unit) as *const () as usize) {
+                    if !seen.insert(Arc::as_ptr(unit) as *const () as usize) {
                         shared += unit.heap_bytes();
                     }
                 }
@@ -231,7 +228,7 @@ impl<F: FileProvider + Clone> Session<F> {
             views,
             view_bytes,
             dead_macro_decisions: dead_macro_files,
-            dead_macro_bytes: dead_macro_offsets * std::mem::size_of::<usize>(),
+            dead_macro_bytes: dead_macro_offsets * size_of::<usize>(),
             directive_signatures: self.directive_signatures.len(),
             include_searches: self.store.include_search_count().unwrap_or(0),
             units_read: self.units_read.len(),

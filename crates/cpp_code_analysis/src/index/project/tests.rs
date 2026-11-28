@@ -16,10 +16,8 @@ use crate::TranslationUnit;
 use crate::WalkCache;
 use crate::build_scopes;
 use crate::cache::SummaryKey;
-use crate::index;
 use crate::index::summarize;
 use crate::preprocess;
-use crate::summary;
 use crate::symbol::{Known, UnknownReason};
 use std::path::Path;
 
@@ -1350,7 +1348,7 @@ fn a_gnu_label_declaration_binds_labels_not_variables() {
             .unwrap_or_else(|| panic!("`{name}` is declared by the `__label__` line"));
         assert_eq!(
             fact.kind,
-            summary::DeclKind::Other,
+            DeclKind::Other,
             "`{name}` is a label, not a variable"
         );
         assert_eq!(fact.type_of, None, "a label writes no type");
@@ -3998,7 +3996,7 @@ fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
         let summary = index
             .summary(Path::new(path))
             .expect("the fixture is summarized");
-        index::CookedFile::declarations(summary.declarations.clone())
+        CookedFile::declarations(summary.declarations.clone())
     };
     // The reading a render produces for the header, filed on its own.
     index.insert_cooked(Path::new("/p/a.h"), cooked_of(&index, "/p/a.h"));
@@ -4008,7 +4006,7 @@ fn an_empty_program_reading_does_not_hide_the_one_with_declarations() {
         7,
         cooked_of(&index, "/p/main.cpp"),
     );
-    index.insert_cooked_in_a_program(Path::new("/p/a.h"), 7, index::CookedFile::default());
+    index.insert_cooked_in_a_program(Path::new("/p/a.h"), 7, CookedFile::default());
 
     let members = index
         .declarations_in("Widget", Path::new("/p/main.cpp"))

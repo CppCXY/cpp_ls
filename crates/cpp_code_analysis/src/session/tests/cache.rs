@@ -56,7 +56,7 @@ pub(crate) fn a_rendering_is_not_left_in_the_cache_for_the_next_session() {
     // the summary holding `Live` twice is the new contract, and the query answering the `#else` one is the guarantee
     // this test exists for — a summary made from `main.cpp`'s rendering would answer the `int` branch instead.
     let mut session = fixture.session();
-    session.add_project_files([std::path::PathBuf::from("/p/api.h")]);
+    session.add_project_files([PathBuf::from("/p/api.h")]);
     session.index_everything();
     let summary = session
         .index()
@@ -183,7 +183,7 @@ pub(crate) fn the_sharing_cache_survives_a_restart() {
         // **A program read is what walks now**: a cook composes its environment and walks no closure, so the sharing
         // table is filled by the reads a reader asks for.
         session
-            .read_the_unit(std::path::Path::new("/p/api.h"))
+            .read_the_unit(Path::new("/p/api.h"))
             .expect("the program reads");
         session
             .save_the_sharing()

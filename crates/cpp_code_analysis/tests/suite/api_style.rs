@@ -40,6 +40,12 @@ const NO_TYPED_NODE: &[&str] = &[
     "TemplateArgumentList",
     // A template header, which declares nothing on its own — the declaration it heads is its sibling.
     "TemplateDecl",
+    // No `CppFunctionDef` wrapper exists: the declaration wrapper is `CppDeclaration`, which is broader than the
+    // question a recovery shape asks here.
+    "FunctionDef",
+    // `CppThisExpr::can_cast` also accepts `IdentifierExpr` — by design, because `this` parses as an identifier when
+    // it is not the whole expression — so the wrapper answers a broader question than this equality does.
+    "ThisExpr",
 ];
 
 const SPELLING_FILES: &[&str] = &[

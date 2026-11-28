@@ -1548,14 +1548,14 @@ pub fn name_references(
     index: &ProjectIndex,
     read: &dyn Fn(&std::path::Path) -> Option<String>,
     name: &str,
-    declaring: &[std::path::PathBuf],
+    declaring: &[PathBuf],
     budget: usize,
 ) -> NameReferences {
     use std::collections::{HashSet, VecDeque};
 
     let mut found = NameReferences::default();
-    let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
-    let mut queue: VecDeque<std::path::PathBuf> = declaring.iter().cloned().collect();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut queue: VecDeque<PathBuf> = declaring.iter().cloned().collect();
     while let Some(path) = queue.pop_front() {
         if !seen.insert(path.clone()) {
             continue;
@@ -1588,11 +1588,11 @@ pub fn name_references(
             continue;
         }
         found.looked_at += 1;
-        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
-        let at: Vec<cpp_parser::SourceRange> = tokens
+        let (tokens, _) = cpp_parser::lex(&text, &LexerConfig::default());
+        let at: Vec<SourceRange> = tokens
             .iter()
             .filter(|token| {
-                token.kind == cpp_parser::CppTokenKind::Identifier
+                token.kind == CppTokenKind::Identifier
                     && text
                         .get(token.range.start_offset..token.range.end_offset())
                         .is_some_and(|spelled| spelled == name)
@@ -1611,9 +1611,9 @@ pub fn name_references(
 #[derive(Debug, Default)]
 pub struct NameReferences {
     /// Places the name is written, one entry per file, in the order the files were examined.
-    pub found: Vec<(std::path::PathBuf, Vec<cpp_parser::SourceRange>)>,
+    pub found: Vec<(PathBuf, Vec<SourceRange>)>,
     /// How many files were read and lexed.
     pub looked_at: usize,
     /// Files that were **not** searched: over budget, unreadable, or declaring the spelling as a local.
-    pub not_looked_at: Vec<std::path::PathBuf>,
+    pub not_looked_at: Vec<PathBuf>,
 }

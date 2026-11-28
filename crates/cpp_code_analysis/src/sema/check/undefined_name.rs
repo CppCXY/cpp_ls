@@ -296,9 +296,7 @@ fn a_read_and_not_a_declaration(node: &cpp_parser::CppSyntaxNode) -> bool {
             return false;
         }
         // A specifier sequence is a type, and the name inside it is not read.
-        if cpp_parser::CppSyntaxKind::from(current.kind())
-            == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
-        {
+        if cpp_parser::CppDeclSpecifierSeq::can_cast(current.kind().into()) {
             return false;
         }
         above = current.parent();

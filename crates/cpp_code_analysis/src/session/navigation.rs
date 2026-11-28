@@ -38,7 +38,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // The tokens are the **rendering's**, like the walk's, and this runs before the placement loop for the same
         // reason: a range still in rendering coordinates is what that loop translates.
         let language = self.config_for(&view.path).language_for(&view.path);
-        let mut claimed: std::collections::HashSet<usize> =
+        let mut claimed: HashSet<usize> =
             names.iter().map(|name| name.range.start_offset).collect();
         for token in view.tree.get_tokens() {
             if token.kind != CppTokenKind::Identifier {
@@ -104,9 +104,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     }
                     // **Back into the rendering's coordinates**, because the loop after this one moves every range out
                     // of the rendering and into the file; a range already in the file would be mapped a second time.
-                    let Some(reading) =
-                        view.reading_offset_of(file::coordinates::FileOffset::new(at))
-                    else {
+                    let Some(reading) = view.reading_offset_of(FileOffset::new(at)) else {
                         continue;
                     };
                     let at = reading.get();
@@ -176,7 +174,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // the rendering's answer for a shared start lost `(Parameter, false)` — a use the cook rewrote — and
             // keeping *both* broke `the_classifications_are_sorted_and_disjoint`. A colour is drawn on the reader's
             // text, so for two answers about one offset the one read from that text is the one to draw.
-            let mut at_offset: std::collections::HashMap<usize, usize> = names
+            let mut at_offset: HashMap<usize, usize> = names
                 .iter()
                 .enumerate()
                 .map(|(index, name)| (name.range.start_offset, index))
@@ -267,7 +265,7 @@ impl<F: FileProvider + Clone> Session<F> {
                         continue;
                     };
                     let is_a_keyword = cpp_parser::is_keyword(token.kind);
-                    if !is_a_keyword && token.kind != cpp_parser::CppTokenKind::Identifier {
+                    if !is_a_keyword && token.kind != CppTokenKind::Identifier {
                         continue;
                     }
                     let kind = if is_a_keyword {
@@ -456,7 +454,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn macro_signature_at(
         &self,
         view: &FileView,
-        offset: file::coordinates::FileOffset,
+        offset: FileOffset,
     ) -> Option<signature::CallSignature> {
         signature::a_macro_signature(self.store.index(), view, offset.get(), &mut |path| {
             self.view(path)

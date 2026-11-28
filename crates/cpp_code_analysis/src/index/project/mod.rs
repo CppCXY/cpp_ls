@@ -280,14 +280,14 @@ pub struct ProjectIndex {
     declaration_revision: u64,
     /// The declaration-shape hash last filed for each path, kept across `forget` so an edit can tell "the same
     /// declarations at new offsets" from "different declarations". See `insert_at`.
-    declaration_shapes: std::collections::HashMap<String, u64>,
+    declaration_shapes: HashMap<String, u64>,
     /// The declaration-shape hash of each cooked reading, keyed like the reading itself.
-    cooked_shapes: std::collections::HashMap<(String, u32), u64>,
+    cooked_shapes: HashMap<(String, u32), u64>,
     /// **The names a completion can see, prepared once per declaration revision.** The old path walked the whole
     /// concrete closure and cloned every declaration on every keystroke; this is the `in_completion` view: a sorted
     /// snapshot of the headers, with the root file's own names added fresh by the query. A body edit does not
     /// change the declaration revision, so the snapshot survives it.
-    completion_names: std::sync::Mutex<std::collections::HashMap<String, CachedCompletionNames>>,
+    completion_names: std::sync::Mutex<HashMap<String, CachedCompletionNames>>,
 
     /// The inverted index — see [`crate::index::names`]. Derived from `summaries` and `cooked`, and updated in the
     /// same call that changes either; nothing else writes it.
@@ -351,7 +351,7 @@ pub struct ProjectIndex {
     /// indexed with **761** declarations, then evicted by the standard-library headers cooked after it, and the hover
     /// that needed it answered `NotDeclaredHere` — the eviction made the answer depend on the order of a walk nobody
     /// asked for.
-    cooked_order: std::sync::Mutex<std::collections::VecDeque<String>>,
+    cooked_order: std::sync::Mutex<VecDeque<String>>,
     /// A visibility walk's answer, by the file it was asked about.
     ///
     /// **The whole-walk memo, beside the per-condition one**, and it exists for the reason the numbers say: the walk
@@ -374,7 +374,7 @@ pub struct ProjectIndex {
     /// while the four walks from the headers it includes survive. A file the index has **never** seen still clears
     /// the whole map, because a new file can change how an `#include "x.h"` resolves for a closure that does not
     /// contain it. See [`ProjectIndex::insert_at`] and [`ProjectIndex::forget`].
-    visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<CachedWalk>>>,
+    visibility: std::sync::Mutex<HashMap<String, Arc<CachedWalk>>>,
     /// **Files a query found it could not answer from, and wants refined** — see
     /// [`ProjectIndex::ask_for_refinement`].
     ///
@@ -382,7 +382,7 @@ pub struct ProjectIndex {
     /// place that may spend it. What a query *can* say is which file would have answered — so it leaves the answer
     /// here and the session drains it (see `Session::advance`), the same shape `refined_on_request` already has for
     /// a file a request named.
-    refinement_asks: std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    refinement_asks: std::sync::Mutex<HashSet<PathBuf>>,
     /// **The walks being built right now**, by root — the single-flight that keeps one cold closure from being walked
     /// twice.
     ///
@@ -395,7 +395,7 @@ pub struct ProjectIndex {
     /// So a walk is **claimed** here before it starts and released when it finishes, and a caller that finds its
     /// root claimed waits for the claim to go rather than repeating the work. `walk_done` is what it waits on; the
     /// mutex is held for the duration of a `HashSet` operation and never across a walk.
-    walking: std::sync::Mutex<std::collections::HashSet<String>>,
+    walking: std::sync::Mutex<HashSet<String>>,
     /// Signalled when a claimed walk is released — see [`ProjectIndex::walking`].
     walk_done: std::sync::Condvar,
     /// **How many visibility walks were built, and how many were answered from the memo** — the numbers that say
@@ -494,7 +494,7 @@ pub struct ProjectIndex {
     ///
     /// Invalidated exactly like [`ProjectIndex::macro_environments`]: an entry is dropped when a file it read is
     /// re-read, and the whole map when a file the index has never seen arrives.
-    macro_states_at: std::sync::Mutex<HashMap<(String, usize), std::sync::Arc<CachedMacroState>>>,
+    macro_states_at: std::sync::Mutex<HashMap<(String, usize), Arc<CachedMacroState>>>,
     /// **The guard verdicts a query's one walk answered**, per file it was asked from — see
     /// [`ProjectIndex::answer_the_guards`] and [`ProjectIndex::install_answered_guards`].
     ///
@@ -507,8 +507,8 @@ pub struct ProjectIndex {
             String,
             (
                 u64,
-                std::sync::Arc<Vec<String>>,
-                std::sync::Arc<HashMap<(String, u32, usize), Visibility>>,
+                Arc<Vec<String>>,
+                Arc<HashMap<(String, u32, usize), Visibility>>,
             ),
         >,
     >,
@@ -526,14 +526,14 @@ pub struct ProjectIndex {
     /// map made every keystroke look like a brand-new file, which cleared the whole walk memo that the contributor
     /// rule exists to keep. It is a set of `String` and not of ids because `sequence` goes with the summary (see
     /// `forget`), and because a path that was known once must stay known after it is forgotten.
-    known_paths: std::collections::HashSet<String>,
+    known_paths: HashSet<String>,
     /// **What the visibility walks read from each file**, as one number — see
     /// [`ProjectIndex::the_walks_fingerprint`].
     ///
     /// Kept per file rather than recomputed from the summaries when a walk is validated: validating a walk reads one
     /// entry per contributor, and a closure here is over a thousand files, so hashing their includes and macro facts
     /// on every query would cost more than the walk it is validating.
-    walk_inputs: std::collections::HashMap<String, u64>,
+    walk_inputs: HashMap<String, u64>,
 }
 
 /// One entry of [`ProjectIndex::member_lists`]: the members, and **what the answer was made of**.
@@ -588,7 +588,7 @@ struct CachedMacroState {
 /// completion's per-keystroke work is a prefix lookup instead of a visibility walk over every included file.
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedVisibleDeclaration {
-    pub file: std::path::PathBuf,
+    pub file: PathBuf,
     pub fact: DeclFact,
     pub visibility: IncludeVisibility,
 }
@@ -597,15 +597,15 @@ pub(crate) struct OwnedVisibleDeclaration {
 #[derive(Debug)]
 pub(crate) struct CachedCompletionNames {
     pub revision: u64,
-    pub names: std::sync::Arc<Vec<OwnedVisibleDeclaration>>,
-    pub contributors: std::collections::HashSet<String>,
+    pub names: Arc<Vec<OwnedVisibleDeclaration>>,
+    pub contributors: HashSet<String>,
 }
 
 /// One entry of [`ProjectIndex::macro_names`] — the same shape, for the whole-name-set walk.
 #[derive(Debug)]
 struct CachedMacroNames {
     contributors: Vec<String>,
-    names: std::collections::HashSet<String>,
+    names: HashSet<String>,
 }
 
 /// How many macro walks each memo may hold before it is emptied.

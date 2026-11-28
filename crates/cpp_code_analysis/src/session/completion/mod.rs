@@ -59,7 +59,6 @@ use crate::CompilerConfig;
 use crate::OfferedName;
 use crate::ProjectLanguage;
 use crate::ascend;
-use crate::completion;
 use crate::cuda;
 use crate::file;
 use crate::include;
@@ -155,7 +154,7 @@ pub struct CompletionItem {
 /// question about the project's configuration, the second about the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unincluded {
-    pub file: std::path::PathBuf,
+    pub file: PathBuf,
     pub inclusion: Inclusion,
 }
 
@@ -188,8 +187,8 @@ impl Inclusion {
 /// One implementation for the code action and the completion item: two spellings of one include would be a defect a
 /// reader meets as "the fix wrote something my compiler cannot find".
 pub fn the_include_spelling(
-    header: &std::path::Path,
-    asking: &std::path::Path,
+    header: &Path,
+    asking: &Path,
     include_paths: &[include::config::IncludePath],
 ) -> String {
     let header_normal = header.to_string_lossy().replace('\\', "/");
@@ -426,7 +425,7 @@ impl CompletionSet {
         !self.prefix.is_empty()
             && !self.items.iter().any(|item| {
                 let compared = item.filter.as_deref().unwrap_or(&item.label);
-                completion::matching::quality(compared, &self.prefix) != completion::matching::NONE
+                matching::quality(compared, &self.prefix) != matching::NONE
             })
     }
 }
@@ -459,7 +458,7 @@ impl Default for CompletionSet {
 #[derive(Debug, Clone)]
 struct Scored {
     score: Score,
-    matched: completion::matching::Quality,
+    matched: matching::Quality,
     item: CompletionItem,
 }
 
@@ -1227,8 +1226,8 @@ fn members_of_a_type(
         // like any other, and a member whose name does not answer it is dropped rather than merely ranked low — see
         // [`crate::completion::matching`] for the rule and why the client's own filter cannot do this alone (it
         // cannot see `to_string` when the reader typed `string`, and it does not know the words of a name).
-        let matched = completion::matching::quality(&item.label, &prefix);
-        if matched == completion::matching::NONE {
+        let matched = matching::quality(&item.label, &prefix);
+        if matched == matching::NONE {
             continue;
         }
 
@@ -1254,17 +1253,14 @@ fn members_of_a_type(
     // which is a `.` on a pointer.
     let (replace, items) = if followed_a_pointer && !arrow {
         let operator = replace.start_offset.saturating_sub(1);
-        let items: Vec<completion::CompletionItem> = items
+        let items: Vec<CompletionItem> = items
             .into_iter()
             .map(|mut item| {
                 item.insert = format!("->{}", item.insert);
                 item
             })
             .collect();
-        (
-            cpp_parser::SourceRange::new(operator, replace.length + 1),
-            items,
-        )
+        (SourceRange::new(operator, replace.length + 1), items)
     } else {
         (replace, items)
     };
@@ -1434,7 +1430,7 @@ fn names(
             names: index
                 .declarations_in(&position.scope, path)
                 .into_iter()
-                .map(|declaration| index::project::OfferedName {
+                .map(|declaration| OfferedName {
                     fact: declaration.fact.clone(),
                     file: declaration.file.clone(),
                     depth: 0,
@@ -1613,7 +1609,7 @@ fn names(
         // The built-in type names that are not keywords (`size_t`, `char16_t`). They are names rather than
         // keywords because that is how a compiler reads them, and they are here because a file that never includes
         // `<cstddef>` still writes `size_t`.
-        for (name, detail) in table::BUILTIN_TYPES {
+        for (name, detail) in BUILTIN_TYPES {
             let matched = matching::quality(name, &listed_prefix);
             if matched == matching::NONE {
                 continue;
@@ -1741,7 +1737,7 @@ fn names(
 /// Filtered by the same rule as every other list — see [`crate::completion::matching`] — so that `#ifnd` finds
 /// `ifndef` and `#inc` finds `include` for the same reason a name list answers the initials of its words.
 fn directives(written: &str, range: SourceRange) -> CompletionSet {
-    let items: Vec<CompletionItem> = table::DIRECTIVES
+    let items: Vec<CompletionItem> = DIRECTIVES
         .iter()
         .filter(|directive| matching::quality(directive.name, written) != matching::NONE)
         .map(|directive| {
@@ -2159,7 +2155,7 @@ fn ordered(mut scored: Vec<Scored>, budget: usize) -> (Vec<CompletionItem>, bool
     // One bucket per declaring file, first seen in rank order — so the *nearest* file's names still lead, and an item
     // with no identity (a snippet, a keyword, a member) is a bucket of its own.
     let mut buckets: Vec<Vec<Scored>> = Vec::new();
-    let mut which: std::collections::HashMap<Option<std::path::PathBuf>, usize> =
+    let mut which: std::collections::HashMap<Option<PathBuf>, usize> =
         std::collections::HashMap::new();
     for one in scored {
         let key = one.item.identity.as_ref().map(|(file, _)| file.clone());
@@ -2388,8 +2384,8 @@ mod tests {
             modifiers: DeclModifiers::VIRTUAL,
             type_of: None,
             returns: returns.map(smol_str::SmolStr::from),
-            range: cpp_parser::SourceRange::new(0, 0),
-            name_range: cpp_parser::SourceRange::new(0, 0),
+            range: SourceRange::new(0, 0),
+            name_range: SourceRange::new(0, 0),
             clean: true,
             split_by_a_directive: false,
             guard: FactGuard::Unconditional,

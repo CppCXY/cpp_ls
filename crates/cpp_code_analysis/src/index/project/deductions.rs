@@ -34,9 +34,7 @@ pub(crate) fn range_for_element_type(
     let declared_at = binding.name_range.start_offset;
     let loop_node = cpp_parser::token_at(root, declared_at)?
         .parent_ancestors()
-        .find(|node| {
-            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RangeForStat
-        })?;
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RangeForStat)?;
 
     // **The loop's own variable, and not a declaration that merely sits inside the body.**
     //
@@ -86,7 +84,7 @@ pub(crate) fn range_for_element_type(
     };
 
     Some(match range_element_of(as_a_range(&container)) {
-        Some(element) => Known::Yes(sema::types::parse_type_spelling(&element)),
+        Some(element) => Known::Yes(parse_type_spelling(&element)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
 }
@@ -163,10 +161,7 @@ pub(crate) fn element_of_a_range_expression(
         )
         && let Some(element) = range_element_of(as_a_range(&container))
     {
-        return Some(Known::Yes((
-            sema::types::parse_type_spelling(&element),
-            file,
-        )));
+        return Some(Known::Yes((parse_type_spelling(&element), file)));
     }
 
     // **A pipeline a reader gave a name.** `auto ids = items | std::views::filter(pred);` binds the view, and a
@@ -455,7 +450,7 @@ pub(crate) fn adapted_element(
             the_member_a_lambdas_return_names(&lambda, element, index, scopes, root, path)
         });
         return match label {
-            Some(label) => Known::Yes((sema::types::parse_type_spelling(&label), file.clone())),
+            Some(label) => Known::Yes((parse_type_spelling(&label), file.clone())),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(
                 "std::views::transform",
             ))),
@@ -536,7 +531,7 @@ fn the_member_a_lambdas_return_names(
         let spelled = if parameter.is_auto() {
             element.clone()
         } else {
-            sema::types::parse_type_spelling(&parameter.get_type_text())
+            parse_type_spelling(&parameter.get_type_text())
         };
         // **The class, not the reference the parameter binds** — `const Item&` and `Item` have the same members.
         let class = as_a_range(&spelled).to_string();
@@ -580,7 +575,7 @@ pub(crate) fn pair_component(element: &Type, position: usize) -> Option<Type> {
 pub(crate) fn strip_a_leading_const(type_of: &Type) -> Type {
     let written = type_of.to_string();
     match written.strip_prefix("const ") {
-        Some(rest) => sema::types::parse_type_spelling(rest),
+        Some(rest) => parse_type_spelling(rest),
         None => type_of.clone(),
     }
 }
@@ -588,7 +583,7 @@ pub(crate) fn strip_a_leading_const(type_of: &Type) -> Type {
 /// **The element of the element** — `join`'s rule, for the shapes this layer can read.
 pub(crate) fn element_of_the_element(element: &Type) -> Option<Type> {
     let written = element_of(element, 0)?;
-    Some(sema::types::parse_type_spelling(&written))
+    Some(parse_type_spelling(&written))
 }
 
 /// **The element of the range an iterator expression came from** — `numbers.begin()`, `numbers.begin() + 3`.
@@ -623,10 +618,7 @@ pub(crate) fn element_of_an_iterator_expression(
                 return None;
             };
             let element = range_element_of(as_a_range(&container))?;
-            return Some(Known::Yes((
-                sema::types::parse_type_spelling(&element),
-                file,
-            )));
+            return Some(Known::Yes((parse_type_spelling(&element), file)));
         }
     }
     // `begin + 3` — the iterator is the left operand, and the question is the same.
@@ -797,10 +789,8 @@ pub(crate) fn a_typeof_payload(
     };
     let declarator = node_covering(root, binding.name_range.start_offset, binding.range)?;
     let specifiers = declarator.ancestors().find_map(|node| {
-        node.children().find(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind())
-                == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
-        })
+        node.children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
     })?;
     let typeof_node = specifiers.children().find(|child| {
         let text = child.text().to_string();
@@ -825,8 +815,8 @@ pub(crate) fn a_typeof_payload(
     // The payload is the node inside the parentheses. A type-id has a TypeId child and is not this question.
     typeof_node.children().find(|child| {
         !matches!(
-            cpp_parser::CppSyntaxKind::from(child.kind()),
-            cpp_parser::CppSyntaxKind::TypeId | cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::TypeId | CppSyntaxKind::DeclSpecifierSeq
         )
     })
 }
@@ -839,15 +829,13 @@ pub(crate) fn an_unnamed_class_body(
 ) -> Option<cpp_parser::CppSyntaxNode> {
     let body = specifiers.children().find(|child| {
         matches!(
-            cpp_parser::CppSyntaxKind::from(child.kind()),
-            cpp_parser::CppSyntaxKind::ClassDef
-                | cpp_parser::CppSyntaxKind::StructDef
-                | cpp_parser::CppSyntaxKind::UnionDef
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
         )
     })?;
-    let tag = body.children().any(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
-    });
+    let tag = body
+        .children()
+        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr);
     (!tag).then_some(body)
 }
 pub(crate) fn deduction_inputs(
@@ -865,14 +853,14 @@ pub(crate) fn deduction_inputs(
     // made class template argument deduction unreachable. Measured: `techniques::Box box(7)` typed as
     // `techniques::Box`.
     let is_an_initializer = |node: &cpp_parser::CppSyntaxNode| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Initializer
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer
     };
     let declarator = if declarator.children().any(|child| is_an_initializer(&child)) {
         declarator
     } else {
-        declarator.children().find(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declarator
-        })?
+        declarator
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)?
     };
     let initializer = declarator
         .children()
@@ -882,9 +870,7 @@ pub(crate) fn deduction_inputs(
     // `Initializer > ArgumentList > LiteralExpr`, and handing the list itself to the expression walk answers nothing —
     // the `auto` path never noticed because `auto n(7)` is unusual while `Box box(7)` is the shape C++17's class
     // template argument deduction is written for. Measured: `techniques::Box box(7)` typed as `techniques::Box`.
-    let expression = if cpp_parser::CppSyntaxKind::from(first.kind())
-        == cpp_parser::CppSyntaxKind::ArgumentList
-    {
+    let expression = if CppSyntaxKind::from(first.kind()) == CppSyntaxKind::ArgumentList {
         first.children().next()?
     } else {
         first
@@ -895,10 +881,8 @@ pub(crate) fn deduction_inputs(
     let specifiers = declarator
         .ancestors()
         .find_map(|node| {
-            node.children().find(|child| {
-                cpp_parser::CppSyntaxKind::from(child.kind())
-                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
-            })
+            node.children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
         })
         .map(|node| node.text().to_string())
         .unwrap_or_default();
@@ -916,9 +900,7 @@ pub(crate) fn deduction_inputs(
         .to_string();
     let operators: String = declarator
         .children()
-        .find(|child| {
-            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declarator
-        })
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
         .map(|node| node.text().to_string())
         .unwrap_or_default()
         .replace(&name, "")
@@ -1203,17 +1185,14 @@ pub(crate) fn structured_binding_type(
     let declared_at = binding.name_range.start_offset;
     let pattern = cpp_parser::token_at(root, declared_at)?
         .parent_ancestors()
-        .find(|node| {
-            cpp_parser::CppSyntaxKind::from(node.kind())
-                == cpp_parser::CppSyntaxKind::StructuredBinding
-        })?;
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::StructuredBinding)?;
 
     // **Which name of the pattern this is**, by position — the order maps into the components, and the names
     // themselves mean nothing (`[first, second]` and `[a, b]` are the same binding).
     let mut position = None;
     let mut seen = 0usize;
     for child in pattern.children() {
-        if cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::NameExpr {
+        if CppSyntaxKind::from(child.kind()) != CppSyntaxKind::NameExpr {
             continue;
         }
         let range = cpp_parser::source_range(child.text_range());
@@ -1290,7 +1269,7 @@ pub(crate) fn structured_binding_type(
     });
 
     Some(match element {
-        Some(element) => Known::Yes((sema::types::parse_type_spelling(&element), file)),
+        Some(element) => Known::Yes((parse_type_spelling(&element), file)),
         None => Known::Unknown(UnknownReason::UnknownType(Box::from(container.to_string()))),
     })
 }
@@ -1326,9 +1305,9 @@ pub(crate) fn range_expression_of_the_pattern(
 ) -> Option<cpp_parser::CppSyntaxNode> {
     use cpp_parser::CppTokenKind;
 
-    let loop_node = binding.ancestors().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::RangeForStat
-    })?;
+    let loop_node = binding
+        .ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RangeForStat)?;
 
     let mut after_the_colon = false;
     for child in loop_node.children_with_tokens() {
@@ -1364,14 +1343,14 @@ pub(crate) fn initializer_of_the_pattern(
         .ancestors()
         .take_while(|node| {
             !matches!(
-                cpp_parser::CppSyntaxKind::from(node.kind()),
-                cpp_parser::CppSyntaxKind::FunctionDef | cpp_parser::CppSyntaxKind::TranslationUnit
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::FunctionDef | CppSyntaxKind::TranslationUnit
             )
         })
         .filter(|node| {
             matches!(
-                cpp_parser::CppSyntaxKind::from(node.kind()),
-                cpp_parser::CppSyntaxKind::InitDeclarator | cpp_parser::CppSyntaxKind::Declaration
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::InitDeclarator | CppSyntaxKind::Declaration
             )
         })
         .collect();

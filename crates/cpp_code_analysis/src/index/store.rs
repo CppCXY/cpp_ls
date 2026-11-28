@@ -71,7 +71,6 @@ use crate::file;
 use crate::include;
 use crate::index;
 use crate::macros;
-use crate::preprocess;
 use crate::summary;
 use crate::summary_codec;
 use std::collections::HashSet;
@@ -136,7 +135,7 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// [`SummaryStore::mark_the_reading_as_refined`]. A mark says the first pass's reading *is* the program's reading,
     /// which is what [`Session::is_refined`] has to report for the majority of a project, where the second pass decides
     /// nothing and rebuilds nothing.
-    refined_marks: std::sync::Mutex<std::collections::HashSet<String>>,
+    refined_marks: std::sync::Mutex<HashSet<String>>,
     /// **The macro environment a file's closure composes, and the witness it was built from.**
     ///
     /// `the_indexed_environment` walks the whole include closure and decides every guarded `#define` — measured
@@ -220,9 +219,9 @@ const MAX_INCLUDE_SEARCHES: usize = 8192;
 /// rendering, and `Session::view` parses one.
 #[derive(Debug, Default)]
 pub struct ServedRefinements {
-    pub still_to_do: Vec<std::path::PathBuf>,
+    pub still_to_do: Vec<PathBuf>,
     /// Served from the disk: their cooked facts are in the index and their rendering is owed.
-    pub served: Vec<std::path::PathBuf>,
+    pub served: Vec<PathBuf>,
 }
 pub struct ReRead {
     /// The files whose reading changed, and whether each may be written down.
@@ -322,7 +321,7 @@ where
 pub struct Prepared {
     outcome: PreparedOutcome,
     with_environment: bool,
-    rendering: Option<std::sync::Arc<preprocess::cooked::RenderedCooked>>,
+    rendering: Option<std::sync::Arc<cooked::RenderedCooked>>,
     /// **The text this was built from, by its hash** — what a commit compares the file against, because a wave is
     /// prepared and committed at two different moments and the file can be written in between.
     content_hash: Option<u64>,
@@ -352,9 +351,7 @@ impl Prepared {
         self.content_hash
     }
 
-    pub(crate) fn rendering(
-        &self,
-    ) -> Option<(u64, std::sync::Arc<preprocess::cooked::RenderedCooked>)> {
+    pub(crate) fn rendering(&self) -> Option<(u64, std::sync::Arc<cooked::RenderedCooked>)> {
         let PreparedOutcome::Built { summary, .. } = &self.outcome else {
             return None;
         };
@@ -387,9 +384,8 @@ impl<F: FileProvider> DetachedRead<F> {
                 let seed = macros::MacroTable::from_marked(&self.seed);
                 let (tokens, _) =
                     cpp_parser::lex(&self.source, &cpp_parser::LexerConfig::default());
-                let macros =
-                    preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
-                let rendered = preprocess::cooked::cook_with_file(
+                let macros = cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
+                let rendered = cooked::cook_with_file(
                     &self.source,
                     &tokens,
                     &macros,
@@ -612,7 +608,7 @@ impl<F: FileProvider> SummaryStore<F> {
             stats: StoreStats::default(),
             revision: std::sync::atomic::AtomicU64::new(0),
             dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
-            refined_marks: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refined_marks: std::sync::Mutex::new(HashSet::new()),
             environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             environment_clock: std::sync::atomic::AtomicU64::new(0),
             summary_database: std::sync::OnceLock::new(),
@@ -780,7 +776,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// one that is not, and they get different answers to "was this code compiled" without either of them being
     /// re-indexed — which is what keeps `-DX` from invalidating a project's cache. See
     /// [`crate::index::environment`].
-    pub fn with_macros(mut self, macros: include::graph::Marked) -> Self {
+    pub fn with_macros(mut self, macros: Marked) -> Self {
         self.index = std::mem::take(&mut self.index).with_macros(macros);
         self
     }
@@ -881,7 +877,7 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         let summary = std::sync::Arc::new(
-            index::FileIndexer::new(&self.files, &self.config)
+            FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
                 .directive_summary(path, &source),
         );
@@ -915,7 +911,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn index_the_rendering(
         &mut self,
         path: &Path,
-        rendered: &preprocess::cooked::RenderedCooked,
+        rendered: &cooked::RenderedCooked,
         environment: Option<&dyn cpp_parser::MacroFacts>,
     ) -> Option<&FileSummary> {
         let source = self.files.read(path)?;
@@ -946,7 +942,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let source = self.files.read(path)?;
         let key = SummaryKey::new(content_hash(&source), self.context_hash(path));
         Some(
-            index::FileIndexer::new(&self.files, &self.config)
+            FileIndexer::new(&self.files, &self.config)
                 .with_seed(self.index.macros())
                 .index(path, &source, key),
         )
@@ -1267,10 +1263,9 @@ impl<F: FileProvider> SummaryStore<F> {
         let seed = macros::MacroTable::from_marked(self.index.macros());
         let definitions = unit.definitions();
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-        let macros =
-            { preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
+        let macros = { cooked::FileMacros::new(&view, &definitions, Some(&seed), true) };
         let rendered = {
-            preprocess::cooked::cook_with_file(
+            cooked::cook_with_file(
                 source,
                 &tokens,
                 &macros,
@@ -1760,7 +1755,7 @@ impl<F: FileProvider> SummaryStore<F> {
         const MISSING_SUMMARY: u64 = 0x51d0_c0de_9a3b_7e21;
         let root = normalize_path(path, cfg!(windows));
         // The constant that stood here is gone: an absent summary answers `None`, not a value that collides.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut pending: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
         let mut parts: Vec<u64> = Vec::new();
         pending.push_back(path.to_path_buf());
@@ -1775,7 +1770,7 @@ impl<F: FileProvider> SummaryStore<F> {
             // **The index's own spelling**, which is the normalized one — the index stores `c:/…` and a session hands
             // `C:\…`. Looked up raw, every closure past the first file was "not indexed" and every fingerprint came
             // back empty.
-            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+            let Some(summary) = self.index.summary(Path::new(&key)) else {
                 // **A member the index cannot describe has no fingerprint at all.** It used to contribute a
                 // constant, which made two different texts of the same unindexed header produce the *same* key —
                 // and that header is exactly the file whose text just changed. A miss is correct; a collision is
@@ -1969,7 +1964,7 @@ impl<F: FileProvider> SummaryStore<F> {
         &self,
         path: &Path,
         reading: &CookedFile,
-        rendered: &preprocess::cooked::RenderedCooked,
+        rendered: &cooked::RenderedCooked,
     ) {
         let Some(source) = self.files.read(path) else {
             return;
@@ -1997,7 +1992,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn the_stored_cooked_reading_with_rendering(
         &self,
         path: &Path,
-    ) -> Option<(CookedFile, preprocess::cooked::RenderedCooked)> {
+    ) -> Option<(CookedFile, cooked::RenderedCooked)> {
         self.the_stored_cook_reason(path).ok()
     }
 
@@ -2024,7 +2019,7 @@ impl<F: FileProvider> SummaryStore<F> {
     pub fn the_stored_cook_reason(
         &self,
         path: &Path,
-    ) -> Result<(CookedFile, preprocess::cooked::RenderedCooked), &'static str> {
+    ) -> Result<(CookedFile, cooked::RenderedCooked), &'static str> {
         let bytes = self.the_stored_cook_bytes(path)?;
         let (cooked, rendered) =
             summary_codec::decode_the_cooked_record(&bytes).map_err(|_| "undecodable")?;
@@ -2123,7 +2118,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let Some(fingerprint) = self.the_closure_fingerprint(path) else {
             return false;
         };
-        let key = cache::SummaryKey::new(summary.key.content_hash, summary.key.context_hash)
+        let key = SummaryKey::new(summary.key.content_hash, summary.key.context_hash)
             .with_environment(fingerprint);
         let Some(database) = self.summary_database() else {
             return false;
@@ -2421,7 +2416,7 @@ impl<F: FileProvider> SummaryStore<F> {
         //   asked about, so its environment is never built (4 127 ms of a 4 186 ms pass, on a cold start's corpus,
         //   and all of it on a warm one).
         let mut bodied: Vec<String> = Vec::new();
-        let mut is_bodied: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut is_bodied: HashSet<&str> = HashSet::new();
         // The cache the **timeline-less** caller's fallback reads definitions through — one parse per definition
         // rather than one per definition per file. Unused when the caller passes units, which is the session.
         let mut definitions = summary::MacroDefinitions::default();
@@ -2478,12 +2473,8 @@ impl<F: FileProvider> SummaryStore<F> {
                         // defines it, which is a position in the walk — no closure walked here at all. The cook is
                         // built here, from the view and the unit's definitions, because the renderer borrows them.
                         Some((view, definitions)) => {
-                            let bodies = preprocess::cooked::FileMacros::new(
-                                view,
-                                *definitions,
-                                Some(&seed),
-                                true,
-                            );
+                            let bodies =
+                                cooked::FileMacros::new(view, *definitions, Some(&seed), true);
                             cpp_parser::shape_of_a_body_at(body, &bodies, range.start_offset)
                                 .a_reading_uses_this()
                         }
@@ -2498,7 +2489,7 @@ impl<F: FileProvider> SummaryStore<F> {
                                     |wanted| {
                                         let key = normalize_path(wanted, cfg!(windows));
                                         Some((
-                                            self.index.summary(std::path::Path::new(&key))?,
+                                            self.index.summary(Path::new(&key))?,
                                             sources.get(&key)?.as_str(),
                                         ))
                                     },
@@ -2542,7 +2533,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // A file whose declarations are all unguarded and whole is a file the two readings agree about, so rendering
         // it would cost a cook and buy nothing — that is the filter. After the pass the declarations are the
         // rendering's, every one of them unguarded, and this cannot be true of the same file twice.
-        let guarded: std::collections::HashSet<&Path> = indexed
+        let guarded: HashSet<&Path> = indexed
             .iter()
             .filter(|path| {
                 self.index.summary(path).is_some_and(|summary| {
@@ -2573,8 +2564,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // is one of these; against a `Vec` that is a linear scan *per word* — tens of thousands of words per file,
         // over a list of hundreds — and it was the last unnamed third of a cold index: 9.45 s of wall clock with
         // 5.70 s of stages, and this line was the difference. A `HashSet` makes the same question one hash.
-        let bodied_names: std::collections::HashSet<&str> =
-            bodied.iter().map(String::as_str).collect();
+        let bodied_names: HashSet<&str> = bodied.iter().map(String::as_str).collect();
 
         // **The re-reads themselves, waiting to be applied.** Everything below builds a summary; putting one in the
         // index is the one thing that is not a pure function of the store, and it is what
@@ -2672,10 +2662,9 @@ impl<F: FileProvider> SummaryStore<F> {
             {
                 let definitions = unit.definitions();
                 let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-                let macros =
-                    preprocess::cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
+                let macros = cooked::FileMacros::new(&view, &definitions, Some(&seed), true);
                 let rendered = {
-                    preprocess::cooked::cook_with_file(
+                    cooked::cook_with_file(
                         source,
                         &tokens,
                         &macros,
@@ -2737,9 +2726,9 @@ impl<F: FileProvider> SummaryStore<F> {
             // **The reading is the rendering's**, and this is the branch that makes it possible: a timeline can render
             // a file, which is what the timeline-less half of this pass cannot do (see the note on `eager`).
             let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
-            let macros = preprocess::cooked::FileMacros::new(&view, definitions, Some(&seed), true);
+            let macros = cooked::FileMacros::new(&view, definitions, Some(&seed), true);
             let rendered = {
-                preprocess::cooked::cook_with_file(
+                cooked::cook_with_file(
                     source,
                     &tokens,
                     &macros,
@@ -2855,8 +2844,8 @@ impl<F: FileProvider> SummaryStore<F> {
     /// A function rather than an expression at the call site so that "the closure of these files" has one definition
     /// and one test (`tests::the_closure_is_the_roots_and_what_they_include`), which is the part of the filter a
     /// regression would break silently: a filter that is too *narrow* loses a scope, and nothing fails.
-    fn the_closure_of(&self, roots: &[PathBuf]) -> std::collections::HashSet<String> {
-        let mut closure: std::collections::HashSet<String> = std::collections::HashSet::new();
+    fn the_closure_of(&self, roots: &[PathBuf]) -> HashSet<String> {
+        let mut closure: HashSet<String> = HashSet::new();
         for path in roots {
             closure.insert(normalize_path(path, cfg!(windows)));
             for reached in self.includes_reached_from(path) {
@@ -2875,7 +2864,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// an answer.
     fn includes_reached_from(&self, root: &Path) -> Vec<PathBuf> {
         let mut reached: Vec<PathBuf> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
 
         while let Some(path) = pending.pop() {
@@ -2984,7 +2973,7 @@ impl<F: FileProvider> SummaryStore<F> {
             },
         }
         let root = normalize_path(path, cfg!(windows));
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut order: Vec<(usize, PathBuf, usize)> = Vec::new();
         let mut pending: Vec<Step> = vec![Step::Enter {
             file: path.to_path_buf(),
@@ -3004,7 +2993,7 @@ impl<F: FileProvider> SummaryStore<F> {
             if !seen.insert(key.clone()) {
                 continue;
             }
-            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+            let Some(summary) = self.index.summary(Path::new(&key)) else {
                 continue;
             };
             let is_the_root = key == root;
@@ -3052,7 +3041,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // is decided by the compile command, not by any file this walk reads — and an unseeded table answers
         // `Unknown` for every such region. `self.index.macros()` is the same seed the renderer's own table starts
         // from (`Session::rendering_of`), so the two cannot disagree about what the compilation defines.
-        let mut table = preprocess::macros::MacroTable::from_marked(self.index.macros());
+        let mut table = macros::MacroTable::from_marked(self.index.macros());
         let mut parsed = cooked::ParsedDefinitions::new();
 
         // **One decision per `(offset, name)`** — the definition a file leaves behind, or `None` for a name it takes
@@ -3091,7 +3080,7 @@ impl<F: FileProvider> SummaryStore<F> {
             if key == root {
                 continue;
             }
-            let Some(summary) = self.index.summary(std::path::Path::new(&key)) else {
+            let Some(summary) = self.index.summary(Path::new(&key)) else {
                 continue;
             };
             let Some(fact) = summary.macros.get(*index) else {
@@ -3227,9 +3216,8 @@ impl<F: FileProvider> SummaryStore<F> {
         // the text it is given, so something has to own those strings for as long as it runs. The texts the pass has
         // already copied are reused; the rest are read here.
         let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<std::path::PathBuf> =
-            std::collections::VecDeque::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
         queue.push_back(root.path.clone());
         // **Only a closure the index can describe in full is rendered.** A walk taken while the
         // queue is still filling sees the includes that happen to be indexed yet, so its rendering
@@ -3286,7 +3274,7 @@ impl<F: FileProvider> SummaryStore<F> {
         .with_the_command_spelling(
             self.config
                 .presumed_name_for(&root.path)
-                .map(std::path::Path::to_path_buf),
+                .map(Path::to_path_buf),
         );
         Some(std::sync::Arc::new(unit))
     }
@@ -3457,7 +3445,7 @@ impl<F: FileProvider> SummaryStore<F> {
             "{form:?}|{is_next}|{spelling}|{directory:?}|{paths:?}|{:?}",
             config.dialect()
         );
-        cache::content_hash(&folded).to_string()
+        content_hash(&folded).to_string()
     }
 
     /// The work set when `path` changes: the file, and everything that transitively includes it.
@@ -3651,7 +3639,7 @@ fn bodies_of<'pass>(
 ///
 /// `names` is a **set** and not a slice: this runs once per word of every file being re-read, and asked against a
 /// list it is a linear scan per word (see the call site — that was 3.5 s of a 9.4 s index).
-fn mentions_one_of(text: &str, names: &std::collections::HashSet<&str>) -> bool {
+fn mentions_one_of(text: &str, names: &HashSet<&str>) -> bool {
     words_of(text).any(|word| names.contains(word))
 }
 
@@ -3753,8 +3741,8 @@ fn the_plain_shape(body: &str) -> APlainShape {
 fn words_mentioned_by(
     sources: &std::collections::HashMap<String, String>,
     files: &[PathBuf],
-) -> std::collections::HashSet<String> {
-    let mut mentioned: std::collections::HashSet<String> = std::collections::HashSet::new();
+) -> HashSet<String> {
+    let mut mentioned: HashSet<String> = HashSet::new();
 
     for path in files {
         let Some(text) = sources.get(&normalize_path(path, cfg!(windows))) else {
@@ -3831,7 +3819,7 @@ fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
         bytes.extend_from_slice(body.as_bytes());
         bytes.push(0);
     }
-    cache::fnv1a64(&bytes)
+    fnv1a64(&bytes)
 }
 
 /// **Was the region a fact was written in compiled?** — asked of the conditions the summary stored, against the
@@ -3862,7 +3850,7 @@ fn environment_hash(facts: &dyn cpp_parser::MacroFacts) -> u64 {
 fn a_facts_visibility(
     guards: &summary::SummaryGuards,
     fact: &summary::MacroFact,
-    table: &preprocess::macros::MacroTable,
+    table: &macros::MacroTable,
     answers: &mut std::collections::HashMap<(u32, usize), Option<bool>>,
 ) -> Visibility {
     let summary::FactGuard::Region(innermost) = fact.guard else {

@@ -264,10 +264,7 @@ fn enclosing_definition(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
 /// The token at that offset and its ancestors are the only nodes that can start there, so this is O(depth) where
 /// [`super::CheckContext::own_syntax_nodes`] is O(the file). Ancestors come innermost first, and the old walk
 /// answered with the first node in *pre-order* — the outermost — so the last match is the one to keep.
-fn declaration_starting_at(
-    context: &super::CheckContext<'_>,
-    offset: usize,
-) -> Option<CppSyntaxNode> {
+fn declaration_starting_at(context: &CheckContext<'_>, offset: usize) -> Option<CppSyntaxNode> {
     let token = cpp_parser::token_at(context.tree(), offset)?;
     token
         .parent_ancestors()

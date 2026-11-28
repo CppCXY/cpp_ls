@@ -235,26 +235,24 @@ impl NameIndex {
             let keys: usize = map.keys().map(|key| key.len()).sum();
             let entries = map.len();
             // The payload, the keys, and one `Vec` header per key.
-            let bytes = slots * std::mem::size_of::<Posting>()
-                + keys
-                + entries * std::mem::size_of::<Vec<Posting>>();
+            let bytes = slots * size_of::<Posting>() + keys + entries * size_of::<Vec<Posting>>();
             (entries, slots, bytes)
         };
         let (name_entries, name_postings, name_bytes) = postings(&self.by_name);
         let (scope_entries, scope_postings, scope_bytes) = postings(&self.by_scope);
         let definers: usize = self.definers.values().map(Vec::capacity).sum();
         let definer_keys: usize = self.definers.keys().map(|key| key.len()).sum();
-        let definer_bytes = definers * std::mem::size_of::<u32>()
+        let definer_bytes = definers * size_of::<u32>()
             + definer_keys
-            + self.definers.len() * std::mem::size_of::<Vec<u32>>();
+            + self.definers.len() * size_of::<Vec<u32>>();
         let spellings: Vec<&Box<str>> = self.sorted.values().flatten().collect();
         let sorted_bytes = self.sorted.keys().map(|key| key.len()).sum::<usize>()
             + spellings
                 .iter()
                 .map(|spelling| spelling.len())
                 .sum::<usize>()
-            + self.sorted.len() * std::mem::size_of::<Vec<Box<str>>>()
-            + spellings.len() * std::mem::size_of::<Box<str>>();
+            + self.sorted.len() * size_of::<Vec<Box<str>>>()
+            + spellings.len() * size_of::<Box<str>>();
         NameIndexCost {
             name_entries,
             name_postings,

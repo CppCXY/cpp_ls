@@ -10,7 +10,6 @@ use crate::SummaryKey;
 use crate::cache;
 use crate::index;
 use crate::preprocess;
-use crate::session;
 use crate::summarize;
 
 /// **One file a cooking slice claimed**, and where its reading will come from.
@@ -141,7 +140,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub(crate) fn feature_probe(
         &self,
         path: &Path,
-    ) -> Option<std::sync::Arc<dyn cpp_toolchain::FeatureProbe>> {
+    ) -> Option<Arc<dyn cpp_toolchain::FeatureProbe>> {
         let compiler = self
             .toolchain
             .as_ref()
@@ -160,15 +159,15 @@ impl<F: FileProvider + Clone> Session<F> {
         // **A permissive configuration states no standard**, and asking with one guessed from another family is
         // worse than asking the compiler's default: `-x c -std=c++23` is a command line no compiler accepts.
         let standard = language.family().map(|_| language.describe());
-        Some(std::sync::Arc::new(
+        Some(Arc::new(
             cpp_toolchain::CompilerFeatureProbe::new(
                 compiler,
-                std::sync::Arc::new(cpp_toolchain::DiskCommands),
+                Arc::new(cpp_toolchain::DiskCommands),
                 probe_language,
                 standard,
             )
             .with_cache(self.feature_cache.clone()),
-        ) as std::sync::Arc<dyn cpp_toolchain::FeatureProbe>)
+        ) as Arc<dyn cpp_toolchain::FeatureProbe>)
     }
 
     /// **The `Configuration` a composed cook renders in** — the environment materialised, cached by its fingerprint.
@@ -176,10 +175,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// `cooking_materials` composes an environment from the index and then turns it into a table; the table is a
     /// function of that environment and the seed, and the fingerprint names the environment exactly. Measured on
     /// neovim's `main.c`: **21–29 ms** per keystroke to rebuild a table nothing had changed.
-    fn a_configuration_for(
-        &self,
-        path: &Path,
-    ) -> Option<std::sync::Arc<preprocess::cooked::Configuration>> {
+    fn a_configuration_for(&self, path: &Path) -> Option<Arc<preprocess::cooked::Configuration>> {
         let (fingerprint, environment) = self.store.the_environment(path)?;
         let key = (queue_key(path), self.store.context_hash(path));
         let asked = std::time::Instant::now();
@@ -194,7 +190,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .parsed_definitions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::sync::Arc::new(preprocess::cooked::configuration_from_environment_and(
+            Arc::new(preprocess::cooked::configuration_from_environment_and(
                 &*environment,
                 true,
                 &mut parsed,
@@ -220,7 +216,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let key = SummaryKey::new(0, self.store.context_hash(&path));
 
         // What the file's own text already declares — the names the cooked reading adds are the ones missing here.
-        let already_declared: std::collections::HashSet<String> = self
+        let already_declared: HashSet<String> = self
             .store
             .index()
             .summary(&path)
@@ -301,7 +297,7 @@ impl<F: FileProvider + Clone> Session<F> {
                                 .next()
                                 .is_some_and(|root| queue_key(root) == designated)
                     })
-                    .map(|held| std::sync::Arc::clone(&held.unit))
+                    .map(|held| Arc::clone(&held.unit))
                     .next(),
                 // **The index names no unit** — a file nothing in the project includes, or an index still being
                 // built. The smallest held root is the deterministic fallback, and it is the old rule.
@@ -309,7 +305,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     .values()
                     .filter(|held| !held.provisional && held.unit.environment_of(&path).is_some())
                     .min_by(|left, right| left.unit.files().next().cmp(&right.unit.files().next()))
-                    .map(|held| std::sync::Arc::clone(&held.unit)),
+                    .map(|held| Arc::clone(&held.unit)),
             }
         };
         // The definition cache is the run's, not this file's: a definition's text does not depend on which file asked
@@ -367,7 +363,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let text = self.files.read(&path)?;
         let text_hash = cache::content_hash(&text);
-        let seed = session::the_seed_for(&self.config, self.store.index().macros(), &path);
+        let seed = the_seed_for(&self.config, self.store.index().macros(), &path);
 
         let features = self.feature_probe(&path);
 
@@ -543,7 +539,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // **And pinned when the file is open**, outside the LRU's budget: a pass over the project's closure fills the
         // table, and the file the reader is editing must keep its rendering or the next completion answers from the
         // file's own text with an empty environment (measured: `ids.` → 0 members twenty seconds after the edit).
-        self.remember_a_rendering(&path, text_hash, std::sync::Arc::clone(&indexed.rendered));
+        self.remember_a_rendering(&path, text_hash, Arc::clone(&indexed.rendered));
         {
             // **The reading goes to the disk as well as the index**, which is what makes a second start free: the
             // next session's `take_the_stored_refinements` serves this file instead of rebuilding it — measured at
@@ -585,7 +581,7 @@ impl<F: FileProvider + Clone> Session<F> {
         const A_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
         let started = std::time::Instant::now();
         let now = started;
-        let mut due: Vec<std::path::PathBuf> = match self.cook_persistence.lock() {
+        let mut due: Vec<PathBuf> = match self.cook_persistence.lock() {
             Ok(mut dirty) => {
                 let due: Vec<_> = dirty
                     .iter()
@@ -776,10 +772,10 @@ impl<F: FileProvider + Clone> Session<F> {
         let text_hash = self.text(&path).map(|text| cache::content_hash(&text))?;
         // **The rendering, where a `view` will look for it** — the reason this record carries one at all. Through
         // `remember_a_rendering`, so an open document's copy is pinned outside the LRU's budget.
-        self.remember_a_rendering(&path, text_hash, std::sync::Arc::new(rendered));
+        self.remember_a_rendering(&path, text_hash, Arc::new(rendered));
         // **The declarations the file's own text does not have** — the same count `render_cook` makes, and the only
         // number a stored record cannot carry: it is a comparison with the summary, not a property of the reading.
-        let already_declared: std::collections::HashSet<String> = self
+        let already_declared: HashSet<String> = self
             .store
             .index()
             .summary(&path)?
@@ -854,7 +850,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
         let unit = self.translation_unit_of(&path)?;
         let text = self.files.read(&path)?;
-        let seed = session::the_seed_for(&self.config, self.store.index().macros(), &path);
+        let seed = the_seed_for(&self.config, self.store.index().macros(), &path);
         let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
         let unit_definitions = unit.definitions();
         let view = unit.environment_of(&path)?;
@@ -894,7 +890,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let written = self.files.read(&path)?;
         let rendered = match self.known_rendering_of(&path, &written) {
             Some(rendered) => rendered,
-            None => std::sync::Arc::new(self.rendering_of(&path)?),
+            None => Arc::new(self.rendering_of(&path)?),
         };
         self.store
             .index_the_rendering(&path, &rendered, Some(&environment))
@@ -928,7 +924,7 @@ impl<F: FileProvider + Clone> Session<F> {
             Some(rendered) => rendered,
             None => {
                 // Built and **kept**: the key is the one `known_rendering_of` reads, so the next ask is a lookup.
-                let built = std::sync::Arc::new(self.rendering_of(&path)?);
+                let built = Arc::new(self.rendering_of(&path)?);
                 self.remember_a_rendering(&path, cache::content_hash(&text), built.clone());
                 built
             }
@@ -944,8 +940,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let summary = match remembered {
             Some(summary) => summary,
             None => {
-                let built =
-                    std::sync::Arc::new(summarize(&path, &rendered.text, SummaryKey::new(0, 0)));
+                let built = Arc::new(summarize(&path, &rendered.text, SummaryKey::new(0, 0)));
                 if let Ok(mut known) = self.rendering_summaries.lock() {
                     let weight = built.declarations.len() + built.macros.len();
                     known.insert(key, built.clone(), weight);

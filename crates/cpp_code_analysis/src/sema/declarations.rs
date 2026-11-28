@@ -30,7 +30,6 @@
 
 use crate::DeclModifiers;
 use crate::Name;
-use crate::cache;
 use crate::scopes;
 use crate::sema;
 use crate::summary;
@@ -45,6 +44,7 @@ use crate::summary::{
     Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, GuardBranch, MacroFact, MacroKind,
     SummaryGuards,
 };
+use cpp_parser::CppAstNode;
 use cpp_parser::CppSyntaxKind;
 
 use cpp_parser::{CppSyntaxNode, SourceRange};
@@ -164,7 +164,7 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
 /// the root, measured then at 2.9 s → 24.9 s on 356 files — which is what [`DeclarationShapes`] exists to answer
 /// in one pass. A `using` declaration **is** one of the shapes, and the `TypeId` written after its `=` is recorded
 /// with it, so the same answer costs a walk up the ancestor chain.
-fn using_alias_target(shapes: &DeclarationShapes, name: cpp_parser::SourceRange) -> Option<String> {
+fn using_alias_target(shapes: &DeclarationShapes, name: SourceRange) -> Option<String> {
     // **The innermost `using` the name is inside**: `on_the_path` visits outermost first, so the last one that
     // holds the name is the one that declares it — which is what "the smallest such node" meant when this walked.
     let mut target = None;
@@ -230,20 +230,18 @@ pub(crate) fn an_unnamed_class_body_named(
 fn a_class_body_without_a_tag(specifiers: &CppSyntaxNode) -> bool {
     let Some(body) = specifiers.children().find(|child| {
         matches!(
-            cpp_parser::CppSyntaxKind::from(child.kind()),
-            cpp_parser::CppSyntaxKind::ClassDef
-                | cpp_parser::CppSyntaxKind::StructDef
-                | cpp_parser::CppSyntaxKind::UnionDef
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
         )
     }) else {
         return false;
     };
-    !body.children().any(|child| {
-        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::NameExpr
-    })
+    !body
+        .children()
+        .any(|child| cpp_parser::CppNameExpr::cast(child).is_some())
 }
 
-fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool {
+fn reaches_the_name(node: &CppSyntaxNode, name: SourceRange) -> bool {
     let span = node.text_range();
     usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
 }
@@ -524,7 +522,7 @@ pub(crate) fn declared_modifiers_with(
             .union(DeclModifiers::CONST)
             .union(DeclModifiers::VOLATILE);
         found = DeclModifiers::from_bits(found.bits() & !A_CONSTRUCTOR_CANNOT_SAY.bits());
-    } else if cache::summary::is_a_destructor_name(&binding.name.spelled()) {
+    } else if summary::is_a_destructor_name(&binding.name.spelled()) {
         // A destructor writes `final` **after its parameter list** — `~D() final` — so the word can only be its own
         // when it is in the destructor's declarator. Anywhere else it is the class's, which is the leak this mask is
         // for. The declarator is re-read rather than the bits inspected, because after the union there is no telling
@@ -725,8 +723,8 @@ fn modifiers_in(node: &CppSyntaxNode) -> DeclModifiers {
             if cpp_parser::CppClassBody::can_cast(child.kind().into())
                 || cpp_parser::CppCompoundStat::can_cast(child.kind().into())
                 || matches!(
-                    cpp_parser::CppSyntaxKind::from(child.kind()),
-                    cpp_parser::CppSyntaxKind::OldStyleParameterList
+                    CppSyntaxKind::from(child.kind()),
+                    CppSyntaxKind::OldStyleParameterList
                 )
             {
                 continue;
@@ -795,7 +793,7 @@ pub struct DeclarationShapes {
     /// re-parsed the same `template <…>` list into three `Vec`s of `String`; measured on `import std;` that was **65 M of
     /// a read`s 150 M allocations**, the largest single cost of the whole program reading. See [`Self::template_at`].
     templates: Vec<(
-        cpp_parser::SourceRange,
+        SourceRange,
         CppSyntaxNode,
         std::sync::OnceLock<std::sync::Arc<Vec<TemplateParameters>>>,
     )>,
@@ -809,7 +807,7 @@ pub struct DeclarationShapes {
     /// **The tree these shapes were read from** — retained for the calls above that still read nodes out of it.s *ancestry*
     /// rather than about a shape: whether a name stands inside a parameter list — see
     /// [`DeclarationShapes::names_a_parameter`].
-    parameter_lists: Vec<cpp_parser::SourceRange>,
+    parameter_lists: Vec<SourceRange>,
 }
 
 /// **One file's declaration table, built at most once per request.**
@@ -833,17 +831,14 @@ pub struct DeclarationShapes {
 pub type ShapeTable = std::cell::OnceCell<DeclarationShapes>;
 
 /// The table in `shapes`, built from `root` if this is the first ask.
-pub fn shapes_from<'a>(
-    shapes: &'a ShapeTable,
-    root: &cpp_parser::CppSyntaxNode,
-) -> &'a DeclarationShapes {
+pub fn shapes_from<'a>(shapes: &'a ShapeTable, root: &CppSyntaxNode) -> &'a DeclarationShapes {
     shapes.get_or_init(|| DeclarationShapes::of(root))
 }
 
 /// One node a question is answered at, and how it is reached.
 struct Shape {
     /// The node's own range — the interval that decides which bindings it is the shape *for*.
-    at: cpp_parser::SourceRange,
+    at: SourceRange,
     kind: CppSyntaxKind,
     /// **Who may name a declaration written here** — the access level in force in the class body this node is in,
     /// or `None` outside every class body. Recorded per shape rather than looked up per binding because the pass
@@ -933,7 +928,7 @@ impl DeclarationShapes {
         let mut chain: Vec<u32> = Vec::new();
         // The class templates, recorded in the same pass — see the field's note.
         let mut templates: Vec<(
-            cpp_parser::SourceRange,
+            SourceRange,
             CppSyntaxNode,
             std::sync::OnceLock<std::sync::Arc<Vec<TemplateParameters>>>,
         )> = Vec::new();
@@ -943,7 +938,7 @@ impl DeclarationShapes {
         // The `export`ed regions the walk has entered, innermost last — see [`Shape::exported`].
         let mut exports: Vec<usize> = Vec::new();
 
-        let mut parameter_lists: Vec<cpp_parser::SourceRange> = Vec::new();
+        let mut parameter_lists: Vec<SourceRange> = Vec::new();
         for node in root.descendants() {
             let at = cpp_parser::source_range(node.text_range());
             // Recorded before any skip: a `ParameterList` is not a shape, and this is the only place that sees it.
@@ -1201,7 +1196,7 @@ impl DeclarationShapes {
             if !contains(shape.at, name_range) {
                 return;
             }
-            if shape.kind == cpp_parser::CppSyntaxKind::TemplateDecl {
+            if shape.kind == CppSyntaxKind::TemplateDecl {
                 template = Some(shape.at);
             } else {
                 innermost = Some(shape.at);
@@ -1500,10 +1495,7 @@ fn the_class_a_typedef_body_names(
 /// declarator is a spelling problem with C's precedence in it: writing `Array { Pointer { Function } }` back gave
 /// `int ([3]*)(int)` for `int (*table[3])(int);` — the operators in the wrong order around the name — and a helper
 /// that reproduced precedence would be a second grammar. The file wrote the spelling; this keeps it.
-fn the_operators_around_the_name(
-    declarator: &CppSyntaxNode,
-    name: cpp_parser::SourceRange,
-) -> String {
+fn the_operators_around_the_name(declarator: &CppSyntaxNode, name: SourceRange) -> String {
     let text = declarator.text().to_string();
     let start = usize::from(declarator.text_range().start());
     let mut cut: Vec<(usize, usize)> = Vec::new();
@@ -1528,11 +1520,10 @@ fn the_operators_around_the_name(
     // makes `int (*)(int left, int right)` a different answer for consumers that compare spellings.
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for child in declarator.children() {
-        let kind = cpp_parser::CppSyntaxKind::from(child.kind());
-        let is_initialiser = kind == cpp_parser::CppSyntaxKind::Initializer;
+        let kind = CppSyntaxKind::from(child.kind());
+        let is_initialiser = kind == CppSyntaxKind::Initializer;
         // …and a parameter list at the name's own level is a constructor call when the declarator spells the name.
-        let is_a_constructor_call =
-            names_the_binding && kind == cpp_parser::CppSyntaxKind::ParameterList;
+        let is_a_constructor_call = names_the_binding && kind == CppSyntaxKind::ParameterList;
         if is_initialiser || is_a_constructor_call {
             let range = child.text_range();
             let (from, to) = (
@@ -1544,7 +1535,7 @@ fn the_operators_around_the_name(
             }
             continue;
         }
-        if kind == cpp_parser::CppSyntaxKind::ParameterList {
+        if kind == CppSyntaxKind::ParameterList {
             let range = child.text_range();
             let (from, to) = (
                 usize::from(range.start()).saturating_sub(start),
@@ -1943,13 +1934,13 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [DeclFact]) {
     // member of a template parameter list, a nested declarator, an out-of-line definition handled elsewhere) had its
     // parameter list built for an answer nothing reads. On `import std;` this pass is 13 M of a read's 143 M, and
     // `the_parameter_names` is the allocation in it: one `Vec` and one `String` per parameter, per declaration.
-    let wanted: std::collections::HashSet<usize> = facts
+    let wanted: HashSet<usize> = facts
         .iter()
         .filter(|fact| fact.kind == DeclKind::Function)
         .map(|fact| fact.name_range.start_offset)
         .collect();
-    let mut bodies: std::collections::HashMap<usize, (CppSyntaxNode, Vec<String>)> =
-        std::collections::HashMap::with_capacity(wanted.len());
+    let mut bodies: HashMap<usize, (CppSyntaxNode, Vec<String>)> =
+        HashMap::with_capacity(wanted.len());
     use cpp_parser::CppAstNode;
     // **The name and the body of every declaration that has one**, asked of the typed node: `get_name` covers the class, the
     // namespace, the declarator and the constructor's bare declarator, which is the chain four kind comparisons used to spell
@@ -2008,13 +1999,12 @@ fn fill_the_frees(root: &CppSyntaxNode, facts: &mut [DeclFact]) {
 /// a `Vec` for an answer no `ReflectionFact` may ever need.
 /// The next change: store the annotation's **byte range** and split it only when a fact actually matches, which is
 /// behaviour-preserving and removes the allocation for the pairs nothing reads.
-fn fill_the_reflection(root: &cpp_parser::CppSyntaxNode, written: &str, facts: &mut [DeclFact]) {
+fn fill_the_reflection(root: &CppSyntaxNode, written: &str, facts: &mut [DeclFact]) {
     // **The annotation is remembered as the two borrowed pieces**, not as a `ReflectionFact`. `the_annotation_before`
     // accepts *any* macro call that ends just before a declaration, so most entries are pairs no fact ever reads —
     // and a `Vec<String>` of specifiers for each of those was 11.3 M allocations of a read's 143 M. The split now
     // happens only where a fact actually matches, below.
-    let mut annotations: std::collections::HashMap<usize, (&str, &str)> =
-        std::collections::HashMap::new();
+    let mut annotations: HashMap<usize, (&str, &str)> = HashMap::new();
     use cpp_parser::CppAstNode;
     for node in cpp_parser::typed_descendants::<cpp_parser::CppDeclaration>(root) {
         let Some(name_start) = the_declaration_name_start(node.syntax()) else {
@@ -2046,7 +2036,7 @@ fn fill_the_reflection(root: &cpp_parser::CppSyntaxNode, written: &str, facts: &
 
 /// **Where the name a declaration declares starts** — the class's own name, or the declarator's, never the first name in its
 /// type.
-fn the_declaration_name_start(declaration: &cpp_parser::CppSyntaxNode) -> Option<usize> {
+fn the_declaration_name_start(declaration: &CppSyntaxNode) -> Option<usize> {
     use cpp_parser::{CppAstNode, CppAstToken, CppDeclaration};
     let declaration = CppDeclaration::cast(declaration.clone())?;
     let name = declaration.get_name()?;
@@ -2383,8 +2373,7 @@ fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNo
     // can build, although a function definition is measured to be a `Declaration` here.
     token.parent_ancestors().find(|node| {
         cpp_parser::CppDeclaration::can_cast(node.kind().into())
-            || cpp_parser::CppSyntaxKind::from(node.kind())
-                == cpp_parser::CppSyntaxKind::FunctionDef
+            || CppSyntaxKind::from(node.kind()) == CppSyntaxKind::FunctionDef
     })
 }
 
@@ -3217,10 +3206,10 @@ pub(crate) fn declared_returns_of_with(
             .unwrap_or_default();
         nodes.sort_by_key(|node| node.text_range().start());
         for node in nodes {
-            match cpp_parser::CppSyntaxKind::from(node.kind()) {
-                cpp_parser::CppSyntaxKind::PointerType => operators.push('*'),
-                cpp_parser::CppSyntaxKind::ReferenceType => operators.push('&'),
-                cpp_parser::CppSyntaxKind::RValueReferenceType => operators.push_str("&&"),
+            match CppSyntaxKind::from(node.kind()) {
+                CppSyntaxKind::PointerType => operators.push('*'),
+                CppSyntaxKind::ReferenceType => operators.push('&'),
+                CppSyntaxKind::RValueReferenceType => operators.push_str("&&"),
                 _ => {}
             }
         }
@@ -3300,10 +3289,7 @@ pub(crate) fn declared_returns_of_with(
 /// The operators before the name (`*`) go inside parentheses, and what follows the name's **own** parameter list is
 /// the rest — so `(int b)` stays attached in the right place. `None` for every other shape, which is what keeps the
 /// ordinary assembly ([`before`] plus its operator filter) answering `Widget *` and `const char *`.
-fn a_parenthesised_return_type(
-    declarator: &CppSyntaxNode,
-    name: cpp_parser::SourceRange,
-) -> Option<String> {
+fn a_parenthesised_return_type(declarator: &CppSyntaxNode, name: SourceRange) -> Option<String> {
     use cpp_parser::CppAstNode;
 
     // The declarator that names the binding: the innermost one holding the name as a direct child.
@@ -3352,8 +3338,8 @@ fn a_parenthesised_return_type(
         .filter(|child| {
             child.text_range() != path.text_range()
                 && matches!(
-                    cpp_parser::CppSyntaxKind::from(child.kind()),
-                    cpp_parser::CppSyntaxKind::ParameterList | cpp_parser::CppSyntaxKind::ArrayType
+                    CppSyntaxKind::from(child.kind()),
+                    CppSyntaxKind::ParameterList | CppSyntaxKind::ArrayType
                 )
         })
         .map(|suffix| suffix.text().to_string())
@@ -3365,7 +3351,7 @@ fn a_parenthesised_return_type(
     Some(format!("({operators}){after}"))
 }
 
-fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> String {
+fn before(text: &str, node: &CppSyntaxNode, name: SourceRange) -> String {
     if name.length == 0 {
         return String::new();
     }
@@ -4866,8 +4852,7 @@ impl<'a> DeclarationFacts<'a> {
         // standard-library closure is fifty million string comparisons, and the map is one hash per question.
         // **What the 360–400 ms this phase prints actually is** is `qualified_declarations`' own walk of the tree —
         // see the note there.
-        let mut by_offset: std::collections::HashMap<usize, usize> =
-            std::collections::HashMap::with_capacity(facts.len());
+        let mut by_offset: HashMap<usize, usize> = HashMap::with_capacity(facts.len());
         for (at, fact) in facts.iter().enumerate() {
             by_offset.entry(fact.name_range.start_offset).or_insert(at);
         }
@@ -5045,8 +5030,8 @@ fn qualified_declarations(root: &CppSyntaxNode) -> Vec<(Binding, String, Option<
         // function `size_t` in namespace `std`, rendered as a function, given a code lens, and counted against
         // `std::size_t`. Measured with `inspect facts` on `struct Hashed { std::size_t operator()(…) const; };`: four
         // facts, one of them that phantom. A declarator that spells an operator names itself.
-        let names_itself = declarator.get_name().is_some()
-            || sema::scopes::spells_an_operator(declarator.syntax());
+        let names_itself =
+            declarator.get_name().is_some() || scopes::spells_an_operator(declarator.syntax());
         let from_the_declarator = declarator
             .child::<CppNameExpr>()
             .filter(CppNameExpr::is_qualified);
@@ -6320,7 +6305,7 @@ int Box<int>::Inner::deep = 0;
         );
     }
 
-    fn facts(source: &str) -> (Vec<summary::DeclFact>, summary::SummaryGuards) {
+    fn facts(source: &str) -> (Vec<DeclFact>, summary::SummaryGuards) {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
@@ -6403,9 +6388,7 @@ public:
         assert!(plain.reflection().is_none());
     }
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
-    fn facts_of_a_broken_file(
-        source: &str,
-    ) -> (Vec<summary::DeclFact>, Vec<cpp_parser::SourceRange>) {
+    fn facts_of_a_broken_file(source: &str) -> (Vec<DeclFact>, Vec<cpp_parser::SourceRange>) {
         let tree = CppParser::parse(source, ParserConfig::default());
         assert_ne!(
             tree.get_errors(),

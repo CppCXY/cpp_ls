@@ -999,7 +999,7 @@ fn a_template_parameter_takes_the_type_of_the_argument() {
             &view,
             cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
         ) {
-            cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
+            Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
     };
@@ -1566,7 +1566,7 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
             &view,
             cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset),
         ) {
-            cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
+            Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
     };
@@ -1586,7 +1586,7 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
                     mixed.name_range.start_offset
                 )
             ),
-            cpp_code_analysis::Known::Yes(_)
+            Known::Yes(_)
         ),
         "the arms disagree, so the conversion decides — and this layer does not rank conversions"
     );
@@ -1935,7 +1935,7 @@ fn a_function_returning_a_reference_keeps_its_parameter_list() {
     let found: Vec<(&str, Option<&str>)> = summary
         .declarations
         .iter()
-        .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
+        .filter(|fact| matches!(fact.kind, DeclKind::Function))
         .map(|fact| (&*fact.name, fact.parameter_list()))
         .collect();
     println!("functions: {found:?}");
@@ -2002,7 +2002,7 @@ fn a_return_type_a_directive_splits_is_the_branch_this_compilation_takes() {
     let found: Vec<(&str, Option<&str>)> = cooked
         .declarations
         .iter()
-        .filter(|fact| matches!(fact.kind, cpp_code_analysis::DeclKind::Function))
+        .filter(|fact| matches!(fact.kind, DeclKind::Function))
         .map(|fact| (&*fact.name, fact.returns.as_deref()))
         .collect();
     println!("returns: {found:?}");

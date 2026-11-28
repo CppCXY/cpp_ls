@@ -299,7 +299,7 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn put_path(out: &mut Vec<u8>, path: &std::path::Path) {
+fn put_path(out: &mut Vec<u8>, path: &Path) {
     put_bytes(out, path.to_string_lossy().as_bytes());
 }
 

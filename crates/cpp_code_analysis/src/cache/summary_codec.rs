@@ -419,10 +419,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
 ///
 /// A caller does not encode a timeline it has not validated: see [`crate::index::store`], where the entry carries
 /// the closure's content hashes and is refused when one of them moved.
-pub fn encode_translation_unit(
-    unit: &TranslationUnit,
-    closure: &[(std::path::PathBuf, u64)],
-) -> Vec<u8> {
+pub fn encode_translation_unit(unit: &TranslationUnit, closure: &[(PathBuf, u64)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + unit.events.len() * 24);
 
     out.extend_from_slice(MAGIC);
@@ -499,7 +496,7 @@ pub fn encode_translation_unit(
 /// Read a timeline written by [`encode_translation_unit`].
 pub fn decode_translation_unit(
     bytes: &[u8],
-) -> Result<(TranslationUnit, Vec<(std::path::PathBuf, u64)>), DecodeError> {
+) -> Result<(TranslationUnit, Vec<(PathBuf, u64)>), DecodeError> {
     let mut reader = Reader::new(bytes);
     if reader.take(MAGIC.len())? != MAGIC {
         return Err(DecodeError::NotASummary);
@@ -561,7 +558,7 @@ pub fn decode_translation_unit(
         let parameters = reader.optional_string()?.map(std::sync::Arc::from);
         let body_range = match reader.u8()? {
             0 => None,
-            1 => Some(cpp_parser::SourceRange::new(
+            1 => Some(SourceRange::new(
                 reader.u64()? as usize,
                 reader.u64()? as usize,
             )),
@@ -2095,9 +2092,9 @@ fn a_cooked_reading_round_trips() {
                 }),
             },
         ],
-        macros: vec![summary::MacroFact {
+        macros: vec![MacroFact {
             name: "_STD_BEGIN".to_string(),
-            kind: summary::MacroKind::Definition,
+            kind: MacroKind::Definition,
             function_like: false,
             body: MacroBody::Expression,
             value: Some(Box::from("namespace std {")),

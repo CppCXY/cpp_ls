@@ -317,7 +317,7 @@ pub(crate) fn cuda_words_are_offered_only_by_a_cuda_project() {
     session.did_open("/p/a.cu", text);
     session.index_everything();
 
-    let path = std::path::PathBuf::from("/p/a.cu");
+    let path = PathBuf::from("/p/a.cu");
     let view = session.view_of_the_file(&path).expect("a view");
     let at = text.find("__dev\n").expect("the fixture") + "__dev".len();
     let labels = |set: &CompletionSet| {
@@ -359,7 +359,7 @@ pub(crate) fn the_built_in_variables_and_vector_types_complete_too() {
         fixture.session_with(CompilerConfig::new().with_language_family(ProjectLanguage::Cuda));
     session.did_open("/p/a.cu", text);
     session.index_everything();
-    let path = std::path::PathBuf::from("/p/a.cu");
+    let path = PathBuf::from("/p/a.cu");
     let view = session.view_of_the_file(&path).expect("a view");
     let at = text.find("thr\n").expect("the fixture") + "thr".len();
     let set = session.completions(&view, file::coordinates::FileOffset::new(at));
@@ -399,26 +399,23 @@ pub(crate) fn an_implementation_unit_sees_its_interface_units_declarations() {
         .with_file("/p/math.cpp", unit_text);
     let fixture = Memory::new("implementation-unit", &files);
     let mut session = fixture.session();
-    session.add_project_files([
-        std::path::PathBuf::from("/p/math.cppm"),
-        std::path::PathBuf::from("/p/math.cpp"),
-    ]);
+    session.add_project_files([PathBuf::from("/p/math.cppm"), PathBuf::from("/p/math.cpp")]);
     session.did_open("/p/math.cpp", unit_text);
     session.index_everything();
     // **The read the server does before answering a name question**: `import`s, and now the implementation unit's own
     // interface.
-    session.read_the_modules_a_file_imports(std::path::Path::new("/p/math.cpp"));
+    session.read_the_modules_a_file_imports(Path::new("/p/math.cpp"));
     session.index_everything();
     while session.pending_work() > 0 {
         session.advance(64);
     }
 
-    let path = std::path::PathBuf::from("/p/math.cpp");
+    let path = PathBuf::from("/p/math.cpp");
     let view = session.view_of_the_file(&path).expect("a view");
 
     // **`x_` is a member of `Vec2`**, and it is declared in the interface unit alone.
     let at = unit_text.find("x_)").expect("the fixture") + 1;
-    let typed = session.type_at(&view, file::coordinates::ReadingOffset::new(at));
+    let typed = session.type_at(&view, ReadingOffset::new(at));
     assert!(
         matches!(&typed, Known::Yes(found) if found.type_of.contains("double")),
         "`x_` must have the type the interface unit gives it: {typed:?}"
@@ -478,21 +475,21 @@ pub(crate) fn a_modules_includes_define_what_a_later_condition_asks() {
     let fixture = Memory::new("a-modules-includes", &files);
     let mut session = fixture.session();
     session.add_project_files([
-        std::path::PathBuf::from("/p/std.cppm"),
-        std::path::PathBuf::from("/p/library.h"),
-        std::path::PathBuf::from("/p/detail.h"),
-        std::path::PathBuf::from("/p/a.cpp"),
+        PathBuf::from("/p/std.cppm"),
+        PathBuf::from("/p/library.h"),
+        PathBuf::from("/p/detail.h"),
+        PathBuf::from("/p/a.cpp"),
     ]);
     session.did_open("/p/a.cpp", consumer_text);
     session.index_everything();
     // The read the server does before answering a name question, and the drain that follows it.
-    session.read_the_modules_a_file_imports(std::path::Path::new("/p/a.cpp"));
+    session.read_the_modules_a_file_imports(Path::new("/p/a.cpp"));
     session.index_everything();
     while session.pending_work() > 0 {
         session.advance(64);
     }
 
-    let path = std::path::PathBuf::from("/p/a.cpp");
+    let path = PathBuf::from("/p/a.cpp");
     let view = session.view_of_the_file(&path).expect("a view");
 
     // **The class is what `std::vector` names**, not the re-export in the interface unit.
@@ -691,7 +688,7 @@ pub(crate) fn a_parameter_of_an_out_of_class_definition_is_declared() {
     let mut session = fixture.session();
     session.did_open("/p/archive.cpp", text);
     session.index_everything();
-    let path = std::path::PathBuf::from("/p/archive.cpp");
+    let path = PathBuf::from("/p/archive.cpp");
     let view = session.view_of_the_file(&path).expect("a view");
 
     // **The use, not the declaration**: `entry` in `entry.key`, inside the body.

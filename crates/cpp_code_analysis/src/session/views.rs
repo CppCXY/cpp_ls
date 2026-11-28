@@ -439,12 +439,12 @@ impl<F: FileProvider + Clone> Session<F> {
         let rendered = match self.known_rendering_of(&file.path, &file.text) {
             Some(known) => known,
             None => {
-                let built = std::sync::Arc::new(self.rendering_of(&file.path)?);
+                let built = Arc::new(self.rendering_of(&file.path)?);
                 // Remembered, so the next `view` — which cannot build one — finds it.
                 self.remember_a_rendering(
                     &file.path,
                     cache::content_hash(&file.text),
-                    std::sync::Arc::clone(&built),
+                    Arc::clone(&built),
                 );
                 built
             }
@@ -478,7 +478,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text: &str,
-    ) -> Option<std::sync::Arc<preprocess::cooked::RenderedCooked>> {
+    ) -> Option<Arc<preprocess::cooked::RenderedCooked>> {
         let text_hash = cache::content_hash(text);
         // **The open document's own rendering first, and it is not in the budget** — see
         // [`Session::open_renderings`]: the LRU is filled by a pass over the closure, and the file the reader is
@@ -515,10 +515,10 @@ impl<F: FileProvider + Clone> Session<F> {
         let (_, rendered) = self
             .store
             .the_stored_cooked_reading_with_rendering(&spelling)?;
-        let rendered = std::sync::Arc::new(rendered);
+        let rendered = Arc::new(rendered);
         if let Ok(mut known) = self.renderings.lock() {
             let weight = rendered.weight();
-            known.insert(key, std::sync::Arc::clone(&rendered), weight);
+            known.insert(key, Arc::clone(&rendered), weight);
         }
         Some(rendered)
     }
@@ -532,7 +532,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text_hash: u64,
-        rendered: std::sync::Arc<preprocess::cooked::RenderedCooked>,
+        rendered: Arc<preprocess::cooked::RenderedCooked>,
     ) {
         // **An open document is pinned outside the budget** — see [`Session::open_renderings`]: the LRU is filled by
         // a pass over the closure, and evicting the rendering of the file being edited is what made member
@@ -540,10 +540,7 @@ impl<F: FileProvider + Clone> Session<F> {
         if self.documents.is_open(path)
             && let Ok(mut open) = self.open_renderings.lock()
         {
-            open.insert(
-                queue_key(path),
-                (text_hash, std::sync::Arc::clone(&rendered)),
-            );
+            open.insert(queue_key(path), (text_hash, Arc::clone(&rendered)));
         }
         let weight = rendered.weight();
         if let Ok(mut known) = self.renderings.lock() {
@@ -598,7 +595,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text: &str,
-    ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
+    ) -> Option<Arc<cpp_parser::MacroEnvironment>> {
         let key = (path.to_path_buf(), cache::content_hash(text));
         self.macro_environments.lock().ok()?.get(&key).cloned()
     }
@@ -613,14 +610,14 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         path: &Path,
         text: &str,
-    ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
+    ) -> Option<Arc<cpp_parser::MacroEnvironment>> {
         if let Some(known) = self.known_macros_of(path, text) {
             return Some(known);
         }
 
         let summary = self.store.index().summary(path)?;
         let (closure, by_key) = self.closure_with_text(path);
-        let mut definitions = summary::MacroDefinitions::default();
+        let mut definitions = MacroDefinitions::default();
 
         let evidence = summary::macros_from_the_closure_with_bodies(
             summary,
@@ -633,7 +630,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &mut definitions,
         );
 
-        let made = std::sync::Arc::new(
+        let made = Arc::new(
             cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
                 .with_bodies_in_force(evidence.conditional_bodies),
         );

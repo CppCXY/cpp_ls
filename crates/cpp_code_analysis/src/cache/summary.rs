@@ -35,7 +35,6 @@ use crate::index;
 use crate::macros;
 use crate::paths;
 use crate::preprocess;
-use crate::summary;
 use crate::token;
 use smol_str::SmolStr;
 use std::path::Path;
@@ -50,7 +49,7 @@ use crate::macros::MacroDef;
 /// A path reaches these layers in the spelling whoever named it used: a directory scan keeps the caller's
 /// (`C:\Users\…`), an `#include` that resolved through [`crate::IncludeResolver`] is normalized (`c:/users/…`), and a
 /// cache entry is found by the normalized form either way. Comparing raw spellings made the same file two files.
-fn frame_key(path: &std::path::Path) -> String {
+fn frame_key(path: &Path) -> String {
     paths::normalize_path(path, cfg!(windows))
 }
 
@@ -896,10 +895,10 @@ pub type ConditionalBody = (Box<str>, bool, Option<Box<str>>, Box<str>);
 /// must stay separated from the `)` — the same thing `definition_text` spells as a space.
 ///
 /// `None` when the replacement list does not read as a definition, which is the `unreadable` count.
-fn definition_written_at(event: &TuEvent, body: &str) -> Option<macros::MacroDef> {
-    let mut tokens: Vec<token::Token> = Vec::new();
+fn definition_written_at(event: &TuEvent, body: &str) -> Option<MacroDef> {
+    let mut tokens: Vec<Token> = Vec::new();
     let name_at = cpp_parser::SourceRange::new(event.at, event.name.len());
-    tokens.push(token::Token::new(
+    tokens.push(Token::new(
         cpp_parser::CppTokenKind::Identifier,
         &*event.name,
         name_at,
@@ -912,7 +911,7 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<macros::MacroDef
     }
 
     let body_range = event.body_range?;
-    tokens.push(token::Token::new(
+    tokens.push(Token::new(
         cpp_parser::CppTokenKind::Whitespace,
         " ",
         cpp_parser::SourceRange::new(body_range.start_offset, 0),
@@ -933,12 +932,12 @@ fn definition_written_at(event: &TuEvent, body: &str) -> Option<macros::MacroDef
 ///
 /// The piece is a substring the walk copied, so the shift is exact rather than a guess — see
 /// [`definition_written_at`], which is the only caller.
-fn lex_in_place(text: &str, at: usize) -> Vec<token::Token> {
+fn lex_in_place(text: &str, at: usize) -> Vec<Token> {
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
     tokens
         .iter()
         .map(|token| {
-            token::Token::new(
+            Token::new(
                 token.kind,
                 &text[token.range.start_offset..token.range.end_offset()],
                 cpp_parser::SourceRange::new(at + token.range.start_offset, token.range.length),
@@ -1126,7 +1125,7 @@ impl IncludeFact {
 /// whatever whitespace and comments the body has — and nothing here re-spells a body.
 pub fn macros_from_direct_includes_with_bodies<'a>(
     summary: &FileSummary,
-    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    mut look_up: impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
 ) -> Vec<cpp_parser::IncludedMacro> {
     let mut entries = Vec::new();
 
@@ -1238,18 +1237,12 @@ struct Binding {
     definition: std::sync::Arc<MacroDef>,
     /// The file that wrote it — a position means nothing without it, and only the file being walked can have
     /// written something *below* the condition being answered.
-    defined_in: Box<std::path::Path>,
+    defined_in: Box<Path>,
     defined_at: usize,
 }
 
 impl UnitState {
-    fn define(
-        &mut self,
-        name: &str,
-        definition: std::sync::Arc<MacroDef>,
-        file: &std::path::Path,
-        at: usize,
-    ) {
+    fn define(&mut self, name: &str, definition: std::sync::Arc<MacroDef>, file: &Path, at: usize) {
         self.definitions.insert(
             name.into(),
             Binding {
@@ -1284,10 +1277,8 @@ pub struct MacroDefinitions {
     /// **The path is shared**, not owned per key: the same header defines hundreds of macros, and a `PathBuf` per
     /// entry was hundreds of copies of the same path — measured at 34 000 entries on a cold start, most of them
     /// pointing into about 400 files.
-    parsed: std::collections::HashMap<
-        (std::sync::Arc<std::path::Path>, usize),
-        Option<std::sync::Arc<MacroDef>>,
-    >,
+    parsed:
+        std::collections::HashMap<(std::sync::Arc<Path>, usize), Option<std::sync::Arc<MacroDef>>>,
     /// What the map holds, in the estimate [`MacroDefinitions::accounting`] makes — the number the budget below is
     /// deducted from.
     bytes: usize,
@@ -1310,7 +1301,7 @@ impl DeclFact {
     /// at all. Counting `len()` for those was how the first measurement of this change reported "no difference": the
     /// estimate charged an allocation that no longer happens.
     pub fn heap_bytes(&self) -> usize {
-        std::mem::size_of::<DeclFact>()
+        size_of::<DeclFact>()
             + on_the_heap(&self.name)
             + self.scope.as_ref().map_or(0, on_the_heap)
             + self.in_namespace().map_or(0, str::len)
@@ -1329,7 +1320,7 @@ fn on_the_heap(text: &SmolStr) -> usize {
 impl MacroFact {
     /// The bytes one macro fact holds. The body is a range into the file's own text, not a copy of it.
     pub fn heap_bytes(&self) -> usize {
-        std::mem::size_of::<MacroFact>()
+        size_of::<MacroFact>()
             + self.name.len()
             + self.value.as_ref().map_or(0, |text| text.len())
             + self.alias.as_ref().map_or(0, |text| text.len())
@@ -1339,7 +1330,7 @@ impl MacroFact {
 impl IncludeFact {
     /// The bytes one include fact holds.
     pub fn heap_bytes(&self) -> usize {
-        std::mem::size_of::<IncludeFact>()
+        size_of::<IncludeFact>()
             + self.spelling.len()
             + self
                 .resolved
@@ -1355,7 +1346,7 @@ impl FileSummary {
     /// their spare capacity, so it is a lower bound. Measured against the resident set, the difference is the
     /// allocator's slack — which is itself worth seeing, and is why the report prints both.
     pub fn heap_bytes(&self) -> usize {
-        std::mem::size_of::<FileSummary>()
+        size_of::<FileSummary>()
             + self.path.as_os_str().len()
             + self
                 .declarations
@@ -1368,14 +1359,12 @@ impl FileSummary {
                 .iter()
                 .map(IncludeFact::heap_bytes)
                 .sum::<usize>()
-            + self.guards.regions.len() * std::mem::size_of::<cpp_parser::SourceRange>()
+            + self.guards.regions.len() * size_of::<cpp_parser::SourceRange>()
             + self
                 .macro_readings
                 .iter()
                 .map(|reading| {
-                    std::mem::size_of::<MacroScopeReading>()
-                        + reading.name.len()
-                        + reading.body.len()
+                    size_of::<MacroScopeReading>() + reading.name.len() + reading.body.len()
                 })
                 .sum::<usize>()
             + self.use_filter.len()
@@ -1388,7 +1377,7 @@ impl FileSummary {
                 .map(|name| name.len())
                 .sum::<usize>()
             + (self.modules.header_units.len() + self.modules.partitions.len())
-                * std::mem::size_of::<std::path::PathBuf>()
+                * size_of::<std::path::PathBuf>()
     }
 }
 
@@ -1401,15 +1390,15 @@ impl MacroDefinitions {
     pub fn accounting(&self) -> (usize, usize) {
         let mut bytes = 0usize;
         for (key, definition) in &self.parsed {
-            bytes += std::mem::size_of::<(
+            bytes += size_of::<(
                 (std::path::PathBuf, usize),
                 Option<std::sync::Arc<MacroDef>>,
             )>();
             bytes += key.0.as_os_str().len();
             if let Some(definition) = definition {
-                bytes += std::mem::size_of::<MacroDef>() + definition.name.len();
+                bytes += size_of::<MacroDef>() + definition.name.len();
                 if let Some(params) = &definition.params {
-                    bytes += params.len() * std::mem::size_of::<preprocess::macros::Parameter>();
+                    bytes += params.len() * size_of::<macros::Parameter>();
                 }
             }
         }
@@ -1426,7 +1415,7 @@ impl MacroDefinitions {
     /// result are relative to that reconstructed line, which is all the evaluator does with them.
     fn definition_of(
         &mut self,
-        path: &std::path::Path,
+        path: &Path,
         source: &str,
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
@@ -1449,11 +1438,11 @@ impl MacroDefinitions {
             self.parsed.clear();
             self.bytes = 0;
         }
-        self.bytes += std::mem::size_of::<(
-            (std::sync::Arc<std::path::Path>, usize),
+        self.bytes += size_of::<(
+            (std::sync::Arc<Path>, usize),
             Option<std::sync::Arc<MacroDef>>,
         )>();
-        self.bytes += std::mem::size_of::<MacroDef>();
+        self.bytes += size_of::<MacroDef>();
         if let Some(definition) = &definition {
             self.bytes += definition.name.len();
         }
@@ -1468,7 +1457,7 @@ impl MacroDefinitions {
     /// reached by a *different* fact that happens to start where the old one did — the cache would then hand back a
     /// definition nobody wrote. The whole file's entries go, not only the edited definition's: every offset after
     /// the edit moved.
-    pub fn forget(&mut self, path: &std::path::Path) {
+    pub fn forget(&mut self, path: &Path) {
         let before = self.parsed.len();
         self.parsed.retain(|(held, _), _| held.as_ref() != path);
         if self.parsed.len() != before {
@@ -1489,7 +1478,7 @@ impl MacroDefinitions {
 
     fn get_or_read(
         &mut self,
-        path: &std::path::Path,
+        path: &Path,
         source: &str,
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
@@ -1546,12 +1535,12 @@ fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
     let mut errors = Vec::new();
     let mut lexer =
         cpp_parser::CppLexer::new(&line, cpp_parser::LexerConfig::default(), &mut errors);
-    let tokens: Vec<token::Token> = lexer
+    let tokens: Vec<Token> = lexer
         .tokenize()
         .into_iter()
         .map(|token| {
             let text = &line[token.range.start_offset..token.range.end_offset()];
-            token::Token::new(token.kind, text, token.range)
+            Token::new(token.kind, text, token.range)
         })
         .collect();
 
@@ -1583,10 +1572,10 @@ struct UnitMacros<'a> {
     /// The file the condition being answered was written in, and the offset it was written at. `None` asks the
     /// question **without a position** — "what does the unit say now, at the end of what has been read" — which is
     /// what the expansion *inside* a body wants.
-    here: Option<(&'a std::path::Path, usize)>,
+    here: Option<(&'a Path, usize)>,
 }
 
-impl condition::MacroValues for UnitMacros<'_> {
+impl MacroValues for UnitMacros<'_> {
     fn lookup(&self, name: &str) -> condition::Lookup<'_> {
         // **What the walk's own evaluator is told about a name.**
         //
@@ -1664,7 +1653,7 @@ impl condition::MacroValues for UnitMacros<'_> {
 /// seeded from the same corpus, which is what keeps the feeding affordable (see [`MacroDefinitions`]).
 pub fn macros_from_the_closure_with_bodies<'a>(
     summary: &'a FileSummary,
-    look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    look_up: impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
@@ -1692,7 +1681,7 @@ pub fn macros_from_the_closure_with_bodies<'a>(
 pub fn macros_in_force_before_the_include<'a>(
     includer: &'a FileSummary,
     before: usize,
-    look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    look_up: impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
@@ -1734,7 +1723,7 @@ fn walk_the_translation_unit<'a>(
     summary: &'a FileSummary,
     only_before: Option<usize>,
     all_from: Option<usize>,
-    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    mut look_up: impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions_of: &mut MacroDefinitions,
     cache: &index::walk_cache::WalkCache,
@@ -1756,7 +1745,7 @@ fn walk_the_translation_unit<'a>(
     // libstdc++ header for the feature-test macros that header asks for, it has no guard, and skipping it dropped
     // `__cpp_lib_print`. The two skips in `walk_one_file` are `#pragma once` and the `#ifndef X / #define X` idiom,
     // and both are *unit-wide* facts, not per-include ones.
-    let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
     for include in &summary.includes {
         // The includes are facts in source order, so the first one at or past the limit ends the walk.
         if only_before.is_some_and(|limit| include.range.start_offset >= limit) {
@@ -1952,7 +1941,7 @@ impl TimelineBuilder {
     /// Open a frame for a file the walk is about to read, and return its id.
     fn enter(
         &mut self,
-        file: &std::path::Path,
+        file: &Path,
         parent: Option<u32>,
         from_in_parent: usize,
         visit_once: bool,
@@ -2017,18 +2006,18 @@ impl TranslationUnit {
     /// body strings. It is kept whole in the unit table (`MAX_UNITS` of them), which is what makes the number worth
     /// measuring: on a header-heavy closure it is megabytes, and sixty-four of them is not a number to guess.
     pub fn heap_bytes(&self) -> usize {
-        let mut bytes = std::mem::size_of::<TranslationUnit>();
+        let mut bytes = size_of::<TranslationUnit>();
         for frame in &self.frames {
-            bytes += std::mem::size_of::<TuFrame>() + frame.file.as_os_str().len();
+            bytes += size_of::<TuFrame>() + frame.file.as_os_str().len();
         }
         for event in &self.events {
-            bytes += std::mem::size_of::<TuEvent>()
+            bytes += size_of::<TuEvent>()
                 + event.name.len()
                 + event.body_text.as_ref().map_or(0, |text| text.len())
                 + event.parameters.as_ref().map_or(0, |text| text.len());
         }
         for key in self.entered.keys() {
-            bytes += key.len() + std::mem::size_of::<u32>();
+            bytes += key.len() + size_of::<u32>();
         }
         if let Some(name) = &self.root_presumed_name {
             bytes += name.as_os_str().len();
@@ -2042,7 +2031,7 @@ impl TranslationUnit {
     /// take; a file it cannot answer for is outside the analysis and defines nothing (see `walk_one_file`).
     pub fn walk<'a>(
         root: &'a FileSummary,
-        mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+        mut look_up: impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
         seed: &Marked,
         definitions_of: &mut MacroDefinitions,
         share: bool,
@@ -2056,8 +2045,7 @@ impl TranslationUnit {
             definitions: Default::default(),
             generation: 0,
         };
-        let mut seen: std::collections::HashSet<&std::path::Path> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
 
         // The root is walked by the same function every included file is: it *is* a file of the unit, and a
         // second entry point for it would be a second place for the include order to be got wrong.
@@ -2196,9 +2184,8 @@ impl TranslationUnit {
         // **A slot per event, nothing lexed.** A body is read the first time the cook asks for it, which is what makes
         // this table cheap to build and is why the cache that used to sit in front of it is gone — see
         // [`UnitDefinitions::of`] for the measurement.
-        let mut by_event: Vec<
-            Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>,
-        > = (0..self.events.len()).map(|_| None).collect();
+        let mut by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<MacroDef>>>>> =
+            (0..self.events.len()).map(|_| None).collect();
         let mut function_like_without_parameters = 0usize;
         let mut without_a_body = 0usize;
         let mut in_force_without_a_parameter_list = 0usize;
@@ -2254,7 +2241,7 @@ impl TranslationUnit {
     }
 
     /// The path of a frame — how a [`crate::macros::MacroFile::Frame`] becomes something a consumer can open.
-    pub fn frame_file(&self, frame: u32) -> Option<&std::path::Path> {
+    pub fn frame_file(&self, frame: u32) -> Option<&Path> {
         self.frames
             .get(frame as usize)
             .map(|frame| frame.file.as_path())
@@ -2290,7 +2277,7 @@ impl TranslationUnit {
     }
 
     /// The files the walk entered, in the order it entered them.
-    pub fn files(&self) -> impl Iterator<Item = &std::path::Path> {
+    pub fn files(&self) -> impl Iterator<Item = &Path> {
         self.frames.iter().map(|frame| frame.file.as_path())
     }
 
@@ -2303,7 +2290,7 @@ impl TranslationUnit {
     /// the offset of every fact rather than only the ones a view happens to use.
     pub fn facts_of<'unit>(
         &'unit self,
-        path: &'unit std::path::Path,
+        path: &'unit Path,
     ) -> impl Iterator<Item = (&'unit str, usize)> {
         let frame = self
             .frames
@@ -2321,7 +2308,7 @@ impl TranslationUnit {
     ///
     /// `None` is the honest answer for a file nothing includes: nothing in this translation unit says what it
     /// sees, and inventing a context for it is what the earlier per-file census did with a heuristic.
-    pub fn environment_of(&self, path: &std::path::Path) -> Option<MacroView<'_>> {
+    pub fn environment_of(&self, path: &Path) -> Option<MacroView<'_>> {
         let &frame = self.entered.get(&frame_key(path))?;
         Some(self.environment_at(frame))
     }
@@ -2398,7 +2385,7 @@ impl TranslationUnit {
     /// missing one header still reads the ones below it.
     pub fn cook_the_unit(
         &self,
-        sources: &dyn preprocess::macros::UnitSources,
+        sources: &dyn macros::UnitSources,
         definitions: &UnitDefinitions,
         seed: Option<&macros::MacroTable>,
         use_in_force_bodies: bool,
@@ -2417,7 +2404,7 @@ impl TranslationUnit {
     /// [`TranslationUnit::cook_the_unit`] with a **compiler probe** for `__has_builtin` and its siblings.
     pub fn cook_the_unit_with_features(
         &self,
-        sources: &dyn preprocess::macros::UnitSources,
+        sources: &dyn macros::UnitSources,
         definitions: &UnitDefinitions,
         seed: Option<&macros::MacroTable>,
         use_in_force_bodies: bool,
@@ -2478,7 +2465,7 @@ impl TranslationUnit {
 /// alternative is the same list at every call, which is how a recursion ends up disagreeing with itself.
 struct UnitCook<'unit> {
     unit: &'unit TranslationUnit,
-    sources: &'unit dyn preprocess::macros::UnitSources,
+    sources: &'unit dyn macros::UnitSources,
     definitions: &'unit UnitDefinitions<'unit>,
     seed: Option<&'unit macros::MacroTable>,
     use_in_force_bodies: bool,
@@ -2678,7 +2665,7 @@ pub struct UnitDefinitions<'unit> {
     unit: &'unit TranslationUnit,
     /// Parallel to `TranslationUnit::events`: the definition a fact becomes as a `#define` line, or `None` when that
     /// fact is not one this reader can put back together.
-    by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>>,
+    by_event: Vec<Option<std::sync::OnceLock<Option<std::sync::Arc<MacroDef>>>>>,
     /// Definitions whose parameter list the evidence does not carry — a function-like macro that cannot be
     /// substituted into, so it is not in the table. Counted for the unit; see [`TranslationUnit::definitions`].
     pub function_like_without_parameters: usize,
@@ -2694,18 +2681,16 @@ pub struct UnitDefinitions<'unit> {
 impl UnitDefinitions<'_> {
     /// The bytes this table holds: one slot per event, and the definitions the slots have built.
     pub fn heap_bytes(&self) -> usize {
-        let mut bytes = std::mem::size_of::<UnitDefinitions<'_>>()
+        let mut bytes = size_of::<UnitDefinitions<'_>>()
             + self.by_event.capacity()
-                * std::mem::size_of::<
-                    Option<std::sync::OnceLock<Option<std::sync::Arc<macros::MacroDef>>>>,
-                >();
+                * size_of::<Option<std::sync::OnceLock<Option<std::sync::Arc<MacroDef>>>>>();
         for definition in self.by_event.iter().flatten().filter_map(|cell| cell.get()) {
             let Some(definition) = definition else {
                 continue;
             };
-            bytes += std::mem::size_of::<macros::MacroDef>() + definition.name.len();
+            bytes += size_of::<MacroDef>() + definition.name.len();
             if let Some(params) = &definition.params {
-                bytes += params.len() * std::mem::size_of::<preprocess::macros::Parameter>();
+                bytes += params.len() * size_of::<macros::Parameter>();
             }
         }
         bytes
@@ -2716,7 +2701,7 @@ impl UnitDefinitions<'_> {
     /// The body is lexed here rather than when the unit was prepared: on `import std;` the table holds tens of thousands
     /// of definitions and the cook meets a fraction of them, so the eager version lexed replacement lists nothing would
     /// ever expand. A slot remembers its answer — including "this one does not read" — so a second ask costs nothing.
-    pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<macros::MacroDef>> {
+    pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<MacroDef>> {
         let cell = self.by_event.get(index as usize)?.as_ref()?;
         cell.get_or_init(|| {
             let event = self.unit.events.get(index as usize)?;
@@ -2825,7 +2810,7 @@ impl TranslationUnit {
     /// include contributes its own definitions at the point it is included. Asking without a position means asking
     /// about the end of the file, which is how a name that `xtr1common:22` had `#undef`ed still read as defined — see
     /// [`crate::preprocess::cooked::attribute_support`], where that mistake cost the `[[msvc::…]]` attributes.
-    pub fn macro_at(&self, file: &std::path::Path, name: &str, offset: usize) -> Option<MacroAt> {
+    pub fn macro_at(&self, file: &Path, name: &str, offset: usize) -> Option<MacroAt> {
         // **The file is matched the way this crate matches every path**, not by `Path` equality: a caller reaching for
         // a header from an `#include <...>` spelling hands over forward slashes and whatever case it typed, while the
         // walk recorded the path the filesystem gave it. Comparing raw paths made every question about a system header
@@ -2942,7 +2927,7 @@ impl TranslationUnit {
 
 impl<'unit> MacroView<'unit> {
     /// The file this view is of.
-    pub fn file(&self) -> &'unit std::path::Path {
+    pub fn file(&self) -> &'unit Path {
         &self.unit.frames[self.frame as usize].file
     }
 
@@ -3587,7 +3572,7 @@ impl RenderedUnit {
     }
 
     /// The file a token of the rendering stands in, as a path.
-    pub fn file_at(&self, cooked_offset: usize) -> Option<&std::path::Path> {
+    pub fn file_at(&self, cooked_offset: usize) -> Option<&Path> {
         let (file, _) = self.written_at(cooked_offset)?;
         self.file_of(file)
     }
@@ -3671,7 +3656,7 @@ impl RenderedUnit {
     }
 
     /// The path a span's file index names.
-    pub fn file_of(&self, file: u32) -> Option<&std::path::Path> {
+    pub fn file_of(&self, file: u32) -> Option<&Path> {
         self.files
             .get(file as usize)
             .map(std::path::PathBuf::as_path)
@@ -4031,14 +4016,14 @@ fn guard_name_of(file: &FileSummary, region: u32) -> Option<&str> {
 const MAX_INCLUDE_DEPTH: usize = 200;
 
 fn walk_one_file<'a>(
-    path: &'a std::path::Path,
+    path: &'a Path,
     from_offset: usize,
     parent: Option<u32>,
     from_in_parent: usize,
     // How deep in `#include`s this file is — 0 for the root, bounded by `MAX_INCLUDE_DEPTH`.
     depth: usize,
-    seen: &mut std::collections::HashSet<&'a std::path::Path>,
-    look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seen: &mut std::collections::HashSet<&'a Path>,
+    look_up: &mut impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
     definitions_of: &mut MacroDefinitions,
     unit: &mut UnitState,
@@ -4195,8 +4180,7 @@ fn walk_one_file<'a>(
     // which is what the generation covers, and only a change to the set in force can make it stale.
     // **Three answers per region**, not two: see the note where it is read. The memo has to hold the third one too,
     // or a region nobody can decide would be remembered as dead on its second fact.
-    let mut decided: rustc_hash::FxHashMap<(u32, u32), preprocess::guard::Visibility> =
-        Default::default();
+    let mut decided: rustc_hash::FxHashMap<(u32, u32), Visibility> = Default::default();
     // The generation every answer in `decided` was worked out at. The memo lives *between two changes to the set in
     // force* and nowhere longer, which is what the clearing below says in one line.
     let mut decided_at = unit.generation;
@@ -4216,7 +4200,7 @@ fn walk_one_file<'a>(
         if next_is_a_macro {
             let fact = macros.next().expect("peeked just above");
             let (in_force, visibility) = if matches!(fact.guard, FactGuard::Unconditional) {
-                (true, preprocess::guard::Visibility::Active)
+                (true, Visibility::Active)
             } else {
                 walked.conditional_facts += 1;
                 if let Some(at) = frame.map(|frame| frame as usize) {
@@ -4230,13 +4214,13 @@ fn walk_one_file<'a>(
                 let branch = match fact.guard {
                     // `regions` and `conditionals` are two views of the same list, indexed by the same region number
                     // — see `SummaryGuards` — so the branch is one lookup away, and it needs no macro.
-                    summary::FactGuard::Region(region) => file
+                    FactGuard::Region(region) => file
                         .guards
                         .conditionals
                         .get(region as usize)
                         .and_then(|conditional| conditional.branch_at(fact.range.start_offset))
                         .map(|branch| (region, branch as u32)),
-                    summary::FactGuard::Unconditional => None,
+                    FactGuard::Unconditional => None,
                 };
 
                 // **Anything the set in force has changed since the last fact makes every answer suspect** — a
@@ -4269,7 +4253,7 @@ fn walk_one_file<'a>(
                         answer
                     }
                 };
-                let taken = visibility == preprocess::guard::Visibility::Active;
+                let taken = visibility == Visibility::Active;
                 if taken {
                     walked.facts_in_force += 1;
                 }
@@ -4281,7 +4265,7 @@ fn walk_one_file<'a>(
                     // **A branch the compiler does not read.** Recorded before the skip, because the file's own
                     // summary kept this `#define` and a consumer would otherwise decide the region again with a
                     // different environment. See [`RenderedUnit::dead_macros`].
-                    preprocess::guard::Visibility::Inactive => {
+                    Visibility::Inactive => {
                         walked
                             .dead_macros
                             .entry(path.to_path_buf())
@@ -4292,7 +4276,7 @@ fn walk_one_file<'a>(
                     // compiler takes one branch or the other, so the name is defined afterwards either way, and
                     // dropping it is what left `_MEMBER_CALL_CV_REF_NOEXCEPT` undefined in `import std;`. An `#undef`
                     // is **not** executed: taking a name away on a guess is the error in the other direction.
-                    preprocess::guard::Visibility::Unknown if fact.kind.is_definition() => {
+                    Visibility::Unknown if fact.kind.is_definition() => {
                         if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
                             unit.define(&fact.name, definition, path, fact.range.start_offset);
                             // **And the timeline, so a use site can expand it.** The line above keeps the name in
@@ -4322,8 +4306,8 @@ fn walk_one_file<'a>(
                             }
                         }
                     }
-                    preprocess::guard::Visibility::Unknown => {}
-                    preprocess::guard::Visibility::Active => {}
+                    Visibility::Unknown => {}
+                    Visibility::Active => {}
                 }
                 continue;
             }
@@ -4574,8 +4558,8 @@ fn splice_a_contribution<'a>(
     from_offset: usize,
     parent: Option<u32>,
     from_in_parent: usize,
-    seen: &std::collections::HashSet<&'a std::path::Path>,
-    look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seen: &std::collections::HashSet<&'a Path>,
+    look_up: &mut impl FnMut(&Path) -> Option<(&'a FileSummary, &'a str)>,
     unit: &mut UnitState,
     walked: &mut Walked<'a>,
     depth: usize,
@@ -4772,7 +4756,7 @@ fn splice_a_contribution<'a>(
 /// closure walk above.
 pub fn macros_from_direct_includes<'a>(
     summary: &FileSummary,
-    mut look_up: impl FnMut(&std::path::Path) -> Option<&'a FileSummary>,
+    mut look_up: impl FnMut(&Path) -> Option<&'a FileSummary>,
 ) -> Vec<cpp_parser::IncludedMacro> {
     let mut entries = Vec::new();
 
@@ -5817,7 +5801,7 @@ impl DeclKind {
 /// expansion, the environment owns where the file sits and which definitions are in force there, and neither needs the
 /// other's types. `MacroView` is two words — the unit and a frame — so the answers are the same comparisons they were
 /// when the renderer took the view by value.
-impl cpp_toolchain::preprocess::cooked::MacroEnvironment for MacroView<'_> {
+impl preprocess::cooked::MacroEnvironment for MacroView<'_> {
     fn visible_body_in_force(&self, name: &str) -> Option<u32> {
         MacroView::visible_body_in_force(self, name)
     }
@@ -5832,8 +5816,8 @@ impl cpp_toolchain::preprocess::cooked::MacroEnvironment for MacroView<'_> {
 ///
 /// Lazy on both sides: the table lexes a replacement list the first time a rendering meets it, and a slot nobody asks
 /// for is never read. `of` is the reader; this trait is the door the renderer is allowed to knock on.
-impl cpp_toolchain::preprocess::cooked::UnitDefinitionsView for UnitDefinitions<'_> {
-    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<macros::MacroDef>> {
+impl preprocess::cooked::UnitDefinitionsView for UnitDefinitions<'_> {
+    fn definition_of(&self, index: u32) -> Option<&std::sync::Arc<MacroDef>> {
         self.of(index)
     }
 }

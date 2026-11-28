@@ -718,9 +718,9 @@ pub(crate) fn the_return_the_body_gives_back(
     let in_the_reading = candidate.fact.name_range.start_offset;
 
     let token = cpp_parser::token_at(the_root, in_the_reading)?;
-    let declaration = token.parent_ancestors().find(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Declaration
-    })?;
+    let declaration = token
+        .parent_ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)?;
     use cpp_parser::CppAstNode;
     let body = cpp_parser::CppDeclaration::cast(declaration)?.get_body()?;
 
@@ -737,10 +737,7 @@ pub(crate) fn the_return_the_body_gives_back(
             .syntax()
             .ancestors()
             .take_while(|ancestor| ancestor != body.syntax())
-            .any(|ancestor| {
-                cpp_parser::CppSyntaxKind::from(ancestor.kind())
-                    == cpp_parser::CppSyntaxKind::LambdaExpr
-            })
+            .any(|ancestor| CppSyntaxKind::from(ancestor.kind()) == CppSyntaxKind::LambdaExpr)
         {
             continue;
         }

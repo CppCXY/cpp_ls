@@ -147,15 +147,8 @@ pub struct ScannedIncludes {
     /// By the offset the directive starts at. The directive itself is kept too, so that an answer is only reused
     /// for the same include: a scan that read a line differently from the parser would find its answer refused, not
     /// wrongly used.
-    found: std::collections::HashMap<
-        usize,
-        (
-            preprocess::directive::IncludeForm,
-            Box<str>,
-            bool,
-            Option<PathBuf>,
-        ),
-    >,
+    found:
+        std::collections::HashMap<usize, (directive::IncludeForm, Box<str>, bool, Option<PathBuf>)>,
     order: Vec<usize>,
 }
 
@@ -168,11 +161,7 @@ impl ScannedIncludes {
             .collect()
     }
 
-    fn resolved(
-        &self,
-        at: usize,
-        include: &preprocess::directive::Include,
-    ) -> Option<Option<PathBuf>> {
+    fn resolved(&self, at: usize, include: &directive::Include) -> Option<Option<PathBuf>> {
         let (form, target, is_next, resolved) = self.found.get(&at)?;
         (*form == include.form && **target == *include.target && *is_next == include.is_next)
             .then(|| resolved.clone())
@@ -371,7 +360,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let directory = path.parent().unwrap_or(Path::new("."));
 
         let mut scanned = ScannedIncludes::default();
-        for spanned in preprocess::directive::scan_directives(source, &tokens) {
+        for spanned in directive::scan_directives(source, &tokens) {
             let Directive::Include(include) = &spanned.directive else {
                 continue;
             };
@@ -678,7 +667,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let summary = { self.index_tree(root, &stream.text, &tree, key, false) };
 
-        let mut files: Vec<(std::path::PathBuf, CookedFile)> = stream
+        let mut files: Vec<(PathBuf, CookedFile)> = stream
             .files
             .iter()
             .map(|path| (path.clone(), CookedFile::default()))
@@ -707,8 +696,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // summary had lost `visit_once` — gave the class **108 members, 18 of them named `EndLine`**, one per copy of
         // the same declaration at the same offset, and the hover drew one line for each. The same rule for a
         // `#define`, whose name range is the position that names it.
-        let mut merged: Vec<(std::path::PathBuf, CookedFile)> = Vec::with_capacity(files.len());
-        let mut where_to: std::collections::HashMap<std::path::PathBuf, usize> =
+        let mut merged: Vec<(PathBuf, CookedFile)> = Vec::with_capacity(files.len());
+        let mut where_to: std::collections::HashMap<PathBuf, usize> =
             std::collections::HashMap::new();
         // The sites each merged entry already holds, parallel to `merged`.
         let mut declared: Vec<std::collections::HashSet<(usize, usize, usize)>> = Vec::new();
@@ -809,7 +798,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // [`preprocess_with`], which is where the rule and its cost are stated.
             match self.seed {
                 Some(seed) => preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed),
-                None => preprocess::preprocess(source, tree.get_tokens()),
+                None => preprocess(source, tree.get_tokens()),
             }
         };
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
@@ -925,7 +914,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             guards.visit_once = preprocessing.directives.iter().any(|spanned| {
                 matches!(
                     &spanned.directive,
-                    directive::Directive::Pragma { tokens }
+                    Directive::Pragma { tokens }
                         if tokens.first().is_some_and(|token| token.text() == "once")
                 )
             });
@@ -1012,7 +1001,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         fold_quoted_header_names(source, &mut tokens);
         let preprocessing = match self.seed {
             Some(seed) => preprocess::preprocess_with_a_seed(source, &tokens, seed),
-            None => preprocess::preprocess(source, &tokens),
+            None => preprocess(source, &tokens),
         };
 
         let mut interner = PathInterner::new(cfg!(windows));
@@ -1073,7 +1062,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         guards.visit_once = preprocessing.directives.iter().any(|spanned| {
             matches!(
                 &spanned.directive,
-                directive::Directive::Pragma { tokens }
+                Directive::Pragma { tokens }
                     if tokens.first().is_some_and(|token| token.text() == "once")
             )
         });
@@ -1133,7 +1122,7 @@ fn modules_of<F: FileProvider>(
     //
     // `None` for a header that cannot be found (no include paths configured, a header outside them) — the walk
     // then knows nothing about that import, which is the honest state and not an empty header unit.
-    let header_units: Vec<std::path::PathBuf> = info
+    let header_units: Vec<PathBuf> = info
         .imports
         .iter()
         .filter_map(|declaration| match &declaration.target {
@@ -1170,7 +1159,7 @@ fn modules_of<F: FileProvider>(
     //
     // A partition whose file cannot be found is **absent**, like an unresolved header unit: that is the honest
     // state — nothing is known about it — rather than an empty partition.
-    let partitions: Vec<std::path::PathBuf> = match info.module_name.as_deref() {
+    let partitions: Vec<PathBuf> = match info.module_name.as_deref() {
         Some(module) if info.has_an_imported_partition() => {
             let mut scanner = ModuleScanner::new(resolver.files(), resolver.config());
             let mut found = Vec::new();
@@ -1260,7 +1249,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 // inside the same conditional region as the directive that wrote it — a `#define` cannot span an
                 // `#endif`.
                 range: definition.name_range,
-                guard: summary::FactGuard::Unconditional,
+                guard: FactGuard::Unconditional,
                 // **Where the body is**, derived from the body's own tokens rather than searched for in the
                 // directive's text: `MacroDef::body.tokens` each carry their range, so the span from the first
                 // to the last *is* the replacement list. `None` for an empty body (`#define FOO`), which is the
@@ -1284,7 +1273,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             // comment under it, and a jump to an #undef should land on the line that wrote it.
             range: spanned.line,
             body_range: None,
-            guard: summary::FactGuard::Unconditional,
+            guard: FactGuard::Unconditional,
             settles_the_name: false,
         }),
         _ => None,
@@ -1648,7 +1637,7 @@ fn file_what_was_found(
     declarations: Vec<DeclFact>,
     tree: &CppSyntaxTree,
     stream: &RenderedUnit,
-    files: &mut [(std::path::PathBuf, CookedFile)],
+    files: &mut [(PathBuf, CookedFile)],
     unplaced: &mut usize,
 ) {
     // **The switch is read once, by the probe module.** This function runs once per program read, and a `std::env`
@@ -1740,7 +1729,7 @@ fn include_fact<F: FileProvider>(
         resolved,
         is_next: include.is_next,
         range,
-        guard: summary::FactGuard::Unconditional,
+        guard: FactGuard::Unconditional,
     })
 }
 
@@ -2079,7 +2068,7 @@ mod tests {
     }
 
     /// The facts about `name`, with their guards and the settling flag, for a short assertion.
-    fn macro_facts(source: &str, name: &str) -> Vec<(summary::MacroKind, FactGuard, bool)> {
+    fn macro_facts(source: &str, name: &str) -> Vec<(MacroKind, FactGuard, bool)> {
         summary(source)
             .macros
             .iter()
@@ -2443,7 +2432,7 @@ mod tests {
 
         for (source, expected) in cases {
             let tree = CppParser::parse(source, ParserConfig::default());
-            let preprocessing = preprocess::preprocess(source, tree.get_tokens());
+            let preprocessing = preprocess(source, tree.get_tokens());
 
             let Directive::Define(define) = &preprocessing.directives[0].directive else {
                 panic!("{source:?} must be a define");
@@ -2464,7 +2453,7 @@ mod tests {
         // it an expression would be right in this case and wrong for a statement that happens to be written that
         // way, so the answer is `Unknown` — which still rules out the call reading.
         let tree = CppParser::parse("#define A (a) + (b)", ParserConfig::default());
-        let preprocessing = preprocess::preprocess("#define A (a) + (b)", tree.get_tokens());
+        let preprocessing = preprocess("#define A (a) + (b)", tree.get_tokens());
 
         let Directive::Define(define) = &preprocessing.directives[0].directive else {
             panic!("must be a define");
@@ -2480,7 +2469,7 @@ mod tests {
             "#include <nonexistent_xyz>\nstruct W { int a; };\n",
             ParserConfig::default(),
         );
-        let preprocessing = preprocess::preprocess(
+        let preprocessing = preprocess(
             "#include <nonexistent_xyz>\nstruct W { int a; };\n",
             tree.get_tokens(),
         );

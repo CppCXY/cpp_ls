@@ -1667,9 +1667,9 @@ fn default_of(parameter: &str) -> Option<String> {
 /// [`crate::index::project::type_of_expression_memoed`]). The descent is kept as the smaller walk with the same
 /// answers rather than as a fix for a measured defect.
 pub fn declarator_declaring(
-    root: &cpp_parser::CppSyntaxNode,
+    root: &CppSyntaxNode,
     name: cpp_parser::SourceRange,
-) -> Option<cpp_parser::CppSyntaxNode> {
+) -> Option<CppSyntaxNode> {
     // **The outermost declarator that declares this name**, which is the one under the declaration or under its
     // `InitDeclarator` — not a search for the shortest one containing the name, and the difference is every
     // function pointer and every array: `typedef void (*Callback)(int);` nests `(* Callback)(int)`, `(* Callback)`
@@ -1682,7 +1682,7 @@ pub fn declarator_declaring(
 
     // **One descent, and the chain it leaves behind.** Every node whose range holds the name is an ancestor of the
     // token the name is written in, so the innermost one is the deepest node the descent reaches.
-    let mut chain: Vec<cpp_parser::CppSyntaxNode> = Vec::new();
+    let mut chain: Vec<CppSyntaxNode> = Vec::new();
     let mut current = root.clone();
     loop {
         chain.push(current.clone());
@@ -1724,7 +1724,7 @@ pub fn declarator_declaring(
         // one `Declaration`. Taking the first was the bug: `hash`'s type was read from `integers[6]`'s declarator, so
         // redis's `dictFingerprint` was reported as returning `unsigned long long[6]` from `return hash;`
         // (`src/dict.c:1156`, `docs/worklog.md`). The range test is the same one the descent above uses.
-        let holds_the_name = |child: &cpp_parser::CppSyntaxNode| {
+        let holds_the_name = |child: &CppSyntaxNode| {
             let own = child.text_range();
             usize::from(own.start()) <= name.start_offset
                 && usize::from(own.end()) >= name.end_offset()
@@ -2238,7 +2238,7 @@ pub(crate) fn read_specifiers_named(
     match qualifiers_written.is_none() {
         true => answer,
         false => Type::Qualified {
-            of: std::sync::Arc::new(answer),
+            of: Arc::new(answer),
             qualifiers: qualifiers_written,
         },
     }

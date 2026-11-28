@@ -31,7 +31,6 @@
 //! size of the index pool) and bounded, because it is a memo: a miss costs one re-walk of one file.
 use crate::cache;
 use crate::index;
-use crate::summary;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -234,17 +233,17 @@ impl WalkCache {
         let table = self.locked();
         let mut bytes = 0usize;
         for contribution in table.held.values() {
-            bytes += std::mem::size_of::<Contribution>() + contribution.file.as_os_str().len();
+            bytes += size_of::<Contribution>() + contribution.file.as_os_str().len();
             for event in &contribution.events {
-                bytes += std::mem::size_of::<summary::TuEvent>()
+                bytes += size_of::<TuEvent>()
                     + event.name.len()
                     + event.body_text.as_ref().map_or(0, |text| text.len())
                     + event.parameters.as_ref().map_or(0, |text| text.len());
             }
-            bytes += contribution.changes.len() * std::mem::size_of::<StateChange>();
-            bytes += contribution.edges.len() * std::mem::size_of::<(usize, u64)>();
-            bytes += contribution.bodies.len() * std::mem::size_of::<ConditionalBody>();
-            bytes += contribution.dead.len() * std::mem::size_of::<usize>();
+            bytes += contribution.changes.len() * size_of::<StateChange>();
+            bytes += contribution.edges.len() * size_of::<(usize, u64)>();
+            bytes += contribution.bodies.len() * size_of::<ConditionalBody>();
+            bytes += contribution.dead.len() * size_of::<usize>();
         }
         (table.held.len(), bytes)
     }
@@ -325,7 +324,7 @@ mod tests {
 
     fn an_event() -> TuEvent {
         TuEvent {
-            name: std::sync::Arc::from("X"),
+            name: Arc::from("X"),
             function_like: None,
             body: None,
             body_text: None,

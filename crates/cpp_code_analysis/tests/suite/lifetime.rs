@@ -150,7 +150,7 @@ fn a_pointer_read_after_a_headers_helper_frees_it_is_reported() {
     let source = "#include \"release.h\"\nvoid f() { T* p = new T(); release(p); p->x; }\n";
     std::fs::write(root.join("a.cpp"), source).expect("the source");
 
-    let mut session = cpp_code_analysis::Session::open(
+    let mut session = Session::open(
         root.clone(),
         SessionFiles::new(OpenDocuments::new(), cpp_code_analysis::DiskFiles),
         WatchFilter::new(&root),

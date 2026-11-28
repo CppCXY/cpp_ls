@@ -596,7 +596,7 @@ pub(crate) fn lookup_names(bases: &[String]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
 
     for base in bases {
-        let parsed = sema::types::parse_type_spelling(base);
+        let parsed = parse_type_spelling(base);
         collect_class_names(&parsed, &mut names);
     }
 
@@ -608,7 +608,7 @@ pub(crate) fn lookup_names(bases: &[String]) -> Vec<String> {
 /// The walk is over the **parsed type** rather than its text, so `_Normal_allocator_traits<_Alloc>`
 /// contributes `_Normal_allocator_traits` and not `_Alloc`, and a class named inside a nested template
 /// argument is found at whatever depth it was written.
-pub(crate) fn collect_class_names(ty: &sema::types::Type, into: &mut Vec<String>) {
+pub(crate) fn collect_class_names(ty: &Type, into: &mut Vec<String>) {
     if let Some(name) = ty.class_name()
         && !name.is_empty()
         && !into.iter().any(|kept| kept == name)

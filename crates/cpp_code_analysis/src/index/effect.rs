@@ -742,11 +742,11 @@ mod tests {
     }
 
     /// A small include graph, in memory: the reader and resolver a chain needs.
-    struct Fixture(std::collections::HashMap<std::path::PathBuf, String>);
+    struct Fixture(HashMap<std::path::PathBuf, String>);
 
     impl Fixture {
         fn new(files: &[(&str, &str)]) -> Self {
-            let mut held = std::collections::HashMap::new();
+            let mut held = HashMap::new();
             for (path, text) in files {
                 held.insert(std::path::PathBuf::from(*path), text.to_string());
             }
@@ -755,11 +755,11 @@ mod tests {
     }
 
     impl Reads for Fixture {
-        fn read(&self, path: &std::path::Path) -> Option<String> {
+        fn read(&self, path: &Path) -> Option<String> {
             self.0.get(path).cloned()
         }
 
-        fn resolve(&self, _from: &std::path::Path, spelling: &str) -> Option<std::path::PathBuf> {
+        fn resolve(&self, _from: &Path, spelling: &str) -> Option<std::path::PathBuf> {
             // Every fixture is in one directory, so the spelling names the file: `"a.h"` and `<a.h>` alike.
             let name = spelling.trim_matches(|c| c == '"' || c == '<' || c == '>');
             let path = std::path::PathBuf::from("/p").join(name);
@@ -776,13 +776,11 @@ mod tests {
                 "#include \"a.h\"\n#ifdef A\n#define B 2\n#endif\n",
             ),
         ]);
-        let mut cache = std::collections::HashMap::new();
+        let mut cache = HashMap::new();
         let chain = Chain::new(&files, &mut cache);
-        let (tables, walked) = chain.at(std::path::Path::new("/p/b.h"), &Macros::new());
+        let (tables, walked) = chain.at(Path::new("/p/b.h"), &Macros::new());
 
-        let at_b = tables
-            .get(std::path::Path::new("/p/b.h"))
-            .expect("b was entered");
+        let at_b = tables.get(Path::new("/p/b.h")).expect("b was entered");
         assert!(at_b.get("A").is_some(), "a.h`s define is in b.h`s table");
         assert_eq!(walked.files, 2, "a.h and b.h");
         assert_eq!(walked.inclusions, 1);
@@ -797,12 +795,12 @@ mod tests {
             ),
             ("/p/root.cpp", "#include \"g.h\"\n#include \"g.h\"\n"),
         ]);
-        let mut cache = std::collections::HashMap::new();
+        let mut cache = HashMap::new();
         let chain = Chain::new(&files, &mut cache);
-        let (tables, walked) = chain.at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+        let (tables, walked) = chain.at(Path::new("/p/root.cpp"), &Macros::new());
 
         let at_root = tables
-            .get(std::path::Path::new("/p/root.cpp"))
+            .get(Path::new("/p/root.cpp"))
             .expect("root was entered");
         assert!(at_root.get("G_H").is_some());
         assert_eq!(walked.inclusions, 2, "both includes are walked");
@@ -824,13 +822,11 @@ mod tests {
             ("/p/c.h", "#ifdef C\n#define SEEN 1\n#endif\n"),
             ("/p/root.cpp", "#define C 1\n#include \"c.h\"\n"),
         ]);
-        let mut cache = std::collections::HashMap::new();
+        let mut cache = HashMap::new();
         let chain = Chain::new(&files, &mut cache);
-        let (tables, _) = chain.at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+        let (tables, _) = chain.at(Path::new("/p/root.cpp"), &Macros::new());
 
-        let at_c = tables
-            .get(std::path::Path::new("/p/c.h"))
-            .expect("c was entered");
+        let at_c = tables.get(Path::new("/p/c.h")).expect("c was entered");
         assert!(
             at_c.get("C").is_some(),
             "the host`s define comes before the include that reads it"
@@ -880,9 +876,9 @@ mod tests {
 
         // The chain.
         let fixture = Fixture::new(files);
-        let mut cache = std::collections::HashMap::new();
-        let (tables, walked) = Chain::new(&fixture, &mut cache)
-            .at(std::path::Path::new("/p/root.cpp"), &Macros::new());
+        let mut cache = HashMap::new();
+        let (tables, walked) =
+            Chain::new(&fixture, &mut cache).at(Path::new("/p/root.cpp"), &Macros::new());
 
         // The walk.
         let mut provider = MemoryFiles::new();
@@ -891,10 +887,8 @@ mod tests {
         }
         let config = CompilerConfig::default().with_include_path(std::path::PathBuf::from("/p"));
         let indexer = FileIndexer::new(&provider, &config);
-        let mut summaries: std::collections::HashMap<std::path::PathBuf, FileSummary> =
-            std::collections::HashMap::new();
-        let mut texts: std::collections::HashMap<std::path::PathBuf, String> =
-            std::collections::HashMap::new();
+        let mut summaries: HashMap<std::path::PathBuf, FileSummary> = HashMap::new();
+        let mut texts: HashMap<std::path::PathBuf, String> = HashMap::new();
         for (path, text) in files {
             let path = std::path::PathBuf::from(*path);
             summaries.insert(
@@ -906,7 +900,7 @@ mod tests {
         let mut definitions = MacroDefinitions::default();
         let unit = TranslationUnit::walk(
             summaries
-                .get(std::path::Path::new("/p/root.cpp"))
+                .get(Path::new("/p/root.cpp"))
                 .expect("the root was indexed"),
             |wanted| {
                 summaries

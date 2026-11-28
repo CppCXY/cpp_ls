@@ -675,7 +675,7 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
     let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let view = cooked_view(&mut session, "/p/a.cpp");
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -1600,7 +1600,7 @@ fn a_constructors_parameters_are_in_scope() {
                   };\n";
     let files = MemoryFiles::new().with_file("/p/ctor.cpp", source);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = cpp_code_analysis::Session::with_config(
+    let mut session = Session::with_config(
         "/p",
         providers,
         WatchFilter::new("/p"),
@@ -1664,7 +1664,7 @@ fn a_missing_semicolon_is_reported() {
     let source = "int g();\nstruct Name {\n    void print(int i) {\n        std::cout << middleName << std::endl\n    }\n};\n";
     let files = MemoryFiles::new().with_file("/p/a.cpp", source);
     let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = cpp_code_analysis::Session::with_config(
+    let mut session = Session::with_config(
         "/p",
         providers,
         WatchFilter::new("/p"),
@@ -1747,7 +1747,7 @@ fn a_macro_is_not_shown_with_a_signature() {
 
     let cursor = source.rfind("FULL_NAME_FORMAT").expect("the fixture") + "FULL_NAME_FORMAT".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -1845,7 +1845,7 @@ fn the_typed_prefix_is_the_word_being_replaced() {
 
         let at = source.find("auto x = ").expect("the fixture") + "auto x = ".len() + typed.len();
         match session.members_of(&view, "Source") {
-            cpp_code_analysis::Known::Yes(list) => println!(
+            Known::Yes(list) => println!(
                 "members_of(Source) → {:?}",
                 list.members
                     .iter()
@@ -1906,7 +1906,7 @@ fn a_statement_position_prefix_is_read_too() {
 
         let at = source.find(&format!("    {typed}\n")).expect("the fixture") + 4 + typed.len();
         match session.members_of(&view, "Source") {
-            cpp_code_analysis::Known::Yes(list) => println!(
+            Known::Yes(list) => println!(
                 "members_of(Source) → {:?}",
                 list.members
                     .iter()
@@ -1970,7 +1970,7 @@ int main()
 
     let at = source.find("    STD s").expect("the fixture") + "    STD s".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2049,7 +2049,7 @@ struct Widget { int size; };
     // **After `@par`** — the vocabulary, filtered by what was typed.
     let after_par = source.find("/// @par").expect("the fixture") + "/// @par".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2086,7 +2086,7 @@ struct Widget { int size; };
     // for a hook to trim and the string still ends the command with the space this half asserts about.
     let after_param = source.find("/// @param").expect("the fixture") + "/// @param ".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2139,7 +2139,7 @@ fn a_macro_body_offers_its_own_parameters() {
         .expect("the fixture")
         + "MAX3(a, b, c) MAX(MAX(a, ".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2219,7 +2219,7 @@ int neither;
     // After `defined(` in the `#elif`: the macros are the answer, filtered by `FEATU`.
     let at = source.find("#elif defined(FEATU").expect("the fixture") + "#elif defined(FEATU".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2244,7 +2244,7 @@ int neither;
     // Right after `#if `: every macro the file defines, plus `defined`.
     let blank = source.find("#if VERSION").expect("the fixture") + "#if ".len();
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2314,7 +2314,7 @@ int f() {
         cpp_code_analysis::completion::context_at(&view.root, reading.get())
     );
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()
@@ -2400,7 +2400,7 @@ fn a_member_is_completed_in_a_separated_definition() {
         }
     }
     match session.members_of(&view, "Source") {
-        cpp_code_analysis::Known::Yes(list) => println!(
+        Known::Yes(list) => println!(
             "members_of(Source) → {:?}",
             list.members
                 .iter()

@@ -146,15 +146,15 @@ fn reaches_through_an_arrow(node: &cpp_parser::CppSyntaxNode) -> bool {
         if super::an_arrow_access(&current) {
             return true;
         }
-        let Some(expression) = cpp_parser::CppExpr::cast(current.clone()) else {
+        let Some(expression) = CppExpr::cast(current.clone()) else {
             return false;
         };
         current = match expression {
-            cpp_parser::CppExpr::IndexExpr(index) => match index.get_object() {
+            CppExpr::IndexExpr(index) => match index.get_object() {
                 Some(object) => object.syntax().clone(),
                 None => return false,
             },
-            cpp_parser::CppExpr::MemberExpr(member) => match member.get_object() {
+            CppExpr::MemberExpr(member) => match member.get_object() {
                 Some(object) => object.syntax().clone(),
                 None => return false,
             },

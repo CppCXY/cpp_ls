@@ -12,9 +12,7 @@ use crate::DeclModifiers;
 use crate::FileView;
 use crate::ScopeTree;
 use crate::completion;
-use crate::index;
 use crate::sema;
-use crate::summary;
 
 pub(crate) fn declaration_of_expression(
     index: &ProjectIndex,
@@ -343,10 +341,7 @@ pub(crate) fn type_of_a_call(
     // an `auto`-returning function goes through. Measured: `auto result = doubler(3)` answered *"the type of `doubler(3)` is
     // not known here"* while the body plainly returns an `int`.
     if let Some(returns) = a_lambdas_body_the_callee_names(root, scopes, &callee, &argument_types) {
-        return Known::Yes((
-            sema::types::parse_type_spelling(&returns),
-            path.to_path_buf(),
-        ));
+        return Known::Yes((parse_type_spelling(&returns), path.to_path_buf()));
     }
 
     // **A call of an object** — `f(1)` where `f`'s type declares `operator()`. The callee is not a function
@@ -382,7 +377,7 @@ pub(crate) fn type_of_a_call(
             sema::call_syntax::arguments_of(call).map(|arguments| arguments.len()),
         )
     {
-        return Known::Yes((sema::types::parse_type_spelling(&returns), file));
+        return Known::Yes((parse_type_spelling(&returns), file));
     }
 
     // **The standard library's factories, whose return type the standard fixes.** `make_shared<T>(args…)` is a
@@ -395,7 +390,7 @@ pub(crate) fn type_of_a_call(
         && let Some(argument) = written_arguments.first()
     {
         return Known::Yes((
-            sema::types::parse_type_spelling(&format!("{pointer}<{argument}>")),
+            parse_type_spelling(&format!("{pointer}<{argument}>")),
             path.to_path_buf(),
         ));
     }
@@ -422,7 +417,7 @@ pub(crate) fn type_of_a_call(
         )
         && let Some(element) = range_element_of(as_a_range(&argument))
     {
-        let element = sema::types::parse_type_spelling(&element);
+        let element = parse_type_spelling(&element);
         let element = Arc::new(Type::Qualified {
             of: Arc::new(element),
             qualifiers: sema::types::Qualifiers::CONST,
@@ -457,16 +452,10 @@ pub(crate) fn type_of_a_call(
                 }
             }
             "count" | "count_if" | "distance" | "ssize" => {
-                return Known::Yes((
-                    sema::types::parse_type_spelling("std::ptrdiff_t"),
-                    path.to_path_buf(),
-                ));
+                return Known::Yes((parse_type_spelling("std::ptrdiff_t"), path.to_path_buf()));
             }
             "size" => {
-                return Known::Yes((
-                    sema::types::parse_type_spelling("std::size_t"),
-                    path.to_path_buf(),
-                ));
+                return Known::Yes((parse_type_spelling("std::size_t"), path.to_path_buf()));
             }
             "subrange" => {
                 if let Some(first) = arguments.first()
@@ -487,10 +476,7 @@ pub(crate) fn type_of_a_call(
     // Measured: `std::shared_ptr<int>(shared, nullptr).use_count()` answered *"the type of … is not known here"*, and the
     // hover on the member then had no class to look it up in.
     if let Some(spelling) = a_callee_that_names_a_type(index, path, &callee) {
-        return Known::Yes((
-            sema::types::parse_type_spelling(&spelling),
-            path.to_path_buf(),
-        ));
+        return Known::Yes((parse_type_spelling(&spelling), path.to_path_buf()));
     }
 
     let resolved = declaration_of_a_callee(
@@ -534,10 +520,7 @@ pub(crate) fn type_of_a_call(
         root,
         depth,
     ) {
-        return Known::Yes((
-            sema::types::parse_type_spelling(&returns),
-            path.to_path_buf(),
-        ));
+        return Known::Yes((parse_type_spelling(&returns), path.to_path_buf()));
     }
 
     known_so_far
@@ -748,11 +731,7 @@ pub(crate) fn the_return_the_overloads_agree_on(
             // only to make the call ill-formed. `std::make_unique` declares
             // `template <class T, class... Args> void make_unique(Args&&...) = delete;` to stop `make_unique<T[]>(…)`,
             // and keeping it made the set disagree with the two real overloads around it.
-            if candidate
-                .fact
-                .modifiers
-                .contains(summary::DeclModifiers::DELETED)
-            {
+            if candidate.fact.modifiers.contains(DeclModifiers::DELETED) {
                 continue;
             }
             // **A function the summary has no return type for may still have one in its body.** The summary types a
@@ -917,10 +896,7 @@ pub(crate) fn iterator_element_type(
     };
 
     let element = range_element_of(&object)?;
-    Some(Known::Yes((
-        sema::types::parse_type_spelling(&element),
-        file,
-    )))
+    Some(Known::Yes((parse_type_spelling(&element), file)))
 }
 
 pub(crate) fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
@@ -1151,7 +1127,7 @@ pub(crate) fn declaration_of_a_callee(
         return Known::Yes(NamedDeclaration::Indexed(
             member.fact,
             member.file,
-            sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+            TypeBindings::new(Vec::new(), Vec::new()),
         ));
     }
 
@@ -1177,7 +1153,7 @@ pub(crate) fn declaration_of_a_callee(
                             Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(
                                 found.fact,
                                 found.file,
-                                sema::types::TypeBindings::new(Vec::new(), Vec::new()),
+                                TypeBindings::new(Vec::new(), Vec::new()),
                             )),
                             Known::Unknown(reason) => Known::Unknown(reason),
                             Known::No => Known::No,
@@ -1355,7 +1331,7 @@ pub(crate) fn the_call_around(
     let mut node = callee.parent();
     for _ in 0..4 {
         let inner = node?;
-        if cpp_parser::CppSyntaxKind::from(inner.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
+        if CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::CallExpr {
             return Some(inner);
         }
         node = inner.parent();
@@ -1761,14 +1737,14 @@ pub(crate) fn a_members_answer_as_a_type(
         else {
             break;
         };
-        let resolved = sema::types::parse_type_spelling(&target);
+        let resolved = parse_type_spelling(&target);
         let Some(resolved_name) = resolved.class_name() else {
             break;
         };
         // **The target is written unqualified**, and the class it names is looked up by the index's own spelling:
         // `basic_string` in `<string>` is `std::basic_string`, and asking a member question about the bare name found
         // no class at all — the substitution then answered `reference`, the alias's *name*, which is no type either.
-        let qualified = index::project::qualified_from_the_index(index, path, resolved_name)
+        let qualified = qualified_from_the_index(index, path, resolved_name)
             .unwrap_or_else(|| resolved_name.to_string());
         if qualified == name {
             break;
@@ -1781,13 +1757,13 @@ pub(crate) fn a_members_answer_as_a_type(
         // **The qualifier is written on the use, so it is put back on the target** — see the same step in
         // [`operator_returns_of_with_arguments`]: a `const std::string&` resolved to `basic_string<char, …>`
         // unqualified and the member choice then treated the object as non-const.
-        let resolved = sema::types::parse_type_spelling(&match arguments.is_empty() {
+        let resolved = parse_type_spelling(&match arguments.is_empty() {
             true => qualified,
             false => format!("{qualified}<{}>", arguments.join(", ")),
         });
         class_type = match class_type.is_const() && !resolved.is_const() {
-            true => sema::types::Type::Qualified {
-                of: std::sync::Arc::new(resolved),
+            true => Type::Qualified {
+                of: Arc::new(resolved),
                 qualifiers: sema::types::Qualifiers::CONST,
             },
             false => resolved,

@@ -45,7 +45,6 @@
 use crate::DeclFact;
 use crate::FileView;
 use crate::completion;
-use crate::index;
 use crate::sema;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -74,7 +73,7 @@ pub struct SemanticModel<'a> {
     /// What this model has already been asked, by node. `RefCell` because the queries are `&self` — a caller with a
     /// shared model is the ordinary case, and a check that had to hold `&mut` would not be able to ask two questions
     /// while iterating the file.
-    types: index::project::TypeMemo,
+    types: project::TypeMemo,
     /// **What `members_of` was asked, and what it answered** — a class's members do not change during one file's checks, and
     /// the same class is asked once per member access. See `members_of` for the measurement that made this necessary.
     members: RefCell<BTreeMap<String, Known<MemberList>>>,
@@ -109,7 +108,7 @@ impl<'a> SemanticModel<'a> {
             source,
             path,
             resolver: RefCell::new(resolver),
-            types: index::project::TypeMemo::default(),
+            types: project::TypeMemo::default(),
             members: RefCell::new(BTreeMap::new()),
             shapes: sema::declarations::ShapeTable::new(),
         }
@@ -185,7 +184,7 @@ impl<'a> SemanticModel<'a> {
     /// from [`crate::completion::the_class_after_the_operator`], which `ptr->` completion has used since the smart
     /// pointers landed. `undefined-field` asks it for an arrow, which it used to skip outright: "an arrow is not
     /// evidence" was the right answer while nothing here could follow one.
-    pub fn the_class_after_an_arrow(&self, written: &sema::types::Type) -> Option<(String, bool)> {
+    pub fn the_class_after_an_arrow(&self, written: &Type) -> Option<(String, bool)> {
         completion::the_class_after_the_operator(
             self.index,
             self.scopes,
@@ -202,7 +201,7 @@ impl<'a> SemanticModel<'a> {
     /// chain: measured on `test_module`'s `import std;` file, `members_of("std::vector")` is **ten bases and 583 ms**
     /// of walking for a class whose own list is empty. A check that only needs the class's own constructors —
     /// `assign-type-check` — was paying that on every pull. See [`project::own_members_of`].
-    pub fn own_members_of(&self, class: &str) -> Known<Vec<(std::path::PathBuf, DeclFact)>> {
+    pub fn own_members_of(&self, class: &str) -> Known<Vec<(PathBuf, DeclFact)>> {
         project::own_members_of_with(
             &self.shapes,
             self.index,

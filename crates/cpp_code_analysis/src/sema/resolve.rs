@@ -296,10 +296,7 @@ pub fn name_ending_before_an_operator(
         if cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::ThisKeyword {
             return token
                 .parent_ancestors()
-                .find(|node| {
-                    cpp_parser::CppSyntaxKind::from(node.kind())
-                        == cpp_parser::CppSyntaxKind::ThisExpr
-                })
+                .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ThisExpr)
                 .or_else(|| token.parent_ancestors().next());
         }
 
@@ -715,9 +712,9 @@ fn inside_a_comment_or_a_literal(token: &cpp_parser::CppSyntaxToken) -> bool {
         return true;
     }
 
-    token.parent_ancestors().any(|node| {
-        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::DocComment
-    })
+    token
+        .parent_ancestors()
+        .any(|node| cpp_parser::CppDocComment::can_cast(node.kind().into()))
 }
 
 /// The name node a cursor is **in or at the end of**, innermost first.
