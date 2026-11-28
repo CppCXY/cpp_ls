@@ -856,6 +856,35 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // is `operator` can only be a conversion.
         CppTokenKind::OperatorKeyword => return parse_conversion_operator_declaration(p),
 
+        // **A constructor with a specifier in front** — `explicit A(int);`, `constexpr A() = default;`,
+        // `inline A(A&&);`.
+        //
+        // The arm below recognises a constructor by its *first* token being the class's own name. These spellings put a
+        // specifier first, so the specifier sequence was already open when the name arrived, and the sequence took it
+        // for a type:
+        //
+        // ```text
+        //   Declaration "explicit A(int f) : x(f) {}"
+        //     DeclSpecifierSeq "explicit A" > NamedType "A"   <- the constructor's name, read as a type
+        //     InitDeclarator > Declarator > ParameterList     <- a declarator that names nothing
+        // ```
+        //
+        // so the declaration had no name at all. Measured on the adversarial corpus: `dangling-field` could not find
+        // the constructor to check, because its filter asks whether the declaration names a *type* and this one seemed
+        // to. The same is true for every `constexpr` and `inline` constructor, and for anything else that keys on a
+        // declaration's name.
+        //
+        // Claimed only when the specifiers are followed by the class's own name and a `(` — the test the plain
+        // constructor arm makes — and *not* by changing what the specifier sequence itself answers, which the recovery
+        // path below depends on (see `a_directive_inside_a_declaration_keeps_the_members_after_it_members`).
+        CppTokenKind::ExplicitKeyword
+        | CppTokenKind::ConstexprKeyword
+        | CppTokenKind::InlineKeyword
+            if starts_a_constructor_with_a_specifier(p) =>
+        {
+            return parse_constructor_declaration_after_specifiers(p);
+        }
+
         // **An out-of-class member definition** — `S::f(int) { }`, `S::S(int) : _x(x) { }`, `S::~S() { }`.
         //
         // The same shape as a constructor one level down the match: the *name* is written first, so the specifier
@@ -5434,8 +5463,59 @@ pub(crate) fn starts_an_out_of_class_member(p: &CppParser) -> bool {
     scopes > 0 && p.peek_token_kind_at(at..at + 1).first() == Some(&CppTokenKind::LeftParen)
 }
 
+/// **Is this a constructor written with a specifier first?** — `explicit A(int)`, `constexpr A()`, `inline A(A&&)`.
+///
+/// The question the dispatch arm above asks, and the same one the plain constructor arm asks of the first token:
+/// a member-level declaration whose name is the class's own and which is followed by `(`. The specifiers are
+/// walked first because `explicit` and `constexpr` stand where a return type would.
+fn starts_a_constructor_with_a_specifier(p: &CppParser) -> bool {
+    if !p.is_at_class_member_level() {
+        return false;
+    }
+    let Some(class) = p.current_class_name() else {
+        return false;
+    };
+    let mut at = 0usize;
+    while matches!(
+        p.peek_token_kind_at(at..at + 1).first().copied(),
+        Some(
+            CppTokenKind::ExplicitKeyword
+                | CppTokenKind::ConstexprKeyword
+                | CppTokenKind::InlineKeyword
+        )
+    ) {
+        at += 1;
+    }
+    p.peek_token_kind_at(at..at + 1).first().copied() == Some(CppTokenKind::Identifier)
+        && p.peek_token_text_at(at) == class
+        && p.peek_token_kind_at(at + 1..at + 2).first().copied() == Some(CppTokenKind::LeftParen)
+}
+
 fn parse_constructor_declaration(p: &mut CppParser) -> ParseResult {
+    parse_a_constructor(p, false)
+}
+
+/// A constructor whose **specifiers are written before its name** — see the dispatch arm above.
+fn parse_constructor_declaration_after_specifiers(p: &mut CppParser) -> ParseResult {
+    parse_a_constructor(p, true)
+}
+
+fn parse_a_constructor(p: &mut CppParser, specifiers_first: bool) -> ParseResult {
     parse_declaration_starting_at_a_name(p, |p| {
+        if specifiers_first {
+            // The specifiers belong to the declaration: `explicit` says how the constructor may be called, and
+            // the name after it is still the class's own.
+            let specifiers = p.mark(CppSyntaxKind::DeclSpecifierSeq);
+            while matches!(
+                p.current_token(),
+                CppTokenKind::ExplicitKeyword
+                    | CppTokenKind::ConstexprKeyword
+                    | CppTokenKind::InlineKeyword
+            ) {
+                p.bump();
+            }
+            specifiers.complete(p);
+        }
         let name = p.mark(CppSyntaxKind::Declarator);
         if let Err(err) = parse_name(p) {
             name.undo(p);

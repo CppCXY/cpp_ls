@@ -1401,3 +1401,42 @@ fn a_function_pointer_parameter_keeps_its_signature() {
         "the parameter`s type is the pointer to the function, signature included"
     );
 }
+
+/// **A constructor's name is its own, whatever specifier is written in front of it.**
+///
+/// `explicit A(int f) : x(f) {}` reached the specifier sequence with `explicit` consumed and the name at the cursor, and
+/// the "no type yet, so this name can only be the type" rule took the constructor's own name for its type — so the
+/// declaration had no name at all and every rule that asks a declaration what it declares was wrong for every
+/// `explicit`, `constexpr` or `inline` constructor. Measured on the adversarial corpus: `dangling-field` could not find
+/// the constructor to check it.
+///
+/// The fix is in the dispatch, not in what the specifier sequence answers: the recovery path a failed
+/// `parse_constructor_declaration` falls back on *needs* that answer (`gaps::constructs_the_parser_reads`).
+#[test]
+fn an_explicit_constructor_declares_its_own_name() {
+    for (what, source) in [
+        (
+            "explicit",
+            "struct A {\n    explicit A(int f) : x(f) {}\n    int x;\n};\n",
+        ),
+        (
+            "constexpr",
+            "struct A {\n    constexpr A(int f) : x(f) {}\n    int x;\n};\n",
+        ),
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.get_errors(), [], "{what} parses cleanly");
+        let names: Vec<String> = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+            .filter_map(|node| {
+                CppDeclaration::cast(node).and_then(|declaration| declaration.get_name_text())
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "A"),
+            "the {what} constructor is named `A`, and {names:?} says otherwise"
+        );
+    }
+}
