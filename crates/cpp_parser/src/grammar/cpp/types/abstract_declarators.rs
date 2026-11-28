@@ -345,7 +345,7 @@ pub fn parse_abstract_declarator_with(
             // **An attribute group before the operator decorates the operator**: `(__attribute__((__cdecl__)) *)`
             // is how mingw writes a decorated callback pointer. Parsed here, where the group stands — reading it as
             // part of the declarator is what lets the `*` that follows be found at all.
-            let _ = super::parse_attribute_specifiers(p);
+            let _ = parse_attribute_specifiers(p);
             // The inner abstract declarator, recursively: `(* const)`, `(**)`, `(&)`.
             parse_abstract_declarator(p, false)?;
             expect_token(p, CppTokenKind::RightParen)?;

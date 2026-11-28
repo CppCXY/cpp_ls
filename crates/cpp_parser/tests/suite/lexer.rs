@@ -586,7 +586,7 @@ fn a_fixed_width_float_suffix_is_part_of_the_literal() {
         let tokens: Vec<_> = root
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
-            .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+            .filter(|token| !cpp_parser::is_trivia(CppTokenKind::from(token.kind())))
             .collect();
         assert_eq!(
             tokens.len(),
@@ -594,8 +594,8 @@ fn a_fixed_width_float_suffix_is_part_of_the_literal() {
             "{name}: the whole literal is one token, got {tokens:?}"
         );
         assert_eq!(
-            cpp_parser::CppTokenKind::from(tokens[0].kind()),
-            cpp_parser::CppTokenKind::FloatingLiteral,
+            CppTokenKind::from(tokens[0].kind()),
+            CppTokenKind::FloatingLiteral,
             "{name}"
         );
         assert_eq!(tokens[0].text(), text, "{name}");

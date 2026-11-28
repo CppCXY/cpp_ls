@@ -279,8 +279,8 @@ fn every_feature_is_supported_by_the_configuration_its_requirement_describes() {
 /// and a session can store it in a field or a cache key without an allocation.
 #[test]
 fn the_config_is_one_word() {
-    assert_eq!(std::mem::size_of::<LanguageConfig>(), 8);
-    assert_eq!(std::mem::align_of::<LanguageConfig>(), 8);
+    assert_eq!(size_of::<LanguageConfig>(), 8);
+    assert_eq!(align_of::<LanguageConfig>(), 8);
 
     fn is_copy<T: Copy>(_: &T) {}
     let config = LanguageConfig::gnu_cpp17();

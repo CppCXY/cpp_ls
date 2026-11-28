@@ -772,7 +772,7 @@ fn a_comma_expression_inside_a_parenthesised_initializer_parses() {
         "void f() { static T n(a, std::g<int>(1).p); }\n",
         "void f() { const T n = (a, std::g<int>(1).p); }\n",
     ] {
-        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(text, ParserConfig::default());
         let errors = tree.get_errors();
         assert!(errors.is_empty(), "{text}: {errors:?}");
     }
@@ -837,7 +837,7 @@ fn a_member_name_is_not_on_the_next_line() {
 /// (or a functional cast).
 #[test]
 fn a_qualified_name_that_names_two_different_things_is_a_call() {
-    let tree = cpp_parser::CppParser::parse(
+    let tree = CppParser::parse(
         "void f() { std::println(\"x {}\u{3000}\u{9762}\u{79ef}\", 1.0); }\n",
         ParserConfig::default(),
     );
@@ -852,7 +852,7 @@ fn a_qualified_name_that_names_two_different_things_is_a_call() {
         "struct A { ~A(); };\nA::~A() {}\n", // and a destructor
         "namespace n { struct B {}; }\nn::B value(1);\n", // a variable of a qualified type
     ] {
-        let tree = cpp_parser::CppParser::parse(declaration, ParserConfig::default());
+        let tree = CppParser::parse(declaration, ParserConfig::default());
         assert_eq!(
             tree.get_errors(),
             [],
@@ -875,7 +875,7 @@ fn a_qualified_name_that_names_two_different_things_is_a_call() {
 /// constructor — so the answer is the last segment against the segment before it, at any length.
 #[test]
 fn a_qualified_name_is_judged_at_the_end_of_its_chain() {
-    let tree = cpp_parser::CppParser::parse(
+    let tree = CppParser::parse(
         "namespace std { namespace ranges { void find_if(); } }\n\
          void f(int items) { std::ranges::find_if(items, 1); }\n",
         ParserConfig::default(),
@@ -889,7 +889,7 @@ fn a_qualified_name_is_judged_at_the_end_of_its_chain() {
 
     // **A three-segment constructor and destructor are declarations**, and the call above is the only difference.
     let declarations = "namespace a { struct B { B(); ~B(); }; }\na::B::B() {}\na::B::~B() {}\n";
-    let tree = cpp_parser::CppParser::parse(declarations, ParserConfig::default());
+    let tree = CppParser::parse(declarations, ParserConfig::default());
     assert_eq!(tree.get_errors(), [], "both are declarations");
     assert_eq!(
         cpp_parser::typed_descendants::<cpp_parser::CppCallExpr>(&tree.get_red_root()).count(),

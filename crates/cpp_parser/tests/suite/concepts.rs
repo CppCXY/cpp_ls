@@ -704,7 +704,7 @@ fn a_constrained_template_parameter_declares_a_type() {
         "template<class T> concept Small = true;\n\
          struct S { template<Small U, int N> void f(U[N]); };\n",
     ] {
-        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(text, ParserConfig::default());
         let errors = tree.get_errors();
         assert!(errors.is_empty(), "{text}: {errors:?}");
     }
@@ -728,7 +728,7 @@ fn a_template_parameter_default_may_be_a_comparison() {
         // A constraint still ends with a declaration keyword, which is *not* a comparison.
         "template <typename T> requires C<T> struct S { };\n",
     ] {
-        let tree = cpp_parser::CppParser::parse(text, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(text, ParserConfig::default());
         let errors = tree.get_errors();
         assert!(errors.is_empty(), "{text}: {errors:?}");
     }

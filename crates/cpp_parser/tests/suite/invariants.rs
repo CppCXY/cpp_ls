@@ -767,7 +767,7 @@ fn assert_only_header_names_were_folded(
         let folded = parsed[j];
         assert_eq!(
             folded.kind,
-            cpp_parser::CppTokenKind::HeaderName,
+            CppTokenKind::HeaderName,
             "{name}: the streams differ at {:?} (lexed) against {:?} (parsed), and the difference is \
              not a header name",
             &source[lexed[i].range.start_offset..lexed[i].range.end_offset()],
@@ -830,7 +830,7 @@ fn recovery_leaves_the_event_stream_balanced() {
         for event in &events {
             match event {
                 cpp_parser::MarkEvent::NodeStart {
-                    kind: cpp_parser::CppSyntaxKind::None,
+                    kind: CppSyntaxKind::None,
                     ..
                 } => {}
                 cpp_parser::MarkEvent::NodeStart { .. } => starts += 1,

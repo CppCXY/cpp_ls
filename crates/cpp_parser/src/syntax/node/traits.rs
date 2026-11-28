@@ -67,14 +67,14 @@ pub trait CppAstNode {
     }
 
     /// The first child token with the given kind, as a generic token.
-    fn token_by_kind(&self, kind: CppTokenKind) -> Option<super::token::CppGeneralToken> {
+    fn token_by_kind(&self, kind: CppTokenKind) -> Option<CppGeneralToken> {
         let token = self
             .syntax()
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .find(|it| it.kind() == CppKind::Token(kind))?;
 
-        super::token::CppGeneralToken::cast(token)
+        CppGeneralToken::cast(token)
     }
 
     /// All child nodes of type `N`.

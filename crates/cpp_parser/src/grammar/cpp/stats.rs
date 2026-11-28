@@ -5,7 +5,6 @@
 //! is where that is resolved; the control-flow rules below are ordinary recursive descent.
 
 use crate::features;
-use crate::grammar;
 use crate::parser;
 use crate::{
     grammar::{
@@ -1918,7 +1917,7 @@ fn at_the_implementations_handler(p: &CppParser) -> bool {
 fn parse_parenthesized_filter(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
-    grammar::cpp::exprs::parse_expr(p)?;
+    parse_expr(p)?;
     expect_token(p, CppTokenKind::RightParen)?;
     Ok(m.complete(p))
 }
@@ -2172,7 +2171,7 @@ fn parse_goto_statement(p: &mut CppParser) -> ParseResult {
         && p.language().support(features::Feature::LabelsAsValues)
     {
         p.bump();
-        if let Err(err) = grammar::cpp::exprs::parse_expr(p) {
+        if let Err(err) = parse_expr(p) {
             p.close_marks_above(base);
             return Err(err);
         }

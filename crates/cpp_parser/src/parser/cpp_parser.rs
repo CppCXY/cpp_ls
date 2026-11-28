@@ -2,11 +2,8 @@ use crate::ProjectLanguage;
 use crate::features;
 use crate::grammar;
 use crate::is_trivia;
-use crate::kind;
 use crate::lexer;
 use crate::parser;
-use crate::syntax;
-use crate::text;
 use crate::{
     grammar::parse_cpp_unit,
     kind::{CppSyntaxKind, CppTokenKind, Dialect},
@@ -112,7 +109,7 @@ pub struct EventStreamAudit {
     /// on purpose — but tracked so the count can be asserted to stay stable.
     pub empty_nodes: usize,
     /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
-    pub unclosed: Vec<kind::CppSyntaxKind>,
+    pub unclosed: Vec<CppSyntaxKind>,
 }
 
 /// **The first way a caller's token stream cannot be parsed**, as a message for the error the tree carries.
@@ -155,12 +152,12 @@ fn why_the_tokens_do_not_fit(text: &str, tokens: &[CppTokenData]) -> Option<Stri
 /// cannot parse, so a caller gets the same shape a parse of garbage produces rather than a panic.
 fn a_tree_that_says(text: &str, tokens: &[CppTokenData], problem: String) -> CppSyntaxTree {
     let mut builder = rowan::GreenNodeBuilder::new();
-    builder.start_node(kind::CppSyntaxKind::TranslationUnit.into());
+    builder.start_node(CppSyntaxKind::TranslationUnit.into());
     builder.finish_node();
     let root = builder.finish();
     let message = format!("the token stream does not describe this text: {problem}");
     let error =
-        CppParseError::syntax_error_from(&message, text::SourceRange::new(0, text.len().min(1)));
+        CppParseError::syntax_error_from(&message, SourceRange::new(0, text.len().min(1)));
     CppSyntaxTree::new(root, vec![error], tokens.to_vec(), 0)
 }
 
@@ -366,7 +363,7 @@ pub struct CppParser<'a> {
     /// C++ settles several parse questions by looking up a name — `Widget w(1, 2);` against `g(1, 2);` — so a
     /// parser without this table has to guess. See [`crate::parser::TypeNames`] for what it records and why
     /// recording too little is the safe direction.
-    type_names: parser::TypeNames,
+    type_names: TypeNames,
     /// **What [`a_specifier_follows_the_group`](crate::grammar) answered, by the absolute index of the name it was
     /// asked from.** The question is answered by reading ahead through a *run* — `M(a) M(b) M(c) … int x;` asks it of
     /// each `M` in turn, and each answer is the answer for the rest of the run — so without a memory a run of `n`
@@ -709,7 +706,7 @@ impl<'a> CppParser<'a> {
 
         let events = std::mem::take(&mut parser.events);
         let (root, unbalanced_events) = {
-            let mut builder = syntax::CppTreeBuilder::new(text, events.clone(), None);
+            let mut builder = CppTreeBuilder::new(text, events.clone(), None);
             builder.build();
             let unbalanced = builder.unbalanced_events();
             (builder.finish(), unbalanced)
@@ -1030,7 +1027,7 @@ impl<'a> CppParser<'a> {
         let close = self.tokens[end_index];
         let whole = CppTokenData::new(
             CppTokenKind::HeaderName,
-            text::SourceRange::new(
+            SourceRange::new(
                 start.range.start_offset,
                 close.range.end_offset() - start.range.start_offset,
             ),
@@ -1052,7 +1049,7 @@ impl<'a> CppParser<'a> {
     /// Used by the grammar to answer "what did I just parse?" without threading a return value
     /// through every level. `from_event` is an event index from
     /// [`CppParser::current_event_count`].
-    pub fn events_contain_any(&self, from_event: usize, kinds: &[kind::CppSyntaxKind]) -> bool {
+    pub fn events_contain_any(&self, from_event: usize, kinds: &[CppSyntaxKind]) -> bool {
         self.events[from_event.min(self.events.len())..]
             .iter()
             .any(|event| {
@@ -1221,7 +1218,7 @@ impl<'a> CppParser<'a> {
         &self,
         from_event: usize,
         to_event: usize,
-        kinds: &[kind::CppSyntaxKind],
+        kinds: &[CppSyntaxKind],
     ) -> bool {
         let from = from_event.min(self.events.len());
         let to = to_event.min(self.events.len());
@@ -1498,7 +1495,7 @@ impl<'a> CppParser<'a> {
     }
 
     /// The table itself, for a consumer that wants to audit what the parse recorded.
-    pub fn type_names(&self) -> &parser::TypeNames {
+    pub fn type_names(&self) -> &TypeNames {
         &self.type_names
     }
 
@@ -2158,7 +2155,7 @@ impl<'a> CppParser<'a> {
     /// The doc layer hands over a token that already carries a range in *file* coordinates, so this
     /// is the whole of the translation between the two layers: no offset arithmetic, no buffering.
     /// That is what lets doc nodes be ordinary children of the C++ tree.
-    pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: text::SourceRange) {
+    pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: SourceRange) {
         self.push_event(MarkEvent::EatToken { kind, range });
     }
 
@@ -2269,7 +2266,7 @@ impl<'a> CppParser<'a> {
     /// Zero-width nodes cost nothing in the tree and are what make completion work at a broken
     /// position: the cursor is inside a node of the expected kind rather than in an error blob.
     pub fn emit_missing_node(&mut self) {
-        let m = self.mark(kind::CppSyntaxKind::MissingNode);
+        let m = self.mark(CppSyntaxKind::MissingNode);
         m.complete(self);
     }
 

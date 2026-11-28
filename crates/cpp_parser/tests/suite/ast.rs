@@ -1227,10 +1227,10 @@ struct Box {
 ";
     let (root, tree) = unit(source);
     assert_eq!(tree.get_errors(), [], "the fixture parses cleanly");
-    let declarations: Vec<cpp_parser::CppDeclaration> = root
+    let declarations: Vec<CppDeclaration> = root
         .syntax()
         .descendants()
-        .filter_map(cpp_parser::CppDeclaration::cast)
+        .filter_map(CppDeclaration::cast)
         .filter(|declaration| declaration.get_body().is_some())
         .collect();
     // **The name is there and the promise is not.** A destructor's *token* is the identifier `A` — the tilde is a

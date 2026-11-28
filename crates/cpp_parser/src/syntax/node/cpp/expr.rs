@@ -1049,7 +1049,7 @@ impl CppLambdaExpr {
         self.child()
     }
 
-    pub fn get_trailing_return_type(&self) -> Option<super::CppTypeId> {
+    pub fn get_trailing_return_type(&self) -> Option<CppTypeId> {
         syntax::node::traits::first_child_of_kind(
             self.syntax(),
             &[CppSyntaxKind::TrailingReturnType],

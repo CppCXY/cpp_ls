@@ -272,11 +272,11 @@ fn debug_initialised_variable() {
     let declarator = declaration
         .get_init_declarator()
         .and_then(|init| init.child::<cpp_parser::CppDeclarator>());
-    fn dump(node: &cpp_parser::CppSyntaxNode, depth: usize) {
+    fn dump(node: &CppSyntaxNode, depth: usize) {
         println!(
             "{:indent$}{:?} {:?}",
             "",
-            cpp_parser::CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::from(node.kind()),
             node.text().to_string(),
             indent = depth * 2
         );

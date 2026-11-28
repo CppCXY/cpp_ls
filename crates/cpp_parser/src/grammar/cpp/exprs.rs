@@ -1,5 +1,4 @@
 use crate::features;
-use crate::grammar;
 use crate::parser;
 use crate::{
     grammar::{
@@ -3007,7 +3006,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             if p.peek_next_token() == CppTokenKind::LeftBracket
                 && p.peek_token_kind_at(2..3).first() == Some(&CppTokenKind::Colon) =>
         {
-            super::types::parse_a_typename_splice(p)
+            types::parse_a_typename_splice(p)
         }
 
         // **A Clang block literal**: `^(int n) { … }` — the closure syntax Apple's APIs are written with.
@@ -3190,7 +3189,7 @@ fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::LeftBrace
         && p.language().support(features::Feature::StatementExpression)
     {
-        if let Err(err) = grammar::cpp::stats::parse_compound_stat(p) {
+        if let Err(err) = stats::parse_compound_stat(p) {
             m.undo(p);
             return Err(err);
         }
@@ -3234,7 +3233,7 @@ fn parse_block_literal(p: &mut CppParser) -> ParseResult {
     p.bump(); // `^`
 
     if p.current_token() == CppTokenKind::LeftParen
-        && let Err(err) = grammar::cpp::decls::parse_parameter_list(p)
+        && let Err(err) = decls::parse_parameter_list(p)
     {
         m.undo(p);
         return Err(err);
@@ -3242,13 +3241,13 @@ fn parse_block_literal(p: &mut CppParser) -> ParseResult {
 
     // The same directive seam a lambda body has: `#if` between the head and the body is a real spelling.
     while p.current_token() == CppTokenKind::Hash {
-        if let Err(err) = grammar::cpp::stats::parse_preprocessor_directive(p) {
+        if let Err(err) = stats::parse_preprocessor_directive(p) {
             m.undo(p);
             return Err(err);
         }
     }
 
-    if let Err(err) = grammar::cpp::stats::parse_compound_stat(p) {
+    if let Err(err) = stats::parse_compound_stat(p) {
         m.undo(p);
         return Err(err);
     }
@@ -3282,8 +3281,8 @@ fn parse_reflect_expression(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
-    let read = if grammar::cpp::types::starts_a_type_id(p) {
-        grammar::cpp::types::parse_type_id(p)
+    let read = if types::starts_a_type_id(p) {
+        types::parse_type_id(p)
     } else {
         parse_unary_expr(p, false)
     };

@@ -7564,7 +7564,7 @@ fn a_parse_error_follows_the_locale() {
     let source = "int f() { return 1 }\n";
     let errors = |locale: &str| {
         cpp_parser::set_locale(locale);
-        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(source, ParserConfig::default());
         tree.get_errors()
             .iter()
             .map(|error| error.message.clone())
@@ -7607,7 +7607,7 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
         ("namespace a::b::c { }", "a::b::c"),
         ("inline namespace a::b { }", "a::b"),
     ] {
-        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(source, ParserConfig::default());
         assert!(
             tree.get_errors().is_empty(),
             "{source}: {:?}",
@@ -7618,8 +7618,8 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
         let declaration = root
             .descendants()
             .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind())
-                    == cpp_parser::CppSyntaxKind::NamespaceDecl
+                CppSyntaxKind::from(node.kind())
+                    == CppSyntaxKind::NamespaceDecl
             })
             .unwrap_or_else(|| panic!("{source}: no NamespaceDecl"));
 
@@ -7627,14 +7627,14 @@ fn a_nested_namespace_definition_may_spell_inline_on_an_inner_segment() {
         let name_node = declaration
             .children()
             .find(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::NameExpr
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr
             })
             .unwrap_or_else(|| panic!("{source}: no NameExpr"));
         let written: Vec<String> = name_node
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
             .filter(|token| {
-                cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+                CppTokenKind::from(token.kind()) == CppTokenKind::Identifier
             })
             .map(|token| token.text().to_string())
             .collect();
@@ -7662,7 +7662,7 @@ fn a_templated_base_is_one_base_specifier() {
         ("struct D : virtual public B { };", 1),
         ("struct D { };", 0),
     ] {
-        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+        let tree = CppParser::parse(source, ParserConfig::default());
         assert!(
             tree.get_errors().is_empty(),
             "{source}: {:?}",
@@ -7673,8 +7673,8 @@ fn a_templated_base_is_one_base_specifier() {
             .get_red_root()
             .descendants()
             .filter(|node| {
-                cpp_parser::CppSyntaxKind::from(node.kind())
-                    == cpp_parser::CppSyntaxKind::BaseSpecifier
+                CppSyntaxKind::from(node.kind())
+                    == CppSyntaxKind::BaseSpecifier
             })
             .count();
         assert_eq!(bases, expected, "{source}");
@@ -7810,7 +7810,7 @@ fn parse_tokens_refuses_a_stream_that_does_not_describe_its_text() {
             vec![token(4, 1), token(0, 1)],
         ),
     ] {
-        let tree = cpp_parser::CppParser::parse_tokens(text, &tokens, ParserConfig::default());
+        let tree = CppParser::parse_tokens(text, &tokens, ParserConfig::default());
         assert!(
             tree.has_syntax_errors(),
             "{what} is reported: {:?}",
@@ -7820,7 +7820,7 @@ fn parse_tokens_refuses_a_stream_that_does_not_describe_its_text() {
     }
 
     // A range inside a multi-byte character: `é` is two bytes, so byte 1 is not a boundary.
-    let tree = cpp_parser::CppParser::parse_tokens(
+    let tree = CppParser::parse_tokens(
         "é",
         &[CppTokenData::new(
             CppTokenKind::Identifier,
@@ -7841,7 +7841,7 @@ fn parse_tokens_refuses_a_stream_that_does_not_describe_its_text() {
         CppTokenData::new(CppTokenKind::Identifier, SourceRange::new(4, 1)),
         CppTokenData::new(CppTokenKind::Semicolon, SourceRange::new(5, 1)),
     ];
-    let tree = cpp_parser::CppParser::parse_tokens(text, &good, ParserConfig::default());
+    let tree = CppParser::parse_tokens(text, &good, ParserConfig::default());
     assert_eq!(
         tree.to_source_text(),
         text,

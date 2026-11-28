@@ -43,7 +43,6 @@
 //! readings given up — `tests/gaps.rs` lists them, and `tests/direct_init.rs` pins the rules themselves.
 
 use crate::features;
-use crate::grammar;
 use crate::parser;
 use crate::{
     grammar::{
@@ -2313,7 +2312,7 @@ fn starts_an_old_style_parameter_list(p: &mut CppParser) -> bool {
         return false;
     }
 
-    types::is_type_specifier_keyword(p.current_token())
+    is_type_specifier_keyword(p.current_token())
         || starts_declaration(p)
         || (p.current_token() == CppTokenKind::Identifier
             && p.is_a_known_type_name(p.current_token_text()))
@@ -3258,7 +3257,7 @@ fn the_declaration_has_a_type(p: &CppParser) -> bool {
                 return false;
             }
             _ if inside > 0 => {}
-            _ => return types::is_type_specifier_keyword(kind),
+            _ => return is_type_specifier_keyword(kind),
         }
     }
 
@@ -3813,7 +3812,7 @@ fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
     // a call as it is as a declaration. Of the two readings, the expression is the one to prefer — reading a
     // call as a declaration loses its callee *and* its arguments, while reading a declaration as a call merely
     // leaves a variable unbound.
-    types::is_type_specifier_keyword(kind)
+    is_type_specifier_keyword(kind)
         && !matches!(
             kind,
             CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
@@ -3884,7 +3883,7 @@ fn a_type_keyword_precedes_the_declarator_name(p: &CppParser) -> bool {
             // The token in front of the name — `auto` and `decltype` are left out for the reason
             // [`declarator_starts_with_a_type_keyword`] gives: both can begin an expression as readily.
             _ if seen_an_identifier => {
-                return types::is_type_specifier_keyword(kind)
+                return is_type_specifier_keyword(kind)
                     && !matches!(
                         kind,
                         CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
@@ -4661,7 +4660,7 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
         // type-id, which is exactly what is written here — and its refusal is what makes the guard above
         // unnecessary: `this` followed by something that is not a type does not parse as one, so the caller
         // rewinds and the expression reading gets `f(this)`.
-        if let Err(err) = types::parse_type_id(p) {
+        if let Err(err) = parse_type_id(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -5115,7 +5114,7 @@ pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
 /// needed only for the shapes a type *can* be followed by and a declaration cannot, which is the `::` above.
 fn a_decltype_here_is_a_type(p: &mut CppParser) -> bool {
     let checkpoint = p.checkpoint();
-    let parsed = types::parse_type_id(p).is_ok();
+    let parsed = parse_type_id(p).is_ok();
     let followed_by_a_declarator = parsed && starts_a_declarator(p);
     p.rollback(checkpoint);
     followed_by_a_declarator
@@ -5344,7 +5343,7 @@ fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Identifier {
             p.bump();
         }
-        types::parse_declarator(p)
+        parse_declarator(p)
     })
 }
 
@@ -5627,7 +5626,7 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         // wrapping the tail directly would report the first segment as the name and the qualifier as
         // everything else. `using ns::f;` introduces `f`, and this is what makes the tree say so.
         let rest = p.mark(CppSyntaxKind::NameExpr);
-        if let Err(err) = types::parse_name(p) {
+        if let Err(err) = parse_name(p) {
             rest.undo(p);
             name.undo(p);
             p.close_marks_above(base);
@@ -5892,7 +5891,7 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::TypedefKeyword)?;
 
     // The rest is a declaration without the keyword, so reuse the same machinery.
-    if let Err(err) = types::parse_decl_specifier_seq(p) {
+    if let Err(err) = parse_decl_specifier_seq(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -5904,7 +5903,7 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
         // `*PWCHAR` puts it after a `*`, `(*F)(int)` inside parentheses.
         let declarator_from = p.current_event_count();
 
-        if let Err(err) = types::parse_declarator(p) {
+        if let Err(err) = parse_declarator(p) {
             p.close_marks_above(base);
             return Err(err);
         }
@@ -6595,6 +6594,6 @@ fn starts_a_type_in_a_parameter(p: &CppParser, index: usize) -> bool {
         CppTokenKind::Ellipsis => true,
         // `nullptr` is a value — see `starts_a_type_id` — so it is not one of them.
         CppTokenKind::NullptrKeyword => false,
-        kind => grammar::cpp::types::is_type_specifier_keyword(kind),
+        kind => is_type_specifier_keyword(kind),
     }
 }

@@ -540,7 +540,7 @@ impl<'a, 'p> DocParser<'a, 'p> {
         let m = self.p.mark(CppSyntaxKind::DocCommand);
 
         let name = self.current_text().to_string();
-        let spec = commands::lookup(&name);
+        let spec = lookup(&name);
         self.bump(); // the name itself
 
         // Inside `@code`, a command is code. The block's *end* is handled by `parse_document`, which
