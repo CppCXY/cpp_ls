@@ -234,4 +234,3 @@ pub struct Tally {
     pub withheld: usize,
     pub parse_errors: usize,
 }
-
