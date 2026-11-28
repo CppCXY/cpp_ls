@@ -273,8 +273,8 @@ fn a_read_and_not_a_declaration(node: &cpp_parser::CppSyntaxNode) -> bool {
         // **The compiler's own parentheses are not names.** `__declspec(dllexport)` and `__attribute__((unused))` are
         // one construct written with an argument, and the argument is a word the compiler reads: measured on sqlite,
         // the guard that skips `__declspec` itself left `dllexport` reported.
-        if let Some(first) = current.first_token() {
-            if matches!(
+        if let Some(first) = current.first_token()
+            && matches!(
                 first.text(),
                 "__declspec"
                     | "__attribute__"
@@ -283,9 +283,9 @@ fn a_read_and_not_a_declaration(node: &cpp_parser::CppSyntaxNode) -> bool {
                     | "__pragma"
                     | "alignas"
                     | "_Alignas"
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
         if cpp_parser::CppDeclarator::cast(current.clone()).is_some()
             || cpp_parser::CppParam::cast(current.clone()).is_some()
