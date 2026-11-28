@@ -25,6 +25,7 @@
 //! x64 ABI, so an `int` is 32 bits and a `long` is 32 bits on Windows and 64 on Linux — measured, not guessed at by
 //! the C standard's minimums.
 
+use crate::sema;
 use cpp_parser::{CppAstNode, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -80,7 +81,7 @@ impl Check for BitfieldWidth {
             let Some(declared) = the_type_of_the_field(&initializer) else {
                 continue;
             };
-            let Some((size, _)) = crate::sema::layout::a_builtin_in_memory(&declared) else {
+            let Some((size, _)) = sema::layout::a_builtin_in_memory(&declared) else {
                 continue;
             };
             let bits = size * 8;

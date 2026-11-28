@@ -58,6 +58,7 @@ use crate::ScopeKind;
 use crate::UnknownReason;
 use crate::file::coordinates::ReadingOffset;
 use crate::index;
+use crate::sema;
 use cpp_parser::{CppAstNode, CppSyntaxKind, CppTokenKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
@@ -367,15 +368,15 @@ fn the_declaration_is_a_value(context: &CheckContext<'_>, name: &str, at: usize)
 /// project writes (measured: two findings in this very corpus). Only a `Builtin` — a number — and a pointer to one are
 /// certainly not callable. Both shapes of a callable are real: the model answers `Pointer { to: Function }` for
 /// `int (*p)(int)` in some places and a bare `Function` in others (see `param_type_check`'s note on it).
-fn whether_it_can_be_called(type_of: &crate::sema::types::Type) -> Option<bool> {
+fn whether_it_can_be_called(type_of: &sema::types::Type) -> Option<bool> {
     match type_of {
-        crate::sema::types::Type::Qualified { of, .. } => whether_it_can_be_called(of),
-        crate::sema::types::Type::Reference { to, .. } => whether_it_can_be_called(to),
-        crate::sema::types::Type::Function { .. } => Some(true),
+        sema::types::Type::Qualified { of, .. } => whether_it_can_be_called(of),
+        sema::types::Type::Reference { to, .. } => whether_it_can_be_called(to),
+        sema::types::Type::Function { .. } => Some(true),
         // A pointer to a function is the one callable pointer; a pointer to a *name* may be one through a typedef, and
         // this layer cannot see through it.
-        crate::sema::types::Type::Pointer { to } => whether_it_can_be_called(to),
-        crate::sema::types::Type::Builtin { spelling }
+        sema::types::Type::Pointer { to } => whether_it_can_be_called(to),
+        sema::types::Type::Builtin { spelling }
             if !matches!(spelling.as_str(), "void" | "auto" | "decltype(auto)") =>
         {
             Some(false)
